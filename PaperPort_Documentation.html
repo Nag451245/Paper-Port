@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PaperPort — Technical Documentation</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+  
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  
+  body {
+    font-family: 'Inter', -apple-system, sans-serif;
+    color: #1e293b;
+    line-height: 1.7;
+    background: #fff;
+    font-size: 11pt;
+  }
+
+  @media print {
+    body { font-size: 10pt; }
+    .page-break { page-break-before: always; }
+    .no-print { display: none; }
+    h2 { page-break-after: avoid; }
+    table { page-break-inside: avoid; }
+  }
+
+  .container { max-width: 900px; margin: 0 auto; padding: 40px 50px; }
+
+  /* Cover page */
+  .cover {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    background: linear-gradient(160deg, #f8faf8 0%, #f0f4f1 50%, #e8ede9 100%);
+    padding: 60px 40px;
+  }
+  .cover-logo { width: 120px; height: 100px; margin-bottom: 30px; }
+  .cover h1 { font-size: 42pt; font-weight: 800; color: #3d5a47; letter-spacing: -1px; margin-bottom: 8px; }
+  .cover .subtitle { font-size: 16pt; color: #64748b; font-weight: 400; margin-bottom: 40px; }
+  .cover .meta { font-size: 10pt; color: #94a3b8; line-height: 2; }
+  .cover .meta strong { color: #475569; }
+  .cover .badge { display: inline-block; background: #4a6b52; color: white; padding: 6px 20px; border-radius: 20px; font-size: 10pt; font-weight: 600; margin-top: 20px; }
+
+  /* Section headers */
+  h2 {
+    font-size: 18pt;
+    font-weight: 700;
+    color: #3d5a47;
+    border-bottom: 3px solid #4a6b52;
+    padding-bottom: 8px;
+    margin: 40px 0 20px 0;
+  }
+  h3 { font-size: 13pt; font-weight: 700; color: #1e293b; margin: 25px 0 10px 0; }
+  h4 { font-size: 11pt; font-weight: 600; color: #475569; margin: 18px 0 8px 0; }
+
+  p { margin-bottom: 12px; }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 15px 0 25px 0;
+    font-size: 10pt;
+  }
+  th {
+    background: #3d5a47;
+    color: white;
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    font-size: 9pt;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  td { padding: 9px 14px; border-bottom: 1px solid #e2e8f0; }
+  tr:nth-child(even) td { background: #f8faf9; }
+  tr:hover td { background: #f0f4f1; }
+
+  /* Highlight boxes */
+  .highlight {
+    background: linear-gradient(135deg, #f0f7f2, #e8f0ea);
+    border-left: 4px solid #4a6b52;
+    padding: 16px 20px;
+    border-radius: 0 8px 8px 0;
+    margin: 18px 0;
+  }
+  .highlight strong { color: #3d5a47; }
+
+  .warn-box {
+    background: #fffbeb;
+    border-left: 4px solid #f59e0b;
+    padding: 14px 18px;
+    border-radius: 0 8px 8px 0;
+    margin: 15px 0;
+  }
+
+  /* Architecture diagram */
+  .arch-diagram {
+    text-align: center;
+    margin: 30px 0;
+    padding: 20px;
+    background: #fafbfa;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+  }
+  .arch-diagram img { max-width: 100%; height: auto; border-radius: 8px; }
+  .arch-caption { font-size: 9pt; color: #64748b; margin-top: 10px; font-style: italic; }
+
+  /* Feature grid */
+  .feature-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin: 20px 0; }
+  .feature-card {
+    background: #f8faf9;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .feature-card h4 { margin: 0 0 6px 0; color: #3d5a47; font-size: 11pt; }
+  .feature-card p { margin: 0; font-size: 9.5pt; color: #64748b; }
+
+  /* Market badge */
+  .mbadge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-size: 8pt;
+    font-weight: 700;
+    margin-right: 4px;
+  }
+  .mbadge-nse { background: #dbeafe; color: #1e40af; }
+  .mbadge-mcx { background: #fef3c7; color: #92400e; }
+  .mbadge-cds { background: #d1fae5; color: #065f46; }
+  .mbadge-nfo { background: #ede9fe; color: #5b21b6; }
+
+  /* TOC */
+  .toc { margin: 30px 0; }
+  .toc a { color: #3d5a47; text-decoration: none; display: block; padding: 6px 0; border-bottom: 1px dotted #cbd5e1; }
+  .toc a:hover { color: #2d4a37; }
+  .toc .toc-num { display: inline-block; width: 30px; font-weight: 700; color: #4a6b52; }
+
+  ul, ol { margin: 8px 0 15px 24px; }
+  li { margin-bottom: 4px; }
+
+  code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-size: 9.5pt; font-family: 'Consolas', monospace; }
+
+  .footer { text-align: center; color: #94a3b8; font-size: 9pt; margin-top: 60px; padding-top: 20px; border-top: 1px solid #e2e8f0; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════ COVER PAGE ═══════════════════ -->
+<div class="cover">
+  <svg viewBox="0 0 120 100" class="cover-logo" fill="none">
+    <path d="M15 65 L60 85 L105 65 L95 70 L60 78 L25 70 Z" fill="#3d5a47"/>
+    <path d="M20 62 L60 80 L100 62 L105 65 L60 85 L15 65 Z" fill="#4a6b52"/>
+    <path d="M58 20 L58 65 L28 65 Z" fill="#5a7d63"/>
+    <path d="M62 20 L62 65 L92 65 Z" fill="#4a6b52"/>
+    <path d="M72 35 L80 18 L76 22 M80 18 L84 22" stroke="#3d5a47" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M82 45 L90 28 L86 32 M90 28 L94 32" stroke="#4a6b52" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M5 75 Q20 70 35 75 Q50 80 65 75 Q80 70 95 75 Q110 80 115 75" stroke="#4a6b52" stroke-width="1.5" opacity="0.3"/>
+  </svg>
+  <h1>PaperPort</h1>
+  <p class="subtitle">AI-Powered Multi-Market Paper Trading Platform</p>
+  <div class="badge">Technical Documentation v2.0</div>
+  <div class="meta" style="margin-top: 40px;">
+    <strong>Date:</strong> February 28, 2026<br>
+    <strong>Platform:</strong> Paper Trading &amp; Market Intelligence<br>
+    <strong>Markets:</strong> NSE &middot; BSE &middot; MCX (Commodities) &middot; CDS (Forex) &middot; NFO/BFO (Derivatives)<br>
+    <strong>Stack:</strong> React 19 &middot; Node.js/Fastify &middot; Rust Engine &middot; PostgreSQL &middot; Redis
+  </div>
+</div>
+
+<div class="container page-break">
+
+<!-- ═══════════════════ TABLE OF CONTENTS ═══════════════════ -->
+<h2>Table of Contents</h2>
+<div class="toc">
+  <a href="#s1"><span class="toc-num">1.</span> Executive Summary</a>
+  <a href="#s2"><span class="toc-num">2.</span> System Architecture</a>
+  <a href="#s3"><span class="toc-num">3.</span> Technology Stack</a>
+  <a href="#s4"><span class="toc-num">4.</span> Market Coverage</a>
+  <a href="#s5"><span class="toc-num">5.</span> Core Modules &amp; Features</a>
+  <a href="#s6"><span class="toc-num">6.</span> Rust TA Engine</a>
+  <a href="#s7"><span class="toc-num">7.</span> API Reference</a>
+  <a href="#s8"><span class="toc-num">8.</span> Database Schema</a>
+  <a href="#s9"><span class="toc-num">9.</span> Security Architecture</a>
+  <a href="#s10"><span class="toc-num">10.</span> Deployment &amp; Infrastructure</a>
+  <a href="#s11"><span class="toc-num">11.</span> Appendices</a>
+</div>
+
+<!-- ═══════════════════ 1. EXECUTIVE SUMMARY ═══════════════════ -->
+<h2 id="s1">1. Executive Summary</h2>
+
+<p><strong>PaperPort</strong> is a comprehensive, AI-powered multi-market paper trading platform designed for Indian financial markets. It enables traders — from beginners to professionals — to practice trading across <strong>equities (NSE/BSE)</strong>, <strong>commodities (MCX)</strong>, and <strong>currency derivatives (CDS/Forex)</strong> using virtual capital in a zero-risk environment.</p>
+
+<p>The platform combines real-time market data, an intelligent AI-driven 9-gate scoring system, autonomous bot teams, a native Rust technical analysis engine, advanced risk management, and deep market intelligence to create an institutional-grade learning and simulation environment.</p>
+
+<div class="highlight">
+  <strong>Key Differentiators:</strong> Native Rust engine for sub-50ms signal computation &middot; 9-gate AI scoring system &middot; 6-role bot team with inter-bot communication &middot; Multi-market support (NSE, BSE, MCX, CDS) &middot; Market-specific cost structures &middot; Real-time WebSocket streaming
+</div>
+
+<table>
+  <tr><th>Capability</th><th>Description</th></tr>
+  <tr><td><strong>Multi-Market Trading</strong></td><td>NSE, BSE, MCX, CDS — equities, commodities, and forex in one platform</td></tr>
+  <tr><td><strong>Rust TA Engine</strong></td><td>Native binary computing EMA, RSI, MACD, Bollinger, Supertrend, VaR, Greeks in &lt;50ms</td></tr>
+  <tr><td><strong>AI Agent</strong></td><td>9-gate scoring with autonomous, signal, and advisory modes</td></tr>
+  <tr><td><strong>Bot Team</strong></td><td>6 specialized bots: Scanner, Analyst, Executor, Risk Manager, Strategist, Monitor</td></tr>
+  <tr><td><strong>Intelligence Hub</strong></td><td>Options flow, FII/DII, sector rotation, global indices, smart money tracking</td></tr>
+  <tr><td><strong>Risk Engine</strong></td><td>Capital preservation rules, stop-loss enforcement, exposure limits</td></tr>
+  <tr><td><strong>Backtesting</strong></td><td>Strategy backtesting with comprehensive performance metrics</td></tr>
+  <tr><td><strong>Trade Journal</strong></td><td>AI-powered post-trade analysis and improvement suggestions</td></tr>
+</table>
+
+<!-- ═══════════════════ 2. ARCHITECTURE ═══════════════════ -->
+<div class="page-break"></div>
+<h2 id="s2">2. System Architecture</h2>
+
+<p>The platform follows a <strong>4-layer architecture</strong> with clear separation of concerns. The Rust Technical Analysis Engine sits within the Service Layer, providing high-performance computation for scanning, backtesting, risk metrics, and options Greeks.</p>
+
+<div class="arch-diagram">
+  <img src="assets/paperport-architecture.png" alt="PaperPort System Architecture Diagram" />
+  <p class="arch-caption">Figure 1: PaperPort Full System Architecture — showing all 4 layers, the Rust TA Engine integration, and multi-market coverage</p>
+</div>
+
+<h3>Layer 1 — Client Layer (Frontend)</h3>
+<ul>
+  <li><strong>React 19</strong> SPA with TypeScript, <strong>Zustand</strong> state, <strong>React Query</strong> server-state</li>
+  <li><strong>WebSocket client</strong> for real-time market data streaming</li>
+  <li><strong>Lightweight Charts</strong> (TradingView) for candlesticks, <strong>Recharts</strong> for analytics</li>
+  <li>Responsive UI with <strong>Tailwind CSS</strong>, i18n via <strong>i18next</strong> (English + Hindi)</li>
+</ul>
+
+<h3>Layer 2 — API Gateway Layer (Backend)</h3>
+<ul>
+  <li><strong>Fastify v5</strong> REST API with 12 route groups and 100+ endpoints</li>
+  <li>JWT authentication, Zod validation, Helmet security headers, rate limiting</li>
+  <li>WebSocket hub for real-time broadcast to connected clients</li>
+</ul>
+
+<h3>Layer 3 — Business Logic (Service Layer)</h3>
+<ul>
+  <li><strong>Market Data Service</strong> — Live quotes from NSE India + simulated MCX/CDS data</li>
+  <li><strong>Trade Engine</strong> — Order execution with market-specific cost calculations</li>
+  <li><strong>AI Agent Service</strong> — 9-gate scoring, pre/post-market briefings</li>
+  <li><strong>Rust TA Engine</strong> — Native binary for scanning, backtesting, risk, Greeks (see Section 6)</li>
+  <li><strong>Bot Engine</strong> — Multi-bot orchestration via OpenAI/Claude + Rust signals</li>
+  <li><strong>Intelligence Service</strong> — Options chain, FII/DII, sector rotation, global macro</li>
+  <li><strong>Risk Service</strong> — Capital preservation rules, margin monitoring</li>
+</ul>
+
+<h3>Layer 4 — Data &amp; Infrastructure</h3>
+<ul>
+  <li><strong>PostgreSQL 16</strong> — Primary database (users, trades, portfolios, bots, signals)</li>
+  <li><strong>Redis 7</strong> — Caching, BullMQ job queues, rate limiting, sessions</li>
+  <li><strong>External APIs</strong> — NSE India, ICICI Breeze API, OpenAI/Claude</li>
+</ul>
+
+<!-- ═══════════════════ 3. TECH STACK ═══════════════════ -->
+<div class="page-break"></div>
+<h2 id="s3">3. Technology Stack</h2>
+
+<h3>Backend</h3>
+<table>
+  <tr><th>Component</th><th>Technology</th><th>Version</th></tr>
+  <tr><td>Runtime</td><td>Node.js</td><td>20+</td></tr>
+  <tr><td>Language</td><td>TypeScript</td><td>5.7</td></tr>
+  <tr><td>Framework</td><td>Fastify</td><td>5.0</td></tr>
+  <tr><td>ORM</td><td>Prisma</td><td>6.0</td></tr>
+  <tr><td>Database</td><td>PostgreSQL (prod) / SQLite (dev)</td><td>16</td></tr>
+  <tr><td>Cache / Queue</td><td>Redis + BullMQ</td><td>7 / 5.70</td></tr>
+  <tr><td>Auth</td><td>@fastify/jwt + bcryptjs</td><td>9.0</td></tr>
+  <tr><td>Validation</td><td>Zod</td><td>3.24</td></tr>
+  <tr><td>WebSocket</td><td>@fastify/websocket</td><td>11.0</td></tr>
+  <tr><td>TA Engine</td><td>Rust (native binary)</td><td>1.0</td></tr>
+  <tr><td>Scheduling</td><td>node-cron</td><td>3.0</td></tr>
+  <tr><td>2FA</td><td>otpauth</td><td>9.5</td></tr>
+  <tr><td>Logging</td><td>Pino</td><td>10.3</td></tr>
+</table>
+
+<h3>Frontend</h3>
+<table>
+  <tr><th>Component</th><th>Technology</th><th>Version</th></tr>
+  <tr><td>Framework</td><td>React</td><td>19.2</td></tr>
+  <tr><td>Build Tool</td><td>Vite</td><td>7.3</td></tr>
+  <tr><td>Styling</td><td>Tailwind CSS</td><td>4.2</td></tr>
+  <tr><td>State</td><td>Zustand</td><td>5.0</td></tr>
+  <tr><td>Server State</td><td>@tanstack/react-query</td><td>5.90</td></tr>
+  <tr><td>Charts</td><td>lightweight-charts + recharts</td><td>5.1 / 3.7</td></tr>
+  <tr><td>Icons</td><td>Lucide React</td><td>0.575</td></tr>
+  <tr><td>i18n</td><td>i18next + react-i18next</td><td>25.8</td></tr>
+</table>
+
+<!-- ═══════════════════ 4. MARKET COVERAGE ═══════════════════ -->
+<div class="page-break"></div>
+<h2 id="s4">4. Market Coverage</h2>
+
+<p>PaperPort supports trading across <strong>four major Indian market segments</strong>:</p>
+
+<table>
+  <tr><th>Exchange</th><th>Segment</th><th>Instruments</th><th>Market Hours (IST)</th><th>Data Source</th></tr>
+  <tr>
+    <td><span class="mbadge mbadge-nse">NSE/BSE</span></td>
+    <td>Equities</td>
+    <td>Stocks, ETFs, Indices</td>
+    <td>9:15 AM – 3:30 PM (Mon–Fri)</td>
+    <td>NSE India API + ICICI Breeze</td>
+  </tr>
+  <tr>
+    <td><span class="mbadge mbadge-mcx">MCX</span></td>
+    <td>Commodities</td>
+    <td>Gold, Silver, Crude Oil, Natural Gas, Copper, Zinc, Nickel, Cotton</td>
+    <td>9:00 AM – 11:30 PM (Mon–Sat)</td>
+    <td>Simulated quotes (paper trading)</td>
+  </tr>
+  <tr>
+    <td><span class="mbadge mbadge-cds">CDS</span></td>
+    <td>Forex</td>
+    <td>USDINR, EURINR, GBPINR, JPYINR, AUDINR, CADINR, CHFINR</td>
+    <td>9:00 AM – 5:00 PM (Mon–Fri)</td>
+    <td>Simulated quotes (paper trading)</td>
+  </tr>
+  <tr>
+    <td><span class="mbadge mbadge-nfo">NFO/BFO</span></td>
+    <td>Derivatives</td>
+    <td>Index Options, Stock Futures, Currency Options</td>
+    <td>9:15 AM – 3:30 PM</td>
+    <td>NSE India API (options chain)</td>
+  </tr>
+</table>
+
+<h3>Market-Specific Cost Structures</h3>
+<table>
+  <tr><th>Charge</th><th>NSE/BSE Equity</th><th>MCX Commodity</th><th>CDS Currency</th></tr>
+  <tr><td>Brokerage</td><td>0.03% or ₹20 max</td><td>0.03% or ₹20 max</td><td>0.03% or ₹20 max</td></tr>
+  <tr><td>STT/CTT</td><td>0.1% (sell side)</td><td>0.01% CTT (sell)</td><td>Nil</td></tr>
+  <tr><td>Exchange Charges</td><td>0.00345%</td><td>0.0026%</td><td>0.0035%</td></tr>
+  <tr><td>GST</td><td>18% on brokerage</td><td>18% on brokerage</td><td>18% on brokerage</td></tr>
+  <tr><td>Stamp Duty (buy)</td><td>0.015%</td><td>0.002%</td><td>0.001%</td></tr>
+</table>
+
+<!-- ═══════════════════ 5. CORE MODULES ═══════════════════ -->
+<div class="page-break"></div>
+<h2 id="s5">5. Core Modules &amp; Features</h2>
+
+<div class="feature-grid">
+  <div class="feature-card">
+    <h4>Dashboard</h4>
+    <p>Portfolio summary, AI agent status, pre-market briefing, today's trades, watchlist, VIX widget, global indices strip</p>
+  </div>
+  <div class="feature-card">
+    <h4>Trading Terminal</h4>
+    <p>Multi-exchange filter tabs (NSE/BSE/MCX/CDS), symbol search, candlestick chart, order entry, positions/orders/trades tabs</p>
+  </div>
+  <div class="feature-card">
+    <h4>AI Agent Panel</h4>
+    <p>3 modes (Autonomous/Signal/Advisory), 9-gate scoring, market scanner, pre/post-market briefings, signal execution workflow</p>
+  </div>
+  <div class="feature-card">
+    <h4>Bot Team Management</h4>
+    <p>6 bot roles, inter-bot messaging, task assignment, symbol/strategy assignment, performance tracking, start/stop controls</p>
+  </div>
+  <div class="feature-card">
+    <h4>Intelligence Dashboard</h4>
+    <p>Options analysis (PCR, Max Pain, OI, IV, Greeks), sector rotation, FII/DII flow, global markets, earnings calendar</p>
+  </div>
+  <div class="feature-card">
+    <h4>Portfolio Management</h4>
+    <p>Multiple portfolios, equity curve, daily P&amp;L, risk metrics (Sharpe, Sortino, drawdown), capital management</p>
+  </div>
+  <div class="feature-card">
+    <h4>Backtesting</h4>
+    <p>Strategy backtesting with CAGR, Sharpe, win rate, equity curve, trade log, monthly returns, result comparison</p>
+  </div>
+  <div class="feature-card">
+    <h4>Trade Journal</h4>
+    <p>AI-powered trade analysis, signal quality review, market context, exit analysis, improvement suggestions</p>
+  </div>
+</div>
+
+<h3>AI Agent — 9-Gate Scoring System</h3>
+<table>
+  <tr><th>Gate</th><th>Name</th><th>Weight</th><th>Description</th></tr>
+  <tr><td>G1</td><td>Trend</td><td>15%</td><td>Multi-timeframe trend analysis</td></tr>
+  <tr><td>G2</td><td>Momentum</td><td>12%</td><td>RSI, MACD, Stochastic indicators</td></tr>
+  <tr><td>G3</td><td>Volatility</td><td>10%</td><td>VIX, ATR, Bollinger Band analysis</td></tr>
+  <tr><td>G4</td><td>Volume</td><td>12%</td><td>Volume confirmation and anomalies</td></tr>
+  <tr><td>G5</td><td>Options Flow</td><td>13%</td><td>PCR, OI, max pain analysis</td></tr>
+  <tr><td>G6</td><td>Global Macro</td><td>10%</td><td>US markets, Asian cues, commodities</td></tr>
+  <tr><td>G7</td><td>FII/DII</td><td>10%</td><td>Institutional flow analysis</td></tr>
+  <tr><td>G8</td><td>Sentiment</td><td>8%</td><td>News sentiment, social signals</td></tr>
+  <tr><td>G9</td><td>Risk</td><td>10%</td><td>Portfolio risk assessment</td></tr>
+</table>
+
+<h3>Bot Team — 6 Specialized Roles</h3>
+<table>
+  <tr><th>Role</th><th>Purpose</th></tr>
+  <tr><td>SCANNER</td><td>Identifies trading opportunities across NSE, MCX, CDS markets</td></tr>
+  <tr><td>ANALYST</td><td>Deep technical and fundamental analysis of instruments</td></tr>
+  <tr><td>EXECUTOR</td><td>Order placement and execution management</td></tr>
+  <tr><td>RISK_MANAGER</td><td>Portfolio risk monitoring, drawdown alerts</td></tr>
+  <tr><td>STRATEGIST</td><td>Strategy formulation and parameter optimization</td></tr>
+  <tr><td>MONITOR</td><td>Position and market condition surveillance</td></tr>
+</table>
+
+<!-- ═══════════════════ 6. RUST ENGINE ═══════════════════ -->
+<div class="page-break"></div>
+<h2 id="s6">6. Rust Technical Analysis Engine</h2>
+
+<div class="highlight">
+  The Rust TA Engine is an <strong>optional native binary</strong> (<code>capital-guard-engine</code>) that provides high-performance computation for trading operations. It communicates with the Node.js backend via stdin/stdout JSON, processing each request in under 50ms with minimal memory usage.
+</div>
+
+<h3>6.1 Capabilities</h3>
+<table>
+  <tr><th>Module</th><th>Command</th><th>Wired Into</th><th>Purpose</th></tr>
+  <tr><td><strong>Market Scanner</strong></td><td><code>scan</code></td><td>Bot Engine, AI Agent</td><td>Computes EMA, RSI, MACD, Bollinger, Supertrend on candle data. Generates BUY/SELL signals with 0.0–1.0 confidence scores using weighted indicator voting.</td></tr>
+  <tr><td><strong>Signal Computation</strong></td><td><code>signals</code></td><td>Bot Engine scan loop</td><td>Computes raw technical indicators (EMA9/21, RSI14, MACD, Bollinger Bands, VWAP) on historical candles.</td></tr>
+  <tr><td><strong>Backtesting</strong></td><td><code>backtest</code></td><td>Backtest Service</td><td>Runs EMA-crossover and Supertrend strategies at native speed with full trade log and equity curve.</td></tr>
+  <tr><td><strong>Risk Computation</strong></td><td><code>risk</code></td><td>AI Agent, Risk Service</td><td>Computes portfolio VaR (95%), Sharpe ratio, max drawdown, volatility, Sortino ratio from position returns.</td></tr>
+  <tr><td><strong>Options Greeks</strong></td><td><code>greeks</code></td><td>Intelligence Service</td><td>Calculates Black-Scholes Greeks: Delta, Gamma, Theta, Vega, Rho for call and put options.</td></tr>
+</table>
+
+<h3>6.2 Architecture</h3>
+<p>The Rust engine is <strong>not a persistent process</strong>. It is spawned on demand by the Node.js server as a child process:</p>
+
+<ol>
+  <li>Node.js constructs a JSON payload with <code>{ command, data }</code></li>
+  <li>Spawns the Rust binary via <code>child_process.spawn()</code></li>
+  <li>Writes the JSON to stdin</li>
+  <li>Reads the JSON response from stdout</li>
+  <li>The Rust process exits immediately</li>
+</ol>
+
+<p>Concurrency is limited to <strong>2 simultaneous engine invocations</strong> with a queue for overflow. Timeout is 30 seconds.</p>
+
+<h3>6.3 Signal Generation — Hybrid Rust + GPT Pipeline</h3>
+<p>The market scanner uses a two-stage pipeline:</p>
+
+<table>
+  <tr><th>Stage</th><th>Engine</th><th>Speed</th><th>Cost</th><th>Purpose</th></tr>
+  <tr><td><strong>1. Primary</strong></td><td>Rust Engine</td><td>&lt;50ms</td><td>$0</td><td>Compute indicators + deterministic BUY/SELL/HOLD signals</td></tr>
+  <tr><td><strong>2. Validation</strong></td><td>OpenAI GPT</td><td>10-45s</td><td>$0.01-0.05</td><td>Optional sanity check for high-confidence signals only</td></tr>
+</table>
+
+<div class="highlight">
+  <strong>Cost savings:</strong> The Rust-first approach reduces GPT API calls from ~60/hour (every bot cycle) to ~2-5/hour (only when Rust generates a signal worth validating). This reduces daily API costs from $20-30 to $1-3.
+</div>
+
+<h3>6.4 Resource Requirements</h3>
+<table>
+  <tr><th>Metric</th><th>Value</th></tr>
+  <tr><td>Binary size on disk</td><td>5–10 MB</td></tr>
+  <tr><td>RAM per invocation</td><td>10–50 MB (then exits)</td></tr>
+  <tr><td>CPU per invocation</td><td>&lt;50ms</td></tr>
+  <tr><td>Typical frequency</td><td>~240 spawns/hour (2 per 30s cycle)</td></tr>
+  <tr><td>Cloud compute cost</td><td>$0 (no API calls, no GPU)</td></tr>
+  <tr><td>Deployment</td><td>Ships alongside Node.js in same container/VPS</td></tr>
+</table>
+
+<!-- ═══════════════════ 7. API REFERENCE ═══════════════════ -->
+<div class="page-break"></div>
+<h2 id="s7">7. API Reference</h2>
+
+<p>The backend exposes <strong>100+ REST API endpoints</strong> across 12 route groups:</p>
+
+<table>
+  <tr><th>Route Group</th><th>Base Path</th><th>Endpoints</th><th>Auth</th></tr>
+  <tr><td>Authentication</td><td><code>/api/auth</code></td><td>11</td><td>Partial</td></tr>
+  <tr><td>Portfolio</td><td><code>/api/portfolio</code></td><td>8</td><td>Yes</td></tr>
+  <tr><td>Trading</td><td><code>/api/trades</code></td><td>10</td><td>Yes</td></tr>
+  <tr><td>Market Data</td><td><code>/api/market</code></td><td>8</td><td>Partial</td></tr>
+  <tr><td>Watchlist</td><td><code>/api/watchlist</code></td><td>6</td><td>Yes</td></tr>
+  <tr><td>AI Agent</td><td><code>/api/ai</code></td><td>15</td><td>Yes</td></tr>
+  <tr><td>Intelligence</td><td><code>/api/intelligence</code></td><td>22</td><td>Yes</td></tr>
+  <tr><td>Bots</td><td><code>/api/bots</code></td><td>12</td><td>Yes</td></tr>
+  <tr><td>Backtest</td><td><code>/api/backtest</code></td><td>4</td><td>Yes</td></tr>
+  <tr><td>Notifications</td><td><code>/api/notifications</code></td><td>4</td><td>Yes</td></tr>
+  <tr><td>Alerts</td><td><code>/api/alerts</code></td><td>4</td><td>Yes</td></tr>
+  <tr><td>Analytics</td><td><code>/api/analytics</code></td><td>5</td><td>Yes</td></tr>
+</table>
+
+<h3>Key Trading Endpoints</h3>
+<table>
+  <tr><th>Method</th><th>Endpoint</th><th>Description</th></tr>
+  <tr><td>POST</td><td><code>/api/trades/orders</code></td><td>Place order (supports NSE/BSE/MCX/CDS exchange param)</td></tr>
+  <tr><td>GET</td><td><code>/api/trades/positions</code></td><td>List all open positions across exchanges</td></tr>
+  <tr><td>GET</td><td><code>/api/market/quote/:symbol?exchange=MCX</code></td><td>Get live quote with exchange routing</td></tr>
+  <tr><td>GET</td><td><code>/api/market/search?q=GOLD&amp;exchange=MCX</code></td><td>Search symbols filtered by exchange</td></tr>
+  <tr><td>GET</td><td><code>/api/market/indices?exchange=MCX</code></td><td>Get indices for specific exchange</td></tr>
+  <tr><td>POST</td><td><code>/api/ai/market-scan/start</code></td><td>Start Rust-powered multi-market scanner</td></tr>
+</table>
+
+<!-- ═══════════════════ 8. DATABASE ═══════════════════ -->
+<h2 id="s8">8. Database Schema</h2>
+
+<p>The application uses <strong>16 core models</strong> via Prisma ORM:</p>
+
+<h3>Core Trading Models</h3>
+<table>
+  <tr><th>Model</th><th>Key Fields</th><th>Exchange Support</th></tr>
+  <tr><td>User</td><td>email, passwordHash, riskAppetite, virtualCapital</td><td>—</td></tr>
+  <tr><td>Portfolio</td><td>name, initialCapital, currentNav</td><td>—</td></tr>
+  <tr><td>Position</td><td>symbol, exchange, qty, avgEntryPrice, side, status</td><td>NSE/BSE/MCX/CDS</td></tr>
+  <tr><td>Order</td><td>symbol, exchange, orderType, side, qty, price, status, costs</td><td>NSE/BSE/MCX/CDS</td></tr>
+  <tr><td>Trade</td><td>symbol, exchange, entryPrice, exitPrice, netPnl</td><td>NSE/BSE/MCX/CDS</td></tr>
+  <tr><td>WatchlistItem</td><td>symbol, exchange, instrumentToken</td><td>NSE/BSE/MCX/CDS</td></tr>
+</table>
+
+<h3>AI &amp; Automation Models</h3>
+<table>
+  <tr><th>Model</th><th>Purpose</th></tr>
+  <tr><td>AIAgentConfig</td><td>Agent mode, min signal score, max daily trades, strategies, capital rules</td></tr>
+  <tr><td>AITradeSignal</td><td>AI-generated signals with composite scores and 9-gate breakdown</td></tr>
+  <tr><td>TradingBot</td><td>Bot role, assigned symbols, portfolio, capital, performance stats</td></tr>
+  <tr><td>BotMessage</td><td>Inter-bot communication messages</td></tr>
+  <tr><td>BotTask</td><td>Task assignments with parameters and results</td></tr>
+  <tr><td>TradeJournal</td><td>AI-powered post-trade analysis per trade</td></tr>
+  <tr><td>BacktestResult</td><td>Strategy backtest results with equity curves</td></tr>
+</table>
+
+<!-- ═══════════════════ 9. SECURITY ═══════════════════ -->
+<div class="page-break"></div>
+<h2 id="s9">9. Security Architecture</h2>
+
+<table>
+  <tr><th>Layer</th><th>Feature</th><th>Implementation</th></tr>
+  <tr><td>Authentication</td><td>JWT tokens</td><td>@fastify/jwt with pre-handler hooks on protected routes</td></tr>
+  <tr><td>Password</td><td>Hashing</td><td>bcrypt (10 rounds)</td></tr>
+  <tr><td>API Credentials</td><td>Encryption</td><td>AES-256-CBC for Breeze API keys and session tokens</td></tr>
+  <tr><td>Input</td><td>Validation</td><td>Zod schema validation on all request bodies/params</td></tr>
+  <tr><td>Rate Limiting</td><td>Per-user + per-IP</td><td>@fastify/rate-limit with configurable windows</td></tr>
+  <tr><td>Headers</td><td>Security</td><td>Helmet for XSS, CSRF, clickjacking protection</td></tr>
+  <tr><td>CORS</td><td>Origin control</td><td>Configurable allowed origins via environment</td></tr>
+  <tr><td>Database</td><td>SQL Injection</td><td>Prisma parameterized queries (zero raw SQL)</td></tr>
+  <tr><td>Audit</td><td>Trail</td><td>AuditLog model for all critical actions</td></tr>
+</table>
+
+<!-- ═══════════════════ 10. DEPLOYMENT ═══════════════════ -->
+<h2 id="s10">10. Deployment &amp; Infrastructure</h2>
+
+<h3>Docker Compose (Full Stack)</h3>
+<table>
+  <tr><th>Service</th><th>Image</th><th>Port</th></tr>
+  <tr><td>PostgreSQL</td><td>postgres:16-alpine</td><td>5432</td></tr>
+  <tr><td>Redis</td><td>redis:7-alpine</td><td>6379</td></tr>
+  <tr><td>Backend</td><td>Node.js + Rust binary</td><td>8000</td></tr>
+  <tr><td>Frontend</td><td>Nginx (static)</td><td>80</td></tr>
+</table>
+
+<h3>Production (Render.com)</h3>
+<table>
+  <tr><th>Service</th><th>Type</th><th>Build Command</th></tr>
+  <tr><td>Backend</td><td>Web Service</td><td><code>npm install && npx prisma generate && npm run build</code></td></tr>
+  <tr><td>Frontend</td><td>Static Site</td><td><code>npm install && npm run build</code> → <code>dist/</code></td></tr>
+</table>
+
+<h3>Health Check</h3>
+<p><code>GET /health</code> returns system status including database, Redis, Rust engine availability, and WebSocket connections.</p>
+
+<!-- ═══════════════════ 11. APPENDICES ═══════════════════ -->
+<div class="page-break"></div>
+<h2 id="s11">11. Appendices</h2>
+
+<h3>Appendix A — Supported MCX Commodities</h3>
+<table>
+  <tr><th>Symbol</th><th>Name</th><th>Lot Size</th></tr>
+  <tr><td>GOLD</td><td>Gold</td><td>1 kg</td></tr>
+  <tr><td>GOLDM</td><td>Gold Mini</td><td>100 gm</td></tr>
+  <tr><td>GOLDPETAL</td><td>Gold Petal</td><td>1 gm</td></tr>
+  <tr><td>SILVER</td><td>Silver</td><td>30 kg</td></tr>
+  <tr><td>SILVERM</td><td>Silver Mini</td><td>5 kg</td></tr>
+  <tr><td>CRUDEOIL</td><td>Crude Oil</td><td>100 barrels</td></tr>
+  <tr><td>NATURALGAS</td><td>Natural Gas</td><td>1250 MMBtu</td></tr>
+  <tr><td>COPPER</td><td>Copper</td><td>2500 kg</td></tr>
+  <tr><td>ZINC</td><td>Zinc</td><td>5000 kg</td></tr>
+  <tr><td>LEAD</td><td>Lead</td><td>5000 kg</td></tr>
+  <tr><td>ALUMINIUM</td><td>Aluminium</td><td>5000 kg</td></tr>
+  <tr><td>NICKEL</td><td>Nickel</td><td>1500 kg</td></tr>
+  <tr><td>COTTON</td><td>Cotton</td><td>25 bales</td></tr>
+  <tr><td>MENTHAOIL</td><td>Mentha Oil</td><td>360 kg</td></tr>
+  <tr><td>CASTORSEED</td><td>Castor Seed</td><td>10 MT</td></tr>
+</table>
+
+<h3>Appendix B — Supported CDS Currency Pairs</h3>
+<table>
+  <tr><th>Symbol</th><th>Name</th></tr>
+  <tr><td>USDINR</td><td>US Dollar / Indian Rupee</td></tr>
+  <tr><td>EURINR</td><td>Euro / Indian Rupee</td></tr>
+  <tr><td>GBPINR</td><td>British Pound / Indian Rupee</td></tr>
+  <tr><td>JPYINR</td><td>Japanese Yen / Indian Rupee</td></tr>
+  <tr><td>AUDINR</td><td>Australian Dollar / Indian Rupee</td></tr>
+  <tr><td>CADINR</td><td>Canadian Dollar / Indian Rupee</td></tr>
+  <tr><td>CHFINR</td><td>Swiss Franc / Indian Rupee</td></tr>
+  <tr><td>SGDINR</td><td>Singapore Dollar / Indian Rupee</td></tr>
+  <tr><td>HKDINR</td><td>Hong Kong Dollar / Indian Rupee</td></tr>
+  <tr><td>CNHINR</td><td>Chinese Yuan / Indian Rupee</td></tr>
+</table>
+
+<h3>Appendix C — UI Pages</h3>
+<table>
+  <tr><th>Page</th><th>Route</th><th>Description</th></tr>
+  <tr><td>Login</td><td>/login</td><td>User authentication (PaperPort branded)</td></tr>
+  <tr><td>Register</td><td>/register</td><td>New account with risk appetite selection</td></tr>
+  <tr><td>Onboarding</td><td>/onboarding</td><td>First-time setup wizard</td></tr>
+  <tr><td>Dashboard</td><td>/dashboard</td><td>Overview with 7 widget cards</td></tr>
+  <tr><td>Trading Terminal</td><td>/terminal</td><td>Chart, orders, multi-exchange trading</td></tr>
+  <tr><td>AI Agent</td><td>/ai-agent</td><td>AI config, signals, market scanner</td></tr>
+  <tr><td>Bot Team</td><td>/bots</td><td>Bot creation, messaging, tasks</td></tr>
+  <tr><td>Intelligence</td><td>/intelligence</td><td>Options, sectors, FII/DII, global</td></tr>
+  <tr><td>Portfolio</td><td>/portfolio</td><td>Analytics, equity curve, risk metrics</td></tr>
+  <tr><td>Backtest</td><td>/backtest</td><td>Strategy backtesting</td></tr>
+  <tr><td>Trade Journal</td><td>/journal</td><td>AI-powered trade analysis</td></tr>
+  <tr><td>Settings</td><td>/settings</td><td>Breeze API, capital, preferences</td></tr>
+</table>
+
+<div class="footer">
+  <p><strong>PaperPort</strong> — Where Intelligence Meets Markets</p>
+  <p>Document generated February 28, 2026 &middot; Version 2.0</p>
+</div>
+
+</div>
+</body>
+</html>

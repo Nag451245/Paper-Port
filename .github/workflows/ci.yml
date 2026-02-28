@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  server:
+    name: Server (Lint + Test + Build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: server
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+        working-directory: server
+
+      - name: Type check
+        run: npx tsc --noEmit
+        working-directory: server
+
+      - name: Run tests
+        run: npm test
+        working-directory: server
+        env:
+          DATABASE_URL: "file:./test.db"
+          JWT_SECRET: "ci-test-secret-key-for-testing-only"
+          ENCRYPTION_KEY: "ci-test-encryption-key-32chars!!"
+
+      - name: Build
+        run: npm run build
+        working-directory: server
+
+  frontend:
+    name: Frontend (Lint + Build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Lint
+        run: npm run lint
+        working-directory: frontend
+
+      - name: Build
+        run: npm run build
+        working-directory: frontend
+
+  rust-engine:
+    name: Rust Engine Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build engine
+        run: cargo build --release
+        working-directory: engine
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: capital-guard-engine
+          path: engine/target/release/capital-guard-engine

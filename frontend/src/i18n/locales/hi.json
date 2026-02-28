@@ -1,0 +1,50 @@
+{
+  "app": {
+    "name": "कैपिटल गार्ड",
+    "tagline": "AI-संचालित ट्रेडिंग प्लेटफॉर्म"
+  },
+  "nav": {
+    "dashboard": "डैशबोर्ड",
+    "terminal": "ट्रेडिंग टर्मिनल",
+    "aiAgent": "AI एजेंट",
+    "bots": "बॉट टीम",
+    "intelligence": "इंटेलिजेंस",
+    "portfolio": "पोर्टफोलियो",
+    "backtest": "बैकटेस्ट",
+    "journal": "ट्रेड जर्नल",
+    "settings": "सेटिंग्स"
+  },
+  "auth": {
+    "login": "साइन इन",
+    "register": "खाता बनाएं",
+    "logout": "लॉगआउट",
+    "email": "ईमेल पता",
+    "password": "पासवर्ड",
+    "forgotPassword": "पासवर्ड भूल गए?"
+  },
+  "trading": {
+    "buy": "खरीदें",
+    "sell": "बेचें",
+    "quantity": "मात्रा",
+    "price": "कीमत",
+    "placeOrder": "ऑर्डर दें",
+    "market": "मार्केट",
+    "limit": "लिमिट",
+    "stopLoss": "स्टॉप लॉस",
+    "positions": "पोजीशन",
+    "orders": "ऑर्डर",
+    "trades": "ट्रेड"
+  },
+  "common": {
+    "loading": "लोड हो रहा है...",
+    "error": "कुछ गलत हो गया",
+    "retry": "पुनः प्रयास करें",
+    "save": "सेव करें",
+    "cancel": "रद्द करें",
+    "delete": "हटाएं",
+    "edit": "संपादित करें",
+    "close": "बंद करें",
+    "search": "खोजें",
+    "noData": "कोई डेटा उपलब्ध नहीं"
+  }
+}

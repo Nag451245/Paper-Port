@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: capital-guard-api
+    runtime: node
+    buildCommand: cd server && npm ci && npx prisma generate && npm run build
+    startCommand: cd server && npx prisma db push --skip-generate && node dist/index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: BREEZE_API_KEY
+        sync: false
+      - key: BREEZE_SECRET_KEY
+        sync: false
+
+  - type: web
+    name: capital-guard-frontend
+    runtime: static
+    buildCommand: cd frontend && npm ci && npm run build
+    staticPublishPath: frontend/dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

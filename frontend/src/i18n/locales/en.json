@@ -1,0 +1,50 @@
+{
+  "app": {
+    "name": "PaperPort",
+    "tagline": "Paper Trading Platform"
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "terminal": "Trading Terminal",
+    "aiAgent": "AI Agent",
+    "bots": "Bot Team",
+    "intelligence": "Intelligence",
+    "portfolio": "Portfolio",
+    "backtest": "Backtest",
+    "journal": "Trade Journal",
+    "settings": "Settings"
+  },
+  "auth": {
+    "login": "Sign In",
+    "register": "Create Account",
+    "logout": "Logout",
+    "email": "Email Address",
+    "password": "Password",
+    "forgotPassword": "Forgot Password?"
+  },
+  "trading": {
+    "buy": "Buy",
+    "sell": "Sell",
+    "quantity": "Quantity",
+    "price": "Price",
+    "placeOrder": "Place Order",
+    "market": "Market",
+    "limit": "Limit",
+    "stopLoss": "Stop Loss",
+    "positions": "Positions",
+    "orders": "Orders",
+    "trades": "Trades"
+  },
+  "common": {
+    "loading": "Loading...",
+    "error": "Something went wrong",
+    "retry": "Try Again",
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "edit": "Edit",
+    "close": "Close",
+    "search": "Search",
+    "noData": "No data available"
+  }
+}
