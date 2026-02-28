@@ -5,7 +5,7 @@ services:
     region: oregon
     plan: free
     rootDir: server
-    buildCommand: npm ci && npx prisma generate && npm run build
+    buildCommand: npm ci --include=dev && npx prisma generate && npm run build
     startCommand: npx prisma db push --skip-generate --accept-data-loss && node --max-old-space-size=512 dist/index.js
     healthCheckPath: /health
     envVars:
