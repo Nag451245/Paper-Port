@@ -1,15 +1,25 @@
 services:
   - type: web
-    name: capital-guard-api
+    name: paperport-api
     runtime: node
-    buildCommand: cd server && npm ci && npx prisma generate && npm run build
-    startCommand: cd server && npx prisma db push --skip-generate && node dist/index.js
+    region: oregon
+    plan: free
+    rootDir: server
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: npx prisma db push --skip-generate --accept-data-loss && node --max-old-space-size=512 dist/index.js
+    healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
       - key: DATABASE_URL
         sync: false
+      - key: DIRECT_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
       - key: JWT_SECRET
+        generateValue: true
+      - key: ENCRYPTION_KEY
         generateValue: true
       - key: CORS_ORIGINS
         sync: false
@@ -19,13 +29,7 @@ services:
         sync: false
       - key: BREEZE_SECRET_KEY
         sync: false
-
-  - type: web
-    name: capital-guard-frontend
-    runtime: static
-    buildCommand: cd frontend && npm ci && npm run build
-    staticPublishPath: frontend/dist
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
+      - key: HOST
+        value: "0.0.0.0"
+      - key: PORT
+        value: "8000"

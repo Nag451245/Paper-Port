@@ -3,9 +3,14 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
+  // For production (Supabase): use "postgresql"
+  // For local dev (SQLite): use "sqlite"
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
+// NOTE: When running locally with SQLite, change provider to "sqlite",
+// remove directUrl, and set DATABASE_URL="file:./dev.db" in .env
 
 // ─── Models ────────────────────────────────────────────────────────
 

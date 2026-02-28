@@ -10,6 +10,7 @@ dotenvConfig({ path: resolve(__dirname, '..', '.env') });
 
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
+  DIRECT_URL: z.string().default(''),
   REDIS_URL: z.string().default(''),
   OPENAI_API_KEY: z.string().default(''),
   BREEZE_API_KEY: z.string().default(''),
@@ -22,6 +23,7 @@ const envSchema = z.object({
   CORS_ORIGINS: z.string().default('http://localhost:5173'),
   HOST: z.string().default('0.0.0.0'),
   PORT: z.coerce.number().default(8000),
+  NODE_ENV: z.string().default('development'),
   NEWS_API_KEY: z.string().default(''),
   GNEWS_API_KEY: z.string().default(''),
 });

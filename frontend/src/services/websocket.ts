@@ -12,8 +12,16 @@ class LiveSocket {
     if (this.ws?.readyState === WebSocket.OPEN) return;
 
     const token = localStorage.getItem('token');
-    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const host = import.meta.env.VITE_WS_URL || `${protocol}://localhost:8000`;
+    let host = import.meta.env.VITE_WS_URL;
+    if (!host) {
+      const apiBase = import.meta.env.VITE_API_BASE_URL || '';
+      if (apiBase && apiBase.startsWith('http')) {
+        host = apiBase.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:').replace(/\/api$/, '');
+      } else {
+        const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+        host = `${protocol}://localhost:8000`;
+      }
+    }
     const url = `${host}/ws${token ? `?token=${token}` : ''}`;
 
     try {
