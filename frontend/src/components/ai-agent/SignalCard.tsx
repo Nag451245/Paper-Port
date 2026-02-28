@@ -21,7 +21,7 @@ function scoreBarColor(score: number) {
 }
 
 export default function SignalCard({ signal, showActions = false, onExecute, onReject }: Props) {
-  const isBuy = signal.action === 'BUY';
+  const isBuy = signal.signalType === 'BUY';
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm card-hover">
@@ -33,7 +33,7 @@ export default function SignalCard({ signal, showActions = false, onExecute, onR
               isBuy ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'
             }`}
           >
-            {signal.action}
+            {signal.signalType}
           </span>
         </div>
         <div className="text-right">
@@ -54,7 +54,7 @@ export default function SignalCard({ signal, showActions = false, onExecute, onR
 
       <div className="mb-2">
         <span className="rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-500">
-          {signal.strategy}
+          {signal.strategyId ?? 'General'}
         </span>
       </div>
 
@@ -64,7 +64,7 @@ export default function SignalCard({ signal, showActions = false, onExecute, onR
 
       <div className="flex items-center justify-between">
         <span className="text-[10px] text-slate-300">
-          {new Date(signal.timestamp).toLocaleString('en-IN')}
+          {new Date(signal.createdAt).toLocaleString('en-IN')}
         </span>
 
         {showActions && (

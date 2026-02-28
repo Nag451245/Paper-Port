@@ -21,8 +21,6 @@ import {
   ResponsiveContainer,
   CartesianGrid,
   Cell,
-  PieChart as RPieChart,
-  Pie,
 } from 'recharts';
 import { intelligenceApi } from '@/services/api';
 
@@ -289,8 +287,6 @@ function SectorsTab() {
   }, []);
 
   if (loading) return <LoadingSpinner />;
-
-  const SECTOR_COLORS = ['#4f46e5', '#22c55e', '#eab308', '#ef4444', '#a855f7', '#06b6d4', '#f97316', '#ec4899', '#14b8a6', '#8b5cf6'];
 
   const perfData = performance.map((s: any) => ({
     name: s.sector ?? s.name ?? 'Unknown',
