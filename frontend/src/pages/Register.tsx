@@ -4,9 +4,9 @@ import { User, Mail, Lock, Loader2, Eye, EyeOff, IndianRupee } from 'lucide-reac
 import { useAuthStore } from '@/stores/auth';
 
 const RISK_OPTIONS = [
-  { value: 'conservative', label: 'Conservative', desc: 'Low risk, steady returns. Max 2% per trade.', color: 'from-emerald-600 to-teal-600' },
-  { value: 'moderate', label: 'Moderate', desc: 'Balanced approach. Max 5% per trade.', color: 'from-amber-600 to-orange-500' },
-  { value: 'aggressive', label: 'Aggressive', desc: 'Higher risk for higher returns. Max 10% per trade.', color: 'from-rose-500 to-pink-500' },
+  { value: 'CONSERVATIVE', label: 'Conservative', desc: 'Low risk, steady returns. Max 2% per trade.', color: 'from-emerald-600 to-teal-600' },
+  { value: 'MODERATE', label: 'Moderate', desc: 'Balanced approach. Max 5% per trade.', color: 'from-amber-600 to-orange-500' },
+  { value: 'AGGRESSIVE', label: 'Aggressive', desc: 'Higher risk for higher returns. Max 10% per trade.', color: 'from-rose-500 to-pink-500' },
 ];
 
 function PaperBoatLogo({ className = '' }: { className?: string }) {
@@ -32,7 +32,7 @@ export default function Register() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [riskAppetite, setRiskAppetite] = useState('moderate');
+  const [riskAppetite, setRiskAppetite] = useState('MODERATE');
   const [virtualCapital, setVirtualCapital] = useState(1000000);
   const [showPassword, setShowPassword] = useState(false);
   const [validationError, setValidationError] = useState('');
