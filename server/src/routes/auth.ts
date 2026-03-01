@@ -25,8 +25,8 @@ const updateProfileSchema = z.object({
 });
 
 const breezeCredentialSchema = z.object({
-  api_key: z.string().min(1, 'API key is required'),
-  secret_key: z.string().min(1, 'Secret key is required'),
+  api_key: z.string().optional(),
+  secret_key: z.string().optional(),
   totp_secret: z.string().optional(),
   session_token: z.string().optional(),
   login_id: z.string().optional(),
@@ -130,8 +130,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     try {
       const userId = getUserId(request);
       const result = await authService.saveBreezeCredentials(userId, {
-        apiKey: parsed.data.api_key,
-        secretKey: parsed.data.secret_key,
+        apiKey: parsed.data.api_key || '',
+        secretKey: parsed.data.secret_key || '',
         totpSecret: parsed.data.totp_secret,
         sessionToken: parsed.data.session_token,
         loginId: parsed.data.login_id,

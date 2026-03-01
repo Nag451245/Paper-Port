@@ -379,7 +379,7 @@ export default function Settings() {
               </div>
               <button
                 onClick={handleBreezeConnect}
-                disabled={breezeConnecting || !apiKey || !secretKey}
+                disabled={breezeConnecting || (!breezeStatus?.isConnected && (!apiKey || !secretKey))}
                 className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {breezeConnecting ? <Loader2 className="w-4 h-4 animate-spin inline mr-2" /> : null}

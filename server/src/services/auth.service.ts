@@ -227,36 +227,43 @@ export class AuthService {
   }
 
   async saveBreezeCredentials(userId: string, input: BreezeCredentialInput): Promise<{ configured: boolean; updatedAt: Date }> {
-    const encryptedApiKey = encrypt(input.apiKey, this.encKey);
-    const encryptedSecret = encrypt(input.secretKey, this.encKey);
-    const encTotp = input.totpSecret ? encrypt(input.totpSecret, this.encKey) : null;
-    const encSession = input.sessionToken ? encrypt(input.sessionToken, this.encKey) : null;
+    const existing = await this.prisma.breezeCredential.findUnique({ where: { userId } });
+
+    const encryptedApiKey = input.apiKey ? encrypt(input.apiKey, this.encKey) : undefined;
+    const encryptedSecret = input.secretKey ? encrypt(input.secretKey, this.encKey) : undefined;
+    const encTotp = input.totpSecret ? encrypt(input.totpSecret, this.encKey) : undefined;
+    const encSession = input.sessionToken ? encrypt(input.sessionToken, this.encKey) : undefined;
     const encLoginId = input.loginId ? encrypt(input.loginId, this.encKey) : undefined;
     const encLoginPwd = input.loginPassword ? encrypt(input.loginPassword, this.encKey) : undefined;
+
+    if (!existing && (!encryptedApiKey || !encryptedSecret)) {
+      throw new AuthError('API Key and Secret Key are required for first-time setup.', 400);
+    }
+
+    const updateData: Record<string, unknown> = {};
+    if (encryptedApiKey) updateData.encryptedApiKey = encryptedApiKey;
+    if (encryptedSecret) updateData.encryptedSecret = encryptedSecret;
+    if (encTotp) updateData.totpSecret = encTotp;
+    if (encSession) {
+      updateData.sessionToken = encSession;
+      updateData.sessionExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    }
+    if (encLoginId) updateData.encryptedLoginId = encLoginId;
+    if (encLoginPwd) updateData.encryptedLoginPassword = encLoginPwd;
 
     const credential = await this.prisma.breezeCredential.upsert({
       where: { userId },
       create: {
         userId,
-        encryptedApiKey,
-        encryptedSecret,
-        totpSecret: encTotp,
-        sessionToken: encSession,
+        encryptedApiKey: encryptedApiKey!,
+        encryptedSecret: encryptedSecret!,
+        totpSecret: encTotp ?? null,
+        sessionToken: encSession ?? null,
         sessionExpiresAt: encSession ? new Date(Date.now() + 24 * 60 * 60 * 1000) : null,
         ...(encLoginId ? { encryptedLoginId: encLoginId } : {}),
         ...(encLoginPwd ? { encryptedLoginPassword: encLoginPwd } : {}),
       },
-      update: {
-        encryptedApiKey,
-        encryptedSecret,
-        totpSecret: encTotp,
-        ...(encSession ? {
-          sessionToken: encSession,
-          sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-        } : {}),
-        ...(encLoginId ? { encryptedLoginId: encLoginId } : {}),
-        ...(encLoginPwd ? { encryptedLoginPassword: encLoginPwd } : {}),
-      },
+      update: updateData,
     });
 
     return { configured: true, updatedAt: credential.updatedAt };

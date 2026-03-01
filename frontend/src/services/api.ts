@@ -273,8 +273,8 @@ export const breezeApi = {
     loginId?: string, loginPassword?: string,
   ) =>
     api.post<{ configured: boolean; has_totp: boolean; has_session: boolean; has_login_credentials: boolean; updated_at: string | null }>('/auth/breeze-credentials', {
-      api_key: apiKey,
-      secret_key: secretKey,
+      ...(apiKey ? { api_key: apiKey } : {}),
+      ...(secretKey ? { secret_key: secretKey } : {}),
       ...(totpSecret ? { totp_secret: totpSecret } : {}),
       ...(sessionToken ? { session_token: sessionToken } : {}),
       ...(loginId ? { login_id: loginId } : {}),
