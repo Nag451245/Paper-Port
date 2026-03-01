@@ -572,6 +572,16 @@ export class MarketDataService {
       if (cached) return cached;
     }
 
+    // Try Breeze API first (works reliably from server environments)
+    try {
+      const breezeResult = await this.fetchOptionsChainFromBreeze(symbol);
+      if (breezeResult && breezeResult.strikes.length > 0) {
+        if (this.cache) await this.cache.set(cacheKey, breezeResult, 120);
+        return breezeResult;
+      }
+    } catch { /* Breeze unavailable, try NSE */ }
+
+    // Fallback: NSE India scraping (may fail from server IPs)
     try {
       const url = `https://www.nseindia.com/api/option-chain-indices?symbol=${encodeURIComponent(symbol)}`;
       const res = await this.nseFetch(url);
@@ -596,6 +606,143 @@ export class MarketDataService {
     } catch {
       return { symbol, strikes: [], expiry: '' };
     }
+  }
+
+  private async fetchOptionsChainFromBreeze(symbol: string) {
+    const creds = await this.getAnyBreezeCredentials();
+    if (!creds) return null;
+
+    const expiry = this.getNextExpiry();
+    const exchangeCode = 'NFO';
+    const productType = 'options';
+
+    const allStrikes: Map<number, any> = new Map();
+    let spotPrice = 0;
+
+    for (const right of ['call', 'put'] as const) {
+      try {
+        const payload = JSON.stringify({
+          stock_code: symbol,
+          exchange_code: exchangeCode,
+          product_type: productType,
+          expiry_date: expiry,
+          right,
+          strike_price: '',
+        });
+
+        const now = new Date();
+        now.setMilliseconds(0);
+        const timestamp = now.toISOString();
+        const checksum = createHash('sha256')
+          .update(timestamp + payload + creds.secretKey)
+          .digest('hex');
+
+        const res = await this.breezeRequest(
+          '/breezeapi/api/v1/optionchain',
+          {
+            'Content-Type': 'application/json',
+            'X-AppKey': creds.apiKey,
+            'X-SessionToken': creds.sessionToken,
+            'X-Timestamp': timestamp,
+            'X-Checksum': `token ${checksum}`,
+          },
+          payload,
+        );
+
+        if (res.status !== 200) continue;
+
+        const data = JSON.parse(res.data);
+        if (data.Error || data.Status !== 200) continue;
+
+        const records = data.Success ?? [];
+        if (!Array.isArray(records)) continue;
+
+        for (const rec of records) {
+          const strike = Number(rec.strike_price) || 0;
+          if (strike <= 0) continue;
+
+          if (!spotPrice && rec.spot_price) {
+            spotPrice = Number(rec.spot_price) || 0;
+          }
+
+          const existing = allStrikes.get(strike) ?? {
+            strike,
+            callOI: 0, callOIChange: 0, callVolume: 0, callIV: 0, callLTP: 0,
+            callDelta: 0, callGamma: 0, callTheta: 0, callVega: 0,
+            putOI: 0, putOIChange: 0, putVolume: 0, putIV: 0, putLTP: 0,
+            putDelta: 0, putGamma: 0, putTheta: 0, putVega: 0,
+          };
+
+          const ltp = Number(rec.ltp) || 0;
+          const oi = Number(rec.open_interest) || 0;
+          const volume = Number(rec.total_quantity_traded) || 0;
+          const iv = Number(rec.implied_volatility) || 0;
+          const oiChange = Number(rec.change_oi) ?? 0;
+
+          if (right === 'call') {
+            existing.callOI = oi;
+            existing.callOIChange = oiChange;
+            existing.callVolume = volume;
+            existing.callIV = iv;
+            existing.callLTP = ltp;
+          } else {
+            existing.putOI = oi;
+            existing.putOIChange = oiChange;
+            existing.putVolume = volume;
+            existing.putIV = iv;
+            existing.putLTP = ltp;
+          }
+
+          allStrikes.set(strike, existing);
+        }
+      } catch { /* skip this right type */ }
+    }
+
+    if (allStrikes.size === 0) return null;
+
+    const strikes = [...allStrikes.values()].sort((a, b) => a.strike - b.strike);
+
+    const totalCallOI = strikes.reduce((s, st) => s + st.callOI, 0);
+    const totalPutOI = strikes.reduce((s, st) => s + st.putOI, 0);
+    const pcr = totalCallOI > 0 ? Math.round((totalPutOI / totalCallOI) * 100) / 100 : 0;
+
+    let maxPainStrike = 0, minPain = Infinity;
+    for (const st of strikes) {
+      let pain = 0;
+      for (const s2 of strikes) {
+        if (s2.strike < st.strike) pain += (st.strike - s2.strike) * s2.putOI;
+        if (s2.strike > st.strike) pain += (s2.strike - st.strike) * s2.callOI;
+      }
+      if (pain < minPain) { minPain = pain; maxPainStrike = st.strike; }
+    }
+
+    return {
+      symbol,
+      expiry: expiry.slice(0, 10),
+      underlyingValue: spotPrice,
+      spotPrice,
+      strikes,
+      pcr,
+      maxPain: maxPainStrike,
+      totalCallOI,
+      totalPutOI,
+    };
+  }
+
+  private getNextExpiry(): string {
+    const now = new Date();
+    const day = now.getDay();
+    let daysUntilThursday = (4 - day + 7) % 7;
+    if (daysUntilThursday === 0) {
+      const hours = now.getHours();
+      if (hours >= 15) daysUntilThursday = 7;
+    }
+    const expiry = new Date(now);
+    expiry.setDate(expiry.getDate() + daysUntilThursday);
+    const y = expiry.getFullYear();
+    const m = String(expiry.getMonth() + 1).padStart(2, '0');
+    const d = String(expiry.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}T06:00:00.000Z`;
   }
 
   private parseOptionsChain(symbol: string, data: any) {

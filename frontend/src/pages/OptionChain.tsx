@@ -194,7 +194,7 @@ export default function OptionChain() {
       const data = res.data as any;
       if (data?.strikes?.length) {
         setStrikes(data.strikes);
-        setSpotPrice(data.spotPrice ?? 25000);
+        setSpotPrice(data.spotPrice ?? data.underlyingValue ?? 25000);
         setIsDemo(false);
       } else throw new Error('empty');
     } catch {
