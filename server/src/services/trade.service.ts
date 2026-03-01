@@ -121,9 +121,10 @@ export class TradeService {
     const costs = calculateCosts(input.qty, fillPrice, input.side, input.exchange ?? 'NSE');
 
     const totalValue = fillPrice * input.qty + costs.totalCost;
-    if (input.side === 'BUY' && totalValue > Number(portfolio.currentNav)) {
+    const availableCash = Number(portfolio.currentNav);
+    if (input.side === 'BUY' && totalValue > availableCash) {
       throw new TradeError(
-        `Insufficient capital. Need ₹${totalValue.toFixed(0)} but only ₹${Number(portfolio.currentNav).toFixed(0)} available.`,
+        `Insufficient capital. Need ₹${totalValue.toFixed(0)} but only ₹${availableCash.toFixed(0)} available.`,
         400,
       );
     }
@@ -204,6 +205,18 @@ export class TradeService {
           data: { positionId: position.id },
         });
       }
+
+      // Deduct purchase cost + transaction fees from available cash
+      const portfolio = await this.prisma.portfolio.findUnique({
+        where: { id: input.portfolioId },
+      });
+      if (portfolio) {
+        const purchaseCost = fillPrice * input.qty + costs.totalCost;
+        await this.prisma.portfolio.update({
+          where: { id: input.portfolioId },
+          data: { currentNav: Number(portfolio.currentNav) - purchaseCost },
+        });
+      }
     } else {
       const existingPosition = await this.prisma.position.findFirst({
         where: {
@@ -256,13 +269,15 @@ export class TradeService {
           });
         }
 
+        // Add sale proceeds back to available cash
         const portfolio = await this.prisma.portfolio.findUnique({
           where: { id: input.portfolioId },
         });
         if (portfolio) {
+          const saleProceeds = fillPrice * closeQty - costs.totalCost;
           await this.prisma.portfolio.update({
             where: { id: input.portfolioId },
-            data: { currentNav: Number(portfolio.currentNav) + netPnl },
+            data: { currentNav: Number(portfolio.currentNav) + saleProceeds },
           });
         }
 
@@ -396,11 +411,13 @@ export class TradeService {
       data: { status: 'CLOSED', realizedPnl: netPnl, closedAt: new Date() },
     });
 
+    // Add sale proceeds back to available cash
     const portfolio = await this.prisma.portfolio.findUnique({ where: { id: position.portfolioId } });
     if (portfolio) {
+      const saleProceeds = exitPrice * position.qty - costs.totalCost;
       await this.prisma.portfolio.update({
         where: { id: position.portfolioId },
-        data: { currentNav: Number(portfolio.currentNav) + netPnl },
+        data: { currentNav: Number(portfolio.currentNav) + saleProceeds },
       });
     }
 

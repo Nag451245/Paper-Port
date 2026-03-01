@@ -49,9 +49,7 @@ export class PortfolioService {
   async getSummary(portfolioId: string, userId: string): Promise<PortfolioSummary> {
     const portfolio = await this.getById(portfolioId, userId);
     const initialCapital = Number(portfolio.initialCapital);
-    const currentNav = Number(portfolio.currentNav);
-    const totalPnl = currentNav - initialCapital;
-    const totalPnlPercent = initialCapital > 0 ? (totalPnl / initialCapital) * 100 : 0;
+    const availableCash = Number(portfolio.currentNav);
 
     const openPositions = await this.prisma.position.findMany({
       where: { portfolioId, status: 'OPEN' },
@@ -64,15 +62,19 @@ export class PortfolioService {
       unrealizedPnl += Number(pos.unrealizedPnl ?? 0);
     }
 
+    const totalNav = availableCash + investedValue + unrealizedPnl;
+    const totalPnl = totalNav - initialCapital;
+    const totalPnlPercent = initialCapital > 0 ? (totalPnl / initialCapital) * 100 : 0;
+
     return {
-      totalNav: currentNav,
+      totalNav,
       dayPnl: unrealizedPnl,
-      dayPnlPercent: currentNav > 0 ? (unrealizedPnl / currentNav) * 100 : 0,
+      dayPnlPercent: totalNav > 0 ? (unrealizedPnl / totalNav) * 100 : 0,
       totalPnl,
       totalPnlPercent,
       investedValue,
-      currentValue: currentNav,
-      availableMargin: currentNav - investedValue,
+      currentValue: totalNav,
+      availableMargin: availableCash,
       usedMargin: investedValue,
     };
   }
