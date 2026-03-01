@@ -198,7 +198,14 @@ export default function OptionChain() {
         setIsDemo(false);
       } else throw new Error('empty');
     } catch {
-      const spot = sym.toUpperCase() === 'BANKNIFTY' ? 52000 : 25000;
+      let spot = sym.toUpperCase() === 'BANKNIFTY' ? 52000 : 25000;
+      try {
+        const quoteRes = await marketApi.quote(sym);
+        const ltp = (quoteRes.data as any)?.ltp ?? (quoteRes.data as any)?.lastPrice;
+        if (ltp && ltp > 0) spot = ltp;
+      } catch {
+        // use fallback spot price
+      }
       setSpotPrice(spot);
       setStrikes(generateDemoData(spot));
       setIsDemo(true);

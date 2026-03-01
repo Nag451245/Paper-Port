@@ -254,7 +254,18 @@ export default function StrategyBuilder() {
     setLoadingPayoff(true);
     try {
       const { data } = await api.post('/options/payoff', { legs: currentLegs, spotPrice: spot });
-      setPayoff(data);
+      if (data?.payoffCurve && Array.isArray(data.payoffCurve)) {
+        setPayoff({
+          payoffCurve: data.payoffCurve,
+          greeks: data.greeks ?? { delta: 0, gamma: 0, theta: 0, vega: 0 },
+          maxProfit: data.maxProfit ?? 0,
+          maxLoss: data.maxLoss ?? 0,
+          breakevens: data.breakevens ?? [],
+          netPremium: data.netPremium ?? 0,
+        });
+      } else {
+        setPayoff(computeLocalPayoff(currentLegs, spot));
+      }
     } catch {
       setPayoff(computeLocalPayoff(currentLegs, spot));
     } finally {
@@ -320,7 +331,7 @@ export default function StrategyBuilder() {
         ? `Net debit: ₹${formatNum(netDebit)}. You need the underlying to move enough to recover this cost.`
         : `Net credit: ₹${formatNum(Math.abs(netDebit))}. You profit if the underlying stays within the profitable range.`,
       payoff ? `Max profit: ₹${formatNum(payoff.maxProfit)}. Max loss: ₹${formatNum(payoff.maxLoss)}.` : '',
-      payoff && payoff.breakevens.length > 0 ? `Breakeven${payoff.breakevens.length > 1 ? 's' : ''} at: ${payoff.breakevens.map((b) => b.toLocaleString('en-IN')).join(', ')}.` : '',
+      payoff && payoff.breakevens?.length > 0 ? `Breakeven${(payoff.breakevens ?? []).length > 1 ? 's' : ''} at: ${(payoff.breakevens ?? []).map((b) => b.toLocaleString('en-IN')).join(', ')}.` : '',
     ];
     return parts.filter(Boolean).join(' ');
   };
@@ -547,7 +558,7 @@ export default function StrategyBuilder() {
               <div className="bg-slate-50 rounded-lg p-3 text-center">
                 <p className="text-[10px] font-semibold text-slate-400 uppercase">Breakevens</p>
                 <p className="text-sm font-bold font-mono text-slate-700">
-                  {payoff.breakevens.length > 0 ? payoff.breakevens.map((b) => b.toLocaleString('en-IN')).join(', ') : '—'}
+                  {payoff.breakevens?.length > 0 ? (payoff.breakevens ?? []).map((b) => b.toLocaleString('en-IN')).join(', ') : '—'}
                 </p>
               </div>
               <div className="bg-emerald-50 rounded-lg p-3 text-center">
@@ -576,7 +587,7 @@ export default function StrategyBuilder() {
             {loadingPayoff && <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />}
           </div>
           <div className="h-72">
-            {payoff && payoff.payoffCurve.length > 0 ? (
+            {payoff && payoff?.payoffCurve?.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={payoff.payoffCurve} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                   <defs>
@@ -607,7 +618,7 @@ export default function StrategyBuilder() {
                   />
                   <ReferenceLine y={0} stroke="#64748b" strokeDasharray="4 4" strokeWidth={1.5} />
                   <ReferenceLine x={spotPrice} stroke="#6366f1" strokeDasharray="4 4" label={{ value: 'Spot', fontSize: 10, fill: '#6366f1' }} />
-                  {payoff.breakevens.map((be, idx) => (
+                  {(payoff.breakevens ?? []).map((be, idx) => (
                     <ReferenceLine key={idx} x={be} stroke="#f59e0b" strokeDasharray="3 3" label={{ value: `BE ${be.toLocaleString('en-IN')}`, fontSize: 9, fill: '#d97706' }} />
                   ))}
                   <Area
@@ -674,7 +685,7 @@ export default function StrategyBuilder() {
           </div>
           {explanation ? (
             <div className="text-sm text-slate-700 leading-relaxed bg-violet-50/50 rounded-xl p-4 border border-violet-100">
-              {explanation.split('**').map((part, i) =>
+              {(explanation ?? '').split('**').map((part, i) =>
                 i % 2 === 1 ? <strong key={i} className="text-violet-800">{part}</strong> : <span key={i}>{part}</span>
               )}
             </div>

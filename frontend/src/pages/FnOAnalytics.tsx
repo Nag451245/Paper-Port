@@ -1,4 +1,5 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
+import { marketApi, intelligenceApi } from '@/services/api';
 import {
   BarChart3,
   TrendingUp,
@@ -27,17 +28,12 @@ import {
   Cell,
 } from 'recharts';
 
-// ─── Simulated Market Data ───────────────────────────────────────────────────
+// ─── Default (Simulated) Market Data ──────────────────────────────────────────
 
-const NIFTY_SPOT = 24_285.55;
-const BANKNIFTY_SPOT = 51_430.20;
-const INDIA_VIX = 13.42;
-const OVERALL_PCR = 0.85;
-
-const marketCards = [
+const DEFAULT_MARKET_CARDS = [
   {
     label: 'NIFTY 50',
-    value: NIFTY_SPOT.toLocaleString('en-IN', { minimumFractionDigits: 2 }),
+    value: '24,285.55',
     change: +0.38,
     points: '+92.15',
     icon: TrendingUp,
@@ -45,7 +41,7 @@ const marketCards = [
   },
   {
     label: 'BANK NIFTY',
-    value: BANKNIFTY_SPOT.toLocaleString('en-IN', { minimumFractionDigits: 2 }),
+    value: '51,430.20',
     change: -0.12,
     points: '-61.80',
     icon: TrendingDown,
@@ -53,7 +49,7 @@ const marketCards = [
   },
   {
     label: 'India VIX',
-    value: INDIA_VIX.toFixed(2),
+    value: '13.42',
     change: +7.83,
     points: '+0.97',
     icon: Activity,
@@ -61,7 +57,7 @@ const marketCards = [
   },
   {
     label: 'Overall PCR',
-    value: OVERALL_PCR.toFixed(2),
+    value: '0.85',
     change: -3.41,
     points: '-0.03',
     icon: Gauge,
@@ -92,10 +88,10 @@ const expiryData = {
   maxPain: 24300,
 };
 
-// ─── FII/DII Flow Data ──────────────────────────────────────────────────────
+// ─── Default FII/DII Flow Data ───────────────────────────────────────────────
 
-const fiiDiiToday = { fii: -2310, dii: 1870 };
-const fiiDii5Day = [
+const DEFAULT_FII_DII_TODAY = { fii: -2310, dii: 1870 };
+const DEFAULT_FII_DII_5_DAY = [
   { day: 'Mon', FII: -1200, DII: 980 },
   { day: 'Tue', FII: 450, DII: -320 },
   { day: 'Wed', FII: -890, DII: 1100 },
@@ -165,6 +161,139 @@ function MeterBar({ value, color, label }: { value: number; color: string; label
 
 export default function FnOAnalytics() {
   const [selectedIndex] = useState<'NIFTY' | 'BANKNIFTY'>('NIFTY');
+  const [marketCards, setMarketCards] = useState(DEFAULT_MARKET_CARDS);
+  const [fiiDiiToday, setFiiDiiToday] = useState(DEFAULT_FII_DII_TODAY);
+  const [fiiDii5Day, setFiiDii5Day] = useState(DEFAULT_FII_DII_5_DAY);
+  const [isLiveData, setIsLiveData] = useState(false);
+
+  useEffect(() => {
+    let anySuccess = false;
+
+    const run = async () => {
+      const results = await Promise.allSettled([
+        marketApi.quote('NIFTY'),
+        marketApi.quote('BANKNIFTY'),
+        marketApi.vix(),
+        intelligenceApi.pcr('NIFTY'),
+        intelligenceApi.fiiDii(),
+        intelligenceApi.fiiDiiTrend(5),
+      ]);
+
+      // NIFTY quote
+      if (results[0].status === 'fulfilled') {
+        const d = results[0].value.data;
+        if (d?.ltp != null) {
+          anySuccess = true;
+          setMarketCards((prev) =>
+            prev.map((c) =>
+              c.label === 'NIFTY 50'
+                ? {
+                    ...c,
+                    value: d.ltp.toLocaleString('en-IN', { minimumFractionDigits: 2 }),
+                    change: d.changePercent ?? 0,
+                    points: (d.change >= 0 ? '+' : '') + d.change.toFixed(2),
+                    icon: d.change >= 0 ? TrendingUp : TrendingDown,
+                  }
+                : c
+            )
+          );
+        }
+      }
+
+      // BANKNIFTY quote
+      if (results[1].status === 'fulfilled') {
+        const d = results[1].value.data;
+        if (d?.ltp != null) {
+          anySuccess = true;
+          setMarketCards((prev) =>
+            prev.map((c) =>
+              c.label === 'BANK NIFTY'
+                ? {
+                    ...c,
+                    value: d.ltp.toLocaleString('en-IN', { minimumFractionDigits: 2 }),
+                    change: d.changePercent ?? 0,
+                    points: (d.change >= 0 ? '+' : '') + d.change.toFixed(2),
+                    icon: d.change >= 0 ? TrendingUp : TrendingDown,
+                  }
+                : c
+            )
+          );
+        }
+      }
+
+      // VIX
+      if (results[2].status === 'fulfilled') {
+        const d = results[2].value.data;
+        if (d?.value != null) {
+          anySuccess = true;
+          setMarketCards((prev) =>
+            prev.map((c) =>
+              c.label === 'India VIX'
+                ? {
+                    ...c,
+                    value: d.value.toFixed(2),
+                    change: d.changePercent ?? 0,
+                    points: (d.change >= 0 ? '+' : '') + (d.change ?? 0).toFixed(2),
+                  }
+                : c
+            )
+          );
+        }
+      }
+
+      // PCR (Overall PCR)
+      if (results[3].status === 'fulfilled') {
+        const d = (results[3].value.data as { pcr?: number; value?: number; change?: number; changePercent?: number }) ?? {};
+        const pcr = d.pcr ?? d.value;
+        if (typeof pcr === 'number') {
+          anySuccess = true;
+          const ch = d.changePercent ?? d.change ?? 0;
+          const chNum = typeof ch === 'number' ? ch : 0;
+          setMarketCards((prev) =>
+            prev.map((c) =>
+              c.label === 'Overall PCR'
+                ? { ...c, value: pcr.toFixed(2), change: chNum, points: (chNum >= 0 ? '+' : '') + chNum.toFixed(2) }
+                : c
+            )
+          );
+        }
+      }
+
+      // FII/DII flow
+      if (results[4].status === 'fulfilled') {
+        const d = (results[4].value.data as { fiiNet?: number; diiNet?: number; fii?: number; dii?: number }) ?? {};
+        const fii = d.fiiNet ?? d.fii;
+        const dii = d.diiNet ?? d.dii;
+        if (typeof fii === 'number' && typeof dii === 'number') {
+          anySuccess = true;
+          setFiiDiiToday({ fii, dii });
+        }
+      }
+
+      // FII/DII 5-day trend
+      if (results[5].status === 'fulfilled') {
+        const res = results[5].value;
+        const arr = Array.isArray(res.data) ? res.data : (res.data as { data?: unknown[] })?.data;
+        if (Array.isArray(arr) && arr.length > 0) {
+          const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+          const mapped = arr.slice(-5).map((row: Record<string, unknown>, i: number) => {
+            const fiiVal = (row.fiiNet ?? row.fii ?? row.FII ?? 0) as number;
+            const diiVal = (row.diiNet ?? row.dii ?? row.DII ?? 0) as number;
+            const day = (row.date ? new Date(String(row.date)).getDay() : i) % 7;
+            return { day: dayNames[day] ?? `Day ${i + 1}`, FII: fiiVal, DII: diiVal };
+          });
+          if (mapped.some((r) => typeof r.FII === 'number' || typeof r.DII === 'number')) {
+            anySuccess = true;
+            setFiiDii5Day(mapped);
+          }
+        }
+      }
+
+      if (anySuccess) setIsLiveData(true);
+    };
+
+    run();
+  }, []);
 
   const maxOiChange = useMemo(
     () => Math.max(...oiChangeData.flatMap((r) => [Math.abs(r.callChange), Math.abs(r.putChange)])),
@@ -189,7 +318,7 @@ export default function FnOAnalytics() {
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
             <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
           </span>
-          <span className="text-xs text-slate-400 font-medium">Live • Simulated Data</span>
+          <span className="text-xs text-slate-400 font-medium">{isLiveData ? 'Live Data' : 'Simulated Data'}</span>
         </div>
       </div>
 
