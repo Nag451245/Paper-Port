@@ -18,6 +18,7 @@ import { botRoutes } from './routes/bots.js';
 import { notificationRoutes } from './routes/notifications.js';
 import { alertRoutes } from './routes/alerts.js';
 import { analyticsRoutes } from './routes/analytics.js';
+import { optionsRoutes } from './routes/options.js';
 import { disconnectPrisma, getPrisma } from './lib/prisma.js';
 import { AuthService } from './services/auth.service.js';
 import { BotEngine } from './services/bot-engine.js';
@@ -141,6 +142,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(notificationRoutes, { prefix: '/api/notifications' });
   await app.register(alertRoutes, { prefix: '/api/alerts' });
   await app.register(analyticsRoutes, { prefix: '/api/analytics' });
+  await app.register(optionsRoutes, { prefix: '/api/options' });
 
   await registerWebSocket(app);
   app.decorate('wsHub', wsHub);

@@ -19,6 +19,9 @@ const BotManagement = lazy(() => import('@/pages/BotManagement'));
 const Backtest = lazy(() => import('@/pages/Backtest'));
 const TradeJournal = lazy(() => import('@/pages/TradeJournal'));
 const IntelligenceDashboard = lazy(() => import('@/pages/IntelligenceDashboard'));
+const StrategyBuilder = lazy(() => import('@/pages/StrategyBuilder'));
+const OptionChain = lazy(() => import('@/pages/OptionChain'));
+const FnOAnalytics = lazy(() => import('@/pages/FnOAnalytics'));
 const Onboarding = lazy(() => import('@/pages/Onboarding'));
 
 const queryClient = new QueryClient({
@@ -112,6 +115,9 @@ export default function App() {
             <Route path="/backtest" element={<Suspense fallback={<PageLoader />}><Backtest /></Suspense>} />
             <Route path="/journal" element={<Suspense fallback={<PageLoader />}><TradeJournal /></Suspense>} />
             <Route path="/intelligence" element={<Suspense fallback={<PageLoader />}><IntelligenceDashboard /></Suspense>} />
+            <Route path="/strategy-builder" element={<Suspense fallback={<PageLoader />}><StrategyBuilder /></Suspense>} />
+            <Route path="/option-chain" element={<Suspense fallback={<PageLoader />}><OptionChain /></Suspense>} />
+            <Route path="/fno-analytics" element={<Suspense fallback={<PageLoader />}><FnOAnalytics /></Suspense>} />
           </Route>
 
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
