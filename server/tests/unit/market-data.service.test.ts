@@ -250,4 +250,132 @@ describe('MarketDataService', () => {
       expect(result).toEqual(cached);
     });
   });
+
+  describe('getOptionsChain', () => {
+    it('should return cached option chain if available', async () => {
+      const cached = { symbol: 'NIFTY', strikes: [{ strike: 25000 }], expiry: '2026-03-06' };
+      (mockCache.get as any).mockResolvedValue(cached);
+
+      const result = await service.getOptionsChain('NIFTY');
+
+      expect(result).toEqual(cached);
+    });
+
+    it('should parse NSE option chain response correctly', async () => {
+      (mockCache.get as any).mockResolvedValue(null);
+      (mockCache.set as any).mockResolvedValue(undefined);
+
+      const nseData = {
+        records: {
+          expiryDates: ['06-Mar-2026'],
+          underlyingValue: 25178.65,
+          data: [
+            {
+              strikePrice: 24000,
+              expiryDate: '06-Mar-2026',
+              CE: { openInterest: 22900, changeinOpenInterest: -9800, lastPrice: 1005, impliedVolatility: 20.11 },
+              PE: { openInterest: 22000, changeinOpenInterest: -3900, lastPrice: 4.75, impliedVolatility: 0 },
+            },
+            {
+              strikePrice: 25000,
+              expiryDate: '06-Mar-2026',
+              CE: { openInterest: 71000, changeinOpenInterest: -3000, lastPrice: 191.65, impliedVolatility: 12.57 },
+              PE: { openInterest: 25000, changeinOpenInterest: 130, lastPrice: 26, impliedVolatility: 12.61 },
+            },
+            {
+              strikePrice: 25200,
+              expiryDate: '06-Mar-2026',
+              CE: { openInterest: 51700, changeinOpenInterest: -6000, lastPrice: 67.85, impliedVolatility: 10.34 },
+              PE: { openInterest: 25000, changeinOpenInterest: 660, lastPrice: 88.55, impliedVolatility: 10.34 },
+            },
+          ],
+        },
+      };
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(nseData),
+      } as any);
+
+      const result = await service.getOptionsChain('NIFTY');
+
+      expect(result.symbol).toBe('NIFTY');
+      expect(result.expiry).toBe('06-Mar-2026');
+      expect(result.underlyingValue).toBe(25178.65);
+      expect(result.strikes).toHaveLength(3);
+
+      const atm = result.strikes.find((s: any) => s.strike === 25000);
+      expect(atm).toBeDefined();
+      expect(atm.callOI).toBe(71000);
+      expect(atm.callLTP).toBe(191.65);
+      expect(atm.putOI).toBe(25000);
+      expect(atm.putLTP).toBe(26);
+
+      expect(result.totalCallOI).toBeGreaterThan(0);
+      expect(result.totalPutOI).toBeGreaterThan(0);
+      expect(result.pcr).toBeGreaterThan(0);
+      expect(result.maxPain).toBeGreaterThan(0);
+    });
+
+    it('should return empty when both NSE and Breeze fail', async () => {
+      (mockCache.get as any).mockResolvedValue(null);
+      globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
+
+      const result = await service.getOptionsChain('NIFTY');
+
+      expect(result.symbol).toBe('NIFTY');
+      expect(result.strikes).toEqual([]);
+    });
+
+    it('should compute max pain correctly from NSE data matching screenshot values', async () => {
+      (mockCache.get as any).mockResolvedValue(null);
+      (mockCache.set as any).mockResolvedValue(undefined);
+
+      const nseData = {
+        records: {
+          expiryDates: ['06-Mar-2026'],
+          underlyingValue: 25178.65,
+          data: [
+            { strikePrice: 24000, expiryDate: '06-Mar-2026', CE: { openInterest: 22900, changeinOpenInterest: -9800, lastPrice: 1005, impliedVolatility: 20.11 }, PE: { openInterest: 22000, changeinOpenInterest: -3900, lastPrice: 4.75, impliedVolatility: 0 } },
+            { strikePrice: 24100, expiryDate: '06-Mar-2026', CE: { openInterest: 16200, changeinOpenInterest: -10300, lastPrice: 955, impliedVolatility: 19.17 }, PE: { openInterest: 24900, changeinOpenInterest: -8000, lastPrice: 4.75, impliedVolatility: 0 } },
+            { strikePrice: 24200, expiryDate: '06-Mar-2026', CE: { openInterest: 42500, changeinOpenInterest: 7800, lastPrice: 807.33, impliedVolatility: 27.79 }, PE: { openInterest: 69500, changeinOpenInterest: -3300, lastPrice: 6.96, impliedVolatility: 0 } },
+            { strikePrice: 24300, expiryDate: '06-Mar-2026', CE: { openInterest: 51500, changeinOpenInterest: -7000, lastPrice: 758.69, impliedVolatility: 23.77 }, PE: { openInterest: 86500, changeinOpenInterest: -1400, lastPrice: 8.26, impliedVolatility: 0 } },
+            { strikePrice: 24500, expiryDate: '06-Mar-2026', CE: { openInterest: 82000, changeinOpenInterest: -2300, lastPrice: 610.73, impliedVolatility: 22.53 }, PE: { openInterest: 99300, changeinOpenInterest: -4200, lastPrice: 10.25, impliedVolatility: 0 } },
+            { strikePrice: 25000, expiryDate: '06-Mar-2026', CE: { openInterest: 71000, changeinOpenInterest: -3000, lastPrice: 191.65, impliedVolatility: 12.57 }, PE: { openInterest: 25000, changeinOpenInterest: 130, lastPrice: 26, impliedVolatility: 12.61 } },
+            { strikePrice: 25200, expiryDate: '06-Mar-2026', CE: { openInterest: 102000, changeinOpenInterest: 104900, lastPrice: 67.85, impliedVolatility: 10.34 }, PE: { openInterest: 6600, changeinOpenInterest: 660, lastPrice: 88.55, impliedVolatility: 10.34 } },
+            { strikePrice: 25300, expiryDate: '06-Mar-2026', CE: { openInterest: 162000, changeinOpenInterest: -84600, lastPrice: 34.83, impliedVolatility: 0 }, PE: { openInterest: 25200, changeinOpenInterest: 660, lastPrice: 55, impliedVolatility: 12.07 } },
+          ],
+        },
+      };
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(nseData),
+      } as any);
+
+      const result = await service.getOptionsChain('NIFTY');
+
+      expect(result.strikes.length).toBe(8);
+      expect(result.maxPain).toBeGreaterThanOrEqual(24000);
+      expect(result.maxPain).toBeLessThanOrEqual(26000);
+      expect(result.pcr).toBeGreaterThan(0);
+
+      const s25000 = result.strikes.find((s: any) => s.strike === 25000);
+      expect(s25000.callOI).toBe(71000);
+      expect(s25000.callOIChange).toBe(-3000);
+      expect(s25000.callLTP).toBe(191.65);
+      expect(s25000.putLTP).toBe(26);
+    });
+
+    it('getNextExpiry should return a valid Thursday date', () => {
+      const svc = service as any;
+      const expiry = svc.getNextExpiry();
+
+      expect(expiry).toMatch(/^\d{4}-\d{2}-\d{2}T06:00:00\.000Z$/);
+
+      const d = new Date(expiry);
+      expect(d.getUTCDay()).toBe(4); // Thursday
+      expect(d.getTime()).toBeGreaterThanOrEqual(Date.now() - 86400000);
+    });
+  });
 });
