@@ -115,9 +115,10 @@ describe('PortfolioService', () => {
 
       const summary = await service.getSummary('p1', 'user1');
 
-      expect(summary.totalNav).toBe(1050000);
-      expect(summary.totalPnl).toBe(50000);
-      expect(summary.totalPnlPercent).toBe(5);
+      // totalNav = cash(1050000) + invested(55000) + unrealizedPnl(3000) = 1108000
+      expect(summary.totalNav).toBe(1108000);
+      expect(summary.totalPnl).toBe(108000);
+      expect(summary.totalPnlPercent).toBeCloseTo(10.8, 1);
       expect(summary.investedValue).toBe(55000);
       expect(summary.dayPnl).toBe(3000);
     });
@@ -167,6 +168,8 @@ describe('PortfolioService', () => {
       mockPrisma.portfolio.findUnique.mockResolvedValue({
         id: 'p1',
         userId: 'user1',
+        initialCapital: 1000000,
+        currentNav: 1000000,
         positions: [],
       });
       mockPrisma.portfolio.update.mockResolvedValue({
@@ -177,6 +180,8 @@ describe('PortfolioService', () => {
 
       const result = await service.updateCapital('p1', 'user1', 2000000);
 
+      // pnlDelta = oldNav(1000000) - oldCapital(1000000) = 0
+      // newNav = 2000000 + 0 = 2000000
       expect(mockPrisma.portfolio.update).toHaveBeenCalledWith({
         where: { id: 'p1' },
         data: { initialCapital: 2000000, currentNav: 2000000 },

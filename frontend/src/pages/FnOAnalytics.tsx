@@ -105,7 +105,6 @@ const fiiDii5Day = [
 
 // ─── OI Change Data ─────────────────────────────────────────────────────────
 
-const oiStrikes = [24000, 24100, 24200, 24300, 24400, 24500, 24600];
 const oiChangeData = [
   { strike: 24000, callOI: 12500, putOI: 45200, callChange: -3200, putChange: 18400 },
   { strike: 24100, callOI: 18900, putOI: 38700, callChange: 5600, putChange: 12100 },
@@ -435,7 +434,7 @@ export default function FnOAnalytics() {
                     fontSize: '12px',
                     boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
                   }}
-                  formatter={(val: number) => [`₹${val.toLocaleString('en-IN')} Cr`]}
+                  formatter={(val: number | undefined) => [`₹${(val ?? 0).toLocaleString('en-IN')} Cr`]}
                 />
                 <Legend iconType="circle" wrapperStyle={{ fontSize: '11px' }} />
                 <Bar dataKey="FII" radius={[6, 6, 0, 0]}>

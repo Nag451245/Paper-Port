@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { BotService, BotError } from '../services/bot.service.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
-const VALID_BOT_ROLES = ['SCANNER', 'ANALYST', 'EXECUTOR', 'RISK_MANAGER', 'STRATEGIST', 'MONITOR'] as const;
+const VALID_BOT_ROLES = ['SCANNER', 'ANALYST', 'EXECUTOR', 'RISK_MANAGER', 'STRATEGIST', 'MONITOR', 'FNO_STRATEGIST'] as const;
 
 const createBotSchema = z.object({
   name: z.string().min(1),

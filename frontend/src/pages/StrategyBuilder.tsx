@@ -19,11 +19,9 @@ import {
   RefreshCcw,
   Loader2,
   Lightbulb,
-  ChevronDown,
   BarChart3,
   Target,
   Shield,
-  DollarSign,
   Layers,
 } from 'lucide-react';
 import api from '@/services/api';
@@ -222,7 +220,8 @@ function computeLocalPayoff(legs: StrategyLeg[], spotPrice: number): PayoffResul
   };
 }
 
-function formatNum(val: number): string {
+function formatNum(val: number | undefined | null): string {
+  if (val == null || isNaN(val)) return '—';
   if (Math.abs(val) >= 100000) return (val / 100000).toFixed(1) + 'L';
   return val.toLocaleString('en-IN');
 }
@@ -603,8 +602,8 @@ export default function StrategyBuilder() {
                   />
                   <Tooltip
                     contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
-                    formatter={(value: number) => [`₹${formatNum(value)}`, 'P&L']}
-                    labelFormatter={(label: number) => `Spot: ${label.toLocaleString('en-IN')}`}
+                    formatter={(value: number | undefined) => [`₹${formatNum(value ?? 0)}`, 'P&L']}
+                    labelFormatter={(label: any) => `Spot: ${Number(label).toLocaleString('en-IN')}`}
                   />
                   <ReferenceLine y={0} stroke="#64748b" strokeDasharray="4 4" strokeWidth={1.5} />
                   <ReferenceLine x={spotPrice} stroke="#6366f1" strokeDasharray="4 4" label={{ value: 'Spot', fontSize: 10, fill: '#6366f1' }} />

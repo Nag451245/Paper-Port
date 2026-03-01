@@ -29,11 +29,35 @@ vi.mock('../../src/lib/openai.js', () => ({
   }),
 }));
 
+vi.mock('../../src/services/market-data.service.js', () => ({
+  MarketDataService: vi.fn().mockImplementation(() => ({
+    getHistory: vi.fn().mockResolvedValue(
+      Array.from({ length: 100 }, (_, i) => ({
+        timestamp: `2024-${String(Math.floor(i / 30) + 1).padStart(2, '0')}-${String((i % 28) + 1).padStart(2, '0')}T09:15:00.000Z`,
+        open: 2400 + i, high: 2420 + i, low: 2380 + i, close: 2410 + i, volume: 1000000,
+      }))
+    ),
+    getQuote: vi.fn().mockResolvedValue({ symbol: 'RELIANCE', ltp: 2500, open: 2480, high: 2520, low: 2470, close: 2500, volume: 1000000, exchange: 'NSE' }),
+    search: vi.fn().mockImplementation((q: string) => {
+      const stocks = [
+        { symbol: 'RELIANCE', name: 'Reliance Industries', exchange: 'NSE', sector: 'Oil & Gas' },
+        { symbol: 'TCS', name: 'Tata Consultancy Services', exchange: 'NSE', sector: 'IT' },
+      ];
+      return Promise.resolve(stocks.filter(s => s.symbol.toLowerCase().includes(q.toLowerCase()) || s.name.toLowerCase().includes(q.toLowerCase())));
+    }),
+    getIndices: vi.fn().mockResolvedValue([]),
+    getIndicesForExchange: vi.fn().mockResolvedValue([]),
+    getVIX: vi.fn().mockResolvedValue({ value: 14.5, change: -0.2, changePercent: -1.36 }),
+    getFIIDII: vi.fn().mockResolvedValue({ date: new Date().toISOString().split('T')[0], fiiBuy: 0, fiiSell: 0, fiiNet: 0, diiBuy: 0, diiSell: 0, diiNet: 0 }),
+    getOptionsChain: vi.fn().mockResolvedValue({ symbol: 'NIFTY', strikes: [], expiry: '' }),
+  })),
+}));
+
 vi.mock('../../src/lib/prisma.js', () => {
   const mock = {
     user: { findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
     breezeCredential: { findUnique: vi.fn(), upsert: vi.fn() },
-    portfolio: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn() },
+    portfolio: { findUnique: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
     position: { findUnique: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
     order: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn(), count: vi.fn() },
     trade: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), count: vi.fn() },
@@ -46,6 +70,7 @@ vi.mock('../../src/lib/prisma.js', () => {
     botTask: { findMany: vi.fn(), create: vi.fn() },
     backtestResult: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn() },
     $disconnect: vi.fn(),
+    $queryRawUnsafe: vi.fn().mockResolvedValue([{ 1: 1 }]),
   };
   return { getPrisma: vi.fn(() => mock), disconnectPrisma: vi.fn(), __mockPrisma: mock };
 });
@@ -59,7 +84,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => { await app.close(); });
-beforeEach(() => { vi.resetAllMocks(); });
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 function getToken(userId = 'uat-user') {
   return app.jwt.sign({ sub: userId });

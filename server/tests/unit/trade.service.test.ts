@@ -147,9 +147,12 @@ describe('TradeService', () => {
       expect(mockPrisma.position.update).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { id: 'pos-existing' },
-          data: { qty: 20, avgEntryPrice: 2550 },
+          data: expect.objectContaining({ qty: 20 }),
         }),
       );
+      const updateCall = mockPrisma.position.update.mock.calls[0][0];
+      expect(updateCall.data.avgEntryPrice).toBeGreaterThanOrEqual(2540);
+      expect(updateCall.data.avgEntryPrice).toBeLessThanOrEqual(2570);
     });
   });
 

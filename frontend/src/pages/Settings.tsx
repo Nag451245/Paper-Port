@@ -496,6 +496,65 @@ export default function Settings() {
             </div>
           </section>
 
+          {/* Telegram & Mobile Notifications */}
+          <section className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm">
+            <div className="flex items-center gap-2 mb-4">
+              <svg className="w-5 h-5 text-blue-500" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.2-.08-.06-.19-.04-.27-.02-.12.03-1.99 1.27-5.62 3.72-.53.36-1.01.54-1.44.53-.47-.01-1.38-.27-2.06-.49-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.75 3.99-1.73 6.65-2.87 7.97-3.44 3.8-1.58 4.59-1.86 5.1-1.87.11 0 .37.03.54.17.14.12.18.28.2.46-.01.06.01.24 0 .38z"/></svg>
+              <h2 className="text-lg font-semibold text-slate-900">Telegram & Mobile</h2>
+            </div>
+
+            <div className="space-y-4">
+              <div className="p-4 bg-blue-50 border border-blue-100 rounded-xl">
+                <h3 className="text-sm font-semibold text-blue-800 mb-2">How to Connect Telegram</h3>
+                <ol className="text-xs text-blue-700 space-y-1 list-decimal list-inside">
+                  <li>Search for <strong>@PaperPortBot</strong> on Telegram (or use the bot username shown below)</li>
+                  <li>Start a conversation by sending <code>/start</code></li>
+                  <li>The bot will reply with your <strong>Chat ID</strong></li>
+                  <li>Paste the Chat ID below and click Connect</li>
+                </ol>
+              </div>
+
+              <div>
+                <label className="text-xs text-slate-500 mb-1 block">Mobile Number (optional)</label>
+                <input
+                  type="tel"
+                  placeholder="+91 98765 43210"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                />
+                <p className="text-xs text-slate-400 mt-1">For future WhatsApp/SMS alerts</p>
+              </div>
+
+              <div>
+                <label className="text-xs text-slate-500 mb-1 block">Telegram Chat ID</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="e.g. 123456789"
+                    className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                  />
+                  <button className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-lg transition-colors">
+                    Connect
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between py-2 border-t border-slate-100 mt-2">
+                <div>
+                  <p className="text-sm text-slate-800">Send Alerts via Telegram</p>
+                  <p className="text-xs text-slate-400">Receive trades, signals & daily reports on Telegram</p>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input type="checkbox" className="sr-only peer" />
+                  <div className="w-9 h-5 bg-slate-200 rounded-full peer peer-checked:bg-blue-600 transition-colors after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
+                </label>
+              </div>
+
+              <button className="px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors">
+                Send Test Notification
+              </button>
+            </div>
+          </section>
+
           {/* Save button */}
           {saveError && (
             <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600 flex items-center gap-2">

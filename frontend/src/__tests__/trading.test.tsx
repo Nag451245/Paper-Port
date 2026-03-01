@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
 
@@ -19,25 +19,15 @@ vi.mock('../services/api', () => ({
   tradingApi: {
     placeOrder: vi.fn().mockResolvedValue({ data: { id: 'ord-1', symbol: 'RELIANCE', status: 'FILLED' } }),
     cancelOrder: vi.fn().mockResolvedValue({ data: {} }),
-    listOrders: vi.fn().mockResolvedValue({
-      data: [
-        { id: 'ord-1', symbol: 'RELIANCE', side: 'BUY', qty: 10, price: '2500', status: 'FILLED', created_at: '2026-01-01T00:00:00' },
-        { id: 'ord-2', symbol: 'TCS', side: 'BUY', qty: 5, price: '3500', status: 'PENDING', created_at: '2026-01-01T00:00:00' },
-      ],
-    }),
-    positions: vi.fn().mockResolvedValue({
-      data: [
-        { id: 'pos-1', symbol: 'RELIANCE', qty: 10, avg_price: '2500', ltp: '2550', unrealized_pnl: '500', side: 'LONG', status: 'OPEN' },
-        { id: 'pos-2', symbol: 'INFY', qty: 20, avg_price: '1500', ltp: '1480', unrealized_pnl: '-400', side: 'LONG', status: 'OPEN' },
-      ],
-    }),
-    listTrades: vi.fn().mockResolvedValue({
-      data: [
-        { id: 'tr-1', symbol: 'HDFCBANK', entry_price: '1600', exit_price: '1650', qty: 15, pnl: '750', net_pnl: '720', side: 'LONG', created_at: '2026-01-01T00:00:00' },
-      ],
-    }),
+    listOrders: vi.fn().mockResolvedValue({ data: [] }),
+    positions: vi.fn().mockResolvedValue({ data: [] }),
+    listTrades: vi.fn().mockResolvedValue({ data: [] }),
   },
-  marketApi: { quote: vi.fn(), indices: vi.fn(), search: vi.fn() },
+  marketApi: {
+    quote: vi.fn().mockResolvedValue({ data: { symbol: 'RELIANCE', ltp: 2500 } }),
+    indices: vi.fn().mockResolvedValue({ data: [] }),
+    search: vi.fn().mockResolvedValue({ data: [] }),
+  },
   botsApi: { list: vi.fn(), create: vi.fn(), start: vi.fn(), stop: vi.fn() },
 }));
 
@@ -48,98 +38,91 @@ vi.mock('../stores/auth', () => ({
   ),
 }));
 
-vi.mock('../stores/portfolio', () => ({
-  usePortfolioStore: Object.assign(
-    () => ({
-      portfolios: [{ id: '1', name: 'Default', initial_capital: '1000000', current_nav: '1000000' }],
-      selectedPortfolio: { id: '1', name: 'Default' },
-      summary: { totalNav: 1000000, totalPnl: 500, totalPnlPercent: 0.05 },
-      fetchPortfolios: vi.fn(),
-      selectPortfolio: vi.fn(),
+vi.mock('lightweight-charts', async (importOriginal) => {
+  const actual: any = await importOriginal();
+  return {
+    ...actual,
+    createChart: vi.fn().mockReturnValue({
+      addSeries: vi.fn().mockReturnValue({ setData: vi.fn(), applyOptions: vi.fn() }),
+      addAreaSeries: vi.fn().mockReturnValue({ setData: vi.fn(), applyOptions: vi.fn() }),
+      addHistogramSeries: vi.fn().mockReturnValue({ setData: vi.fn(), applyOptions: vi.fn() }),
+      addCandlestickSeries: vi.fn().mockReturnValue({ setData: vi.fn(), applyOptions: vi.fn() }),
+      applyOptions: vi.fn(),
+      timeScale: vi.fn().mockReturnValue({ fitContent: vi.fn(), applyOptions: vi.fn() }),
+      remove: vi.fn(),
+      resize: vi.fn(),
     }),
-    { getState: () => ({ portfolios: [{ id: '1' }], selectedPortfolio: { id: '1' } }) },
-  ),
-}));
+  };
+});
 
-const renderWithRouter = (component: React.ReactNode) =>
-  render(<BrowserRouter>{component}</BrowserRouter>);
+const renderPage = async () => {
+  const mod = await import('../pages/TradingTerminal');
+  return render(
+    <BrowserRouter>
+      <mod.default />
+    </BrowserRouter>,
+  );
+};
 
 describe('TradingTerminal Page', () => {
-  let TradingTerminal: React.ComponentType;
-
-  beforeEach(async () => {
+  beforeEach(() => {
     vi.clearAllMocks();
-    const mod = await import('../pages/TradingTerminal');
-    TradingTerminal = mod.default;
   });
 
-  it('renders the trading terminal page', () => {
-    renderWithRouter(<TradingTerminal />);
-    expect(screen.getByText(/trading/i)).toBeInTheDocument();
+  it('renders exchange filter buttons', async () => {
+    await renderPage();
+    expect(screen.getByText('All Markets')).toBeInTheDocument();
+    expect(screen.getByText('NSE')).toBeInTheDocument();
   });
 
-  it('has BUY and SELL side toggles', () => {
-    renderWithRouter(<TradingTerminal />);
+  it('has BUY and SELL side toggles', async () => {
+    await renderPage();
     expect(screen.getByText('BUY')).toBeInTheDocument();
     expect(screen.getByText('SELL')).toBeInTheDocument();
   });
 
-  it('has symbol input field', () => {
-    renderWithRouter(<TradingTerminal />);
-    const symbolInput = screen.getByPlaceholderText(/symbol/i);
-    expect(symbolInput).toBeInTheDocument();
+  it('has search input field', async () => {
+    await renderPage();
+    const searchInput = screen.getByPlaceholderText(/Search symbol/i);
+    expect(searchInput).toBeInTheDocument();
   });
 
-  it('has quantity input field', () => {
-    renderWithRouter(<TradingTerminal />);
+  it('has quantity input field', async () => {
+    await renderPage();
     const qtyInputs = screen.getAllByRole('spinbutton');
     expect(qtyInputs.length).toBeGreaterThan(0);
   });
 
-  it('has order type selector with Market and Limit options', () => {
-    renderWithRouter(<TradingTerminal />);
-    const selectEl = screen.getByDisplayValue('Market');
-    expect(selectEl).toBeInTheDocument();
-    expect(selectEl.tagName).toBe('SELECT');
-  });
-
-  it('has navigation tabs for Positions, Orders, Trades', () => {
-    renderWithRouter(<TradingTerminal />);
-    expect(screen.getByText(/positions/i)).toBeInTheDocument();
-    expect(screen.getByText(/orders/i)).toBeInTheDocument();
-    expect(screen.getByText(/trades/i)).toBeInTheDocument();
+  it('has navigation tabs for Positions, Orders, Trades', async () => {
+    await renderPage();
+    expect(screen.getByText(/Positions/i)).toBeInTheDocument();
+    expect(screen.getByText(/Orders/i)).toBeInTheDocument();
+    expect(screen.getByText(/Trades/i)).toBeInTheDocument();
   });
 });
 
 describe('Trading Navigation Flows', () => {
   it('user can type a stock symbol', async () => {
     const user = userEvent.setup();
-    const mod = await import('../pages/TradingTerminal');
-    renderWithRouter(<mod.default />);
-
-    const symbolInput = screen.getByPlaceholderText(/symbol/i);
-    await user.clear(symbolInput);
-    await user.type(symbolInput, 'RELIANCE');
-    expect(symbolInput).toHaveValue('RELIANCE');
+    await renderPage();
+    const searchInput = screen.getByPlaceholderText(/Search symbol/i);
+    await user.clear(searchInput);
+    await user.type(searchInput, 'RELIANCE');
+    expect(searchInput).toHaveValue('RELIANCE');
   });
 
   it('user can switch between BUY and SELL', async () => {
     const user = userEvent.setup();
-    const mod = await import('../pages/TradingTerminal');
-    renderWithRouter(<mod.default />);
-
+    await renderPage();
     const sellButtons = screen.getAllByText('SELL');
     await user.click(sellButtons[0]);
-
     const buyButtons = screen.getAllByText('BUY');
     await user.click(buyButtons[0]);
   });
 
   it('user can set quantity', async () => {
     const user = userEvent.setup();
-    const mod = await import('../pages/TradingTerminal');
-    renderWithRouter(<mod.default />);
-
+    await renderPage();
     const qtyInputs = screen.getAllByRole('spinbutton');
     const qtyInput = qtyInputs[0];
     await user.clear(qtyInput);

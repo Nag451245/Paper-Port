@@ -88,6 +88,65 @@ function calculateCosts(qty: number, price: number, side: OrderSide, exchange: s
   };
 }
 
+interface ExecutionSimulation {
+  idealPrice: number;
+  fillPrice: number;
+  slippageBps: number;
+  spreadCost: number;
+  impactCost: number;
+  filledQty: number;
+  requestedQty: number;
+  fillRatio: number;
+  latencyMs: number;
+}
+
+function simulateExecution(
+  idealPrice: number,
+  qty: number,
+  side: 'BUY' | 'SELL',
+  exchange: string = 'NSE',
+  orderType: string = 'MARKET',
+): ExecutionSimulation {
+  if (orderType !== 'MARKET') {
+    return {
+      idealPrice, fillPrice: idealPrice, slippageBps: 0, spreadCost: 0,
+      impactCost: 0, filledQty: qty, requestedQty: qty, fillRatio: 1, latencyMs: 0,
+    };
+  }
+
+  const spreadBps = exchange === 'MCX' ? 8 : exchange === 'CDS' ? 5 : 3;
+  const spreadHalf = idealPrice * spreadBps / 20000;
+  const spreadAdjusted = side === 'BUY' ? idealPrice + spreadHalf : idealPrice - spreadHalf;
+
+  const slippageFactor = Math.min(qty * idealPrice / 5_000_000, 0.003);
+  const randomJitter = (Math.random() - 0.5) * 0.001;
+  const slippage = slippageFactor + Math.abs(randomJitter);
+  const slippageAmount = spreadAdjusted * slippage;
+  const fillPrice = side === 'BUY'
+    ? spreadAdjusted + slippageAmount
+    : spreadAdjusted - slippageAmount;
+
+  const impactCost = Math.abs(fillPrice - idealPrice) * qty;
+
+  const liquidity = exchange === 'MCX' ? 0.85 : exchange === 'CDS' ? 0.80 : 0.95;
+  const fillRatio = Math.min(1, liquidity + Math.random() * (1 - liquidity));
+  const filledQty = Math.max(1, Math.round(qty * fillRatio));
+
+  const latencyMs = Math.round(15 + Math.random() * 50);
+
+  return {
+    idealPrice: Number(idealPrice.toFixed(2)),
+    fillPrice: Number(fillPrice.toFixed(2)),
+    slippageBps: Number((slippage * 10000).toFixed(1)),
+    spreadCost: Number((spreadHalf * 2 * qty).toFixed(2)),
+    impactCost: Number(impactCost.toFixed(2)),
+    filledQty,
+    requestedQty: qty,
+    fillRatio: Number(fillRatio.toFixed(3)),
+    latencyMs,
+  };
+}
+
 export class TradeService {
   private marketData: MarketDataService;
 
@@ -118,7 +177,11 @@ export class TradeService {
       }
     }
 
-    const costs = calculateCosts(input.qty, fillPrice, input.side, input.exchange ?? 'NSE');
+    const execSim = simulateExecution(fillPrice, input.qty, input.side as 'BUY' | 'SELL', input.exchange ?? 'NSE', input.orderType);
+    fillPrice = execSim.fillPrice;
+    const effectiveQty = execSim.filledQty;
+
+    const costs = calculateCosts(effectiveQty, fillPrice, input.side, input.exchange ?? 'NSE');
 
     const totalValue = fillPrice * input.qty + costs.totalCost;
     const availableCash = Number(portfolio.currentNav);

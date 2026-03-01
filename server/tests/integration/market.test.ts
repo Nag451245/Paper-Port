@@ -88,13 +88,20 @@ describe('Market Routes Integration', () => {
     it('should return historical data (empty when API unavailable)', async () => {
       globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network'));
 
+      const token = app.jwt.sign({ sub: 'test-user' });
       const res = await app.inject({
         method: 'GET',
         url: '/api/market/history/RELIANCE?interval=1day&from_date=2025-01-01&to_date=2025-01-31',
+        headers: { authorization: `Bearer ${token}` },
       });
 
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual([]);
+      const body = res.json();
+      if (Array.isArray(body)) {
+        expect(body).toEqual([]);
+      } else {
+        expect(body.data).toEqual([]);
+      }
     });
   });
 

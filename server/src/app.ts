@@ -4,7 +4,6 @@ import jwt from '@fastify/jwt';
 import sensible from '@fastify/sensible';
 import rateLimit from '@fastify/rate-limit';
 import helmet from '@fastify/helmet';
-import cron from 'node-cron';
 import { env } from './config.js';
 import { authRoutes } from './routes/auth.js';
 import { portfolioRoutes } from './routes/portfolio.js';
@@ -19,9 +18,14 @@ import { notificationRoutes } from './routes/notifications.js';
 import { alertRoutes } from './routes/alerts.js';
 import { analyticsRoutes } from './routes/analytics.js';
 import { optionsRoutes } from './routes/options.js';
+import { learningRoutes } from './routes/learning.js';
+import { edgeRoutes } from './routes/edge.js';
 import { disconnectPrisma, getPrisma } from './lib/prisma.js';
 import { AuthService } from './services/auth.service.js';
 import { BotEngine } from './services/bot-engine.js';
+import { LearningEngine } from './services/learning-engine.js';
+import { MorningBoot } from './services/morning-boot.js';
+import { ServerOrchestrator } from './services/server-orchestrator.js';
 import { registerWebSocket, wsHub } from './lib/websocket.js';
 
 export interface BuildAppOptions {
@@ -36,7 +40,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   const authService = new AuthService(getPrisma(), env.JWT_SECRET);
   const botEngine = new BotEngine(getPrisma());
+  const learningEngine = new LearningEngine(getPrisma());
+  const morningBoot = new MorningBoot(getPrisma());
+  const orchestrator = new ServerOrchestrator(getPrisma(), botEngine, env.PORT);
   app.decorate('botEngine', botEngine);
+  app.decorate('learningEngine', learningEngine);
+  app.decorate('morningBoot', morningBoot);
+  app.decorate('orchestrator', orchestrator);
 
   await app.register(sensible);
 
@@ -81,7 +91,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.get('/health', async () => {
     const checks: Record<string, string> = {};
 
-    // Database check
     try {
       await getPrisma().$queryRawUnsafe('SELECT 1');
       checks.database = 'ok';
@@ -89,7 +98,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       checks.database = 'error';
     }
 
-    // Redis check
     try {
       const { getRedis } = await import('./lib/redis.js');
       const redis = getRedis();
@@ -103,7 +111,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       checks.redis = 'error';
     }
 
-    // Rust engine check
     try {
       const { isEngineAvailable } = await import('./lib/rust-engine.js');
       checks.rustEngine = isEngineAvailable() ? 'ok' : 'not_found';
@@ -111,12 +118,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       checks.rustEngine = 'error';
     }
 
-    // WebSocket connections
     checks.wsConnections = String(wsHub.getConnectedCount());
 
     const overall = Object.values(checks).every(v =>
       v === 'ok' || v === 'not_configured' || v === 'not_found' || !isNaN(Number(v))
     ) ? 'ok' : 'degraded';
+
+    const orchStatus = orchestrator.getStatus();
 
     return {
       status: overall,
@@ -127,6 +135,22 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         rssMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
       },
       checks,
+      market: {
+        phase: orchStatus.market.phase,
+        phaseLabel: orchStatus.market.phaseLabel,
+        isOpen: orchStatus.market.isOpen,
+        isHoliday: orchStatus.market.isHoliday,
+        holidayName: orchStatus.market.holidayName,
+        nextOpen: orchStatus.market.nextOpen,
+      },
+      bots: {
+        activeBots: orchStatus.botEngine.activeBots,
+        activeAgents: orchStatus.botEngine.activeAgents,
+      },
+      orchestrator: {
+        pingsSentToday: orchStatus.orchestrator.pingsSentToday,
+        lastPingAt: orchStatus.orchestrator.lastPingAt,
+      },
     };
   });
 
@@ -143,12 +167,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(alertRoutes, { prefix: '/api/alerts' });
   await app.register(analyticsRoutes, { prefix: '/api/analytics' });
   await app.register(optionsRoutes, { prefix: '/api/options' });
+  await app.register(learningRoutes, { prefix: '/api/learning' });
+  await app.register(edgeRoutes, { prefix: '/api/edge' });
 
   await registerWebSocket(app);
   app.decorate('wsHub', wsHub);
 
-  // Auto-renew Breeze sessions at 8:00 AM and 8:30 AM IST on weekdays (retry)
-  const sessionRefreshTask = cron.schedule('0 8 * * 1-6', async () => {
+  // Session renewal — runs on all trading days including Saturdays (some exchanges)
+  orchestrator.scheduleAlways('0 8 * * 1-6', async () => {
     try {
       const result = await authService.renewExpiringSessions();
       console.log(`[Breeze Cron] Auto-renew: ${result.refreshed}/${result.attempted} refreshed`);
@@ -160,8 +186,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
   });
 
-  // Retry at 8:30 in case the first attempt failed
-  const sessionRetryTask = cron.schedule('30 8 * * 1-6', async () => {
+  orchestrator.scheduleAlways('30 8 * * 1-6', async () => {
     try {
       const result = await authService.renewExpiringSessions();
       if (result.attempted > 0) {
@@ -172,15 +197,28 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
   });
 
+  // Nightly learning — only on market days (skips holidays & weekends)
+  orchestrator.scheduleMarketDay('30 10 * * 1-5', async () => {
+    const result = await learningEngine.runNightlyLearning();
+    console.log(`[Learning Cron] Processed ${result.usersProcessed} users, ${result.insights} insights generated`);
+  });
+
+  // Morning boot — only on market days
+  orchestrator.scheduleMarketDay('15 3 * * 1-5', async () => {
+    const result = await morningBoot.runMorningBoot();
+    console.log(`[Morning Boot] Processed ${result.usersProcessed} users, activated ${result.strategiesActivated} strategies`);
+  });
+
   app.addHook('onClose', async () => {
     botEngine.stopAll();
-    sessionRefreshTask.stop();
-    sessionRetryTask.stop();
+    orchestrator.stop();
     await disconnectPrisma();
   });
 
-  // Auto-renew Breeze sessions on startup (15s delay to let server stabilize)
+  // Start orchestrator and renew sessions on startup
   app.addHook('onReady', async () => {
+    orchestrator.start();
+
     setTimeout(async () => {
       try {
         const result = await authService.renewExpiringSessions();
@@ -194,17 +232,24 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }, 15_000);
   });
 
-  // Auto-resume bots/agents on startup — limited to MAX_CONCURRENT_BOTS (3)
+  // Auto-resume bots/agents — only during market phases where bots should be active
   app.addHook('onReady', async () => {
+    const phase = orchestrator.calendar.getMarketPhase();
+    const phaseConfig = orchestrator.calendar.getPhaseConfig(phase);
+
+    if (!phaseConfig.botsActive) {
+      app.log.info(`[Bot Resume] Skipping — current phase: ${phase} (${phaseConfig.label})`);
+      return;
+    }
+
     const prisma = getPrisma();
     try {
       const runningBots = await prisma.tradingBot.findMany({
         where: { status: 'RUNNING' },
         select: { id: true, userId: true, name: true, role: true },
-        take: 5, // resume up to 5 bots (matches MAX_CONCURRENT_BOTS)
+        take: 5,
       });
 
-      // Mark excess bots as IDLE so they don't auto-resume next time
       if (runningBots.length > 0) {
         const excessBots = await prisma.tradingBot.findMany({
           where: { status: 'RUNNING', id: { notIn: runningBots.map(b => b.id) } },
@@ -219,7 +264,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         }
       }
 
-      // Stagger bot resumes with 10s gaps
       for (let i = 0; i < runningBots.length; i++) {
         const bot = runningBots[i];
         setTimeout(() => {
@@ -231,10 +275,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       const activeAgents = await prisma.aIAgentConfig.findMany({
         where: { isActive: true },
         select: { userId: true },
-        take: 1, // only one agent at a time
+        take: 1,
       });
       for (const agent of activeAgents) {
-        // Delay agent start by 40s to let server stabilize
         setTimeout(() => {
           botEngine.startAgent(agent.userId).catch(() => {});
           botEngine.startMarketScan(agent.userId).catch(() => {});
@@ -243,7 +286,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       }
 
       if (runningBots.length > 0 || activeAgents.length > 0) {
-        app.log.info(`Will resume ${runningBots.length} bots, ${activeAgents.length} agents (staggered)`);
+        app.log.info(`Will resume ${runningBots.length} bots, ${activeAgents.length} agents (staggered, phase: ${phase})`);
       }
     } catch (err) {
       app.log.error({ err }, 'Failed to auto-resume bots/agents');

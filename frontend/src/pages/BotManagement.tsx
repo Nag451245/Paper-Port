@@ -27,6 +27,7 @@ const ROLE_COLORS: Record<string, string> = {
   RISK_MANAGER: 'bg-amber-50 text-amber-700 border-amber-200',
   STRATEGIST: 'bg-violet-50 text-violet-700 border-violet-200',
   MONITOR: 'bg-slate-100 text-slate-700 border-slate-200',
+  FNO_STRATEGIST: 'bg-orange-50 text-orange-700 border-orange-200',
 };
 
 const ROLES = [
@@ -36,6 +37,7 @@ const ROLES = [
   { value: 'RISK_MANAGER', label: 'Risk Manager' },
   { value: 'STRATEGIST', label: 'Strategist' },
   { value: 'MONITOR', label: 'Monitor' },
+  { value: 'FNO_STRATEGIST', label: 'F&O Strategist', description: 'Analyzes options chain data, generates multi-leg F&O strategies' },
 ];
 const EMOJIS = ['🤖', '🧠', '🎯', '📊', '🔍', '⚡', '🛡️', '🏹', '🦅', '🐂', '🐻', '🔬', '📈'];
 const TASK_TYPES = ['scan', 'analyze', 'trade', 'monitor', 'report'];

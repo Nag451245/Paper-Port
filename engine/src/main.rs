@@ -1,8 +1,12 @@
-mod backtest;
+pub mod backtest;
 pub mod signals;
 mod risk;
 mod greeks;
 mod scan;
+mod optimize;
+mod walk_forward;
+mod advanced_signals;
+mod iv_surface;
 
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read};
@@ -55,6 +59,22 @@ fn handle_request(req: Request) -> Response {
             Err(e) => Response { success: false, data: serde_json::Value::Null, error: Some(e) },
         },
         "scan" => match scan::compute(req.data) {
+            Ok(result) => Response { success: true, data: result, error: None },
+            Err(e) => Response { success: false, data: serde_json::Value::Null, error: Some(e) },
+        },
+        "optimize" => match optimize::compute(req.data) {
+            Ok(result) => Response { success: true, data: result, error: None },
+            Err(e) => Response { success: false, data: serde_json::Value::Null, error: Some(e) },
+        },
+        "walk_forward" => match walk_forward::compute(req.data) {
+            Ok(result) => Response { success: true, data: result, error: None },
+            Err(e) => Response { success: false, data: serde_json::Value::Null, error: Some(e) },
+        },
+        "advanced_signals" => match advanced_signals::compute(req.data) {
+            Ok(result) => Response { success: true, data: result, error: None },
+            Err(e) => Response { success: false, data: serde_json::Value::Null, error: Some(e) },
+        },
+        "iv_surface" => match iv_surface::compute(req.data) {
             Ok(result) => Response { success: true, data: result, error: None },
             Err(e) => Response { success: false, data: serde_json::Value::Null, error: Some(e) },
         },

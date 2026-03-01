@@ -320,4 +320,50 @@ export const botsApi = {
   allMessages: () => api.get('/bots/messages/all'),
 };
 
+// ─── Learning Intelligence ──────────────────────────────────────────
+export const learningApi = {
+  getInsights: (limit = 30) => api.get(`/learning/insights?limit=${limit}`),
+  getLatestInsight: () => api.get('/learning/insights/latest'),
+  getLedger: (days = 30, strategy?: string) => {
+    let url = `/learning/ledger?days=${days}`;
+    if (strategy) url += `&strategy=${strategy}`;
+    return api.get(url);
+  },
+  getHeatmap: (days = 60) => api.get(`/learning/ledger/heatmap?days=${days}`),
+  getParams: (strategy?: string) => {
+    let url = '/learning/params';
+    if (strategy) url += `?strategy=${strategy}`;
+    return api.get(url);
+  },
+  getActiveParams: () => api.get('/learning/params/active'),
+  getRegimeTimeline: (days = 30) => api.get(`/learning/regime-timeline?days=${days}`),
+  getCalibration: () => api.get('/learning/calibration'),
+  triggerNightly: () => api.post('/learning/trigger-nightly'),
+};
+
+// ─── Telegram Notifications ─────────────────────────────────────────
+export const telegramApi = {
+  getStatus: () => api.get('/notifications/telegram/status'),
+  connect: (chatId: string) => api.post('/notifications/telegram/connect', { chatId }),
+  disconnect: () => api.post('/notifications/telegram/disconnect'),
+  updatePreferences: (data: { notifyTelegram?: boolean; notifyEmail?: boolean; phoneNumber?: string }) =>
+    api.put('/notifications/telegram/preferences', data),
+  sendTest: () => api.post('/notifications/telegram/test'),
+};
+
+// ─── Edge Features ──────────────────────────────────────────────────
+export const edgeApi = {
+  getComposition: () => api.get('/edge/composition'),
+  getKelly: (strategy: string) => api.get(`/edge/composition/kelly/${strategy}`),
+  walkForward: (data: { strategy: string; symbol: string; candles: unknown[]; param_grid?: Record<string, number[]>; num_folds?: number }) =>
+    api.post('/edge/walk-forward', data),
+  getSentiment: () => api.get('/edge/sentiment'),
+  analyzeSentiment: (symbols: string[]) => api.post('/edge/sentiment/analyze', { symbols }),
+  advancedSignals: (data: { candles: unknown[]; compute?: string[] }) =>
+    api.post('/edge/advanced-signals', data),
+  ivSurface: (data: { spot: number; strikes: unknown[] }) =>
+    api.post('/edge/iv-surface', data),
+  getTrackRecord: () => api.get('/edge/track-record'),
+};
+
 export default api;

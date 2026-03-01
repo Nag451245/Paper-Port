@@ -22,6 +22,10 @@ model User {
   riskAppetite   String   @default("MODERATE") @map("risk_appetite")
   virtualCapital Decimal  @default(1000000) @map("virtual_capital")
   role           String   @default("LEARNER")
+  phoneNumber    String?  @map("phone_number")
+  telegramChatId String?  @map("telegram_chat_id")
+  notifyTelegram Boolean  @default(false) @map("notify_telegram")
+  notifyEmail    Boolean  @default(false) @map("notify_email")
   isActive       Boolean  @default(true) @map("is_active")
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
@@ -40,6 +44,9 @@ model User {
   notifications    Notification[]
   riskEvents       RiskEvent[]
   perfSnapshots    PerformanceSnapshot[]
+  strategyLedgers  StrategyLedger[]
+  learningInsights LearningInsight[]
+  strategyParams   StrategyParam[]
 
   @@map("users")
 }
@@ -295,6 +302,8 @@ model AITradeSignal {
   strategyId     String?   @map("strategy_id")
   rationale      String?
   status         String    @default("PENDING")
+  outcomeTag     String?   @map("outcome_tag")
+  outcomeNotes   String?   @map("outcome_notes")
   createdAt      DateTime  @default(now()) @map("created_at")
   executedAt     DateTime? @map("executed_at")
   expiresAt      DateTime? @map("expires_at")
@@ -442,4 +451,68 @@ model PerformanceSnapshot {
   @@unique([portfolioId, date])
   @@index([userId, date])
   @@map("performance_snapshots")
+}
+
+// ─── Self-Improving Learning Models ────────────────────────────────
+
+model StrategyLedger {
+  id                  String   @id @default(uuid())
+  userId              String   @map("user_id")
+  strategyId          String   @map("strategy_id")
+  date                DateTime
+  tradesCount         Int      @default(0) @map("trades_count")
+  wins                Int      @default(0)
+  losses              Int      @default(0)
+  grossPnl            Decimal  @default(0) @map("gross_pnl")
+  netPnl              Decimal  @default(0) @map("net_pnl")
+  winRate             Float    @default(0) @map("win_rate")
+  avgWin              Float    @default(0) @map("avg_win")
+  avgLoss             Float    @default(0) @map("avg_loss")
+  sharpeRatio         Float    @default(0) @map("sharpe_ratio")
+  maxDrawdown         Float    @default(0) @map("max_drawdown")
+  confidenceThreshold Float    @default(0.7) @map("confidence_threshold")
+  paramSnapshot       String   @default("{}") @map("param_snapshot")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, strategyId, date])
+  @@index([userId, date])
+  @@map("strategy_ledgers")
+}
+
+model LearningInsight {
+  id                   String    @id @default(uuid())
+  userId               String    @map("user_id")
+  date                 DateTime
+  marketRegime         String    @default("unknown") @map("market_regime")
+  topWinningStrategies String    @default("[]") @map("top_winning_strategies")
+  topLosingStrategies  String    @default("[]") @map("top_losing_strategies")
+  paramAdjustments     String    @default("{}") @map("param_adjustments")
+  narrative            String    @default("")
+  appliedAt            DateTime? @map("applied_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@index([userId, date])
+  @@map("learning_insights")
+}
+
+model StrategyParam {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  strategyId      String   @map("strategy_id")
+  version         Int      @default(1)
+  params          String   @default("{}")
+  source          String   @default("default")
+  backtestMetrics String   @default("{}") @map("backtest_metrics")
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, strategyId, isActive])
+  @@map("strategy_params")
 }

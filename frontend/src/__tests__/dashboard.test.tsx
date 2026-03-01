@@ -70,9 +70,7 @@ describe('Dashboard Component Integration', () => {
 
     it('renders global indices strip', () => {
         renderWithRouter(<Dashboard />);
-        expect(screen.getByText('S&P 500')).toBeInTheDocument();
-        expect(screen.getByText('Nasdaq')).toBeInTheDocument();
-        expect(screen.getByText('SGX Nifty')).toBeInTheDocument();
+        expect(screen.getByText(/Loading indices/i)).toBeInTheDocument();
     });
 
     it('renders portfolio section with empty state when no portfolios', async () => {

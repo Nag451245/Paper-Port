@@ -16,7 +16,7 @@ vi.mock('../../src/lib/prisma.js', () => {
   const mock = {
     user: { findUnique: vi.fn() },
     breezeCredential: { findUnique: vi.fn(), upsert: vi.fn() },
-    portfolio: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn() },
+    portfolio: { findUnique: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
     position: { findUnique: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
     order: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn(), count: vi.fn() },
     trade: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), count: vi.fn() },
@@ -133,6 +133,9 @@ describe('AI Routes Integration', () => {
     it('should execute a pending signal', async () => {
       mockPrisma.aITradeSignal.findUnique.mockResolvedValue({
         id: 's1', userId: 'test-user', status: 'PENDING',
+      });
+      mockPrisma.portfolio.findFirst.mockResolvedValue({
+        id: 'p1', userId: 'test-user', currentNav: 1000000,
       });
       mockPrisma.aITradeSignal.update.mockResolvedValue({
         id: 's1', status: 'EXECUTED',

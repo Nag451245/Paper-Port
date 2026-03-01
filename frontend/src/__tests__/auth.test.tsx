@@ -28,14 +28,14 @@ describe('Login Page', () => {
 
   it('has email input', () => {
     renderWithRouter(<Login />);
-    const emailInput = screen.getByPlaceholderText('you@example.com');
+    const emailInput = screen.getByPlaceholderText('Email');
     expect(emailInput).toBeInTheDocument();
     expect(emailInput).toHaveAttribute('type', 'email');
   });
 
   it('has password input', () => {
     renderWithRouter(<Login />);
-    const passwordInput = screen.getByPlaceholderText('Enter your password');
+    const passwordInput = screen.getByPlaceholderText('Password');
     expect(passwordInput).toBeInTheDocument();
     expect(passwordInput).toHaveAttribute('type', 'password');
   });
@@ -61,11 +61,11 @@ describe('Register Page', () => {
 
   it('has full name input', () => {
     renderWithRouter(<Register />);
-    expect(screen.getByPlaceholderText('John Doe')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Full Name')).toBeInTheDocument();
   });
 
   it('has email input', () => {
     renderWithRouter(<Register />);
-    expect(screen.getByPlaceholderText('you@example.com')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Email')).toBeInTheDocument();
   });
 });

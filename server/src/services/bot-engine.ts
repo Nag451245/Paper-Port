@@ -3,11 +3,11 @@ import { chatCompletionJSON } from '../lib/openai.js';
 import { MarketDataService, type MarketMover } from './market-data.service.js';
 import { TradeService } from './trade.service.js';
 import { engineScan, engineRisk, isEngineAvailable, type ScanSignal } from '../lib/rust-engine.js';
+import { calculateMaxPain, calculateIVPercentile, calculateGreeks } from './options.service.js';
 
-// Intervals tuned for 5-min candle data: no point checking faster than the candles update
-const TICK_INTERVAL = 60_000; // 1 min — sweet spot for 5-min candle data
-const SIGNAL_INTERVAL = 2 * 60_000; // 2 min agent cycle
-const MARKET_SCAN_INTERVAL = 5 * 60_000; // 5 min full market scan (aligned with candle interval)
+const DEFAULT_TICK_INTERVAL = 60_000;
+const DEFAULT_SIGNAL_INTERVAL = 2 * 60_000;
+const DEFAULT_MARKET_SCAN_INTERVAL = 5 * 60_000;
 const MAX_CONCURRENT_BOTS = 5;
 const MAX_CANDLE_SYMBOLS = 8;
 
@@ -52,6 +52,12 @@ parameter tweaks, new opportunities to explore.`,
 Track open positions and report significant price movements.
 Alert on: positions hitting stop-loss, target reached, unusual volume,
 or any position requiring attention.`,
+
+  FNO_STRATEGIST: `You are an F&O STRATEGIST bot for the Indian derivatives market (NSE F&O).
+Analyze options chain data, IV, OI patterns, PCR, and max pain to recommend multi-leg options strategies.
+Evaluate: Iron Condors, Straddles, Strangles, Bull/Bear Spreads, Butterflies, Calendar Spreads.
+Consider: IV percentile, OI build-up/unwinding, PCR trends, VIX levels, and time decay.
+Give specific strike prices, expiry, position sizing, and risk/reward for each recommendation.`,
 };
 
 export interface MarketScanSignal {
@@ -78,6 +84,14 @@ export interface MarketScanResult {
   scanDurationMs: number;
 }
 
+const ROLLING_WINDOW = 20;
+const AUTO_PAUSE_ACCURACY = 0.35;
+
+interface RollingAccuracy {
+  outcomes: ('WIN' | 'LOSS' | 'BREAKEVEN')[];
+  accuracy: number;
+}
+
 export class BotEngine {
   private runningBots = new Map<string, RunningBot>();
   private runningAgents = new Map<string, RunningAgent>();
@@ -89,10 +103,66 @@ export class BotEngine {
   private lastScanResult: MarketScanResult | null = null;
   private scanInProgress = false;
   private cycleInProgress = new Set<string>();
+  private rollingAccuracy = new Map<string, RollingAccuracy>();
+  private tickInterval = DEFAULT_TICK_INTERVAL;
+  private signalInterval = DEFAULT_SIGNAL_INTERVAL;
+  private marketScanInterval = DEFAULT_MARKET_SCAN_INTERVAL;
 
   constructor(private prisma: PrismaClient) {
     this.tradeService = new TradeService(prisma);
     this.rustAvailable = isEngineAvailable();
+  }
+
+  getRollingAccuracy(strategyId: string): RollingAccuracy | undefined {
+    return this.rollingAccuracy.get(strategyId);
+  }
+
+  private trackOutcome(strategyId: string, outcome: 'WIN' | 'LOSS' | 'BREAKEVEN'): number {
+    let entry = this.rollingAccuracy.get(strategyId);
+    if (!entry) {
+      entry = { outcomes: [], accuracy: 0 };
+      this.rollingAccuracy.set(strategyId, entry);
+    }
+    entry.outcomes.push(outcome);
+    if (entry.outcomes.length > ROLLING_WINDOW) {
+      entry.outcomes.shift();
+    }
+    const wins = entry.outcomes.filter(o => o === 'WIN').length;
+    entry.accuracy = entry.outcomes.length > 0 ? wins / entry.outcomes.length : 0;
+    return entry.accuracy;
+  }
+
+  private async checkAutoPause(userId: string, strategyId: string, botId?: string): Promise<boolean> {
+    const entry = this.rollingAccuracy.get(strategyId);
+    if (!entry || entry.outcomes.length < 5) return false;
+
+    if (entry.accuracy < AUTO_PAUSE_ACCURACY) {
+      if (botId) {
+        const bot = await this.prisma.tradingBot.findUnique({ where: { id: botId } });
+        if (bot && bot.status === 'RUNNING') {
+          await this.prisma.tradingBot.update({
+            where: { id: botId },
+            data: {
+              status: 'IDLE',
+              lastAction: `Auto-paused: ${strategyId} rolling accuracy ${(entry.accuracy * 100).toFixed(0)}% < ${AUTO_PAUSE_ACCURACY * 100}% threshold`,
+              lastActionAt: new Date(),
+            },
+          });
+          this.stopBot(botId);
+
+          await this.prisma.botMessage.create({
+            data: {
+              fromBotId: botId,
+              userId,
+              messageType: 'alert',
+              content: `⚠️ Strategy **${strategyId}** auto-paused. Rolling accuracy: ${(entry.accuracy * 100).toFixed(0)}% (last ${entry.outcomes.length} trades). Threshold: ${AUTO_PAUSE_ACCURACY * 100}%.`,
+            },
+          });
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   getLastScanResult(): MarketScanResult | null {
@@ -125,7 +195,7 @@ export class BotEngine {
       if (!this.cycleInProgress.has(botId)) {
         this.runBotCycle(botId, userId).catch(() => {});
       }
-    }, TICK_INTERVAL);
+    }, this.tickInterval);
 
     this.runningBots.set(botId, { botId, userId, timer });
   }
@@ -149,7 +219,7 @@ export class BotEngine {
 
     const timer = setInterval(() => {
       this.runAgentCycle(userId).catch(() => {});
-    }, SIGNAL_INTERVAL);
+    }, this.signalInterval);
 
     this.runningAgents.set(userId, { userId, timer });
   }
@@ -179,7 +249,7 @@ export class BotEngine {
 
     this.scannerTimer = setInterval(() => {
       this.runMarketScan(userId).catch(() => {});
-    }, MARKET_SCAN_INTERVAL);
+    }, this.marketScanInterval);
   }
 
   stopMarketScan(): void {
@@ -188,6 +258,50 @@ export class BotEngine {
       this.scannerTimer = null;
       this.scannerUserId = null;
     }
+  }
+
+  setTickInterval(ms: number): void {
+    if (ms <= 0) return;
+    this.tickInterval = ms;
+    // Restart running bots with new interval
+    const entries = [...this.runningBots.entries()];
+    for (const [botId, entry] of entries) {
+      clearInterval(entry.timer);
+      const timer = setInterval(() => {
+        if (!this.cycleInProgress.has(botId)) {
+          this.runBotCycle(botId, entry.userId).catch(() => {});
+        }
+      }, this.tickInterval);
+      this.runningBots.set(botId, { ...entry, timer });
+    }
+    if (entries.length > 0) {
+      console.log(`[BotEngine] Tick interval updated to ${ms}ms for ${entries.length} bots`);
+    }
+  }
+
+  setMarketScanInterval(ms: number): void {
+    if (ms <= 0) return;
+    this.marketScanInterval = ms;
+    if (this.scannerTimer && this.scannerUserId) {
+      clearInterval(this.scannerTimer);
+      const userId = this.scannerUserId;
+      this.scannerTimer = setInterval(() => {
+        this.runMarketScan(userId).catch(() => {});
+      }, this.marketScanInterval);
+      console.log(`[BotEngine] Market scan interval updated to ${ms}ms`);
+    }
+  }
+
+  getActiveBotCount(): number {
+    return this.runningBots.size;
+  }
+
+  getActiveAgentCount(): number {
+    return this.runningAgents.size;
+  }
+
+  isRunning(): boolean {
+    return this.runningBots.size > 0 || this.runningAgents.size > 0 || this.scannerTimer !== null;
   }
 
   private async runMarketScan(userId: string): Promise<void> {
@@ -280,6 +394,16 @@ export class BotEngine {
         };
       });
 
+      // Enrich scan signals with PCR/VIX context when available
+      try {
+        const vixData = await this.marketData.getVIX().catch(() => null);
+        if (vixData?.value) {
+          for (const sig of signals) {
+            sig.indicators = { ...sig.indicators, vix: vixData.value };
+          }
+        }
+      } catch { /* skip enrichment */ }
+
       // Store high-confidence signals in the database
       for (const sig of signals.filter(s => s.confidence >= 0.65)) {
         try {
@@ -341,7 +465,8 @@ export class BotEngine {
           ltp = quote.ltp;
         } catch { /* will be fetched by TradeService */ }
 
-        const maxPerTrade = nav * 0.05;
+        const kellyAllocation = await this.computeKellySize(userId, symbol, nav);
+        const maxPerTrade = nav * kellyAllocation;
         const qty = ltp > 0 ? Math.max(1, Math.floor(maxPerTrade / ltp)) : 1;
 
         const order = await this.tradeService.placeOrder(userId, {
@@ -381,6 +506,27 @@ export class BotEngine {
           await this.updateBotTradeStats(botId, pnl);
         }
 
+        const strategyTag = position.strategyTag || 'AI-BOT';
+        const outcome: 'WIN' | 'LOSS' | 'BREAKEVEN' = Math.abs(pnl) < 10 ? 'BREAKEVEN' : pnl > 0 ? 'WIN' : 'LOSS';
+        const accuracy = this.trackOutcome(strategyTag, outcome);
+
+        try {
+          const signal = await this.prisma.aITradeSignal.findFirst({
+            where: { userId, symbol, status: 'EXECUTED', outcomeTag: null },
+            orderBy: { createdAt: 'desc' },
+          });
+          if (signal) {
+            await this.prisma.aITradeSignal.update({
+              where: { id: signal.id },
+              data: { outcomeTag: outcome, outcomeNotes: `PnL: ₹${pnl.toFixed(2)} | Rolling accuracy: ${(accuracy * 100).toFixed(0)}%` },
+            });
+          }
+        } catch { /* best effort signal tagging */ }
+
+        if (botId) {
+          await this.checkAutoPause(userId, strategyTag, botId);
+        }
+
         return { success: true, message: `Sold ${position.qty} ${symbol} @ ₹${exitPrice.toFixed(2)} | P&L: ₹${pnl.toFixed(2)}` };
       }
     } catch (err) {
@@ -396,6 +542,34 @@ export class BotEngine {
     if (mcxSymbols.includes(upper)) return 'MCX';
     if (cdsSymbols.includes(upper)) return 'CDS';
     return 'NSE';
+  }
+
+  private async computeKellySize(userId: string, symbol: string, nav: number): Promise<number> {
+    try {
+      const recentTrades = await this.prisma.trade.findMany({
+        where: { portfolio: { userId }, symbol },
+        orderBy: { exitTime: 'desc' },
+        take: 30,
+      });
+
+      if (recentTrades.length < 5) {
+        return 0.05;
+      }
+
+      const wins = recentTrades.filter(t => Number(t.netPnl) > 0);
+      const losses = recentTrades.filter(t => Number(t.netPnl) < 0);
+      const winRate = wins.length / recentTrades.length;
+      const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + Number(t.netPnl), 0) / wins.length : 0;
+      const avgLoss = losses.length > 0 ? Math.abs(losses.reduce((s, t) => s + Number(t.netPnl), 0) / losses.length) : 1;
+      const wlRatio = avgLoss > 0 ? avgWin / avgLoss : 1;
+
+      const kelly = winRate - (1 - winRate) / wlRatio;
+      const halfKelly = kelly / 2;
+
+      return Math.max(0.02, Math.min(0.15, halfKelly));
+    } catch {
+      return 0.05;
+    }
   }
 
   private async updateBotTradeStats(botId: string, pnl: number): Promise<void> {
@@ -624,6 +798,46 @@ Approve or reject?` },
     }
   }
 
+  private async fetchFnOContext(symbols: string[]): Promise<string> {
+    const parts: string[] = [];
+    try {
+      const vixData = await this.marketData.getVIX().catch(() => null);
+      if (vixData?.value) parts.push(`India VIX: ${vixData.value}`);
+    } catch { /* skip */ }
+
+    for (const sym of symbols.slice(0, 3)) {
+      try {
+        const chain = await this.marketData.getOptionsChain(sym);
+        if (!chain?.strikes?.length) continue;
+
+        const callOI: Record<number, number> = {};
+        const putOI: Record<number, number> = {};
+        for (const s of chain.strikes) {
+          callOI[s.strike] = s.callOI || 0;
+          putOI[s.strike] = s.putOI || 0;
+        }
+        const strikeVals = chain.strikes.map((s: any) => s.strike);
+        const maxPain = calculateMaxPain(strikeVals, callOI, putOI);
+
+        const totalCallOI = Object.values(callOI).reduce((a, b) => a + b, 0);
+        const totalPutOI = Object.values(putOI).reduce((a, b) => a + b, 0);
+        const pcr = totalCallOI > 0 ? (totalPutOI / totalCallOI).toFixed(2) : 'N/A';
+
+        const ivValues = chain.strikes.map((s: any) => s.callIV || s.putIV || 0).filter((v: number) => v > 0);
+        const currentIV = ivValues.length > 0 ? ivValues[Math.floor(ivValues.length / 2)] : 0;
+        const ivPct = calculateIVPercentile(currentIV, ivValues);
+
+        const topCallStrikes = [...strikeVals].sort((a, b) => (callOI[b] || 0) - (callOI[a] || 0)).slice(0, 3);
+        const topPutStrikes = [...strikeVals].sort((a, b) => (putOI[b] || 0) - (putOI[a] || 0)).slice(0, 3);
+
+        parts.push(`${sym}: MaxPain=${maxPain.maxPainStrike} PCR=${pcr} IV%=${ivPct} Spot=${chain.underlyingValue || '?'}`);
+        parts.push(`  Resistance(Call OI): ${topCallStrikes.join(',')} | Support(Put OI): ${topPutStrikes.join(',')}`);
+      } catch { /* skip symbol */ }
+    }
+
+    return parts.length > 0 ? `\nF&O Data:\n${parts.join('\n')}` : '';
+  }
+
   // ---- Original GPT-only cycle (fallback) ----
   private async runGptBotCycle(botId: string, userId: string, bot: any, symbols: string[]): Promise<void> {
     let quotes: string;
@@ -634,20 +848,30 @@ Approve or reject?` },
     }
     const positions = await this.getPortfolioPositions(userId);
 
+    let fnoContext = '';
+    if (bot.role === 'FNO_STRATEGIST' || bot.role === 'STRATEGIST' || bot.role === 'ANALYST') {
+      try {
+        fnoContext = await this.fetchFnOContext(symbols);
+      } catch { /* skip */ }
+    }
+
     const systemPrompt = ROLE_PROMPTS[bot.role] || ROLE_PROMPTS.SCANNER;
+
+    const responseFormat = bot.role === 'FNO_STRATEGIST'
+      ? `Respond in JSON: { "message": "your analysis (2-4 sentences)", "messageType": "signal|alert|info", "action": "short description", "signals": [{"symbol":"X","direction":"BUY_CE|BUY_PE|SELL_CE|SELL_PE|IRON_CONDOR|STRADDLE|STRANGLE|BULL_SPREAD|BEAR_SPREAD|BUY|SELL|HOLD","confidence":0.0-1.0,"reason":"why","strategy":"strategy name","legs":[{"type":"CE|PE","strike":0,"action":"BUY|SELL","qty":1}]}] }`
+      : `Respond in JSON: { "message": "your analysis (2-4 sentences)", "messageType": "signal|alert|info", "action": "short description of what you did", "signals": [{"symbol":"X","direction":"BUY|SELL|HOLD","confidence":0.0-1.0,"reason":"why"}] }`;
 
     const analysis = await chatCompletionJSON<{
       message: string;
       messageType: string;
       action?: string;
-      signals?: Array<{ symbol: string; direction: string; confidence: number; reason: string }>;
+      signals?: Array<{ symbol: string; direction: string; confidence: number; reason: string; strategy?: string; legs?: any[] }>;
     }>({
       messages: [
-        { role: 'system', content: `${systemPrompt}
-Respond in JSON: { "message": "your analysis (2-4 sentences)", "messageType": "signal|alert|info", "action": "short description of what you did", "signals": [{"symbol":"X","direction":"BUY|SELL|HOLD","confidence":0.0-1.0,"reason":"why"}] }` },
+        { role: 'system', content: `${systemPrompt}\n${responseFormat}` },
         { role: 'user', content: `Bot: ${bot.name} | Strategy: ${bot.assignedStrategy || 'General'}
 Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
-Market Data:\n${quotes}
+Market Data:\n${quotes}${fnoContext}
 ${positions ? `\nOpen Positions:\n${positions}` : ''}
 Analyze and report.` },
       ],
@@ -821,6 +1045,11 @@ Analyze and report.` },
         quotes = watchSymbols.map(s => `${s}: price data temporarily unavailable`).join('\n');
       }
 
+      let fnoCtx = '';
+      try {
+        fnoCtx = await this.fetchFnOContext(watchSymbols.slice(0, 3));
+      } catch { /* skip */ }
+
       const pnlPct = initCap > 0 ? ((nav - initCap) / initCap * 100).toFixed(2) : '0';
 
       const posInfo = positions.map(p =>
@@ -864,7 +1093,7 @@ Portfolio: NAV ₹${nav.toFixed(0)} | P&L: ${pnlPct}% | Signals today: ${todaySi
 
 Positions:\n${posInfo}
 
-Market Data:\n${quotes}
+Market Data:\n${quotes}${fnoCtx}
 
 Scan and generate signals.` },
         ],

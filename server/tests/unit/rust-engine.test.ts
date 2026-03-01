@@ -37,17 +37,21 @@ describe('Rust Engine Bridge', () => {
 
   it('should have correct module structure', async () => {
     const module = await import('../../src/lib/rust-engine.js');
-    expect(typeof module.runEngine).toBe('function');
+    expect(typeof module.isEngineAvailable).toBe('function');
     expect(typeof module.engineBacktest).toBe('function');
     expect(typeof module.engineSignals).toBe('function');
     expect(typeof module.engineRisk).toBe('function');
     expect(typeof module.engineGreeks).toBe('function');
+    expect(typeof module.engineScan).toBe('function');
   });
 
-  it('should export 5 functions', async () => {
+  it('should export all engine functions', async () => {
     const module = await import('../../src/lib/rust-engine.js');
     const exported = Object.keys(module).filter(k => typeof (module as any)[k] === 'function');
-    expect(exported.length).toBe(5);
+    expect(exported.length).toBeGreaterThanOrEqual(6);
+    expect(typeof module.engineWalkForward).toBe('function');
+    expect(typeof module.engineAdvancedSignals).toBe('function');
+    expect(typeof module.engineIVSurface).toBe('function');
   });
 
   it('engineBacktest should be a wrapper around runEngine', async () => {

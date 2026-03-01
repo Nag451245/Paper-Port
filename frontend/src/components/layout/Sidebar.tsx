@@ -14,6 +14,9 @@ import {
   Layers,
   Grid3X3,
   BarChart3,
+  GraduationCap,
+  Rocket,
+  Globe,
 } from 'lucide-react';
 
 const navItems = [
@@ -26,6 +29,9 @@ const navItems = [
   { to: '/strategy-builder', icon: Layers, label: 'Strategy Builder', color: 'from-violet-500 to-purple-500' },
   { to: '/option-chain', icon: Grid3X3, label: 'Option Chain', color: 'from-sky-500 to-blue-500' },
   { to: '/fno-analytics', icon: BarChart3, label: 'F&O Analytics', color: 'from-teal-500 to-cyan-500' },
+  { to: '/learning', icon: GraduationCap, label: 'Learning AI', color: 'from-fuchsia-500 to-pink-500' },
+  { to: '/edge-lab', icon: Rocket, label: 'Edge Lab', color: 'from-orange-500 to-red-500' },
+  { to: '/community', icon: Globe, label: 'Community', color: 'from-green-500 to-emerald-500' },
   { to: '/backtest', icon: FlaskConical, label: 'Backtest', color: 'from-cyan-500 to-blue-500' },
   { to: '/journal', icon: BookOpen, label: 'Trade Journal', color: 'from-teal-500 to-emerald-500' },
   { to: '/settings', icon: Settings, label: 'Settings', color: 'from-slate-500 to-slate-600' },

@@ -7,7 +7,6 @@ import {
   TrendingDown,
   Target,
   ShieldCheck,
-  ShieldAlert,
   ArrowUpRight,
   ArrowDownRight,
   Activity,
@@ -557,7 +556,7 @@ export default function OptionChain() {
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={v => fmtNum(v as number)} />
               <Tooltip
                 contentStyle={{ borderRadius: 12, border: '1px solid #e2e8f0', fontSize: 12, boxShadow: '0 4px 6px -1px rgba(0,0,0,.05)' }}
-                formatter={(v: number) => [fmtNum(v), undefined]}
+                formatter={(v: number | undefined) => [fmtNum(v ?? 0), undefined]}
                 labelFormatter={l => `Strike: ${Number(l).toLocaleString('en-IN')}`}
               />
               <Legend wrapperStyle={{ fontSize: 12 }} />

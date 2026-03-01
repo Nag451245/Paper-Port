@@ -9,6 +9,24 @@ vi.mock('../../src/lib/openai.js', () => ({
   chatCompletionJSON: vi.fn().mockResolvedValue({ stance: 'neutral', keyPoints: [] }),
 }));
 
+vi.mock('../../src/services/market-data.service.js', () => ({
+  MarketDataService: vi.fn().mockImplementation(() => ({
+    getHistory: vi.fn().mockResolvedValue(
+      Array.from({ length: 100 }, (_, i) => ({
+        timestamp: `2024-${String(Math.floor(i / 30) + 1).padStart(2, '0')}-${String((i % 28) + 1).padStart(2, '0')}T09:15:00.000Z`,
+        open: 2400 + i, high: 2420 + i, low: 2380 + i, close: 2410 + i, volume: 1000000,
+      }))
+    ),
+    getQuote: vi.fn().mockResolvedValue({ symbol: 'RELIANCE', ltp: 2500, open: 2480, high: 2520, low: 2470, close: 2500, volume: 1000000, exchange: 'NSE' }),
+    search: vi.fn().mockResolvedValue([]),
+    getIndices: vi.fn().mockResolvedValue([]),
+    getIndicesForExchange: vi.fn().mockResolvedValue([]),
+    getVIX: vi.fn().mockResolvedValue({ value: 14.5, change: -0.2, changePercent: -1.36 }),
+    getFIIDII: vi.fn().mockResolvedValue({ date: new Date().toISOString().split('T')[0], fiiBuy: 0, fiiSell: 0, fiiNet: 0, diiBuy: 0, diiSell: 0, diiNet: 0 }),
+    getOptionsChain: vi.fn().mockResolvedValue({ symbol: 'NIFTY', strikes: [], expiry: '' }),
+  })),
+}));
+
 vi.mock('../../src/lib/prisma.js', () => {
   const mock = {
     user: { findUnique: vi.fn() },
@@ -39,7 +57,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => { await app.close(); });
-beforeEach(() => { vi.resetAllMocks(); });
+beforeEach(() => { vi.clearAllMocks(); });
 
 function authHeaders(userId = 'test-user') {
   return { authorization: `Bearer ${app.jwt.sign({ sub: userId })}` };

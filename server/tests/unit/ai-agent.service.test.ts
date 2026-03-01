@@ -22,7 +22,7 @@ function createMockPrisma() {
       count: vi.fn(),
       update: vi.fn(),
     },
-    portfolio: { findMany: vi.fn() },
+    portfolio: { findMany: vi.fn(), findFirst: vi.fn() },
     trade: { findMany: vi.fn() },
   } as any;
 }
@@ -139,6 +139,9 @@ describe('AIAgentService', () => {
     it('should execute pending signal', async () => {
       mockPrisma.aITradeSignal.findUnique.mockResolvedValue({
         id: 's1', userId: 'u1', status: 'PENDING',
+      });
+      mockPrisma.portfolio.findFirst.mockResolvedValue({
+        id: 'p1', userId: 'u1', currentNav: 1000000,
       });
       mockPrisma.aITradeSignal.update.mockResolvedValue({
         id: 's1', status: 'EXECUTED', executedAt: new Date(),

@@ -135,6 +135,6 @@ describe('OpenAI client', () => {
     const callBody = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
     expect(callBody.model).toBe('gpt-4o');
     expect(callBody.temperature).toBe(0.2);
-    expect(callBody.max_tokens).toBe(500);
+    expect(callBody.max_completion_tokens).toBe(500);
   });
 });

@@ -22,6 +22,9 @@ const IntelligenceDashboard = lazy(() => import('@/pages/IntelligenceDashboard')
 const StrategyBuilder = lazy(() => import('@/pages/StrategyBuilder'));
 const OptionChain = lazy(() => import('@/pages/OptionChain'));
 const FnOAnalytics = lazy(() => import('@/pages/FnOAnalytics'));
+const LearningIntelligence = lazy(() => import('@/pages/LearningIntelligence'));
+const EdgeLab = lazy(() => import('@/pages/EdgeLab'));
+const CommunityTab = lazy(() => import('@/pages/CommunityTab'));
 const Onboarding = lazy(() => import('@/pages/Onboarding'));
 
 const queryClient = new QueryClient({
@@ -118,6 +121,9 @@ export default function App() {
             <Route path="/strategy-builder" element={<Suspense fallback={<PageLoader />}><StrategyBuilder /></Suspense>} />
             <Route path="/option-chain" element={<Suspense fallback={<PageLoader />}><OptionChain /></Suspense>} />
             <Route path="/fno-analytics" element={<Suspense fallback={<PageLoader />}><FnOAnalytics /></Suspense>} />
+            <Route path="/learning" element={<Suspense fallback={<PageLoader />}><LearningIntelligence /></Suspense>} />
+            <Route path="/edge-lab" element={<Suspense fallback={<PageLoader />}><EdgeLab /></Suspense>} />
+            <Route path="/community" element={<Suspense fallback={<PageLoader />}><CommunityTab /></Suspense>} />
           </Route>
 
           <Route path="*" element={<Navigate to="/dashboard" replace />} />

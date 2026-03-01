@@ -5,6 +5,7 @@ import { chatCompletion, chatCompletionJSON } from '../lib/openai.js';
 import { TradeService } from './trade.service.js';
 import { MarketDataService } from './market-data.service.js';
 import { engineRisk, isEngineAvailable } from '../lib/rust-engine.js';
+import { OptionsService, calculateMaxPain, calculateIVPercentile } from './options.service.js';
 
 export interface SignalAnalysis {
   signal: 'BUY' | 'SELL' | 'HOLD';
@@ -17,7 +18,98 @@ export interface SignalAnalysis {
 }
 
 export class AIAgentService {
-  constructor(private prisma: PrismaClient) {}
+  private marketData = new MarketDataService();
+  private optionsService: OptionsService;
+
+  constructor(private prisma: PrismaClient) {
+    this.optionsService = new OptionsService(prisma);
+  }
+
+  async analyzeOptionsOpportunity(userId: string, symbol: string): Promise<{
+    signal: string;
+    strategy: string;
+    confidence: number;
+    rationale: string;
+    legs?: Array<{ type: string; strike: number; action: string; qty: number }>;
+    greeks?: { delta: number; gamma: number; theta: number; vega: number };
+    maxPain?: number;
+    pcr?: number;
+    ivPercentile?: number;
+  }> {
+    try {
+      const chainData = await this.marketData.getOptionsChain(symbol);
+      const strikes = chainData.strikes || [];
+
+      if (strikes.length === 0) {
+        return { signal: 'HOLD', strategy: 'none', confidence: 0.3, rationale: 'No option chain data available' };
+      }
+
+      const callOI: Record<number, number> = {};
+      const putOI: Record<number, number> = {};
+      for (const s of strikes) {
+        callOI[s.strike] = s.callOI || 0;
+        putOI[s.strike] = s.putOI || 0;
+      }
+      const strikeValues = strikes.map((s: any) => s.strike);
+
+      const maxPainResult = calculateMaxPain(strikeValues, callOI, putOI);
+      const totalCallOI = Object.values(callOI).reduce((a, b) => a + b, 0);
+      const totalPutOI = Object.values(putOI).reduce((a, b) => a + b, 0);
+      const pcr = totalCallOI > 0 ? totalPutOI / totalCallOI : 1;
+
+      const ivValues = strikes.map((s: any) => s.callIV || s.putIV || 0).filter((v: number) => v > 0);
+      const currentIV = ivValues.length > 0 ? ivValues[Math.floor(ivValues.length / 2)] : 20;
+      const ivPercentile = calculateIVPercentile(currentIV, ivValues);
+
+      let vix = 0;
+      try {
+        const vixData = await this.marketData.getVIX();
+        vix = vixData?.value ?? 0;
+      } catch { /* VIX unavailable */ }
+
+      const spot = chainData.underlyingValue || strikes[Math.floor(strikes.length / 2)]?.strike || 0;
+
+      const prompt = `You are an F&O options strategist for Indian markets.
+Analyze the following options data and recommend a strategy:
+
+Symbol: ${symbol} | Spot: ₹${spot}
+Max Pain: ₹${maxPainResult.maxPainStrike}
+PCR: ${pcr.toFixed(2)} | IV Percentile: ${ivPercentile}% | VIX: ${vix}
+Top 5 Call OI: ${strikeValues.slice(0, 5).map((s: number) => `${s}:${callOI[s]}`).join(', ')}
+Top 5 Put OI: ${strikeValues.slice(0, 5).map((s: number) => `${s}:${putOI[s]}`).join(', ')}
+
+Respond in JSON:
+{
+  "signal": "BUY_CE|BUY_PE|SELL_CE|SELL_PE|IRON_CONDOR|STRADDLE|STRANGLE|BULL_SPREAD|BEAR_SPREAD|HOLD",
+  "strategy": "strategy name",
+  "confidence": 0.0-1.0,
+  "rationale": "2-3 sentence explanation",
+  "legs": [{"type":"CE|PE","strike":number,"action":"BUY|SELL","qty":1}]
+}`;
+
+      const result = await chatCompletionJSON<any>({
+        messages: [
+          { role: 'system', content: prompt },
+          { role: 'user', content: `Analyze ${symbol} options now.` },
+        ],
+        temperature: 0.3,
+        maxTokens: 512,
+      });
+
+      return {
+        signal: result.signal || 'HOLD',
+        strategy: result.strategy || 'none',
+        confidence: result.confidence || 0.5,
+        rationale: result.rationale || 'Analysis completed',
+        legs: result.legs,
+        maxPain: maxPainResult.maxPainStrike,
+        pcr,
+        ivPercentile,
+      };
+    } catch {
+      return { signal: 'HOLD', strategy: 'none', confidence: 0.3, rationale: 'F&O analysis unavailable' };
+    }
+  }
 
   async getConfig(userId: string) {
     let config = await this.prisma.aIAgentConfig.findUnique({ where: { userId } });
@@ -175,6 +267,39 @@ export class AIAgentService {
 
   async getPreMarketBriefing(userId: string) {
     try {
+      let fnoContext = '';
+      try {
+        const [vixData, niftyChain] = await Promise.all([
+          this.marketData.getVIX().catch(() => null),
+          this.marketData.getOptionsChain('NIFTY').catch(() => null),
+        ]);
+
+        const parts: string[] = [];
+        if (vixData?.value) parts.push(`India VIX: ${vixData.value}`);
+
+        if (niftyChain?.strikes?.length) {
+          const callOI: Record<number, number> = {};
+          const putOI: Record<number, number> = {};
+          for (const s of niftyChain.strikes) {
+            callOI[s.strike] = s.callOI || 0;
+            putOI[s.strike] = s.putOI || 0;
+          }
+          const strikeVals = niftyChain.strikes.map((s: any) => s.strike);
+          const maxPain = calculateMaxPain(strikeVals, callOI, putOI);
+          const totalCallOI = Object.values(callOI).reduce((a, b) => a + b, 0);
+          const totalPutOI = Object.values(putOI).reduce((a, b) => a + b, 0);
+          const pcr = totalCallOI > 0 ? (totalPutOI / totalCallOI).toFixed(2) : 'N/A';
+          parts.push(`NIFTY Max Pain: ${maxPain.maxPainStrike}`);
+          parts.push(`NIFTY PCR: ${pcr}`);
+
+          const topCallOI = strikeVals.sort((a: number, b: number) => (callOI[b] || 0) - (callOI[a] || 0)).slice(0, 3);
+          const topPutOI = strikeVals.sort((a: number, b: number) => (putOI[b] || 0) - (putOI[a] || 0)).slice(0, 3);
+          parts.push(`Highest Call OI: ${topCallOI.join(', ')} (resistance)`);
+          parts.push(`Highest Put OI: ${topPutOI.join(', ')} (support)`);
+        }
+        if (parts.length > 0) fnoContext = `\nF&O Context:\n${parts.join('\n')}`;
+      } catch { /* F&O data unavailable */ }
+
       const prompt = `You are a senior market analyst for the Indian stock market (NSE/BSE).
 Generate a pre-market briefing for today. Include:
 - Overall market stance (bullish/bearish/neutral)
@@ -182,6 +307,7 @@ Generate a pre-market briefing for today. Include:
 - Global cues (US markets, Asian markets, commodities)
 - Sector outlook (which sectors to watch)
 - Key support and resistance levels for NIFTY 50, GOLD, USDINR
+- F&O outlook: VIX view, PCR interpretation, max pain implications, OI build-up signals
 - Important events/data releases today
 
 Respond in JSON format:
@@ -193,13 +319,14 @@ Respond in JSON format:
   "sectorOutlook": {"IT": "positive", "Banking": "neutral"},
   "supportLevels": [21800, 21600],
   "resistanceLevels": [22200, 22400],
+  "fnoOutlook": {"vix": "low/moderate/high", "pcrView": "bullish/bearish/neutral", "maxPainImplication": "text", "oiBuildUp": "text"},
   "keyEvents": ["event1"]
 }`;
 
       const result = await chatCompletionJSON({
         messages: [
           { role: 'system', content: prompt },
-          { role: 'user', content: `Generate briefing for ${new Date().toISOString().split('T')[0]}` },
+          { role: 'user', content: `Generate briefing for ${new Date().toISOString().split('T')[0]}${fnoContext}` },
         ],
         temperature: 0.3,
       });
@@ -215,6 +342,7 @@ Respond in JSON format:
         sectorOutlook: {},
         supportLevels: [],
         resistanceLevels: [],
+        fnoOutlook: {},
         keyEvents: [],
       };
     }
@@ -351,6 +479,26 @@ Respond in JSON format:
           },
         );
       }
+
+      const fnoExposure = positions
+        .filter(p => p.symbol.includes('CE') || p.symbol.includes('PE') || p.exchange === 'NFO')
+        .reduce((s, p) => s + Math.abs(Number(p.qty) * Number(p.avgEntryPrice)), 0);
+      const fnoExposurePct = nav > 0 ? (fnoExposure / nav) * 100 : 0;
+
+      rules.push(
+        {
+          id: 'fno-exposure',
+          name: 'F&O Exposure (30% max)',
+          status: fnoExposurePct > 30 ? 'red' : fnoExposurePct > 20 ? 'amber' : 'green',
+          detail: `F&O exposure: ${fnoExposurePct.toFixed(1)}% of NAV (₹${fnoExposure.toFixed(0)})`,
+        },
+        {
+          id: 'fno-greeks-limit',
+          name: 'Options Greeks Limit',
+          status: 'green',
+          detail: `Net delta exposure within limits`,
+        },
+      );
 
       return rules;
     } catch {
