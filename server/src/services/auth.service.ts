@@ -367,7 +367,10 @@ export class AuthService {
       throw new AuthError('Breeze credentials not configured. Save API key and secret first.', 400);
     }
     const apiKey = decrypt(credential.encryptedApiKey, this.encKey);
-    const callbackUrl = process.env.BREEZE_CALLBACK_URL || `http://localhost:${env.PORT}/api/auth/breeze-callback`;
+    const callbackUrl = process.env.BREEZE_CALLBACK_URL
+      || (env.NODE_ENV === 'production'
+        ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME || 'paper-port.onrender.com'}/api/auth/breeze-callback`
+        : `http://localhost:${env.PORT}/api/auth/breeze-callback`);
     const url = new URL('https://api.icicidirect.com/apiuser/login');
     url.searchParams.set('api_key', apiKey);
     url.searchParams.set('redirect_url', callbackUrl);
@@ -401,14 +404,20 @@ export class AuthService {
     let sessionToken: string | null = null;
     let method = 'unknown';
 
+    const errors: string[] = [];
+
     // Strategy 1: Full browser-flow simulation (login page → credentials → TOTP → session)
     if (loginId && loginPassword) {
       try {
         sessionToken = await this.browserFlowLogin(apiKey, loginId, loginPassword, rawTotp);
         if (sessionToken) method = 'browser_flow';
       } catch (err) {
-        console.error('[Breeze Auto-Login] Browser flow failed:', (err as Error).message);
+        const msg = (err as Error).message;
+        console.error('[Breeze Auto-Login] Browser flow failed:', msg);
+        errors.push(`Browser flow: ${msg}`);
       }
+    } else {
+      errors.push('Browser flow: Login ID or Password not provided');
     }
 
     // Strategy 2: Direct /tradelogin API call (works on some accounts)
@@ -419,13 +428,16 @@ export class AuthService {
         const checksum = createHash('sha256').update(`${apiKey}${timeStamp}${secretKey}`).digest('hex');
         sessionToken = await this.directTradeLogin({ apiKey, secretKey, timeStamp, checksum, totp });
         if (sessionToken) method = 'direct_api';
+        else errors.push('Direct API: No session token in response');
       } catch (err) {
-        console.error('[Breeze Auto-Login] Direct API failed:', (err as Error).message);
+        const msg = (err as Error).message;
+        console.error('[Breeze Auto-Login] Direct API failed:', msg);
+        errors.push(`Direct API: ${msg}`);
       }
     }
 
     // Record the attempt
-    const errorMsg = sessionToken ? null : 'All auto-login strategies failed. Use popup fallback.';
+    const errorMsg = sessionToken ? null : `Failed: ${errors.join(' | ')}`;
     await this.prisma.breezeCredential.update({
       where: { userId },
       data: {
@@ -436,7 +448,7 @@ export class AuthService {
 
     if (!sessionToken) {
       throw new AuthError(
-        'Auto session generation failed. Ensure your ICICI Login ID, Password, and TOTP secret are correct. Use "Generate Session Popup" as fallback.',
+        `Auto session failed. ${errors.join(' | ')}. Use "Generate Session Popup" fallback.`,
         502,
       );
     }
@@ -612,8 +624,9 @@ export class AuthService {
     }
 
     if (!apiSession) {
-      console.error('[Breeze Auto-Login] No session token found after TOTP submission');
-      return null;
+      const bodySnippet = page3.body.substring(0, 500);
+      console.error(`[Breeze Auto-Login] No session after TOTP. Status: ${page3.status}, Location: ${page3.location || 'none'}, Body preview: ${bodySnippet}`);
+      throw new Error(`TOTP submitted but no session returned (HTTP ${page3.status}). ICICI may require CAPTCHA or has changed login flow.`);
     }
 
     console.log('[Breeze Auto-Login] Got apisession, exchanging for session_token...');
