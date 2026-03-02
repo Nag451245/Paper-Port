@@ -290,65 +290,70 @@ export class TradeService {
         },
       });
 
-      if (existingPosition) {
-        const entryPrice = Number(existingPosition.avgEntryPrice);
-        const closeQty = Math.min(input.qty, existingPosition.qty);
-        const grossPnl = (fillPrice - entryPrice) * closeQty;
-        const netPnl = grossPnl - costs.totalCost;
-
-        await this.prisma.trade.create({
-          data: {
-            portfolioId: input.portfolioId,
-            positionId: existingPosition.id,
-            symbol: input.symbol,
-            exchange: input.exchange ?? 'NSE',
-            side: 'SELL',
-            entryPrice,
-            exitPrice: fillPrice,
-            qty: closeQty,
-            grossPnl,
-            totalCosts: costs.totalCost,
-            netPnl,
-            entryTime: existingPosition.openedAt,
-            exitTime: new Date(),
-            strategyTag: input.strategyTag,
-          },
-        });
-
-        const remainingQty = existingPosition.qty - closeQty;
-        if (remainingQty <= 0) {
-          await this.prisma.position.update({
-            where: { id: existingPosition.id },
-            data: {
-              status: 'CLOSED',
-              realizedPnl: netPnl,
-              closedAt: new Date(),
-            },
-          });
-        } else {
-          await this.prisma.position.update({
-            where: { id: existingPosition.id },
-            data: { qty: remainingQty },
-          });
-        }
-
-        // Add sale proceeds back to available cash
-        const portfolio = await this.prisma.portfolio.findUnique({
-          where: { id: input.portfolioId },
-        });
-        if (portfolio) {
-          const saleProceeds = fillPrice * closeQty - costs.totalCost;
-          await this.prisma.portfolio.update({
-            where: { id: input.portfolioId },
-            data: { currentNav: Number(portfolio.currentNav) + saleProceeds },
-          });
-        }
-
+      if (!existingPosition) {
         await this.prisma.order.update({
           where: { id: orderId },
-          data: { positionId: existingPosition.id },
+          data: { status: 'REJECTED' },
+        });
+        throw new TradeError(`No open position for ${input.symbol} to sell`, 400);
+      }
+
+      const entryPrice = Number(existingPosition.avgEntryPrice);
+      const closeQty = Math.min(input.qty, existingPosition.qty);
+      const grossPnl = (fillPrice - entryPrice) * closeQty;
+      const netPnl = grossPnl - costs.totalCost;
+
+      await this.prisma.trade.create({
+        data: {
+          portfolioId: input.portfolioId,
+          positionId: existingPosition.id,
+          symbol: input.symbol,
+          exchange: input.exchange ?? 'NSE',
+          side: 'SELL',
+          entryPrice,
+          exitPrice: fillPrice,
+          qty: closeQty,
+          grossPnl,
+          totalCosts: costs.totalCost,
+          netPnl,
+          entryTime: existingPosition.openedAt,
+          exitTime: new Date(),
+          strategyTag: input.strategyTag,
+        },
+      });
+
+      const remainingQty = existingPosition.qty - closeQty;
+      if (remainingQty <= 0) {
+        await this.prisma.position.update({
+          where: { id: existingPosition.id },
+          data: {
+            status: 'CLOSED',
+            realizedPnl: netPnl,
+            closedAt: new Date(),
+          },
+        });
+      } else {
+        await this.prisma.position.update({
+          where: { id: existingPosition.id },
+          data: { qty: remainingQty },
         });
       }
+
+      const portfolio = await this.prisma.portfolio.findUnique({
+        where: { id: input.portfolioId },
+      });
+      if (portfolio) {
+        const saleProceeds = fillPrice * closeQty - costs.totalCost;
+        await this.prisma.portfolio.update({
+          where: { id: input.portfolioId },
+          data: { currentNav: Number(portfolio.currentNav) + saleProceeds },
+        });
+      }
+
+      await this.prisma.order.update({
+        where: { id: orderId },
+        data: { positionId: existingPosition.id },
+      });
     }
   }
 
@@ -501,7 +506,11 @@ export class TradeService {
     if (fromDate || toDate) {
       where.exitTime = {};
       if (fromDate) where.exitTime.gte = new Date(fromDate);
-      if (toDate) where.exitTime.lte = new Date(toDate);
+      if (toDate) {
+        const end = new Date(toDate);
+        end.setHours(23, 59, 59, 999);
+        where.exitTime.lte = end;
+      }
     }
 
     const [trades, total] = await Promise.all([

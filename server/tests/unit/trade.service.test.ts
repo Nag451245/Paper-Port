@@ -311,7 +311,9 @@ describe('TradeService', () => {
       const findCall = mockPrisma.trade.findMany.mock.calls[0][0];
       expect(findCall.where.symbol).toBe('TCS');
       expect(findCall.where.exitTime.gte).toEqual(new Date('2025-01-01'));
-      expect(findCall.where.exitTime.lte).toEqual(new Date('2025-12-31'));
+      const expectedEnd = new Date('2025-12-31');
+      expectedEnd.setHours(23, 59, 59, 999);
+      expect(findCall.where.exitTime.lte).toEqual(expectedEnd);
     });
   });
 });

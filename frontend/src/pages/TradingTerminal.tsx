@@ -99,12 +99,13 @@ export default function TradingTerminal() {
 
   const fetchAll = useCallback(async () => {
     setIsLoading(true);
+    const errors: string[] = [];
     try {
       const [pRes, oRes, posRes, tRes] = await Promise.all([
-        portfolioApi.list().catch(() => ({ data: [] })),
-        tradingApi.listOrders().catch(() => ({ data: [] })),
-        tradingApi.positions().catch(() => ({ data: [] })),
-        tradingApi.listTrades().catch(() => ({ data: [] })),
+        portfolioApi.list().catch((e) => { errors.push('Portfolio: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
+        tradingApi.listOrders().catch((e) => { errors.push('Orders: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
+        tradingApi.positions().catch((e) => { errors.push('Positions: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
+        tradingApi.listTrades().catch((e) => { errors.push('Trades: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
       ]);
 
       const pList = Array.isArray(pRes.data) ? pRes.data : [];
@@ -118,8 +119,12 @@ export default function TradingTerminal() {
       setPositions(Array.isArray(posRes.data) ? posRes.data : []);
       const tData = tRes.data;
       setTrades(Array.isArray(tData) ? tData : (tData as any)?.trades ?? []);
-    } catch {
-      // individual catches handle each
+
+      if (errors.length > 0) {
+        setError('Some data failed to load: ' + errors.join('; '));
+      }
+    } catch (e: any) {
+      setError('Failed to load trading data: ' + (e?.message ?? 'Unknown error'));
     } finally {
       setIsLoading(false);
     }

@@ -62,7 +62,16 @@ export default function Dashboard() {
           <p className="text-sm text-slate-400 mt-0.5">Your trading overview at a glance</p>
         </div>
         <button
-          onClick={() => { fetchIndices(); fetchVIX(); fetchPortfolios(); }}
+          onClick={() => {
+            fetchIndices(); fetchVIX(); fetchPortfolios();
+            const today = new Date().toISOString().slice(0, 10);
+            tradingApi.listTrades({ from_date: today, to_date: today, limit: 20 })
+              .then(({ data }) => {
+                const trades = Array.isArray(data) ? data : (data as any)?.trades ?? (data as any)?.items ?? [];
+                setTodayTrades(trades);
+              })
+              .catch(() => {});
+          }}
           className="p-2.5 hover:bg-teal-50 rounded-xl transition group"
           title="Refresh"
         >
