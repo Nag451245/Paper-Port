@@ -24,9 +24,12 @@ interface RunningAgent {
 
 const ROLE_PROMPTS: Record<string, string> = {
   SCANNER: `You are a trading SCANNER bot for the Indian markets (NSE, BSE, MCX, CDS/Forex).
-Analyze the provided market data and identify actionable opportunities across equities, commodities, and currency pairs.
-Look for: breakouts, volume spikes, support/resistance tests, momentum shifts.
-Be specific with instrument names, prices, exchange, and why the pattern matters.`,
+Analyze the provided market data and identify actionable BUY and SELL opportunities.
+In a falling market, aggressively look for SHORT/SELL opportunities on weak stocks.
+In a rising market, look for BUY opportunities on strong momentum stocks.
+Look for: breakouts, breakdowns, volume spikes, support/resistance tests, momentum shifts, gap-ups, gap-downs.
+Be specific with instrument names, prices, exchange, direction (BUY or SELL), and why.
+Stocks CAN be shorted — a SELL signal means "short this stock for profit as it falls".`,
 
   ANALYST: `You are a trading ANALYST bot for the Indian markets (NSE, BSE, MCX, CDS/Forex).
 Provide in-depth analysis of the instruments given to you — equities, commodities, or currency pairs.
@@ -405,14 +408,15 @@ export class BotEngine {
             }>;
           }>({
             messages: [
-              { role: 'system', content: `You are a market scanner for Indian equities (NSE). Analyze the top movers and identify 0-5 actionable trade signals.
-Only generate signals where you see clear technical setups (breakouts, volume spikes, momentum shifts).
+              { role: 'system', content: `You are a market scanner for Indian equities (NSE). Analyze the top movers and identify 1-5 actionable trade signals.
+Generate BOTH BUY and SELL signals. In a falling market, prioritize SELL/SHORT signals. In a rising market, prioritize BUY signals.
+Look for: breakouts, breakdowns, volume spikes, support/resistance tests, momentum shifts, gap-ups, gap-downs.
 Respond in JSON: {"signals": [{"symbol":"X","direction":"BUY|SELL","confidence":0.0-1.0,"entry":price,"stopLoss":price,"target":price,"reason":"brief reason"}]}
-Be selective — only high-conviction signals.` },
-              { role: 'user', content: `Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n\nTop Movers:\n${moverSummary}\n\nScan for actionable signals.` },
+Always generate at least 1 signal if any stock has moved >1%.` },
+              { role: 'user', content: `Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n\nTop Movers:\n${moverSummary}\n\nScan for actionable BUY and SELL signals.` },
             ],
             temperature: 0.3,
-            maxTokens: 512,
+            maxTokens: 2048,
           });
 
           if (gptResult.signals) {
@@ -841,7 +845,7 @@ Stop Loss: ₹${sig.stop_loss}, Target: ₹${sig.target}
 Approve or reject?` },
         ],
         temperature: 0.2,
-        maxTokens: 256,
+        maxTokens: 512,
       });
       return result.approved ?? true;
     } catch {
@@ -924,10 +928,10 @@ Approve or reject?` },
 Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
 Market Data:\n${quotes}${fnoContext}
 ${positions ? `\nOpen Positions:\n${positions}` : ''}
-Analyze and report.` },
+Analyze the data. Generate BUY or SELL signals where you see opportunities. Stocks can be shorted (SELL without holding). Be proactive — if a stock is falling hard, generate a SELL signal. If rising, generate BUY. Always provide at least 1 signal if any stock has moved >1%.` },
       ],
       temperature: 0.5,
-      maxTokens: 512,
+      maxTokens: 2048,
     });
 
     if (analysis.message) {
@@ -1151,10 +1155,10 @@ Positions:\n${posInfo}
 
 Market Data:\n${quotes}${fnoCtx}
 
-Scan and generate signals.` },
+Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted.` },
         ],
         temperature: 0.4,
-        maxTokens: 1024,
+        maxTokens: 2048,
       });
 
       if (result.signals) {
