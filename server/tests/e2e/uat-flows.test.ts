@@ -27,6 +27,8 @@ vi.mock('../../src/lib/openai.js', () => ({
     globalCues: ['US markets up 0.5%'], sectorOutlook: { IT: 'positive' },
     supportLevels: [21800], resistanceLevels: [22200], keyEvents: ['RBI MPC'],
   }),
+  getOpenAIStatus: vi.fn().mockReturnValue({ circuitOpen: false, queueLength: 0, recentRequests: 0, cooldownRemainingMs: 0 }),
+  _resetForTesting: vi.fn(),
 }));
 
 vi.mock('../../src/services/market-data.service.js', () => ({

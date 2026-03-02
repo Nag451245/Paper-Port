@@ -27,6 +27,7 @@ import { LearningEngine } from './services/learning-engine.js';
 import { MorningBoot } from './services/morning-boot.js';
 import { ServerOrchestrator } from './services/server-orchestrator.js';
 import { registerWebSocket, wsHub } from './lib/websocket.js';
+import { getOpenAIStatus } from './lib/openai.js';
 
 export interface BuildAppOptions {
   logger?: boolean;
@@ -151,6 +152,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         pingsSentToday: orchStatus.orchestrator.pingsSentToday,
         lastPingAt: orchStatus.orchestrator.lastPingAt,
       },
+      openai: getOpenAIStatus(),
     };
   });
 
@@ -230,6 +232,66 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         console.error('[Breeze Startup] Auto-renew failed:', (err as Error).message);
       }
     }, 15_000);
+  });
+
+  // Bootstrap default bots & AI agent for users who have none
+  app.addHook('onReady', async () => {
+    const prisma = getPrisma();
+    try {
+      const users = await prisma.user.findMany({
+        where: { isActive: true },
+        select: { id: true },
+      });
+
+      for (const user of users) {
+        const existingBots = await prisma.tradingBot.count({ where: { userId: user.id } });
+        if (existingBots === 0) {
+          const defaultBots = [
+            { name: 'Alpha Scanner', role: 'SCANNER', avatarEmoji: '🔍', assignedSymbols: 'RELIANCE,TCS,INFY,HDFCBANK,ITC,SBIN,BHARTIARTL,KOTAKBANK', description: 'Scans equities for breakouts and momentum patterns' },
+            { name: 'Risk Sentinel', role: 'RISK_MANAGER', avatarEmoji: '🛡️', assignedSymbols: 'NIFTY 50,BANKNIFTY', description: 'Monitors portfolio risk, drawdowns, and position sizing' },
+            { name: 'Strategy Analyst', role: 'ANALYST', avatarEmoji: '📊', assignedSymbols: 'RELIANCE,TCS,INFY,HDFCBANK', description: 'Provides in-depth technical analysis and recommendations' },
+          ];
+          for (const bot of defaultBots) {
+            await prisma.tradingBot.create({
+              data: {
+                userId: user.id,
+                name: bot.name,
+                role: bot.role,
+                avatarEmoji: bot.avatarEmoji,
+                assignedSymbols: bot.assignedSymbols,
+                description: bot.description,
+                status: 'RUNNING',
+                isActive: true,
+              },
+            });
+          }
+          app.log.info(`[Bootstrap] Created 3 default bots for user ${user.id}`);
+        }
+
+        const existingAgent = await prisma.aIAgentConfig.findUnique({ where: { userId: user.id } });
+        if (!existingAgent) {
+          await prisma.aIAgentConfig.create({
+            data: {
+              userId: user.id,
+              mode: 'ADVISORY',
+              isActive: true,
+              minSignalScore: 0.7,
+              maxDailyTrades: 5,
+              strategies: JSON.stringify(['ema-crossover', 'supertrend', 'momentum']),
+            },
+          });
+          app.log.info(`[Bootstrap] Created default AI agent config for user ${user.id}`);
+        } else if (!existingAgent.isActive) {
+          await prisma.aIAgentConfig.update({
+            where: { userId: user.id },
+            data: { isActive: true },
+          });
+          app.log.info(`[Bootstrap] Activated AI agent for user ${user.id}`);
+        }
+      }
+    } catch (err) {
+      app.log.error({ err }, 'Failed to bootstrap default bots/agents');
+    }
   });
 
   // Auto-resume bots/agents — only during market phases where bots should be active

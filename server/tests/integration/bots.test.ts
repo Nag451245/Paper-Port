@@ -7,6 +7,8 @@ let mockPrisma: any;
 vi.mock('../../src/lib/openai.js', () => ({
   chatCompletion: vi.fn().mockResolvedValue('mock'),
   chatCompletionJSON: vi.fn().mockResolvedValue({ stance: 'neutral', keyPoints: [] }),
+  getOpenAIStatus: vi.fn().mockReturnValue({ circuitOpen: false, queueLength: 0, recentRequests: 0, cooldownRemainingMs: 0 }),
+  _resetForTesting: vi.fn(),
 }));
 
 vi.mock('../../src/services/market-data.service.js', () => ({

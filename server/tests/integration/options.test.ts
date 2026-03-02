@@ -8,6 +8,8 @@ let authToken: string;
 vi.mock('../../src/lib/openai.js', () => ({
   chatCompletion: vi.fn().mockResolvedValue('Mock AI response'),
   chatCompletionJSON: vi.fn().mockResolvedValue({}),
+  getOpenAIStatus: vi.fn().mockReturnValue({ circuitOpen: false, queueLength: 0, recentRequests: 0, cooldownRemainingMs: 0 }),
+  _resetForTesting: vi.fn(),
 }));
 
 vi.mock('../../src/lib/prisma.js', () => {

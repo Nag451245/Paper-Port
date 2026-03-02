@@ -10,6 +10,8 @@ vi.mock('../../src/lib/openai.js', () => ({
     date: '2025-06-01', stance: 'neutral', keyPoints: ['Test'],
     globalCues: [], sectorOutlook: {}, supportLevels: [], resistanceLevels: [], keyEvents: [],
   }),
+  getOpenAIStatus: vi.fn().mockReturnValue({ circuitOpen: false, queueLength: 0, recentRequests: 0, cooldownRemainingMs: 0 }),
+  _resetForTesting: vi.fn(),
 }));
 
 vi.mock('../../src/lib/prisma.js', () => {

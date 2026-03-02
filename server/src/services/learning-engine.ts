@@ -407,7 +407,7 @@ Top losers: ${JSON.stringify(topLosers)}`,
 
         let candles: Array<{ timestamp: string; open: number; high: number; low: number; close: number; volume: number }> = [];
         try {
-          const history = await this.marketData.getHistory('NIFTY 50', 'NSE', '1day', thirtyDaysAgo.toISOString().split('T')[0], date.toISOString().split('T')[0]);
+          const history = await this.marketData.getHistory('NIFTY 50', '1day', thirtyDaysAgo.toISOString().split('T')[0], date.toISOString().split('T')[0], userId, 'NSE');
           candles = (history as any[]).map((h: any) => ({
             timestamp: h.date || h.timestamp || new Date().toISOString(),
             open: Number(h.open),

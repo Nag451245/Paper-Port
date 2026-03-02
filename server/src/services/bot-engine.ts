@@ -1,14 +1,14 @@
 import type { PrismaClient } from '@prisma/client';
-import { chatCompletionJSON } from '../lib/openai.js';
+import { chatCompletionJSON, getOpenAIStatus } from '../lib/openai.js';
 import { MarketDataService, type MarketMover } from './market-data.service.js';
 import { TradeService } from './trade.service.js';
 import { engineScan, engineRisk, isEngineAvailable, type ScanSignal } from '../lib/rust-engine.js';
 import { calculateMaxPain, calculateIVPercentile, calculateGreeks } from './options.service.js';
 
-const DEFAULT_TICK_INTERVAL = 60_000;
-const DEFAULT_SIGNAL_INTERVAL = 2 * 60_000;
-const DEFAULT_MARKET_SCAN_INTERVAL = 5 * 60_000;
-const MAX_CONCURRENT_BOTS = 5;
+const DEFAULT_TICK_INTERVAL = 3 * 60_000;
+const DEFAULT_SIGNAL_INTERVAL = 5 * 60_000;
+const DEFAULT_MARKET_SCAN_INTERVAL = 10 * 60_000;
+const MAX_CONCURRENT_BOTS = 3;
 const MAX_CANDLE_SYMBOLS = 8;
 
 interface RunningBot {
@@ -180,16 +180,16 @@ export class BotEngine {
   async startBot(botId: string, userId: string): Promise<void> {
     if (this.runningBots.has(botId)) return;
     if (this.runningBots.size >= MAX_CONCURRENT_BOTS) {
-      // Stop the oldest bot to make room
       const oldest = this.runningBots.keys().next().value;
       if (oldest) this.stopBot(oldest);
     }
 
-    // Stagger: delay first cycle by random 5-15s to avoid all bots firing at once
-    const delay = 5000 + Math.random() * 10000;
-    const startTimer = setTimeout(() => {
+    const botIndex = this.runningBots.size;
+    const staggerMs = botIndex * 30_000 + 10_000;
+
+    setTimeout(() => {
       this.runBotCycle(botId, userId).catch(() => {});
-    }, delay);
+    }, staggerMs);
 
     const timer = setInterval(() => {
       if (!this.cycleInProgress.has(botId)) {
@@ -306,7 +306,6 @@ export class BotEngine {
 
   private async runMarketScan(userId: string): Promise<void> {
     if (this.scanInProgress) return;
-    if (!this.rustAvailable) return;
     this.scanInProgress = true;
 
     const start = Date.now();
@@ -324,77 +323,124 @@ export class BotEngine {
       ];
 
       const uniqueSymbols = [...new Map(allMovers.map(m => [m.symbol, m])).values()];
-
-      const candleData: Array<{
-        symbol: string;
-        candles: Array<{ close: number; high: number; low: number; volume: number }>;
-        mover: typeof uniqueSymbols[0];
-      }> = [];
-
-      const now = new Date();
-      const toDate = now.toISOString().split('T')[0];
-      const twoDaysAgo = new Date(now.getTime() - 2 * 86_400_000);
-      const fromDate = twoDaysAgo.toISOString().split('T')[0];
-
-      // Fetch candles for top movers — capped to avoid memory pressure
-      for (const mover of uniqueSymbols.slice(0, MAX_CANDLE_SYMBOLS * 2)) {
-        try {
-          const bars = await this.marketData.getHistory(
-            mover.symbol, '5m', fromDate, toDate, userId,
-          );
-          if (bars.length >= 26) {
-            candleData.push({
-              symbol: mover.symbol,
-              candles: bars.slice(-50).map(b => ({
-                close: b.close, high: b.high, low: b.low, volume: b.volume,
-              })),
-              mover,
-            });
-          }
-        } catch { /* skip */ }
-      }
-
-      if (candleData.length === 0) {
-        this.lastScanResult = {
-          timestamp: new Date().toISOString(),
-          scannedCount: 0,
-          signals: [],
-          topGainers: gainers.slice(0, 10),
-          topLosers: losers.slice(0, 10),
-          scanDurationMs: Date.now() - start,
-        };
-        this.scanInProgress = false;
-        return;
-      }
-
-      const scanInput = candleData.map(d => ({ symbol: d.symbol, candles: d.candles }));
-      let rustSignals: ScanSignal[] = [];
-      try {
-        const result = await engineScan({ symbols: scanInput, aggressiveness: 'medium' });
-        rustSignals = result.signals ?? [];
-      } catch { /* scan failed */ }
-
       const moverMap = new Map(uniqueSymbols.map(m => [m.symbol, m]));
 
-      const signals: MarketScanSignal[] = rustSignals.map(sig => {
-        const mover = moverMap.get(sig.symbol);
-        return {
-          symbol: sig.symbol,
-          name: mover?.name ?? sig.symbol,
-          direction: sig.direction,
-          confidence: sig.confidence,
-          ltp: mover?.ltp ?? sig.entry,
-          changePercent: mover?.changePercent ?? 0,
-          entry: sig.entry,
-          stopLoss: sig.stop_loss,
-          target: sig.target,
-          indicators: sig.indicators,
-          votes: sig.votes,
-          moverType: (mover as any)?.moverType ?? 'gainer',
-        };
-      });
+      let signals: MarketScanSignal[] = [];
 
-      // Enrich scan signals with PCR/VIX context when available
+      if (this.rustAvailable) {
+        // --- Rust engine path ---
+        const candleData: Array<{
+          symbol: string;
+          candles: Array<{ close: number; high: number; low: number; volume: number }>;
+          mover: typeof uniqueSymbols[0];
+        }> = [];
+
+        const now = new Date();
+        const toDate = now.toISOString().split('T')[0];
+        const twoDaysAgo = new Date(now.getTime() - 2 * 86_400_000);
+        const fromDate = twoDaysAgo.toISOString().split('T')[0];
+
+        for (const mover of uniqueSymbols.slice(0, MAX_CANDLE_SYMBOLS * 2)) {
+          try {
+            const bars = await this.marketData.getHistory(
+              mover.symbol, '5m', fromDate, toDate, userId,
+            );
+            if (bars.length >= 26) {
+              candleData.push({
+                symbol: mover.symbol,
+                candles: bars.slice(-50).map(b => ({
+                  close: b.close, high: b.high, low: b.low, volume: b.volume,
+                })),
+                mover,
+              });
+            }
+          } catch { /* skip */ }
+        }
+
+        if (candleData.length > 0) {
+          const scanInput = candleData.map(d => ({ symbol: d.symbol, candles: d.candles }));
+          let rustSignals: ScanSignal[] = [];
+          try {
+            const result = await engineScan({ symbols: scanInput, aggressiveness: 'medium' });
+            rustSignals = result.signals ?? [];
+          } catch { /* scan failed */ }
+
+          signals = rustSignals.map(sig => {
+            const mover = moverMap.get(sig.symbol);
+            return {
+              symbol: sig.symbol,
+              name: mover?.name ?? sig.symbol,
+              direction: sig.direction,
+              confidence: sig.confidence,
+              ltp: mover?.ltp ?? sig.entry,
+              changePercent: mover?.changePercent ?? 0,
+              entry: sig.entry,
+              stopLoss: sig.stop_loss,
+              target: sig.target,
+              indicators: sig.indicators,
+              votes: sig.votes,
+              moverType: (mover as any)?.moverType ?? 'gainer',
+            };
+          });
+        }
+      }
+
+      // --- GPT fallback: runs when Rust is unavailable OR Rust produced no signals ---
+      if (signals.length === 0 && uniqueSymbols.length > 0) {
+        try {
+          const topMovers = uniqueSymbols.slice(0, 10);
+          const moverSummary = topMovers.map(m =>
+            `${m.symbol} (${(m as any).moverType}): ₹${m.ltp.toFixed(2)} (${m.changePercent >= 0 ? '+' : ''}${m.changePercent.toFixed(1)}%) Vol: ${m.volume}`
+          ).join('\n');
+
+          const gptResult = await chatCompletionJSON<{
+            signals: Array<{
+              symbol: string;
+              direction: 'BUY' | 'SELL';
+              confidence: number;
+              entry: number;
+              stopLoss: number;
+              target: number;
+              reason: string;
+            }>;
+          }>({
+            messages: [
+              { role: 'system', content: `You are a market scanner for Indian equities (NSE). Analyze the top movers and identify 0-5 actionable trade signals.
+Only generate signals where you see clear technical setups (breakouts, volume spikes, momentum shifts).
+Respond in JSON: {"signals": [{"symbol":"X","direction":"BUY|SELL","confidence":0.0-1.0,"entry":price,"stopLoss":price,"target":price,"reason":"brief reason"}]}
+Be selective — only high-conviction signals.` },
+              { role: 'user', content: `Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n\nTop Movers:\n${moverSummary}\n\nScan for actionable signals.` },
+            ],
+            temperature: 0.3,
+            maxTokens: 512,
+          });
+
+          if (gptResult.signals) {
+            for (const sig of gptResult.signals) {
+              if (sig.confidence < 0.6) continue;
+              const mover = moverMap.get(sig.symbol);
+              signals.push({
+                symbol: sig.symbol,
+                name: mover?.name ?? sig.symbol,
+                direction: sig.direction,
+                confidence: sig.confidence,
+                ltp: mover?.ltp ?? sig.entry,
+                changePercent: mover?.changePercent ?? 0,
+                entry: sig.entry,
+                stopLoss: sig.stopLoss,
+                target: sig.target,
+                indicators: {},
+                votes: {},
+                moverType: (mover as any)?.moverType ?? 'gainer',
+              });
+            }
+          }
+        } catch {
+          /* GPT scan failed — will retry next cycle */
+        }
+      }
+
+      // Enrich scan signals with VIX context when available
       try {
         const vixData = await this.marketData.getVIX().catch(() => null);
         if (vixData?.value) {
@@ -414,7 +460,7 @@ export class BotEngine {
               signalType: sig.direction,
               compositeScore: sig.confidence,
               gateScores: JSON.stringify({
-                source: 'market-scanner',
+                source: this.rustAvailable ? 'market-scanner' : 'gpt-market-scanner',
                 votes: sig.votes,
                 indicators: sig.indicators,
                 moverType: sig.moverType,
@@ -430,7 +476,7 @@ export class BotEngine {
 
       this.lastScanResult = {
         timestamp: new Date().toISOString(),
-        scannedCount: candleData.length,
+        scannedCount: uniqueSymbols.length,
         signals: signals.sort((a, b) => b.confidence - a.confidence).slice(0, 20),
         topGainers: gainers.slice(0, 10),
         topLosers: losers.slice(0, 10),
@@ -632,9 +678,14 @@ export class BotEngine {
 
   // ---- Rust-first bot cycle ----
   private async runBotCycle(botId: string, userId: string): Promise<void> {
-    if (this.cycleInProgress.has(botId)) return; // prevent overlapping cycles
+    if (this.cycleInProgress.has(botId)) return;
     this.cycleInProgress.add(botId);
     try {
+      const aiStatus = getOpenAIStatus();
+      if (aiStatus.circuitOpen && !this.rustAvailable) {
+        return;
+      }
+
       const bot = await this.prisma.tradingBot.findUnique({ where: { id: botId } });
       if (!bot || bot.status !== 'RUNNING') {
         this.stopBot(botId);
@@ -940,6 +991,11 @@ Analyze and report.` },
   // ---- Agent cycle with Rust risk integration ----
   private async runAgentCycle(userId: string): Promise<void> {
     try {
+      const aiStatus = getOpenAIStatus();
+      if (aiStatus.circuitOpen && !this.rustAvailable) {
+        return;
+      }
+
       const config = await this.prisma.aIAgentConfig.findUnique({ where: { userId } });
       if (!config || !config.isActive) {
         this.stopAgent(userId);

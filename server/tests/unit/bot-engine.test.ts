@@ -21,6 +21,8 @@ vi.mock('../../src/lib/openai.js', () => ({
     ],
   }),
   chatCompletion: vi.fn().mockResolvedValue('Mock response'),
+  getOpenAIStatus: vi.fn().mockReturnValue({ circuitOpen: false, queueLength: 0, recentRequests: 0, cooldownRemainingMs: 0 }),
+  _resetForTesting: vi.fn(),
 }));
 
 vi.mock('../../src/lib/rust-engine.js', () => ({

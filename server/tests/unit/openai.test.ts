@@ -5,8 +5,10 @@ vi.stubEnv('OPENAI_API_KEY', 'test-openai-key');
 describe('OpenAI client', () => {
   let originalFetch: typeof globalThis.fetch;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     originalFetch = globalThis.fetch;
+    const mod = await import('../../src/lib/openai.js');
+    mod._resetForTesting();
   });
 
   afterEach(() => {
@@ -50,11 +52,12 @@ describe('OpenAI client', () => {
     expect(callBody.messages).toEqual([{ role: 'user', content: 'Hi' }]);
   });
 
-  it('should throw on non-OK response', async () => {
+  it('should throw on quota exceeded (429) and open circuit breaker', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 429,
-      text: () => Promise.resolve('Rate limited'),
+      text: () => Promise.resolve('{"error":{"message":"You exceeded your current quota"}}'),
+      headers: { get: () => null },
     } as any);
 
     const { chatCompletion } = await import('../../src/lib/openai.js');

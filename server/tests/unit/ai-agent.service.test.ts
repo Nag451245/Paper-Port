@@ -7,6 +7,8 @@ vi.mock('../../src/lib/openai.js', () => ({
     date: '2025-06-01', stance: 'bullish', keyPoints: ['Mock point'],
     globalCues: [], sectorOutlook: {}, supportLevels: [], resistanceLevels: [], keyEvents: [],
   }),
+  getOpenAIStatus: vi.fn().mockReturnValue({ circuitOpen: false, queueLength: 0, recentRequests: 0, cooldownRemainingMs: 0 }),
+  _resetForTesting: vi.fn(),
 }));
 
 function createMockPrisma() {
