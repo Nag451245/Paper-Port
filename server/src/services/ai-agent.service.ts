@@ -372,10 +372,24 @@ Respond in JSON format:
       });
 
       if (!result || typeof result !== 'object') throw new Error('Invalid response');
-      this.cachedBriefing = { data: result, fetchedAt: Date.now() };
-      return result;
-    } catch {
-      return this.cachedBriefing?.data ?? this.fallbackBriefing();
+
+      // Ensure keyPoints always has content
+      const briefing: any = { ...result };
+      if (!Array.isArray(briefing.keyPoints) || briefing.keyPoints.length === 0) {
+        briefing.keyPoints = newsHeadlines.length > 0
+          ? newsHeadlines.slice(0, 3)
+          : [`Market is currently ${briefing.stance ?? 'neutral'}. Check back during trading hours for detailed analysis.`];
+      }
+      if (!briefing.stance) briefing.stance = 'neutral';
+      if (!briefing.date) briefing.date = new Date().toISOString().split('T')[0];
+
+      this.cachedBriefing = { data: briefing, fetchedAt: Date.now() };
+      return briefing;
+    } catch (err) {
+      console.error('[Briefing] Generation failed:', err instanceof Error ? err.message : String(err));
+      // If we have a stale cache, use it rather than showing nothing
+      if (this.cachedBriefing?.data) return this.cachedBriefing.data;
+      return this.fallbackBriefing();
     } finally {
       this.briefingInProgress = false;
     }
@@ -432,10 +446,21 @@ Respond in JSON format:
   }
 
   private fallbackBriefing() {
+    const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const h = ist.getHours();
+    const isPreMarket = h >= 7 && h < 9;
+    const isDuringMarket = h >= 9 && h < 16;
+
+    const keyPoints = isDuringMarket
+      ? ['Market is open. Briefing will auto-refresh with live data shortly.', 'Check the Trading Terminal for real-time quotes.']
+      : isPreMarket
+      ? ['Pre-market briefing will be generated as market data becomes available.', 'Global cues from US and Asian markets will set the early tone.']
+      : ['Market is closed. Briefing will be available before market opens.', 'After-hours analysis is running in the background.'];
+
     return {
       date: new Date().toISOString().split('T')[0],
       stance: 'neutral',
-      keyPoints: ['Market briefing is being generated. Please refresh in a minute.'],
+      keyPoints,
       globalCues: [],
       sectorOutlook: {},
       supportLevels: [],
