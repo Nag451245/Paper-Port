@@ -11,6 +11,7 @@ import {
   TrendingDown,
   ArrowUpRight,
   ArrowDownRight,
+  AlertCircle,
 } from 'lucide-react';
 import {
   BarChart,
@@ -29,11 +30,11 @@ import { intelligenceApi } from '@/services/api';
 type IntelligenceTab = 'fii-dii' | 'options' | 'sectors' | 'events' | 'global';
 
 const TABS: { id: IntelligenceTab; label: string; icon: typeof BarChart3 }[] = [
-  { id: 'fii-dii', label: 'FII/DII', icon: BarChart3 },
-  { id: 'options', label: 'Options', icon: Activity },
-  { id: 'sectors', label: 'Sectors', icon: PieChart },
-  { id: 'events', label: 'Events', icon: Calendar },
-  { id: 'global', label: 'Global', icon: Globe },
+  { id: 'fii-dii', label: 'Institutional Flow', icon: BarChart3 },
+  { id: 'options', label: 'Derivatives', icon: Activity },
+  { id: 'sectors', label: 'Sector Pulse', icon: PieChart },
+  { id: 'events', label: 'Market Calendar', icon: Calendar },
+  { id: 'global', label: 'World Markets', icon: Globe },
 ];
 
 function num(v: any): number {
@@ -41,14 +42,20 @@ function num(v: any): number {
   return typeof v === 'string' ? parseFloat(v) || 0 : Number(v) || 0;
 }
 
+function formatCr(value: number): string {
+  const cr = value / 100;
+  if (Math.abs(cr) >= 1000) return `${(cr / 1000).toFixed(1)}K Cr`;
+  return `${cr.toFixed(0)} Cr`;
+}
+
 export default function IntelligenceDashboard() {
   const [activeTab, setActiveTab] = useState<IntelligenceTab>('fii-dii');
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-bold text-slate-900">Intelligence Dashboard</h1>
+      <h1 className="text-xl font-bold text-slate-900">Market Intelligence</h1>
 
-      <div className="flex gap-1 rounded-lg bg-slate-100 p-1">
+      <div className="flex gap-1 rounded-lg bg-slate-100 p-1 overflow-x-auto">
         {TABS.map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
@@ -56,7 +63,7 @@ export default function IntelligenceDashboard() {
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors ${isActive
+              className={`flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors whitespace-nowrap ${isActive
                   ? 'bg-white text-slate-900 shadow-sm'
                   : 'text-slate-400 hover:text-slate-600'
                 }`}
@@ -84,7 +91,7 @@ function FIIDIITab() {
   const [trend, setTrend] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const fetch = useCallback(async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
       const [fiiRes, trendRes] = await Promise.all([
@@ -99,7 +106,7 @@ function FIIDIITab() {
     }
   }, []);
 
-  useEffect(() => { fetch(); }, [fetch]);
+  useEffect(() => { load(); }, [load]);
 
   if (loading) return <LoadingSpinner />;
 
@@ -109,6 +116,8 @@ function FIIDIITab() {
   const fiiSell = num(data?.fii?.sell_value ?? data?.fii_sell ?? data?.fiiSell);
   const diiBuy = num(data?.dii?.buy_value ?? data?.dii_buy ?? data?.diiBuy);
   const diiSell = num(data?.dii?.sell_value ?? data?.dii_sell ?? data?.diiSell);
+  const hasData = fiiBuy > 0 || fiiSell > 0 || diiBuy > 0 || diiSell > 0;
+  const message = data?.message;
 
   const trendData = trend.map((d: any) => ({
     date: d.date ? new Date(d.date).toLocaleDateString('en-IN', { month: 'short', day: 'numeric' }) : '',
@@ -119,51 +128,61 @@ function FIIDIITab() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-base font-semibold text-slate-800">FII/DII Flow Analysis</h2>
-        <button onClick={fetch} className="p-1.5 rounded-md hover:bg-slate-100 text-slate-400">
+        <div>
+          <h2 className="text-base font-semibold text-slate-800">FII / DII Cash Market Activity</h2>
+          <p className="text-xs text-slate-400 mt-0.5">Foreign & Domestic Institutional Investors — Net buy/sell in equities</p>
+        </div>
+        <button onClick={load} className="p-1.5 rounded-md hover:bg-slate-100 text-slate-400">
           <RefreshCcw className="w-4 h-4" />
         </button>
       </div>
 
+      {message && !hasData && (
+        <div className="flex items-center gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 text-xs">
+          <AlertCircle className="w-4 h-4 flex-shrink-0" />
+          <span>{message}</span>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <FlowCard label="FII Net" value={fiiNet} />
         <FlowCard label="DII Net" value={diiNet} />
-        <FlowCard label="FII Buy" value={fiiBuy} positive />
-        <FlowCard label="FII Sell" value={fiiSell} negative />
+        <FlowCard label="FII Bought" value={fiiBuy} positive />
+        <FlowCard label="FII Sold" value={fiiSell} negative />
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="rounded-lg border border-slate-200 p-4">
-          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">FII Activity</h3>
+          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Foreign Institutional Investors (FII/FPI)</h3>
           <div className="space-y-2">
-            <FlowBar label="Buy" value={fiiBuy} max={Math.max(fiiBuy, fiiSell, 1)} color="bg-emerald-500" />
-            <FlowBar label="Sell" value={fiiSell} max={Math.max(fiiBuy, fiiSell, 1)} color="bg-red-500" />
+            <FlowBar label="Gross Purchase" value={fiiBuy} max={Math.max(fiiBuy, fiiSell, 1)} color="bg-emerald-500" />
+            <FlowBar label="Gross Sale" value={fiiSell} max={Math.max(fiiBuy, fiiSell, 1)} color="bg-red-500" />
           </div>
           <p className={`text-sm font-bold mt-3 ${fiiNet >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-            Net: {fiiNet >= 0 ? '+' : ''}₹{(fiiNet / 100).toFixed(0)} Cr
+            Net: {fiiNet >= 0 ? '+' : ''}₹{formatCr(fiiNet)}
           </p>
         </div>
         <div className="rounded-lg border border-slate-200 p-4">
-          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">DII Activity</h3>
+          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Domestic Institutional Investors (DII)</h3>
           <div className="space-y-2">
-            <FlowBar label="Buy" value={diiBuy} max={Math.max(diiBuy, diiSell, 1)} color="bg-emerald-500" />
-            <FlowBar label="Sell" value={diiSell} max={Math.max(diiBuy, diiSell, 1)} color="bg-red-500" />
+            <FlowBar label="Gross Purchase" value={diiBuy} max={Math.max(diiBuy, diiSell, 1)} color="bg-emerald-500" />
+            <FlowBar label="Gross Sale" value={diiSell} max={Math.max(diiBuy, diiSell, 1)} color="bg-red-500" />
           </div>
           <p className={`text-sm font-bold mt-3 ${diiNet >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-            Net: {diiNet >= 0 ? '+' : ''}₹{(diiNet / 100).toFixed(0)} Cr
+            Net: {diiNet >= 0 ? '+' : ''}₹{formatCr(diiNet)}
           </p>
         </div>
       </div>
 
-      {trendData.length > 0 && (
+      {trendData.length > 1 && (
         <div className="rounded-lg border border-slate-200 p-4">
-          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Net FII vs DII — Last 30 Days</h3>
+          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Net FII vs DII Trend</h3>
           <div className="h-[250px]">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={trendData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <XAxis dataKey="date" tick={{ fontSize: 9, fill: '#94a3b8' }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickLine={false} axisLine={false} tickFormatter={(v) => `₹${(v / 100).toFixed(0)}Cr`} />
+                <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickLine={false} axisLine={false} tickFormatter={(v) => `₹${formatCr(v)}`} />
                 <Tooltip contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '12px' }} />
                 <Bar dataKey="fiiNet" name="FII Net" fill="#4f46e5" radius={[2, 2, 0, 0]} />
                 <Bar dataKey="diiNet" name="DII Net" fill="#22c55e" radius={[2, 2, 0, 0]} />
@@ -202,53 +221,67 @@ function OptionsTab() {
   if (loading) return <LoadingSpinner />;
 
   const pcrValue = num(pcr?.pcr_oi ?? pcr?.pcr ?? pcr?.value);
+  const pcrInterpretation = pcr?.interpretation ?? '';
   const maxPainValue = num(maxPain?.max_pain_strike ?? maxPain?.max_pain ?? maxPain?.maxPain);
   const ivValue = num(ivPercentile?.iv_percentile ?? ivPercentile?.ivPercentile);
   const heatmapDataSrc = oiHeatmap?.rows ?? oiHeatmap?.strikes ?? oiHeatmap?.data;
   const heatmapRows = Array.isArray(heatmapDataSrc) ? heatmapDataSrc : [];
+  const hasOIData = heatmapRows.length > 0 || pcrValue > 0;
 
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
-        <h2 className="text-base font-semibold text-slate-800">Options Intelligence —</h2>
-        <select
-          value={symbol}
-          onChange={(e) => setSymbol(e.target.value)}
-          className="text-sm px-2 py-1 bg-slate-50 border border-slate-200 rounded text-slate-700"
-        >
-          <option value="NIFTY">NIFTY</option>
-          <option value="BANKNIFTY">BANK NIFTY</option>
-          <option value="FINNIFTY">FIN NIFTY</option>
-          <option value="CRUDEOIL">CRUDE OIL (MCX)</option>
-          <option value="GOLD">GOLD (MCX)</option>
-          <option value="SILVER">SILVER (MCX)</option>
-          <option value="USDINR">USDINR (CDS)</option>
-        </select>
+        <div>
+          <h2 className="text-base font-semibold text-slate-800">Derivatives Analytics</h2>
+          <p className="text-xs text-slate-400 mt-0.5">Options chain, PCR, Max Pain & IV analysis</p>
+        </div>
+        <div className="ml-auto">
+          <select
+            value={symbol}
+            onChange={(e) => setSymbol(e.target.value)}
+            className="text-sm px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-md text-slate-700"
+          >
+            <option value="NIFTY">NIFTY 50</option>
+            <option value="BANKNIFTY">BANK NIFTY</option>
+            <option value="FINNIFTY">FIN NIFTY</option>
+          </select>
+        </div>
       </div>
 
+      {!hasOIData && (
+        <div className="flex items-center gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 text-xs">
+          <AlertCircle className="w-4 h-4 flex-shrink-0" />
+          <span>{pcrInterpretation || 'Options data requires Breeze API credentials. Configure them in Settings to see live data.'}</span>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <MetricBox label="Put-Call Ratio" value={pcrValue.toFixed(2)} color={pcrValue > 1 ? 'text-emerald-600' : 'text-red-600'} />
-        <MetricBox label="Max Pain" value={`₹${maxPainValue.toLocaleString('en-IN')}`} color="text-indigo-600" />
-        <MetricBox label="IV Percentile" value={`${ivValue.toFixed(0)}%`} color={ivValue > 50 ? 'text-red-600' : 'text-emerald-600'} />
-        <MetricBox label="Sentiment" value={pcrValue > 1.2 ? 'Bullish' : pcrValue < 0.8 ? 'Bearish' : 'Neutral'} color={pcrValue > 1.2 ? 'text-emerald-600' : pcrValue < 0.8 ? 'text-red-600' : 'text-amber-600'} />
+        <MetricBox label="Put-Call Ratio (OI)" value={pcrValue > 0 ? pcrValue.toFixed(2) : '—'} color={pcrValue > 1 ? 'text-emerald-600' : pcrValue > 0 ? 'text-red-600' : 'text-slate-400'} />
+        <MetricBox label="Max Pain Strike" value={maxPainValue > 0 ? `₹${maxPainValue.toLocaleString('en-IN')}` : '—'} color="text-indigo-600" />
+        <MetricBox label="IV Percentile" value={ivValue > 0 ? `${ivValue.toFixed(0)}%` : '—'} color={ivValue > 50 ? 'text-red-600' : ivValue > 0 ? 'text-emerald-600' : 'text-slate-400'} />
+        <MetricBox
+          label="Market Sentiment"
+          value={pcrValue > 1.2 ? 'Bullish' : pcrValue > 0 && pcrValue < 0.8 ? 'Bearish' : pcrValue > 0 ? 'Neutral' : '—'}
+          color={pcrValue > 1.2 ? 'text-emerald-600' : pcrValue > 0 && pcrValue < 0.8 ? 'text-red-600' : pcrValue > 0 ? 'text-amber-600' : 'text-slate-400'}
+        />
       </div>
 
       {heatmapRows.length > 0 && (
         <div className="rounded-lg border border-slate-200 p-4">
-          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Open Interest Heatmap</h3>
+          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Open Interest by Strike</h3>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-slate-400 border-b border-slate-200">
                   <th className="text-right pb-2 font-medium">Call OI</th>
-                  <th className="text-right pb-2 font-medium">Call Chg</th>
+                  <th className="text-right pb-2 font-medium">Call OI Chg</th>
                   <th className="text-center pb-2 font-medium">Strike</th>
-                  <th className="text-left pb-2 font-medium">Put Chg</th>
+                  <th className="text-left pb-2 font-medium">Put OI Chg</th>
                   <th className="text-left pb-2 font-medium">Put OI</th>
                 </tr>
               </thead>
               <tbody>
-                {heatmapRows.slice(0, 15).map((row: any, i: number) => (
+                {heatmapRows.slice(0, 20).map((row: any, i: number) => (
                   <tr key={i} className="border-b border-slate-100 hover:bg-slate-50/50">
                     <td className="py-1.5 text-right font-mono text-slate-600">{num(row.call_oi ?? row.callOI).toLocaleString()}</td>
                     <td className={`py-1.5 text-right font-mono ${num(row.call_oi_change ?? row.callOIChange) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
@@ -301,18 +334,24 @@ function SectorsTab() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-base font-semibold text-slate-800">Sector Analysis</h2>
+      <div>
+        <h2 className="text-base font-semibold text-slate-800">NSE Sector Performance</h2>
+        <p className="text-xs text-slate-400 mt-0.5">Live Nifty sectoral indices — intraday change %</p>
+      </div>
 
       {perfData.length > 0 && (
         <div className="rounded-lg border border-slate-200 p-4">
-          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Sector Performance</h3>
-          <div className="h-[300px]">
+          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Today's Sector Movement</h3>
+          <div className="h-[350px]">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={perfData} layout="vertical">
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <XAxis type="number" tick={{ fontSize: 10, fill: '#94a3b8' }} tickLine={false} tickFormatter={(v) => `${v}%`} />
-                <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: '#94a3b8' }} tickLine={false} width={120} />
-                <Tooltip contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '12px' }} formatter={(v) => [`${Number(v).toFixed(2)}%`, 'Change']} />
+                <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: '#64748b' }} tickLine={false} width={130} />
+                <Tooltip
+                  contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '12px' }}
+                  formatter={(v) => [`${Number(v).toFixed(2)}%`, 'Change']}
+                />
                 <Bar dataKey="change" radius={[0, 3, 3, 0]}>
                   {perfData.map((entry, i) => (
                     <Cell key={i} fill={entry.change >= 0 ? '#22c55e' : '#ef4444'} />
@@ -343,7 +382,7 @@ function SectorsTab() {
       )}
 
       {perfData.length === 0 && heatmapData.length === 0 && (
-        <EmptyState message="No sector data available" />
+        <EmptyState message="Sector data unavailable — NSE API may be down or market is closed" />
       )}
     </div>
   );
@@ -369,52 +408,29 @@ function EventsTab() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-base font-semibold text-slate-800">Market Events</h2>
-
-      <div className="rounded-lg border border-slate-200 p-4">
-        <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Earnings Calendar</h3>
-        {earnings.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-slate-400 border-b border-slate-200">
-                  <th className="text-left pb-2 font-medium">Company</th>
-                  <th className="text-left pb-2 font-medium">Date</th>
-                  <th className="text-left pb-2 font-medium">Quarter</th>
-                  <th className="text-right pb-2 font-medium">Est. Revenue</th>
-                  <th className="text-right pb-2 font-medium">Est. EPS</th>
-                </tr>
-              </thead>
-              <tbody>
-                {earnings.slice(0, 20).map((e: any, i: number) => (
-                  <tr key={i} className="border-b border-slate-100 hover:bg-slate-50/50">
-                    <td className="py-2 font-medium text-slate-800">{e.symbol ?? e.company}</td>
-                    <td className="py-2 text-slate-600">{e.date ? new Date(e.date).toLocaleDateString('en-IN') : '—'}</td>
-                    <td className="py-2 text-slate-500">{e.quarter ?? '—'}</td>
-                    <td className="py-2 text-right font-mono text-slate-600">{e.est_revenue ? `₹${num(e.est_revenue).toLocaleString('en-IN')}Cr` : '—'}</td>
-                    <td className="py-2 text-right font-mono text-slate-600">{e.est_eps ? `₹${num(e.est_eps).toFixed(2)}` : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState message="No upcoming earnings" />
-        )}
+      <div>
+        <h2 className="text-base font-semibold text-slate-800">Upcoming Events & Announcements</h2>
+        <p className="text-xs text-slate-400 mt-0.5">Corporate actions, RBI policy, US Fed, and key data releases</p>
       </div>
 
       <div className="rounded-lg border border-slate-200 p-4">
-        <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Economic & Macro Events</h3>
+        <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Economic & Policy Events</h3>
         {macroEvents.length > 0 ? (
           <div className="space-y-2">
             {macroEvents.slice(0, 15).map((evt: any, i: number) => {
               const impact = (evt.impact ?? 'medium').toLowerCase();
               const impactColor = impact === 'high' ? 'bg-red-100 text-red-700' : impact === 'medium' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600';
+              const eventDate = evt.date ? new Date(evt.date) : null;
+              const isToday = eventDate && eventDate.toDateString() === new Date().toDateString();
               return (
-                <div key={i} className="flex items-center gap-3 py-2 border-b border-slate-100 last:border-0">
+                <div key={i} className={`flex items-center gap-3 py-2.5 px-2 border-b border-slate-100 last:border-0 rounded ${isToday ? 'bg-blue-50/50' : ''}`}>
                   <div className="flex-1">
-                    <p className="text-sm text-slate-800">{evt.event ?? evt.name}</p>
-                    <p className="text-xs text-slate-400">{evt.date ? new Date(evt.date).toLocaleDateString('en-IN') : ''} {evt.country ? `· ${evt.country}` : ''}</p>
+                    <p className="text-sm text-slate-800 font-medium">{evt.event ?? evt.name}</p>
+                    <p className="text-xs text-slate-400">
+                      {eventDate ? eventDate.toLocaleDateString('en-IN', { weekday: 'short', month: 'short', day: 'numeric' }) : ''}
+                      {evt.country ? ` · ${evt.country}` : ''}
+                      {isToday && <span className="ml-1.5 text-blue-600 font-semibold">TODAY</span>}
+                    </p>
                   </div>
                   <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${impactColor}`}>{impact.toUpperCase()}</span>
                 </div>
@@ -422,7 +438,35 @@ function EventsTab() {
             })}
           </div>
         ) : (
-          <EmptyState message="No upcoming events" />
+          <EmptyState message="No upcoming macro events" />
+        )}
+      </div>
+
+      <div className="rounded-lg border border-slate-200 p-4">
+        <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Corporate Announcements (NSE)</h3>
+        {earnings.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-slate-400 border-b border-slate-200">
+                  <th className="text-left pb-2 font-medium">Symbol</th>
+                  <th className="text-left pb-2 font-medium">Date</th>
+                  <th className="text-left pb-2 font-medium">Announcement</th>
+                </tr>
+              </thead>
+              <tbody>
+                {earnings.slice(0, 25).map((e: any, i: number) => (
+                  <tr key={i} className="border-b border-slate-100 hover:bg-slate-50/50">
+                    <td className="py-2 font-medium text-slate-800">{e.symbol ?? e.company}</td>
+                    <td className="py-2 text-slate-600">{e.date ? new Date(e.date).toLocaleDateString('en-IN', { month: 'short', day: 'numeric' }) : '—'}</td>
+                    <td className="py-2 text-slate-500 max-w-xs truncate">{e.description ?? e.quarter ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <EmptyState message="No corporate announcements available" />
         )}
       </div>
     </div>
@@ -435,28 +479,41 @@ function GlobalTab() {
   const [commodities, setCommodities] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
+  const load = useCallback(async () => {
     setLoading(true);
-    Promise.all([
-      intelligenceApi.globalIndices().catch(() => ({ data: [] })),
-      intelligenceApi.fxRates().catch(() => ({ data: [] })),
-      intelligenceApi.commodities().catch(() => ({ data: [] })),
-    ]).then(([idxRes, fxRes, comRes]) => {
+    try {
+      const [idxRes, fxRes, comRes] = await Promise.all([
+        intelligenceApi.globalIndices().catch(() => ({ data: [] })),
+        intelligenceApi.fxRates().catch(() => ({ data: [] })),
+        intelligenceApi.commodities().catch(() => ({ data: [] })),
+      ]);
       setIndices(Array.isArray(idxRes.data) ? idxRes.data : []);
       setFx(Array.isArray(fxRes.data) ? fxRes.data : []);
       setCommodities(Array.isArray(comRes.data) ? comRes.data : []);
-    }).finally(() => setLoading(false));
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => { load(); }, [load]);
 
   if (loading) return <LoadingSpinner />;
 
   return (
     <div className="space-y-6">
-      <h2 className="text-base font-semibold text-slate-800">Global Markets Overview</h2>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-slate-800">World Markets Overview</h2>
+          <p className="text-xs text-slate-400 mt-0.5">Live quotes from Yahoo Finance — indices, currencies & commodities</p>
+        </div>
+        <button onClick={load} className="p-1.5 rounded-md hover:bg-slate-100 text-slate-400">
+          <RefreshCcw className="w-4 h-4" />
+        </button>
+      </div>
 
       {indices.length > 0 && (
         <div className="rounded-lg border border-slate-200 p-4">
-          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Global Indices</h3>
+          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Global & Indian Indices</h3>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
             {indices.map((idx: any, i: number) => {
               const change = num(idx.change ?? idx.changePercent ?? idx.change_pct);
@@ -466,7 +523,7 @@ function GlobalTab() {
                     <span className="text-xs font-medium text-slate-500">{idx.name ?? idx.index}</span>
                     {change >= 0 ? <ArrowUpRight className="w-3.5 h-3.5 text-emerald-500" /> : <ArrowDownRight className="w-3.5 h-3.5 text-red-500" />}
                   </div>
-                  <p className="text-sm font-bold font-mono text-slate-800">{num(idx.value ?? idx.last ?? idx.price).toLocaleString()}</p>
+                  <p className="text-sm font-bold font-mono text-slate-800">{num(idx.value ?? idx.last ?? idx.price).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</p>
                   <p className={`text-xs font-mono ${change >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                     {change >= 0 ? '+' : ''}{change.toFixed(2)}%
                   </p>
@@ -486,7 +543,8 @@ function GlobalTab() {
               return (
                 <div key={i} className="p-3 rounded-lg border border-slate-200">
                   <span className="text-xs font-medium text-slate-500">{c.name ?? c.commodity}</span>
-                  <p className="text-sm font-bold font-mono text-slate-800 mt-1">${num(c.price ?? c.value ?? c.last).toLocaleString()}</p>
+                  {c.unit && <span className="text-[10px] text-slate-300 ml-1">({c.unit})</span>}
+                  <p className="text-sm font-bold font-mono text-slate-800 mt-1">${num(c.price ?? c.value ?? c.last).toLocaleString('en-US', { maximumFractionDigits: 2 })}</p>
                   <p className={`text-xs font-mono ${change >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                     {change >= 0 ? '+' : ''}{change.toFixed(2)}%
                   </p>
@@ -518,7 +576,7 @@ function GlobalTab() {
       )}
 
       {indices.length === 0 && commodities.length === 0 && fx.length === 0 && (
-        <EmptyState message="No global market data available" />
+        <EmptyState message="Market data temporarily unavailable — Yahoo Finance may be unreachable" />
       )}
     </div>
   );
@@ -533,7 +591,7 @@ function FlowCard({ label, value, positive, negative }: { label: string; value: 
       <div className="flex items-center gap-1.5">
         <Icon className={`w-3.5 h-3.5 ${color}`} />
         <p className={`text-lg font-bold font-mono ${color}`}>
-          ₹{Math.abs(value / 100).toFixed(0)} Cr
+          ₹{formatCr(Math.abs(value))}
         </p>
       </div>
     </div>
@@ -546,7 +604,7 @@ function FlowBar({ label, value, max, color }: { label: string; value: number; m
     <div>
       <div className="flex items-center justify-between text-[10px] text-slate-500 mb-0.5">
         <span>{label}</span>
-        <span className="font-mono">₹{(value / 100).toFixed(0)} Cr</span>
+        <span className="font-mono">₹{formatCr(value)}</span>
       </div>
       <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
         <div className={`h-full ${color} rounded-full transition-all`} style={{ width: `${pct}%` }} />

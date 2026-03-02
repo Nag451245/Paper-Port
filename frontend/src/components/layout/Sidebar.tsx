@@ -23,7 +23,7 @@ const navItems = [
   { to: '/terminal', icon: Monitor, label: 'Trading Terminal', color: 'from-blue-500 to-cyan-500' },
   { to: '/ai-agent', icon: Bot, label: 'AI Agent', color: 'from-emerald-500 to-teal-500' },
   { to: '/bots', icon: Users, label: 'Bot Team', color: 'from-amber-500 to-orange-500' },
-  { to: '/intelligence', icon: Brain, label: 'Intelligence', color: 'from-pink-500 to-rose-500' },
+  { to: '/intelligence', icon: Brain, label: 'Market Intel', color: 'from-pink-500 to-rose-500' },
   { to: '/portfolio', icon: Briefcase, label: 'Portfolio', color: 'from-indigo-500 to-purple-500' },
   { to: '/strategy-builder', icon: Layers, label: 'Strategy Builder', color: 'from-violet-500 to-purple-500' },
   { to: '/option-chain', icon: Grid3X3, label: 'Option Chain', color: 'from-sky-500 to-blue-500' },

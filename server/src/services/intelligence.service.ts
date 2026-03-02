@@ -86,6 +86,24 @@ async function nseFetch(url: string): Promise<any> {
   }
 }
 
+async function yahooQuotes(symbols: string[]): Promise<any[]> {
+  try {
+    const joined = symbols.join(',');
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 10000);
+    const res = await fetch(
+      `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(joined)}&fields=symbol,shortName,regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketPreviousClose`,
+      { headers: { 'User-Agent': UA }, signal: ac.signal },
+    );
+    clearTimeout(t);
+    if (!res.ok) { await drainResponse(res); return []; }
+    const json = await res.json();
+    return json?.quoteResponse?.result ?? [];
+  } catch {
+    return [];
+  }
+}
+
 export class IntelligenceService {
   private cache: CacheService | null;
   private chainInflight = new Map<string, Promise<any>>();
@@ -104,6 +122,8 @@ export class IntelligenceService {
     this.chainInflight.set(key, promise);
     return promise;
   }
+
+  // ── FII / DII ──
 
   async getFIIDII() {
     return this.cached('intel:fii-dii', async () => {
@@ -124,22 +144,57 @@ export class IntelligenceService {
             };
           }
         }
-      } catch { /* fall through to fallback */ }
+      } catch { /* fall through */ }
+
+      // Fallback: try NSDL FPI data endpoint
+      try {
+        const data = await nseFetch('https://www.nseindia.com/api/fii-dii-activity');
+        if (data) {
+          return {
+            date: data.date ?? new Date().toISOString().split('T')[0],
+            fiiBuy: parseFloat(data.fii_buy_value ?? '0'),
+            fiiSell: parseFloat(data.fii_sell_value ?? '0'),
+            fiiNet: parseFloat(data.fii_net_value ?? '0'),
+            diiBuy: parseFloat(data.dii_buy_value ?? '0'),
+            diiSell: parseFloat(data.dii_sell_value ?? '0'),
+            diiNet: parseFloat(data.dii_net_value ?? '0'),
+          };
+        }
+      } catch { /* fallback */ }
 
       return {
         date: new Date().toISOString().split('T')[0],
         fiiBuy: 0, fiiSell: 0, fiiNet: 0,
         diiBuy: 0, diiSell: 0, diiNet: 0,
-        message: 'FII/DII data unavailable from NSE',
+        message: 'FII/DII data temporarily unavailable from NSE. Data refreshes during market hours.',
       };
     });
   }
 
   async getFIIDIITrend(days = 30) {
-    return this.cached(`intel:fii-dii-trend:${days}`, () => {
-      return [];
+    return this.cached(`intel:fii-dii-trend:${days}`, async () => {
+      try {
+        const data = await nseFetch('https://www.nseindia.com/api/fiidiiTradeReact');
+        if (!data || !Array.isArray(data)) return { daily_flows: [] };
+        // NSE returns only today's data at this endpoint; generate trend from repeated calls won't work.
+        // Return whatever single-day data we have so the frontend at least shows something
+        const fii = data.find((d: any) => d.category === 'FII/FPI *');
+        const dii = data.find((d: any) => d.category === 'DII *');
+        if (fii || dii) {
+          return {
+            daily_flows: [{
+              date: fii?.date || new Date().toISOString().split('T')[0],
+              fiiNet: parseFloat(fii?.netValue ?? '0') * 100,
+              diiNet: parseFloat(dii?.netValue ?? '0') * 100,
+            }],
+          };
+        }
+      } catch { /* fallback */ }
+      return { daily_flows: [] };
     });
   }
+
+  // ── Options ──
 
   async getPCR(symbol: string) {
     return this.cached(`intel:pcr:${symbol}`, async () => {
@@ -154,7 +209,7 @@ export class IntelligenceService {
           return { symbol, pcr: chain.pcr, interpretation };
         }
       } catch { /* fallback */ }
-      return { symbol, pcr: 0, interpretation: 'Data unavailable — NSE blocked request' };
+      return { symbol, pcr: 0, interpretation: 'Data unavailable — configure Breeze API in Settings' };
     });
   }
 
@@ -166,7 +221,7 @@ export class IntelligenceService {
           return { symbol, strikes: chain.strikes };
         }
       } catch { /* fallback */ }
-      return { symbol, strikes: [], message: 'Options data unavailable — NSE blocked request' };
+      return { symbol, strikes: [], message: 'Options data unavailable — configure Breeze API in Settings' };
     });
   }
 
@@ -205,6 +260,302 @@ export class IntelligenceService {
       return { symbol, currentIV: 0, ivPercentile: 0, ivRank: 0, message: 'Data unavailable' };
     });
   }
+
+  // ── Sectors ──
+
+  async getSectorPerformance() {
+    return this.cached('intel:sectors:perf', async () => {
+      try {
+        const data = await nseFetch('https://www.nseindia.com/api/allIndices');
+        if (data?.data) {
+          const sectorIndices = [
+            'NIFTY IT', 'NIFTY BANK', 'NIFTY PHARMA', 'NIFTY AUTO', 'NIFTY METAL',
+            'NIFTY ENERGY', 'NIFTY FMCG', 'NIFTY REALTY', 'NIFTY INFRA', 'NIFTY MEDIA',
+            'NIFTY PSU BANK', 'NIFTY FIN SERVICE', 'NIFTY HEALTHCARE', 'NIFTY CONSUMER DURABLES',
+          ];
+          const sectors = data.data
+            .filter((idx: any) => sectorIndices.includes(idx.index))
+            .map((idx: any) => ({
+              sector: idx.index.replace('NIFTY ', ''),
+              value: idx.last ?? 0,
+              change: idx.percentChange ?? 0,
+              changePercent: idx.percentChange ?? 0,
+              advances: idx.advances ?? 0,
+              declines: idx.declines ?? 0,
+            }))
+            .sort((a: any, b: any) => b.change - a.change);
+          if (sectors.length > 0) return sectors;
+        }
+      } catch { /* fall through */ }
+
+      // Yahoo fallback for Indian sectors via ETFs
+      try {
+        const sectorSymbols = [
+          { sym: '^CNXIT', name: 'IT' }, { sym: '^NSEBANK', name: 'Banking' },
+          { sym: '^CNXPHARMA', name: 'Pharma' }, { sym: '^CNXAUTO', name: 'Auto' },
+          { sym: '^CNXMETAL', name: 'Metal' }, { sym: '^CNXENERGY', name: 'Energy' },
+          { sym: '^CNXFMCG', name: 'FMCG' }, { sym: '^CNXREALTY', name: 'Realty' },
+        ];
+        const quotes = await yahooQuotes(sectorSymbols.map(s => s.sym));
+        if (quotes.length > 0) {
+          return sectorSymbols.map(s => {
+            const q = quotes.find(q => q.symbol === s.sym);
+            return {
+              sector: s.name,
+              value: q?.regularMarketPrice ?? 0,
+              change: q?.regularMarketChangePercent ?? 0,
+              changePercent: q?.regularMarketChangePercent ?? 0,
+            };
+          }).filter(s => s.value > 0).sort((a, b) => b.change - a.change);
+        }
+      } catch { /* fallback */ }
+
+      return [];
+    });
+  }
+
+  async getSectorHeatmap() {
+    return this.cached('intel:sectors:heatmap', async () => {
+      const perf = await this.getSectorPerformance();
+      if (Array.isArray(perf) && perf.length > 0) {
+        return perf.map((s: any) => ({
+          sector: s.sector ?? s.name,
+          change: s.change ?? s.changePercent ?? 0,
+          value: Math.abs(s.change ?? s.changePercent ?? 0),
+        }));
+      }
+      return [];
+    });
+  }
+
+  async getSectorRRG() {
+    return this.cached('intel:sectors:rrg', () => []);
+  }
+
+  async getSectorRotationAlerts() {
+    return this.cached('intel:sectors:rotation', () => []);
+  }
+
+  // ── Global Markets (Yahoo Finance) ──
+
+  async getGlobalIndices() {
+    return this.cached('intel:global:indices', async () => {
+      const symbolMap: Record<string, string> = {
+        '^GSPC': 'S&P 500', '^IXIC': 'NASDAQ', '^DJI': 'Dow Jones',
+        '^N225': 'Nikkei 225', '^HSI': 'Hang Seng', '^FTSE': 'FTSE 100',
+        '^GDAXI': 'DAX', '000001.SS': 'Shanghai',
+        '^NSEI': 'NIFTY 50', '^NSEBANK': 'BANK NIFTY', '^BSESN': 'SENSEX',
+      };
+      const quotes = await yahooQuotes(Object.keys(symbolMap));
+      if (quotes.length > 0) {
+        return quotes.map(q => ({
+          name: symbolMap[q.symbol] ?? q.shortName ?? q.symbol,
+          value: q.regularMarketPrice ?? 0,
+          change: q.regularMarketChange ?? 0,
+          changePercent: q.regularMarketChangePercent ?? 0,
+        })).filter(i => i.value > 0);
+      }
+
+      // Fallback to NSE for Indian indices
+      try {
+        const data = await nseFetch('https://www.nseindia.com/api/allIndices');
+        if (data?.data) {
+          return data.data
+            .filter((idx: any) => ['NIFTY 50', 'NIFTY BANK', 'NIFTY NEXT 50', 'INDIA VIX'].includes(idx.index))
+            .map((idx: any) => ({
+              name: idx.index,
+              value: idx.last ?? 0,
+              change: idx.variation ?? 0,
+              changePercent: idx.percentChange ?? 0,
+            }));
+        }
+      } catch { /* fallback */ }
+
+      return [];
+    });
+  }
+
+  async getFXRates() {
+    return this.cached('intel:global:fx', async () => {
+      const pairs: Record<string, string> = {
+        'USDINR=X': 'USD/INR', 'EURINR=X': 'EUR/INR',
+        'GBPINR=X': 'GBP/INR', 'JPYINR=X': 'JPY/INR',
+        'EURUSD=X': 'EUR/USD', 'GBPUSD=X': 'GBP/USD',
+      };
+      const quotes = await yahooQuotes(Object.keys(pairs));
+      if (quotes.length > 0) {
+        return quotes.map(q => ({
+          pair: pairs[q.symbol] ?? q.symbol,
+          rate: q.regularMarketPrice ?? 0,
+          change: q.regularMarketChange ?? 0,
+          changePercent: q.regularMarketChangePercent ?? 0,
+        })).filter(p => p.rate > 0);
+      }
+      return [];
+    });
+  }
+
+  async getCommodities() {
+    return this.cached('intel:global:commodities', async () => {
+      const commodityMap: Record<string, { name: string; unit: string }> = {
+        'GC=F': { name: 'Gold', unit: 'USD/oz' },
+        'SI=F': { name: 'Silver', unit: 'USD/oz' },
+        'CL=F': { name: 'Crude Oil (WTI)', unit: 'USD/bbl' },
+        'BZ=F': { name: 'Brent Crude', unit: 'USD/bbl' },
+        'NG=F': { name: 'Natural Gas', unit: 'USD/MMBtu' },
+        'HG=F': { name: 'Copper', unit: 'USD/lb' },
+      };
+      const quotes = await yahooQuotes(Object.keys(commodityMap));
+      if (quotes.length > 0) {
+        return quotes.map(q => {
+          const info = commodityMap[q.symbol] ?? { name: q.shortName ?? q.symbol, unit: '' };
+          return {
+            name: info.name,
+            price: q.regularMarketPrice ?? 0,
+            change: q.regularMarketChange ?? 0,
+            changePercent: q.regularMarketChangePercent ?? 0,
+            unit: info.unit,
+          };
+        }).filter(c => c.price > 0);
+      }
+      return [];
+    });
+  }
+
+  async getUSSummary() {
+    return this.cached('intel:global:us-summary', async () => {
+      const quotes = await yahooQuotes(['^GSPC', '^IXIC', '^VIX']);
+      const sp500 = quotes.find(q => q.symbol === '^GSPC');
+      const nasdaq = quotes.find(q => q.symbol === '^IXIC');
+      const vix = quotes.find(q => q.symbol === '^VIX');
+      return {
+        marketStatus: sp500?.marketState === 'REGULAR' ? 'open' : 'closed',
+        sp500: { value: sp500?.regularMarketPrice ?? 0, change: sp500?.regularMarketChangePercent ?? 0 },
+        nasdaq: { value: nasdaq?.regularMarketPrice ?? 0, change: nasdaq?.regularMarketChangePercent ?? 0 },
+        vix: { value: vix?.regularMarketPrice ?? 0, change: vix?.regularMarketChangePercent ?? 0 },
+      };
+    });
+  }
+
+  async getSGXNifty() {
+    return this.cached('intel:global:sgx-nifty', async () => {
+      const quotes = await yahooQuotes(['NQ=F']); // SGX Nifty discontinued; use NIFTY futures proxy
+      const q = quotes[0];
+      return {
+        value: q?.regularMarketPrice ?? 0,
+        change: q?.regularMarketChange ?? 0,
+        changePercent: q?.regularMarketChangePercent ?? 0,
+        lastUpdated: new Date().toISOString(),
+      };
+    });
+  }
+
+  // ── Earnings & Events ──
+
+  async getEarningsCalendar() {
+    return this.cached('intel:earnings-calendar', async () => {
+      // Use NSE corporate actions / board meetings as proxy
+      try {
+        const data = await nseFetch('https://www.nseindia.com/api/corporate-announcements?index=equities&from_date=&to_date=');
+        if (data && Array.isArray(data)) {
+          return data
+            .filter((a: any) => a.desc?.toLowerCase().includes('financial result') || a.desc?.toLowerCase().includes('board meeting'))
+            .slice(0, 25)
+            .map((a: any) => ({
+              symbol: a.symbol ?? '',
+              company: a.company ?? a.symbol ?? '',
+              date: a.an_dt ?? a.date ?? '',
+              quarter: '',
+              description: a.desc ?? '',
+            }));
+        }
+      } catch { /* fallback */ }
+      return [];
+    });
+  }
+
+  async getRBIMPC() {
+    return this.cached('intel:rbi-mpc', () => ({
+      nextDate: '2026-04-07',
+      lastDecision: 'Repo rate held at 6.50%',
+      currentRate: 6.50,
+    }));
+  }
+
+  async getMacroEvents() {
+    return this.cached('intel:macro-events', async () => {
+      // Static curated list of upcoming key events
+      const now = new Date();
+      const events = [
+        { event: 'RBI MPC Decision', date: '2026-04-07', country: 'India', impact: 'high' },
+        { event: 'US Fed FOMC Meeting', date: '2026-03-18', country: 'US', impact: 'high' },
+        { event: 'India GDP Q3 Data', date: '2026-03-28', country: 'India', impact: 'high' },
+        { event: 'US CPI Data', date: '2026-03-12', country: 'US', impact: 'high' },
+        { event: 'India IIP Data', date: '2026-03-12', country: 'India', impact: 'medium' },
+        { event: 'US Non-Farm Payrolls', date: '2026-03-07', country: 'US', impact: 'high' },
+        { event: 'India WPI Inflation', date: '2026-03-14', country: 'India', impact: 'medium' },
+        { event: 'ECB Rate Decision', date: '2026-04-17', country: 'EU', impact: 'medium' },
+        { event: 'India CPI Inflation', date: '2026-03-12', country: 'India', impact: 'high' },
+        { event: 'US PPI Data', date: '2026-03-13', country: 'US', impact: 'medium' },
+        { event: 'India Trade Balance', date: '2026-03-15', country: 'India', impact: 'medium' },
+        { event: 'Bank of Japan Decision', date: '2026-03-14', country: 'Japan', impact: 'medium' },
+      ];
+      return events
+        .filter(e => new Date(e.date) >= new Date(now.getTime() - 2 * 86_400_000))
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    });
+  }
+
+  async getBlackout(symbol: string) {
+    return this.cached(`intel:blackout:${symbol}`, () => ({
+      symbol, isBlackoutPeriod: false, reason: '',
+    }));
+  }
+
+  async getEventImpact() {
+    return this.cached('intel:event-impact', () => []);
+  }
+
+  // ── Block Deals / Insider ──
+
+  async getBlockDeals() {
+    return this.cached('intel:block-deals', async () => {
+      try {
+        const data = await nseFetch('https://www.nseindia.com/api/block-deal');
+        if (data?.data && Array.isArray(data.data)) {
+          return data.data.slice(0, 20).map((d: any) => ({
+            symbol: d.symbol ?? '',
+            clientName: d.clientName ?? '',
+            buyOrSell: d.buySell ?? '',
+            qty: d.quantity ?? 0,
+            price: d.tradedPrice ?? 0,
+            date: d.dealDate ?? '',
+          }));
+        }
+      } catch { /* fallback */ }
+      return [];
+    });
+  }
+
+  async getSmartMoney() {
+    return this.cached('intel:smart-money', () => []);
+  }
+
+  async getInsiderTransactions() {
+    return this.cached('intel:insider-txns', () => []);
+  }
+
+  async getClusterBuys() {
+    return this.cached('intel:cluster-buys', () => []);
+  }
+
+  async getInsiderSelling(symbol: string) {
+    return this.cached(`intel:insider-selling:${symbol}`, () => ({
+      symbol, transactions: [], hasRecentSelling: false,
+    }));
+  }
+
+  // ── Options Chain ──
 
   private async getBreezeCredentials(): Promise<{ apiKey: string; secretKey: string; sessionToken: string } | null> {
     try {
@@ -264,7 +615,6 @@ export class IntelligenceService {
     now.setMilliseconds(0);
     const timestamp = now.toISOString();
 
-    // Get nearest Thursday expiry
     const today = new Date();
     const dayOfWeek = today.getDay();
     const daysUntilThursday = (4 - dayOfWeek + 7) % 7 || 7;
@@ -293,7 +643,6 @@ export class IntelligenceService {
     if (res.status !== 200) return null;
     const callData = JSON.parse(res.data);
 
-    // Fetch puts
     const putPayload = JSON.stringify({
       stock_code: symbol.toUpperCase() === 'NIFTY' ? 'NIFTY' : symbol,
       exchange_code: 'NFO',
@@ -321,17 +670,13 @@ export class IntelligenceService {
 
     if (!Array.isArray(callRecords) || callRecords.length === 0) return null;
 
-    // Build strike map
     const strikeMap = new Map<number, any>();
     for (const rec of callRecords) {
       const strike = Number(rec.strike_price);
       if (!strike) continue;
       strikeMap.set(strike, {
-        strike,
-        callOI: Number(rec.open_interest ?? 0),
-        callOIChange: Number(rec.change_oi ?? 0),
-        callLTP: Number(rec.ltp ?? 0),
-        callIV: Number(rec.implied_volatility ?? 0),
+        strike, callOI: Number(rec.open_interest ?? 0), callOIChange: Number(rec.change_oi ?? 0),
+        callLTP: Number(rec.ltp ?? 0), callIV: Number(rec.implied_volatility ?? 0),
         putOI: 0, putOIChange: 0, putLTP: 0, putIV: 0,
       });
     }
@@ -368,18 +713,16 @@ export class IntelligenceService {
   }
 
   private async fetchOptionsChain(symbol: string): Promise<any> {
-    // Primary: Breeze API (authenticated, reliable)
     try {
       const breezeResult = await this.fetchOptionsChainFromBreeze(symbol);
       if (breezeResult) return breezeResult;
     } catch { /* fall through to NSE */ }
 
-    // Fallback: NSE scraping
     const indexSymbol = symbol.toUpperCase() === 'NIFTY' ? 'NIFTY' : symbol;
     const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'].includes(indexSymbol);
     const endpoint = isIndex ? 'option-chain-indices' : 'option-chain-equities';
     const url = `https://www.nseindia.com/api/${endpoint}?symbol=${encodeURIComponent(indexSymbol)}`;
-    
+
     const data = await nseFetch(url);
     if (!data?.records?.data) return null;
 
@@ -389,14 +732,10 @@ export class IntelligenceService {
 
     const strikes = allData.map((d: any) => ({
       strike: d.strikePrice,
-      callOI: d.CE?.openInterest ?? 0,
-      callOIChange: d.CE?.changeinOpenInterest ?? 0,
-      callLTP: d.CE?.lastPrice ?? 0,
-      callIV: d.CE?.impliedVolatility ?? 0,
-      putOI: d.PE?.openInterest ?? 0,
-      putOIChange: d.PE?.changeinOpenInterest ?? 0,
-      putLTP: d.PE?.lastPrice ?? 0,
-      putIV: d.PE?.impliedVolatility ?? 0,
+      callOI: d.CE?.openInterest ?? 0, callOIChange: d.CE?.changeinOpenInterest ?? 0,
+      callLTP: d.CE?.lastPrice ?? 0, callIV: d.CE?.impliedVolatility ?? 0,
+      putOI: d.PE?.openInterest ?? 0, putOIChange: d.PE?.changeinOpenInterest ?? 0,
+      putLTP: d.PE?.lastPrice ?? 0, putIV: d.PE?.impliedVolatility ?? 0,
     }));
 
     const totalCallOI = strikes.reduce((s: number, st: any) => s + st.callOI, 0);
@@ -415,6 +754,8 @@ export class IntelligenceService {
 
     return { strikes, pcr, maxPain, totalCallOI, totalPutOI, expiry };
   }
+
+  // ── Greeks (uses Rust engine or JS fallback) ──
 
   private jsBlackScholes(s: number, k: number, t: number, r: number, sigma: number, isCall: boolean) {
     if (t <= 0) {
@@ -450,7 +791,6 @@ export class IntelligenceService {
 
   async getGreeks(symbol: string) {
     return this.cached(`intel:greeks:${symbol}`, async () => {
-
       try {
         const chain = await this.fetchOptionsChainDeduped(symbol);
         if (!chain?.strikes?.length) {
@@ -485,32 +825,10 @@ export class IntelligenceService {
         }
 
         return {
-          symbol,
-          atmStrike: strike,
-          call: {
-            price: callResult.price,
-            delta: callResult.delta,
-            gamma: callResult.gamma,
-            theta: callResult.theta,
-            vega: callResult.vega,
-            rho: callResult.rho,
-            iv: callResult.implied_volatility,
-          },
-          put: {
-            price: putResult.price,
-            delta: putResult.delta,
-            gamma: putResult.gamma,
-            theta: putResult.theta,
-            vega: putResult.vega,
-            rho: putResult.rho,
-            iv: putResult.implied_volatility,
-          },
-          delta: callResult.delta,
-          gamma: callResult.gamma,
-          theta: callResult.theta,
-          vega: callResult.vega,
-          rho: callResult.rho,
-          price: callResult.price,
+          symbol, atmStrike: strike,
+          call: { price: callResult.price, delta: callResult.delta, gamma: callResult.gamma, theta: callResult.theta, vega: callResult.vega, rho: callResult.rho, iv: callResult.implied_volatility },
+          put: { price: putResult.price, delta: putResult.delta, gamma: putResult.gamma, theta: putResult.theta, vega: putResult.vega, rho: putResult.rho, iv: putResult.implied_volatility },
+          delta: callResult.delta, gamma: callResult.gamma, theta: callResult.theta, vega: callResult.vega, rho: callResult.rho, price: callResult.price,
           source: useRust ? 'rust-engine' : 'js-fallback',
         };
       } catch {
@@ -519,178 +837,7 @@ export class IntelligenceService {
     });
   }
 
-  async getSectorPerformance() {
-    return this.cached('intel:sectors:perf', async () => {
-      try {
-        const data = await nseFetch('https://www.nseindia.com/api/allIndices');
-        if (data?.data) {
-          const sectorIndices = ['NIFTY IT', 'NIFTY BANK', 'NIFTY PHARMA', 'NIFTY AUTO', 'NIFTY METAL', 'NIFTY ENERGY', 'NIFTY FMCG', 'NIFTY REALTY', 'NIFTY INFRA', 'NIFTY MEDIA'];
-          const sectors = data.data
-            .filter((idx: any) => sectorIndices.includes(idx.index))
-            .map((idx: any) => ({
-              sector: idx.index.replace('NIFTY ', ''),
-              change: idx.percentChange ?? 0,
-              changePercent: idx.percentChange ?? 0,
-            }));
-          if (sectors.length > 0) return sectors;
-        }
-      } catch { /* fall through */ }
-
-      return [
-        { sector: 'IT', change: 1.85, changePercent: 1.85 },
-        { sector: 'Banking', change: -0.42, changePercent: -0.42 },
-        { sector: 'Pharma', change: 2.15, changePercent: 2.15 },
-        { sector: 'Auto', change: 0.73, changePercent: 0.73 },
-        { sector: 'Metal', change: -1.28, changePercent: -1.28 },
-        { sector: 'Energy', change: 0.56, changePercent: 0.56 },
-        { sector: 'FMCG', change: 0.92, changePercent: 0.92 },
-        { sector: 'Realty', change: -2.10, changePercent: -2.10 },
-      ];
-    });
-  }
-
-  async getSectorHeatmap() {
-    return this.cached('intel:sectors:heatmap', () => [
-      { sector: 'IT', change: 1.85, value: 1.85 },
-      { sector: 'Banking', change: -0.42, value: 0.42 },
-      { sector: 'Pharma', change: 2.15, value: 2.15 },
-      { sector: 'Auto', change: 0.73, value: 0.73 },
-      { sector: 'Metal', change: -1.28, value: 1.28 },
-      { sector: 'Energy', change: 0.56, value: 0.56 },
-      { sector: 'FMCG', change: 0.92, value: 0.92 },
-      { sector: 'Realty', change: -2.10, value: 2.10 },
-      { sector: 'Infrastructure', change: 1.05, value: 1.05 },
-      { sector: 'Media', change: -0.35, value: 0.35 },
-    ]);
-  }
-
-  async getSectorRRG() {
-    return this.cached('intel:sectors:rrg', () => []);
-  }
-
-  async getSectorRotationAlerts() {
-    return this.cached('intel:sectors:rotation', () => []);
-  }
-
-  async getGlobalIndices() {
-    return this.cached('intel:global:indices', async () => {
-      try {
-        const data = await nseFetch('https://www.nseindia.com/api/allIndices');
-        if (data?.data) {
-          const globalNames: Record<string, string> = {
-            'S&P BSE SENSEX': 'SENSEX',
-            'NIFTY 50': 'NIFTY 50',
-          };
-          const domestic = data.data
-            .filter((idx: any) => ['NIFTY 50', 'NIFTY BANK', 'NIFTY NEXT 50', 'INDIA VIX'].includes(idx.index))
-            .map((idx: any) => ({
-              name: globalNames[idx.index] ?? idx.index,
-              value: idx.last ?? 0,
-              change: idx.variation ?? 0,
-              changePercent: idx.percentChange ?? 0,
-            }));
-          if (domestic.length > 0) {
-            return [
-              ...domestic,
-              { name: 'S&P 500', value: 5987.42, change: 0.83, changePercent: 0.83 },
-              { name: 'NASDAQ', value: 19234.18, change: 1.12, changePercent: 1.12 },
-              { name: 'Dow Jones', value: 43521.67, change: 0.45, changePercent: 0.45 },
-              { name: 'Nikkei 225', value: 38956.12, change: -0.31, changePercent: -0.31 },
-            ];
-          }
-        }
-      } catch { /* fallback */ }
-      return [
-        { name: 'S&P 500', value: 5987.42, change: 0.83, changePercent: 0.83 },
-        { name: 'NASDAQ', value: 19234.18, change: 1.12, changePercent: 1.12 },
-        { name: 'Dow Jones', value: 43521.67, change: 0.45, changePercent: 0.45 },
-        { name: 'Nikkei 225', value: 38956.12, change: -0.31, changePercent: -0.31 },
-        { name: 'Hang Seng', value: 20145.89, change: 0.67, changePercent: 0.67 },
-        { name: 'FTSE 100', value: 8234.56, change: 0.28, changePercent: 0.28 },
-        { name: 'DAX', value: 18765.43, change: 0.54, changePercent: 0.54 },
-        { name: 'Shanghai', value: 3089.67, change: -0.15, changePercent: -0.15 },
-      ];
-    });
-  }
-
-  async getFXRates() {
-    return this.cached('intel:global:fx', () => [
-      { pair: 'USD/INR', rate: 83.42, change: -0.12, changePercent: -0.14 },
-      { pair: 'EUR/INR', rate: 90.87, change: 0.23, changePercent: 0.25 },
-      { pair: 'GBP/INR', rate: 105.63, change: 0.15, changePercent: 0.14 },
-      { pair: 'JPY/INR', rate: 0.5567, change: -0.003, changePercent: -0.54 },
-    ]);
-  }
-
-  async getCommodities() {
-    return this.cached('intel:global:commodities', () => [
-      { name: 'Gold', price: 2342.50, change: 0.85, changePercent: 0.85, unit: 'USD/oz' },
-      { name: 'Crude Oil', price: 78.34, change: -1.23, changePercent: -1.55, unit: 'USD/bbl' },
-      { name: 'Silver', price: 27.89, change: 1.42, changePercent: 1.42, unit: 'USD/oz' },
-      { name: 'Natural Gas', price: 2.145, change: -2.35, changePercent: -2.35, unit: 'USD/MMBtu' },
-    ]);
-  }
-
-  async getUSSummary() {
-    return this.cached('intel:global:us-summary', () => ({
-      marketStatus: 'closed',
-      sp500: { value: 0, change: 0 },
-      nasdaq: { value: 0, change: 0 },
-      vix: { value: 0, change: 0 },
-    }));
-  }
-
-  async getSGXNifty() {
-    return this.cached('intel:global:sgx-nifty', () => ({
-      value: 0, change: 0, changePercent: 0, lastUpdated: new Date().toISOString(),
-    }));
-  }
-
-  async getBlockDeals() {
-    return this.cached('intel:block-deals', () => []);
-  }
-
-  async getSmartMoney() {
-    return this.cached('intel:smart-money', () => []);
-  }
-
-  async getInsiderTransactions() {
-    return this.cached('intel:insider-txns', () => []);
-  }
-
-  async getClusterBuys() {
-    return this.cached('intel:cluster-buys', () => []);
-  }
-
-  async getInsiderSelling(symbol: string) {
-    return this.cached(`intel:insider-selling:${symbol}`, () => ({
-      symbol, transactions: [], hasRecentSelling: false,
-    }));
-  }
-
-  async getEarningsCalendar() {
-    return this.cached('intel:earnings-calendar', () => []);
-  }
-
-  async getRBIMPC() {
-    return this.cached('intel:rbi-mpc', () => ({
-      nextDate: '', lastDecision: '', currentRate: 0,
-    }));
-  }
-
-  async getMacroEvents() {
-    return this.cached('intel:macro-events', () => []);
-  }
-
-  async getBlackout(symbol: string) {
-    return this.cached(`intel:blackout:${symbol}`, () => ({
-      symbol, isBlackoutPeriod: false, reason: '',
-    }));
-  }
-
-  async getEventImpact() {
-    return this.cached('intel:event-impact', () => []);
-  }
+  // ── Cache helper ──
 
   private async cached<T>(key: string, fallback: () => T | Promise<T>): Promise<T> {
     if (this.cache) {
