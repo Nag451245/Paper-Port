@@ -5,7 +5,7 @@ services:
     region: oregon
     plan: free
     rootDir: server
-    buildCommand: "mkdir -p bin && for i in 1 2 3 4 5; do curl -sfL -o bin/capital-guard-engine 'https://github.com/Nag451245/Paper-Port/releases/download/engine-latest/capital-guard-engine' && chmod +x bin/capital-guard-engine && echo 'Rust engine downloaded' && break || echo \"Attempt $i: engine not ready, waiting 30s...\" && sleep 30; done && NODE_ENV=development npm ci && npx prisma generate && npm run build"
+    buildCommand: "mkdir -p bin && node -e \"const https=require('https'),fs=require('fs');function dl(u){https.get(u,r=>{if(r.statusCode>=300&&r.statusCode<400&&r.headers.location){dl(r.headers.location)}else if(r.statusCode===200){const f=fs.createWriteStream('bin/capital-guard-engine');r.pipe(f);f.on('finish',()=>{f.close();fs.chmodSync('bin/capital-guard-engine',0o755);console.log('Rust engine downloaded:',fs.statSync('bin/capital-guard-engine').size,'bytes')})}else{console.log('Download failed:',r.statusCode);process.exit(1)}})}dl('https://github.com/Nag451245/Paper-Port/releases/download/engine-latest/capital-guard-engine')\" || echo 'Engine download failed, using JS fallbacks' ; NODE_ENV=development npm ci && npx prisma generate && npm run build"
     startCommand: npx prisma db push --skip-generate --accept-data-loss && node --max-old-space-size=512 dist/index.js
     healthCheckPath: /health
     envVars:
