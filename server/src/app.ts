@@ -289,6 +289,19 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
           app.log.info(`[Bootstrap] Activated AI agent for user ${user.id}`);
         }
       }
+      // Clear stale error messages from previous provider (OpenAI -> Gemini migration)
+      const staleCount = await prisma.tradingBot.updateMany({
+        where: {
+          lastAction: { contains: 'OpenAI' },
+        },
+        data: {
+          lastAction: null,
+          status: 'IDLE',
+        },
+      });
+      if (staleCount.count > 0) {
+        app.log.info(`[Bootstrap] Cleared ${staleCount.count} stale OpenAI error messages from bots`);
+      }
     } catch (err) {
       app.log.error({ err }, 'Failed to bootstrap default bots/agents');
     }
