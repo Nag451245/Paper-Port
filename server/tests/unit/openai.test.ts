@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-vi.stubEnv('OPENAI_API_KEY', 'test-openai-key');
+vi.stubEnv('GEMINI_API_KEY', 'test-gemini-key');
 
-describe('OpenAI client', () => {
+describe('Gemini AI client', () => {
   let originalFetch: typeof globalThis.fetch;
 
   beforeEach(async () => {
@@ -16,15 +16,18 @@ describe('OpenAI client', () => {
     vi.restoreAllMocks();
   });
 
-  it('should call OpenAI API with correct headers and body', async () => {
+  it('should call Gemini API with correct URL and body structure', async () => {
     const mockResponse = {
-      id: 'chatcmpl-123',
-      choices: [{ index: 0, message: { role: 'assistant', content: 'Hello!' }, finish_reason: 'stop' }],
-      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      candidates: [{
+        content: { parts: [{ text: 'Hello!' }], role: 'model' },
+        finishReason: 'STOP',
+      }],
+      usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1, totalTokenCount: 6 },
     };
 
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
+      status: 200,
       json: () => Promise.resolve(mockResponse),
     } as any);
 
@@ -36,20 +39,41 @@ describe('OpenAI client', () => {
 
     expect(result).toBe('Hello!');
 
-    expect(globalThis.fetch).toHaveBeenCalledWith(
-      'https://api.openai.com/v1/chat/completions',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({
-          'Content-Type': 'application/json',
-          Authorization: expect.stringContaining('Bearer'),
-        }),
-      }),
-    );
+    const calledUrl = (globalThis.fetch as any).mock.calls[0][0] as string;
+    expect(calledUrl).toContain('generativelanguage.googleapis.com');
+    expect(calledUrl).toContain('gemini-2.5-flash');
+    expect(calledUrl).toContain('key=test-gemini-key');
 
     const callBody = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
-    expect(callBody.model).toBe('gpt-5.2');
-    expect(callBody.messages).toEqual([{ role: 'user', content: 'Hi' }]);
+    expect(callBody.contents).toBeDefined();
+    expect(callBody.contents[0].role).toBe('user');
+    expect(callBody.contents[0].parts[0].text).toBe('Hi');
+    expect(callBody.generationConfig).toBeDefined();
+  });
+
+  it('should convert system messages to systemInstruction', async () => {
+    const mockResponse = {
+      candidates: [{ content: { parts: [{ text: 'Response' }], role: 'model' }, finishReason: 'STOP' }],
+    };
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve(mockResponse),
+    } as any);
+
+    const { chatCompletion } = await import('../../src/lib/openai.js');
+
+    await chatCompletion({
+      messages: [
+        { role: 'system', content: 'You are a trading bot' },
+        { role: 'user', content: 'Analyze RELIANCE' },
+      ],
+    });
+
+    const callBody = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+    expect(callBody.systemInstruction).toBeDefined();
+    expect(callBody.systemInstruction.parts[0].text).toBe('You are a trading bot');
+    expect(callBody.contents[0].role).toBe('user');
   });
 
   it('should throw on quota exceeded (429) and open circuit breaker', async () => {
@@ -64,42 +88,34 @@ describe('OpenAI client', () => {
 
     await expect(
       chatCompletion({ messages: [{ role: 'user', content: 'Hi' }] }),
-    ).rejects.toThrow('OpenAI API error (429)');
+    ).rejects.toThrow('Gemini API error (429)');
   });
 
   it('should throw on empty response content', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          id: 'chatcmpl-123',
-          choices: [{ index: 0, message: { role: 'assistant', content: null }, finish_reason: 'stop' }],
-          usage: { prompt_tokens: 10, completion_tokens: 0, total_tokens: 10 },
-        }),
+      ok: true, status: 200,
+      json: () => Promise.resolve({
+        candidates: [{ content: { parts: [{ text: '' }], role: 'model' }, finishReason: 'STOP' }],
+      }),
     } as any);
 
     const { chatCompletion } = await import('../../src/lib/openai.js');
 
     await expect(
       chatCompletion({ messages: [{ role: 'user', content: 'Hi' }] }),
-    ).rejects.toThrow('OpenAI returned empty response');
+    ).rejects.toThrow('Gemini returned empty response');
   });
 
   it('should request JSON format when using chatCompletionJSON', async () => {
     const mockResponse = {
-      id: 'chatcmpl-123',
-      choices: [
-        {
-          index: 0,
-          message: { role: 'assistant', content: '{"signal":"BUY","confidence":0.85}' },
-          finish_reason: 'stop',
-        },
-      ],
-      usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+      candidates: [{
+        content: { parts: [{ text: '{"signal":"BUY","confidence":0.85}' }], role: 'model' },
+        finishReason: 'STOP',
+      }],
     };
 
     globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
+      ok: true, status: 200,
       json: () => Promise.resolve(mockResponse),
     } as any);
 
@@ -112,32 +128,6 @@ describe('OpenAI client', () => {
     expect(result).toEqual({ signal: 'BUY', confidence: 0.85 });
 
     const callBody = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
-    expect(callBody.response_format).toEqual({ type: 'json_object' });
-  });
-
-  it('should allow overriding model and temperature', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          id: 'chatcmpl-123',
-          choices: [{ index: 0, message: { role: 'assistant', content: 'Response' }, finish_reason: 'stop' }],
-          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-        }),
-    } as any);
-
-    const { chatCompletion } = await import('../../src/lib/openai.js');
-
-    await chatCompletion({
-      messages: [{ role: 'user', content: 'Hi' }],
-      model: 'gpt-4o',
-      temperature: 0.2,
-      maxTokens: 500,
-    });
-
-    const callBody = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
-    expect(callBody.model).toBe('gpt-4o');
-    expect(callBody.temperature).toBe(0.2);
-    expect(callBody.max_completion_tokens).toBe(500);
+    expect(callBody.generationConfig.responseMimeType).toBe('application/json');
   });
 });

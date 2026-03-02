@@ -152,7 +152,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         pingsSentToday: orchStatus.orchestrator.pingsSentToday,
         lastPingAt: orchStatus.orchestrator.lastPingAt,
       },
-      openai: getOpenAIStatus(),
+      ai: getOpenAIStatus(),
     };
   });
 

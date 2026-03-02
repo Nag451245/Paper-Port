@@ -13,6 +13,7 @@ const envSchema = z.object({
   DIRECT_URL: z.string().default(''),
   REDIS_URL: z.string().default(''),
   OPENAI_API_KEY: z.string().default(''),
+  GEMINI_API_KEY: z.string().default(''),
   BREEZE_API_KEY: z.string().default(''),
   BREEZE_SECRET_KEY: z.string().default(''),
   BREEZE_SESSION_TOKEN: z.string().default(''),
