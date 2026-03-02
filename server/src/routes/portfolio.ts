@@ -112,4 +112,16 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
       throw err;
     }
   });
+
+  app.post('/:portfolioId/reconcile', async (request, reply) => {
+    try {
+      const { portfolioId } = request.params as { portfolioId: string };
+      const userId = getUserId(request);
+      const result = await service.reconcileNav(portfolioId, userId);
+      return reply.send(result);
+    } catch (err) {
+      if (err instanceof PortfolioError) return reply.code(err.statusCode).send({ error: err.message });
+      throw err;
+    }
+  });
 }

@@ -255,6 +255,72 @@ export class PortfolioService {
       },
     });
   }
+
+  /**
+   * Recalculate currentNav from ground truth:
+   *   correctCash = initialCapital
+   *                 + sum(all closed trade netPnl)
+   *                 - sum(open LONG position entry costs)
+   *                 - sum(open SHORT position margin blocked)
+   *
+   * This fixes drift caused by partial failures in order execution.
+   */
+  async reconcileNav(portfolioId: string, userId: string): Promise<{ before: number; after: number; drift: number }> {
+    const portfolio = await this.getById(portfolioId, userId);
+    const initialCapital = Number(portfolio.initialCapital);
+    const beforeNav = Number(portfolio.currentNav);
+
+    // Sum of all realized P&L from closed trades
+    const allTrades = await this.prisma.trade.findMany({
+      where: { portfolioId },
+      select: { netPnl: true, totalCosts: true },
+    });
+    const totalRealizedPnl = allTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
+
+    // Sum of all transaction costs on orders (covers BUY costs on still-open positions)
+    const allOrders = await this.prisma.order.findMany({
+      where: { portfolioId, status: 'FILLED' },
+      select: { side: true, qty: true, avgFillPrice: true, totalCost: true },
+    });
+
+    // Cost locked in open positions
+    const openPositions = await this.prisma.position.findMany({
+      where: { portfolioId, status: 'OPEN' },
+    });
+
+    let lockedCapital = 0;
+    for (const pos of openPositions) {
+      const entryPrice = Number(pos.avgEntryPrice);
+      if (pos.side === 'LONG') {
+        lockedCapital += entryPrice * pos.qty;
+      } else {
+        // SHORT margin: 25% blocked
+        lockedCapital += entryPrice * pos.qty * 0.25;
+      }
+    }
+
+    // Transaction costs on BUY orders for open positions (approximation from order totalCost)
+    const openPositionBuyCosts = allOrders
+      .filter(o => o.side === 'BUY')
+      .reduce((sum, o) => sum + Number(o.totalCost), 0);
+    const closedTradeCosts = allTrades.reduce((sum, t) => sum + Number(t.totalCosts), 0);
+    // Costs on open positions ≈ total BUY costs - costs already accounted in closed trades
+    const openCosts = Math.max(0, openPositionBuyCosts - closedTradeCosts);
+
+    const correctCash = initialCapital + totalRealizedPnl - lockedCapital - openCosts;
+
+    await this.prisma.portfolio.update({
+      where: { id: portfolioId },
+      data: { currentNav: correctCash },
+    });
+
+    const drift = beforeNav - correctCash;
+    return {
+      before: Number(beforeNav.toFixed(2)),
+      after: Number(correctCash.toFixed(2)),
+      drift: Number(drift.toFixed(2)),
+    };
+  }
 }
 
 export class PortfolioError extends Error {

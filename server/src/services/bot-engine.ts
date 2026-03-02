@@ -847,13 +847,14 @@ Respond in JSON: {"signals": [{"symbol":"X","direction":"BUY|SELL","confidence":
     userId: string,
     botId: string,
   ): Promise<void> {
-    const shouldAutoExecute = bot.role === 'EXECUTOR';
+    const shouldAutoExecute = bot.role === 'EXECUTOR' || bot.role === 'SCANNER';
 
     for (const sig of rustSignals.slice(0, 3)) {
       const gptApproved = await this.gptValidateSignal(sig, bot, userId);
 
-      const finalConfidence = gptApproved ? sig.confidence : sig.confidence * 0.6;
-      const execute = shouldAutoExecute && finalConfidence >= 0.7;
+      // GPT rejection only reduces confidence by 20% (was 40%), so solid signals still execute
+      const finalConfidence = gptApproved ? sig.confidence : sig.confidence * 0.8;
+      const execute = shouldAutoExecute && finalConfidence >= 0.65;
 
       const signal = await this.prisma.aITradeSignal.create({
         data: {
@@ -1046,7 +1047,7 @@ INSTRUCTIONS:
     if (analysis.signals && analysis.signals.length > 0) {
       for (const sig of analysis.signals.slice(0, 5)) {
         if (sig.confidence >= 0.6 && (sig.direction === 'BUY' || sig.direction === 'SELL')) {
-          const shouldExecute = (bot.role === 'EXECUTOR' || bot.role === 'SCANNER') && sig.confidence >= 0.75;
+          const shouldExecute = (bot.role === 'EXECUTOR' || bot.role === 'SCANNER') && sig.confidence >= 0.65;
 
           const rationale = sig.entry
             ? `${sig.reason} | Entry: ₹${sig.entry} | SL: ₹${sig.stopLoss || 'N/A'} | Target: ₹${sig.target || 'N/A'} | R:R: ${sig.riskReward || 'N/A'}`
@@ -1164,13 +1165,13 @@ INSTRUCTIONS:
           }
 
           for (const sig of rustSignals.slice(0, 3)) {
-            if (sig.confidence < (config.minSignalScore || 0.7)) continue;
+            if (sig.confidence < (config.minSignalScore || 0.6)) continue;
             if (sig.direction !== 'BUY' && sig.direction !== 'SELL') continue;
 
             // Risk gate: block trades if drawdown is too high
             if (riskData && riskData.max_drawdown_percent > 10) continue;
 
-            const autoExecute = config.mode === 'AUTONOMOUS' && sig.confidence >= 0.8;
+            const autoExecute = config.mode === 'AUTONOMOUS' && sig.confidence >= 0.65;
 
             await this.prisma.aITradeSignal.create({
               data: {
@@ -1270,8 +1271,8 @@ Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted
 
       if (result.signals) {
         for (const sig of result.signals) {
-          if (sig.score >= (config.minSignalScore || 0.7) && (sig.direction === 'BUY' || sig.direction === 'SELL')) {
-            const autoExecute = config.mode === 'AUTONOMOUS' && sig.score >= 0.8;
+          if (sig.score >= (config.minSignalScore || 0.6) && (sig.direction === 'BUY' || sig.direction === 'SELL')) {
+            const autoExecute = config.mode === 'AUTONOMOUS' && sig.score >= 0.65;
 
             await this.prisma.aITradeSignal.create({
               data: {

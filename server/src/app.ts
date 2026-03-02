@@ -248,6 +248,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         if (existingBots === 0) {
           const defaultBots = [
             { name: 'Alpha Scanner', role: 'SCANNER', avatarEmoji: '🔍', assignedSymbols: 'RELIANCE,TCS,INFY,HDFCBANK,ITC,SBIN,BHARTIARTL,KOTAKBANK', description: 'Scans equities for breakouts and momentum patterns' },
+            { name: 'Auto Executor', role: 'EXECUTOR', avatarEmoji: '⚡', assignedSymbols: 'RELIANCE,TCS,INFY,HDFCBANK,ITC,SBIN,BHARTIARTL,KOTAKBANK', description: 'Executes trades automatically on high-confidence signals' },
             { name: 'Risk Sentinel', role: 'RISK_MANAGER', avatarEmoji: '🛡️', assignedSymbols: 'NIFTY 50,BANKNIFTY', description: 'Monitors portfolio risk, drawdowns, and position sizing' },
             { name: 'Strategy Analyst', role: 'ANALYST', avatarEmoji: '📊', assignedSymbols: 'RELIANCE,TCS,INFY,HDFCBANK', description: 'Provides in-depth technical analysis and recommendations' },
           ];
@@ -265,7 +266,27 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
               },
             });
           }
-          app.log.info(`[Bootstrap] Created 3 default bots for user ${user.id}`);
+          app.log.info(`[Bootstrap] Created 4 default bots for user ${user.id}`);
+        } else {
+          // Ensure an EXECUTOR bot exists for users who already have bots
+          const hasExecutor = await prisma.tradingBot.findFirst({
+            where: { userId: user.id, role: 'EXECUTOR' },
+          });
+          if (!hasExecutor) {
+            await prisma.tradingBot.create({
+              data: {
+                userId: user.id,
+                name: 'Auto Executor',
+                role: 'EXECUTOR',
+                avatarEmoji: '⚡',
+                assignedSymbols: 'RELIANCE,TCS,INFY,HDFCBANK,ITC,SBIN,BHARTIARTL,KOTAKBANK',
+                description: 'Executes trades automatically on high-confidence signals',
+                status: 'RUNNING',
+                isActive: true,
+              },
+            });
+            app.log.info(`[Bootstrap] Added missing EXECUTOR bot for user ${user.id}`);
+          }
         }
 
         const existingAgent = await prisma.aIAgentConfig.findUnique({ where: { userId: user.id } });
@@ -368,6 +389,27 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       }
     } catch (err) {
       app.log.error({ err }, 'Failed to auto-resume bots/agents');
+    }
+  });
+
+  // Reconcile portfolio NAV on startup to fix any drift from partial failures
+  app.addHook('onReady', async () => {
+    const prisma = getPrisma();
+    try {
+      const portfolios = await prisma.portfolio.findMany({
+        select: { id: true, userId: true },
+      });
+      const portfolioService = new (await import('./services/portfolio.service.js')).PortfolioService(prisma);
+      for (const p of portfolios) {
+        try {
+          const result = await portfolioService.reconcileNav(p.id, p.userId);
+          if (Math.abs(result.drift) > 1) {
+            app.log.info(`[Reconcile] Portfolio ${p.id}: corrected ₹${result.drift.toFixed(2)} drift (${result.before} → ${result.after})`);
+          }
+        } catch { /* skip individual portfolio errors */ }
+      }
+    } catch (err) {
+      app.log.error({ err }, 'Failed to reconcile portfolios');
     }
   });
 
