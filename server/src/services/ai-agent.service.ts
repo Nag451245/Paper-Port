@@ -160,12 +160,18 @@ Respond in JSON:
       this.prisma.aITradeSignal.count({ where: { userId, status: 'EXECUTED', createdAt: { gte: todayStart } } }),
     ]);
 
+    let rustEngineActive = false;
+    try {
+      rustEngineActive = isEngineAvailable();
+    } catch { /* skip */ }
+
     return {
       isActive: config.isActive,
       mode: config.mode,
       todaySignals,
       todayTrades,
       uptime: config.isActive ? Date.now() - config.updatedAt.getTime() : 0,
+      rustEngine: rustEngineActive,
     };
   }
 

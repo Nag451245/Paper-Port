@@ -184,6 +184,15 @@ export default function Dashboard() {
                 {status?.uptime ? `${Math.floor(status.uptime / 3600)}h ${Math.floor((status.uptime % 3600) / 60)}m` : '—'}
               </p>
             </div>
+            <div className={`rounded-xl p-2.5 ${status?.rustEngine ? 'bg-orange-50 border border-orange-200' : 'bg-slate-50'}`}>
+              <p className="text-xs text-slate-500">Rust Engine</p>
+              <div className="flex items-center gap-1.5">
+                <div className={`w-2 h-2 rounded-full ${status?.rustEngine ? 'bg-orange-500 animate-pulse' : 'bg-slate-300'}`} />
+                <p className={`text-sm font-semibold ${status?.rustEngine ? 'text-orange-600' : 'text-slate-400'}`}>
+                  {status?.rustEngine ? 'Active' : 'JS Fallback'}
+                </p>
+              </div>
+            </div>
           </div>
         </div>
 

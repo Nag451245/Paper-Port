@@ -61,6 +61,7 @@ export const useAIAgentStore = create<AIAgentState>((set) => ({
           uptime: raw.uptime ?? 0,
           todaySignals: raw.todaySignals ?? 0,
           todayTrades: raw.todayTrades ?? 0,
+          rustEngine: Boolean(raw.rustEngine ?? false),
         },
       });
     } catch { /* silently fail */ }
