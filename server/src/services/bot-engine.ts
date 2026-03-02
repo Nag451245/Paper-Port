@@ -23,44 +23,80 @@ interface RunningAgent {
 }
 
 const ROLE_PROMPTS: Record<string, string> = {
-  SCANNER: `You are a trading SCANNER bot for the Indian markets (NSE, BSE, MCX, CDS/Forex).
-Analyze the provided market data and identify actionable BUY and SELL opportunities.
-In a falling market, aggressively look for SHORT/SELL opportunities on weak stocks.
-In a rising market, look for BUY opportunities on strong momentum stocks.
-Look for: breakouts, breakdowns, volume spikes, support/resistance tests, momentum shifts, gap-ups, gap-downs.
-Be specific with instrument names, prices, exchange, direction (BUY or SELL), and why.
-Stocks CAN be shorted — a SELL signal means "short this stock for profit as it falls".`,
+  SCANNER: `You are an expert equity SCANNER bot for the Indian markets (NSE/BSE).
+You perform REAL technical analysis on live market data. You are NOT a generic chatbot — you are a professional trading tool.
 
-  ANALYST: `You are a trading ANALYST bot for the Indian markets (NSE, BSE, MCX, CDS/Forex).
-Provide in-depth analysis of the instruments given to you — equities, commodities, or currency pairs.
-Cover: technical indicators, trend strength, key levels, risk/reward ratio.
-Give a clear BUY/SELL/HOLD recommendation with entry, stop-loss, and target.`,
+Your analysis MUST include:
+- Exact price levels (support, resistance, entry, stop-loss, target) with ₹ values
+- Volume analysis: is today's volume above/below average? Unusual activity?
+- Price action: gap up/down from previous close, intraday range, trend direction
+- Momentum: is the stock accelerating or decelerating in its move?
+- Risk/reward ratio for each signal (e.g. "R:R = 1:2.5")
 
-  EXECUTOR: `You are a trade EXECUTOR bot.
-Monitor signals and decide execution timing.
-Evaluate: current price vs signal entry, slippage risk, market conditions.
-Report what you would execute and why, or why you'd wait.`,
+Rules:
+- In a FALLING market (NIFTY down >0.5%), prioritize SELL/SHORT signals on weak stocks breaking support
+- In a RISING market (NIFTY up >0.5%), prioritize BUY signals on stocks breaking out with volume
+- Stocks CAN be shorted (SELL = short for profit). This is paper trading, be aggressive
+- ALWAYS generate 2-5 signals with specific entry, stop-loss, and target prices
+- Use the actual price data provided — never make up prices`,
 
-  RISK_MANAGER: `You are a RISK MANAGER bot.
-Analyze the portfolio positions and identify risks.
-Check: position concentration, sector exposure, drawdown levels, P&L alerts.
-Flag any rule violations or concerning patterns.`,
+  ANALYST: `You are a professional technical ANALYST bot for the Indian markets.
+You provide institutional-grade analysis with specific price levels and actionable recommendations.
 
-  STRATEGIST: `You are a STRATEGIST bot for trading.
-Review recent trade performance and market regime.
-Suggest strategy adjustments: which strategies to enable/disable,
-parameter tweaks, new opportunities to explore.`,
+Your analysis MUST include for each stock:
+- Current trend (bullish/bearish/sideways) with reasoning from price data
+- Key support and resistance levels derived from the price data (OHLC)
+- Entry price, stop-loss, and target with exact ₹ values
+- Risk/reward ratio
+- Volume confirmation (high volume = strong signal, low volume = weak signal)
+- A clear BUY/SELL/HOLD recommendation with confidence score (0.0-1.0)
 
-  MONITOR: `You are a portfolio MONITOR bot.
-Track open positions and report significant price movements.
-Alert on: positions hitting stop-loss, target reached, unusual volume,
-or any position requiring attention.`,
+Do NOT give vague analysis. Every statement must reference actual numbers from the data.`,
 
-  FNO_STRATEGIST: `You are an F&O STRATEGIST bot for the Indian derivatives market (NSE F&O).
-Analyze options chain data, IV, OI patterns, PCR, and max pain to recommend multi-leg options strategies.
-Evaluate: Iron Condors, Straddles, Strangles, Bull/Bear Spreads, Butterflies, Calendar Spreads.
-Consider: IV percentile, OI build-up/unwinding, PCR trends, VIX levels, and time decay.
-Give specific strike prices, expiry, position sizing, and risk/reward for each recommendation.`,
+  EXECUTOR: `You are a trade EXECUTOR bot for paper trading.
+When you see a high-confidence signal (>0.8), EXECUTE the trade immediately.
+Evaluate: current price vs entry, slippage risk, position sizing (max 10% of capital per trade).
+Report executed trades with exact quantities, prices, and reasoning.
+Be aggressive in paper trading — the purpose is to learn and test strategies.`,
+
+  RISK_MANAGER: `You are a professional RISK MANAGER bot.
+Analyze portfolio positions with quantitative rigor:
+- Position sizing: is any single position >15% of portfolio? Flag it.
+- Sector concentration: are we overexposed to any sector?
+- Drawdown: calculate unrealized loss as % of portfolio. Alert if >5%.
+- Correlation risk: multiple positions in same direction in correlated stocks.
+- Stop-loss compliance: are all positions within acceptable loss limits?
+Give specific numbers and percentages, not vague warnings.`,
+
+  STRATEGIST: `You are an advanced STRATEGIST bot.
+Analyze the current market regime and recommend strategy adjustments:
+- Is the market trending or range-bound? (use NIFTY data)
+- Which sectors are showing relative strength/weakness?
+- Should we be more defensive (reduce position sizes, tighter stops)?
+- Or more aggressive (larger positions, wider stops for momentum)?
+- Specific parameter suggestions with numbers (e.g. "tighten stops to 1.5% from 2%")`,
+
+  MONITOR: `You are a real-time portfolio MONITOR bot.
+For each open position, report:
+- Current P&L in ₹ and %
+- Distance from stop-loss and target
+- Whether the trade thesis is still valid based on current price action
+- Any positions that need immediate attention (hitting stop, unusual volume)
+Use actual prices from the data — never estimate or approximate.`,
+
+  FNO_STRATEGIST: `You are an expert F&O STRATEGIST for Indian derivatives (NSE F&O).
+Analyze options chain, IV, OI patterns, PCR, and max pain for actionable strategies.
+
+Your analysis MUST include:
+- Current IV percentile and whether options are cheap/expensive
+- PCR (Put-Call Ratio) and what it signals about market sentiment
+- Max pain level and its significance for the current expiry
+- OI build-up analysis: which strikes have highest OI and what it means
+- Specific strategy recommendations with exact strikes, lots, premium, max profit, max loss, and breakeven
+- Risk/reward ratio for each strategy
+
+Strategies to consider: Iron Condors, Straddles, Strangles, Bull/Bear Spreads, Butterflies, Calendar Spreads.
+Give specific strike prices and expiry dates — never be vague.`,
 };
 
 export interface MarketScanSignal {
@@ -391,10 +427,12 @@ export class BotEngine {
       // --- GPT fallback: runs when Rust is unavailable OR Rust produced no signals ---
       if (signals.length === 0 && uniqueSymbols.length > 0) {
         try {
-          const topMovers = uniqueSymbols.slice(0, 10);
-          const moverSummary = topMovers.map(m =>
-            `${m.symbol} (${(m as any).moverType}): ₹${m.ltp.toFixed(2)} (${m.changePercent >= 0 ? '+' : ''}${m.changePercent.toFixed(1)}%) Vol: ${m.volume}`
-          ).join('\n');
+          const topMovers = uniqueSymbols.slice(0, 15);
+          const moverSummary = topMovers.map(m => {
+            const dayRange = m.high > 0 ? `Range: ₹${m.low.toFixed(2)}-₹${m.high.toFixed(2)}` : '';
+            const volStr = m.volume > 0 ? `Vol: ${(m.volume / 100000).toFixed(1)}L` : '';
+            return `${m.symbol} (${(m as any).moverType}): ₹${m.ltp.toFixed(2)} (${m.changePercent >= 0 ? '+' : ''}${m.changePercent.toFixed(1)}%) | Open: ₹${m.open.toFixed(2)} | PrevClose: ₹${m.previousClose.toFixed(2)} | ${dayRange} | ${volStr}`;
+          }).join('\n');
 
           const gptResult = await chatCompletionJSON<{
             signals: Array<{
@@ -408,12 +446,24 @@ export class BotEngine {
             }>;
           }>({
             messages: [
-              { role: 'system', content: `You are a market scanner for Indian equities (NSE). Analyze the top movers and identify 1-5 actionable trade signals.
-Generate BOTH BUY and SELL signals. In a falling market, prioritize SELL/SHORT signals. In a rising market, prioritize BUY signals.
-Look for: breakouts, breakdowns, volume spikes, support/resistance tests, momentum shifts, gap-ups, gap-downs.
-Respond in JSON: {"signals": [{"symbol":"X","direction":"BUY|SELL","confidence":0.0-1.0,"entry":price,"stopLoss":price,"target":price,"reason":"brief reason"}]}
-Always generate at least 1 signal if any stock has moved >1%.` },
-              { role: 'user', content: `Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n\nTop Movers:\n${moverSummary}\n\nScan for actionable BUY and SELL signals.` },
+              { role: 'system', content: `You are a professional market scanner for Indian equities (NSE).
+Analyze the top movers and generate 3-5 actionable trade signals with precise price levels.
+
+For each signal, you MUST provide:
+- entry: the exact price to enter (use current LTP or a level nearby)
+- stopLoss: a specific price level (typically 1-2% from entry for intraday)
+- target: a specific price level (minimum 1:1.5 risk/reward ratio)
+- reason: a technical reason referencing actual prices and patterns from the data
+
+Rules:
+- In a falling market, generate MORE SELL/SHORT signals
+- In a rising market, generate MORE BUY signals
+- Use the actual OHLC data to set stop-loss at previous support/resistance
+- Calculate risk/reward: (target-entry)/(entry-stopLoss) should be >= 1.5
+- This is paper trading — be aggressive, generate at least 3 signals
+
+Respond in JSON: {"signals": [{"symbol":"X","direction":"BUY|SELL","confidence":0.0-1.0,"entry":price,"stopLoss":price,"target":price,"reason":"specific technical reason"}]}` },
+              { role: 'user', content: `Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n\nTop Movers:\n${moverSummary}\n\nGenerate detailed trade signals with entry, stop-loss, and target prices.` },
             ],
             temperature: 0.3,
             maxTokens: 2048,
@@ -913,25 +963,34 @@ Approve or reject?` },
     const systemPrompt = ROLE_PROMPTS[bot.role] || ROLE_PROMPTS.SCANNER;
 
     const responseFormat = bot.role === 'FNO_STRATEGIST'
-      ? `Respond in JSON: { "message": "your analysis (2-4 sentences)", "messageType": "signal|alert|info", "action": "short description", "signals": [{"symbol":"X","direction":"BUY_CE|BUY_PE|SELL_CE|SELL_PE|IRON_CONDOR|STRADDLE|STRANGLE|BULL_SPREAD|BEAR_SPREAD|BUY|SELL|HOLD","confidence":0.0-1.0,"reason":"why","strategy":"strategy name","legs":[{"type":"CE|PE","strike":0,"action":"BUY|SELL","qty":1}]}] }`
-      : `Respond in JSON: { "message": "your analysis (2-4 sentences)", "messageType": "signal|alert|info", "action": "short description of what you did", "signals": [{"symbol":"X","direction":"BUY|SELL|HOLD","confidence":0.0-1.0,"reason":"why"}] }`;
+      ? `Respond in JSON: { "message": "detailed analysis (5-8 sentences with specific price levels and reasoning)", "messageType": "signal|alert|info", "action": "1-line summary with key numbers", "signals": [{"symbol":"X","direction":"BUY_CE|BUY_PE|SELL_CE|SELL_PE|IRON_CONDOR|STRADDLE|STRANGLE|BULL_SPREAD|BEAR_SPREAD|BUY|SELL|HOLD","confidence":0.0-1.0,"entry":price,"stopLoss":price,"target":price,"reason":"technical reason with specific levels","strategy":"strategy name","riskReward":"1:2.5","legs":[{"type":"CE|PE","strike":0,"action":"BUY|SELL","qty":1}]}] }`
+      : `Respond in JSON: { "message": "detailed analysis (5-8 sentences referencing actual prices, volumes, trends, support/resistance levels)", "messageType": "signal|alert|info", "action": "1-line summary e.g. 'SELL RELIANCE @1350 SL:1375 TGT:1310 (R:R 1:1.6)'", "signals": [{"symbol":"X","direction":"BUY|SELL","confidence":0.0-1.0,"entry":current_price,"stopLoss":price,"target":price,"reason":"specific technical reason with price levels","riskReward":"1:2.5"}] }`;
 
     const analysis = await chatCompletionJSON<{
       message: string;
       messageType: string;
       action?: string;
-      signals?: Array<{ symbol: string; direction: string; confidence: number; reason: string; strategy?: string; legs?: any[] }>;
+      signals?: Array<{ symbol: string; direction: string; confidence: number; entry?: number; stopLoss?: number; target?: number; reason: string; riskReward?: string; strategy?: string; legs?: any[] }>;
     }>({
       messages: [
         { role: 'system', content: `${systemPrompt}\n${responseFormat}` },
         { role: 'user', content: `Bot: ${bot.name} | Strategy: ${bot.assignedStrategy || 'General'}
 Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
-Market Data:\n${quotes}${fnoContext}
+
+${quotes}${fnoContext}
 ${positions ? `\nOpen Positions:\n${positions}` : ''}
-Analyze the data. Generate BUY or SELL signals where you see opportunities. Stocks can be shorted (SELL without holding). Be proactive — if a stock is falling hard, generate a SELL signal. If rising, generate BUY. Always provide at least 1 signal if any stock has moved >1%.` },
+
+INSTRUCTIONS:
+1. Analyze each stock's price action, volume, and 5-day trend from the data above
+2. Identify stocks with the strongest moves (>1% change or unusual volume)
+3. Generate 2-5 actionable signals with EXACT entry, stop-loss, and target prices
+4. For each signal, calculate risk/reward ratio
+5. Your message MUST reference specific prices and percentages from the data
+6. This is PAPER TRADING — be aggressive and decisive, not cautious
+7. Include both BUY and SELL signals as appropriate for the market condition` },
       ],
-      temperature: 0.5,
-      maxTokens: 2048,
+      temperature: 0.4,
+      maxTokens: 4096,
     });
 
     if (analysis.message) {
@@ -955,9 +1014,13 @@ Analyze the data. Generate BUY or SELL signals where you see opportunities. Stoc
     });
 
     if (analysis.signals && analysis.signals.length > 0) {
-      for (const sig of analysis.signals.slice(0, 3)) {
-        if (sig.confidence >= 0.7 && (sig.direction === 'BUY' || sig.direction === 'SELL')) {
-          const shouldExecute = bot.role === 'EXECUTOR' && sig.confidence >= 0.8;
+      for (const sig of analysis.signals.slice(0, 5)) {
+        if (sig.confidence >= 0.6 && (sig.direction === 'BUY' || sig.direction === 'SELL')) {
+          const shouldExecute = (bot.role === 'EXECUTOR' || bot.role === 'SCANNER') && sig.confidence >= 0.75;
+
+          const rationale = sig.entry
+            ? `${sig.reason} | Entry: ₹${sig.entry} | SL: ₹${sig.stopLoss || 'N/A'} | Target: ₹${sig.target || 'N/A'} | R:R: ${sig.riskReward || 'N/A'}`
+            : sig.reason;
 
           await this.prisma.aITradeSignal.create({
             data: {
@@ -965,25 +1028,39 @@ Analyze the data. Generate BUY or SELL signals where you see opportunities. Stoc
               symbol: sig.symbol,
               signalType: sig.direction,
               compositeScore: sig.confidence,
-              gateScores: JSON.stringify({ source: 'gpt-fallback', botId, botRole: bot.role }),
+              gateScores: JSON.stringify({
+                source: 'gemini-analysis', botId, botRole: bot.role,
+                entry: sig.entry, stopLoss: sig.stopLoss, target: sig.target,
+              }),
               strategyId: bot.assignedStrategy || null,
-              rationale: sig.reason,
+              rationale,
               status: shouldExecute ? 'EXECUTED' : 'PENDING',
               executedAt: shouldExecute ? new Date() : null,
               expiresAt: new Date(Date.now() + 4 * 60 * 60_000),
             },
           });
 
+          // Post individual signal as a bot message for visibility
+          const signalMsg = `${sig.direction} ${sig.symbol} @ ₹${sig.entry || '?'} | SL: ₹${sig.stopLoss || '?'} | TGT: ₹${sig.target || '?'} | Confidence: ${(sig.confidence * 100).toFixed(0)}% | ${sig.reason}`;
+          await this.prisma.botMessage.create({
+            data: {
+              fromBotId: botId,
+              userId,
+              messageType: 'signal',
+              content: signalMsg,
+            },
+          });
+
           if (shouldExecute) {
-            const result = await this.executeTrade(userId, sig.symbol, sig.direction as 'BUY' | 'SELL', sig.reason, botId);
+            const result = await this.executeTrade(userId, sig.symbol, sig.direction as 'BUY' | 'SELL', rationale, botId);
             await this.prisma.botMessage.create({
               data: {
                 fromBotId: botId,
                 userId,
                 messageType: result.success ? 'signal' : 'alert',
                 content: result.success
-                  ? `EXECUTED ${sig.direction}: ${result.message}`
-                  : `Failed to execute ${sig.direction} ${sig.symbol}: ${result.message}`,
+                  ? `✅ EXECUTED ${sig.direction} ${sig.symbol}: ${result.message}`
+                  : `❌ Failed ${sig.direction} ${sig.symbol}: ${result.message}`,
               },
             });
           }
@@ -1206,22 +1283,68 @@ Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted
 
   private async fetchQuotes(symbols: string[]): Promise<string> {
     const lines: string[] = [];
+
+    // Fetch NIFTY 50 as market context
+    try {
+      const nifty = await Promise.race([
+        this.marketData.getQuote('NIFTY 50'),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000)),
+      ]);
+      if (nifty.ltp > 0) {
+        const trend = nifty.changePercent < -0.5 ? 'BEARISH' : nifty.changePercent > 0.5 ? 'BULLISH' : 'SIDEWAYS';
+        lines.push(`=== MARKET CONTEXT ===`);
+        lines.push(`NIFTY 50: ₹${nifty.ltp.toFixed(2)} (${nifty.change >= 0 ? '+' : ''}${nifty.change.toFixed(2)}, ${nifty.changePercent >= 0 ? '+' : ''}${nifty.changePercent.toFixed(2)}%) | Day Range: ₹${nifty.low.toFixed(2)}-₹${nifty.high.toFixed(2)} | Prev Close: ₹${nifty.close.toFixed(2)} | Trend: ${trend}`);
+        lines.push('');
+      }
+    } catch { /* skip nifty context */ }
+
+    lines.push(`=== STOCK DATA ===`);
+
+    const toDate = new Date().toISOString().split('T')[0];
+    const fromDate = new Date(Date.now() - 7 * 86_400_000).toISOString().split('T')[0];
+
     for (const sym of symbols.slice(0, MAX_CANDLE_SYMBOLS)) {
       try {
-        const quote = await Promise.race([
-          this.marketData.getQuote(sym),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000)),
+        const [quote, history] = await Promise.all([
+          Promise.race([
+            this.marketData.getQuote(sym),
+            new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000)),
+          ]),
+          Promise.race([
+            this.marketData.getHistory(sym, '1day', fromDate, toDate),
+            new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000)),
+          ]).catch(() => []),
         ]);
+
         if (quote.ltp > 0) {
-          lines.push(`${sym}: ₹${quote.ltp.toFixed(2)} (${quote.change >= 0 ? '+' : ''}${quote.change.toFixed(2)}, ${quote.changePercent >= 0 ? '+' : ''}${quote.changePercent.toFixed(2)}%) Vol: ${quote.volume}`);
+          const dayRange = quote.high > 0 ? `Day: ₹${quote.low.toFixed(2)}-₹${quote.high.toFixed(2)}` : '';
+          const volStr = quote.volume > 0 ? `Vol: ${(quote.volume / 100000).toFixed(1)}L` : 'Vol: N/A';
+
+          let historyStr = '';
+          if (Array.isArray(history) && history.length >= 2) {
+            const recent = history.slice(-5);
+            const avgVol = recent.reduce((s, b) => s + b.volume, 0) / recent.length;
+            const volRatio = avgVol > 0 ? (quote.volume / avgVol) : 0;
+            const fiveDayHigh = Math.max(...recent.map(b => b.high));
+            const fiveDayLow = Math.min(...recent.map(b => b.low));
+            const priceRange = `5D-Range: ₹${fiveDayLow.toFixed(2)}-₹${fiveDayHigh.toFixed(2)}`;
+            const volSignal = volRatio > 1.5 ? '🔥HIGH' : volRatio < 0.5 ? 'LOW' : 'NORMAL';
+            const trend5d = recent.length >= 2 ? (recent[recent.length - 1].close > recent[0].close ? '↑UP' : '↓DOWN') : '';
+            historyStr = ` | ${priceRange} | VolRatio: ${volRatio.toFixed(1)}x (${volSignal}) | 5D-Trend: ${trend5d}`;
+
+            const closes = recent.map(b => `₹${b.close.toFixed(2)}`).join('→');
+            historyStr += ` | Closes: ${closes}`;
+          }
+
+          lines.push(`${sym}: ₹${quote.ltp.toFixed(2)} (${quote.change >= 0 ? '+' : ''}${quote.change.toFixed(2)}, ${quote.changePercent >= 0 ? '+' : ''}${quote.changePercent.toFixed(2)}%) | Open: ₹${quote.open.toFixed(2)} | ${dayRange} | ${volStr}${historyStr}`);
         } else {
-          lines.push(`${sym}: price data not available right now`);
+          lines.push(`${sym}: price data not available`);
         }
       } catch {
-        lines.push(`${sym}: price data not available right now`);
+        lines.push(`${sym}: data temporarily unavailable`);
       }
     }
-    return lines.join('\n') || 'Market data temporarily unavailable — analyze based on general knowledge';
+    return lines.join('\n');
   }
 
   private async getPortfolioPositions(userId: string): Promise<string> {
