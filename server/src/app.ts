@@ -445,6 +445,24 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }, 30_000);
   });
 
+  // Match pending orders every minute during market hours
+  app.addHook('onReady', async () => {
+    const prisma = getPrisma();
+    const { TradeService } = await import('./services/trade.service.js');
+    const tradeService = new TradeService(prisma);
+
+    orchestrator.scheduleMarketDay('* 9-15 * * 1-5', async () => {
+      try {
+        const result = await tradeService.matchPendingOrders();
+        if (result.matched > 0 || result.failed > 0) {
+          app.log.info(`[OrderMatcher] Matched: ${result.matched}, Failed: ${result.failed}`);
+        }
+      } catch (err) {
+        app.log.error({ err }, '[OrderMatcher] Failed to match pending orders');
+      }
+    });
+  });
+
   // Auto-populate watchlist from open positions for users with empty watchlists
   app.addHook('onReady', async () => {
     const prisma = getPrisma();

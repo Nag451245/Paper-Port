@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
+import { MarketCalendar } from './market-calendar.js';
 type OrderSide = string;
 type OrderType = string;
 type Exchange = string;
@@ -149,12 +150,14 @@ function simulateExecution(
 
 export class TradeService {
   private marketData: MarketDataService;
+  private calendar: MarketCalendar;
 
   constructor(private prisma: PrismaClient) {
     this.marketData = new MarketDataService();
+    this.calendar = new MarketCalendar();
   }
 
-  async placeOrder(userId: string, input: PlaceOrderInput) {
+  async placeOrder(userId: string, input: PlaceOrderInput, skipMarketCheck = false) {
     const portfolio = await this.prisma.portfolio.findUnique({
       where: { id: input.portfolioId },
     });
@@ -163,10 +166,66 @@ export class TradeService {
       throw new TradeError('Portfolio not found', 404);
     }
 
+    const exchange = input.exchange ?? 'NSE';
+    const marketOpen = skipMarketCheck || this.calendar.isMarketOpen(exchange);
+
     let fillPrice = input.price ?? 0;
 
+    // If market is closed, queue ALL orders as PENDING (like a real broker's AMO)
+    if (!marketOpen) {
+      // Get indicative price for validation
+      let indicativePrice = fillPrice;
+      if (indicativePrice <= 0) {
+        try {
+          const quote = await this.marketData.getQuote(input.symbol, exchange);
+          indicativePrice = quote.ltp;
+        } catch { /* use 0, will validate on fill */ }
+      }
+
+      // Basic capital validation even for pending orders
+      if (indicativePrice > 0) {
+        const estCosts = calculateCosts(input.qty, indicativePrice, input.side, exchange);
+        const estValue = indicativePrice * input.qty + estCosts.totalCost;
+        const availableCash = Number(portfolio.currentNav);
+
+        if (input.side === 'BUY') {
+          const existingShort = await this.prisma.position.findFirst({
+            where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'SHORT', status: 'OPEN' },
+          });
+          if (!existingShort && estValue > availableCash) {
+            throw new TradeError(
+              `Insufficient capital. Need ₹${estValue.toFixed(0)} but only ₹${availableCash.toFixed(0)} available.`,
+              400,
+            );
+          }
+        }
+      }
+
+      const order = await this.prisma.order.create({
+        data: {
+          portfolioId: input.portfolioId,
+          instrumentToken: input.instrumentToken,
+          symbol: input.symbol,
+          exchange,
+          orderType: input.orderType === 'MARKET' ? 'MARKET' : 'LIMIT',
+          side: input.side,
+          qty: input.qty,
+          price: indicativePrice > 0 ? indicativePrice : (input.price ?? null),
+          triggerPrice: input.triggerPrice,
+          status: 'PENDING',
+          filledQty: 0,
+          avgFillPrice: null,
+          brokerage: 0, stt: 0, exchangeCharges: 0, gst: 0, sebiCharges: 0, stampDuty: 0, totalCost: 0,
+          filledAt: null,
+        },
+      });
+
+      return { ...order, _pendingReason: 'Market is closed. Order will be executed when market opens and price matches.' };
+    }
+
+    // Market is open -- execute normally
     if (input.orderType === 'MARKET' && fillPrice <= 0) {
-      const quote = await this.marketData.getQuote(input.symbol, input.exchange ?? 'NSE');
+      const quote = await this.marketData.getQuote(input.symbol, exchange);
       fillPrice = quote.ltp;
       if (fillPrice <= 0) {
         throw new TradeError(
@@ -177,17 +236,16 @@ export class TradeService {
       }
     }
 
-    const execSim = simulateExecution(fillPrice, input.qty, input.side as 'BUY' | 'SELL', input.exchange ?? 'NSE', input.orderType);
+    const execSim = simulateExecution(fillPrice, input.qty, input.side as 'BUY' | 'SELL', exchange, input.orderType);
     fillPrice = execSim.fillPrice;
     const effectiveQty = execSim.filledQty;
 
-    const costs = calculateCosts(effectiveQty, fillPrice, input.side, input.exchange ?? 'NSE');
+    const costs = calculateCosts(effectiveQty, fillPrice, input.side, exchange);
 
     const totalValue = fillPrice * input.qty + costs.totalCost;
     const availableCash = Number(portfolio.currentNav);
 
     if (input.side === 'BUY') {
-      // BUY needs full capital unless closing a SHORT (which releases margin)
       const existingShort = await this.prisma.position.findFirst({
         where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'SHORT', status: 'OPEN' },
       });
@@ -198,12 +256,11 @@ export class TradeService {
         );
       }
     } else {
-      // SELL: if no LONG position exists, this will be a short -- check margin
       const existingLong = await this.prisma.position.findFirst({
         where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'LONG', status: 'OPEN' },
       });
       if (!existingLong) {
-        const marginRequired = this.shortMarginRequired(fillPrice, input.qty, input.exchange ?? 'NSE') + costs.totalCost;
+        const marginRequired = this.shortMarginRequired(fillPrice, input.qty, exchange) + costs.totalCost;
         if (marginRequired > availableCash) {
           throw new TradeError(
             `Insufficient margin for short. Need ₹${marginRequired.toFixed(0)} but only ₹${availableCash.toFixed(0)} available.`,
@@ -218,7 +275,7 @@ export class TradeService {
         portfolioId: input.portfolioId,
         instrumentToken: input.instrumentToken,
         symbol: input.symbol,
-        exchange: input.exchange ?? 'NSE',
+        exchange,
         orderType: input.orderType,
         side: input.side,
         qty: input.qty,
@@ -686,6 +743,120 @@ export class TradeService {
     }
 
     return trade;
+  }
+
+  /**
+   * Match pending orders against current market prices.
+   * - MARKET orders placed after hours: fill at current LTP when market opens
+   * - LIMIT BUY orders: fill when LTP <= order price
+   * - LIMIT SELL orders: fill when LTP >= order price
+   */
+  async matchPendingOrders(): Promise<{ matched: number; failed: number }> {
+    if (!this.calendar.isMarketOpen()) return { matched: 0, failed: 0 };
+
+    const pendingOrders = await this.prisma.order.findMany({
+      where: { status: 'PENDING' },
+      include: { portfolio: true },
+      take: 50,
+    });
+
+    let matched = 0;
+    let failed = 0;
+
+    for (const order of pendingOrders) {
+      try {
+        let ltp = 0;
+        try {
+          const quote = await this.marketData.getQuote(order.symbol, order.exchange);
+          ltp = quote.ltp;
+        } catch { continue; }
+
+        if (ltp <= 0) continue;
+
+        const orderPrice = Number(order.price ?? 0);
+        let shouldFill = false;
+
+        if (order.orderType === 'MARKET') {
+          // MARKET orders placed after hours -- fill at current LTP
+          shouldFill = true;
+        } else {
+          // LIMIT orders -- check if price condition is met
+          if (order.side === 'BUY' && ltp <= orderPrice) shouldFill = true;
+          if (order.side === 'SELL' && ltp >= orderPrice) shouldFill = true;
+        }
+
+        if (!shouldFill) continue;
+
+        const fillPrice = order.orderType === 'MARKET' ? ltp : orderPrice;
+        const costs = calculateCosts(order.qty, fillPrice, order.side, order.exchange);
+
+        // Re-validate capital
+        const portfolio = await this.prisma.portfolio.findUnique({ where: { id: order.portfolioId } });
+        if (!portfolio) continue;
+
+        const totalValue = fillPrice * order.qty + costs.totalCost;
+        const availableCash = Number(portfolio.currentNav);
+
+        if (order.side === 'BUY') {
+          const existingShort = await this.prisma.position.findFirst({
+            where: { portfolioId: order.portfolioId, symbol: order.symbol, side: 'SHORT', status: 'OPEN' },
+          });
+          if (!existingShort && totalValue > availableCash) {
+            await this.prisma.order.update({
+              where: { id: order.id },
+              data: { status: 'REJECTED' },
+            });
+            failed++;
+            continue;
+          }
+        } else {
+          const existingLong = await this.prisma.position.findFirst({
+            where: { portfolioId: order.portfolioId, symbol: order.symbol, side: 'LONG', status: 'OPEN' },
+          });
+          if (!existingLong) {
+            const marginRequired = this.shortMarginRequired(fillPrice, order.qty, order.exchange) + costs.totalCost;
+            if (marginRequired > availableCash) {
+              await this.prisma.order.update({
+                where: { id: order.id },
+                data: { status: 'REJECTED' },
+              });
+              failed++;
+              continue;
+            }
+          }
+        }
+
+        // Fill the order
+        await this.prisma.order.update({
+          where: { id: order.id },
+          data: {
+            status: 'FILLED',
+            filledQty: order.qty,
+            avgFillPrice: fillPrice,
+            ...costs,
+            filledAt: new Date(),
+          },
+        });
+
+        const input: PlaceOrderInput = {
+          portfolioId: order.portfolioId,
+          symbol: order.symbol,
+          side: order.side,
+          orderType: order.orderType,
+          qty: order.qty,
+          price: fillPrice,
+          instrumentToken: order.instrumentToken,
+          exchange: order.exchange,
+        };
+
+        await this.handleFill(order.id, input, fillPrice, costs);
+        matched++;
+      } catch {
+        failed++;
+      }
+    }
+
+    return { matched, failed };
   }
 }
 

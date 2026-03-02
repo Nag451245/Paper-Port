@@ -648,7 +648,7 @@ Respond in JSON: {"signals": [{"symbol":"X","direction":"BUY|SELL","confidence":
           instrumentToken: symbol,
           exchange,
           strategyTag: 'AI-BOT',
-        });
+        }, true);
 
         if (botId) {
           await this.updateBotTradeStats(botId, 0);
@@ -721,7 +721,7 @@ Respond in JSON: {"signals": [{"symbol":"X","direction":"BUY|SELL","confidence":
           instrumentToken: symbol,
           exchange,
           strategyTag: 'AI-BOT',
-        });
+        }, true);
 
         if (botId) {
           await this.updateBotTradeStats(botId, 0);

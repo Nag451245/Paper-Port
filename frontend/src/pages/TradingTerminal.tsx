@@ -315,7 +315,7 @@ export default function TradingTerminal() {
 
     setIsPlacing(true);
     try {
-      await tradingApi.placeOrder({
+      const result = await tradingApi.placeOrder({
         portfolio_id: portfolioId,
         symbol: sym,
         side: orderSide,
@@ -325,8 +325,12 @@ export default function TradingTerminal() {
         instrument_token: `${sym}-${selectedExchange}`,
         exchange: selectedExchange,
       });
-      setSuccess(`${orderSide} order placed: ${qty} × ${sym}`);
-      if (orderSide === 'SELL') fireProfitConfetti();
+      if (result?._pendingReason || result?.status === 'PENDING') {
+        setSuccess(`${orderSide} order queued as PENDING: ${qty} × ${sym}. Will execute when market opens and price matches.`);
+      } else {
+        setSuccess(`${orderSide} order placed: ${qty} × ${sym}`);
+        if (orderSide === 'SELL') fireProfitConfetti();
+      }
       setQuantity('');
       setPrice('');
       await fetchAll();
