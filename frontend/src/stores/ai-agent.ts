@@ -4,7 +4,7 @@ import { aiAgentApi } from '@/services/api';
 
 interface AIAgentState {
   config: AIAgentConfig | null;
-  status: { isActive: boolean; mode: string; uptime: number; todaySignals?: number; todayTrades?: number } | null;
+  status: { isActive: boolean; mode: string; uptime: number; todaySignals?: number; todayTrades?: number; rustEngine?: boolean } | null;
   signals: AISignal[];
   briefing: PreMarketBriefing | null;
   strategies: { id: string; name: string; description: string; isActive: boolean }[];

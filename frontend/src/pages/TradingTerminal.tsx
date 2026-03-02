@@ -325,7 +325,8 @@ export default function TradingTerminal() {
         instrument_token: `${sym}-${selectedExchange}`,
         exchange: selectedExchange,
       });
-      if (result?._pendingReason || result?.status === 'PENDING') {
+      const order = (result as any)?.data;
+      if (order?._pendingReason || order?.status === 'PENDING') {
         setSuccess(`${orderSide} order queued as PENDING: ${qty} × ${sym}. Will execute when market opens and price matches.`);
       } else {
         setSuccess(`${orderSide} order placed: ${qty} × ${sym}`);
