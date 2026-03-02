@@ -1,10 +1,14 @@
 import { spawn } from 'child_process';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { existsSync } from 'fs';
+import { existsSync, mkdirSync, createWriteStream, chmodSync, statSync, unlinkSync } from 'fs';
+import https from 'https';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+const RELEASE_URL = 'https://github.com/Nag451245/Paper-Port/releases/download/engine-latest/capital-guard-engine';
+const DOWNLOAD_TARGET = resolve(__dirname, '..', '..', 'bin', 'capital-guard-engine');
 
 const ENGINE_PATHS = [
   resolve(__dirname, '..', '..', 'bin', 'capital-guard-engine.exe'),
@@ -31,6 +35,71 @@ function getBinary(): string | null {
 
 export function isEngineAvailable(): boolean {
   return getBinary() !== null;
+}
+
+function followRedirects(url: string, redirects = 0): Promise<import('http').IncomingMessage> {
+  if (redirects > 5) return Promise.reject(new Error('Too many redirects'));
+  return new Promise((resolve, reject) => {
+    https.get(url, { headers: { 'User-Agent': 'CapitalGuard/1.0' } }, (res) => {
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        console.log(`  ↳ Redirect ${res.statusCode} → ${res.headers.location.substring(0, 80)}...`);
+        res.resume();
+        followRedirects(res.headers.location, redirects + 1).then(resolve, reject);
+      } else {
+        resolve(res);
+      }
+    }).on('error', reject);
+  });
+}
+
+export async function ensureEngineAvailable(): Promise<boolean> {
+  if (isEngineAvailable()) {
+    console.log(`[rust-engine] Binary already available at ${cachedBinary}`);
+    return true;
+  }
+
+  console.log(`[rust-engine] Binary not found, downloading from GitHub Releases...`);
+  console.log(`[rust-engine] URL: ${RELEASE_URL}`);
+  console.log(`[rust-engine] Target: ${DOWNLOAD_TARGET}`);
+
+  try {
+    mkdirSync(dirname(DOWNLOAD_TARGET), { recursive: true });
+
+    const res = await followRedirects(RELEASE_URL);
+
+    if (res.statusCode !== 200) {
+      console.error(`[rust-engine] Download failed: HTTP ${res.statusCode}`);
+      res.resume();
+      return false;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const file = createWriteStream(DOWNLOAD_TARGET);
+      res.pipe(file);
+      file.on('finish', () => { file.close(); resolve(); });
+      file.on('error', reject);
+      res.on('error', reject);
+    });
+
+    try { chmodSync(DOWNLOAD_TARGET, 0o755); } catch { /* Windows doesn't need chmod */ }
+
+    const size = statSync(DOWNLOAD_TARGET).size;
+    console.log(`[rust-engine] Downloaded ${size} bytes`);
+
+    if (size < 10_000) {
+      console.error(`[rust-engine] Binary too small (${size} bytes), likely an error page. Removing.`);
+      unlinkSync(DOWNLOAD_TARGET);
+      return false;
+    }
+
+    cachedBinary = undefined;
+    const available = isEngineAvailable();
+    console.log(`[rust-engine] Engine available: ${available}`);
+    return available;
+  } catch (err: any) {
+    console.error(`[rust-engine] Download error: ${err.message}`);
+    return false;
+  }
 }
 
 interface EngineResponse {
