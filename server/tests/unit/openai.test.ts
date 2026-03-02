@@ -130,4 +130,27 @@ describe('Gemini AI client', () => {
     const callBody = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
     expect(callBody.generationConfig.responseMimeType).toBe('application/json');
   });
+
+  it('should strip markdown code fences from JSON responses', async () => {
+    const wrappedJson = '```json\n{"signal":"SELL","confidence":0.9}\n```';
+    const mockResponse = {
+      candidates: [{
+        content: { parts: [{ text: wrappedJson }], role: 'model' },
+        finishReason: 'STOP',
+      }],
+    };
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve(mockResponse),
+    } as any);
+
+    const { chatCompletionJSON } = await import('../../src/lib/openai.js');
+
+    const result = await chatCompletionJSON<{ signal: string; confidence: number }>({
+      messages: [{ role: 'user', content: 'Analyze TCS' }],
+    });
+
+    expect(result).toEqual({ signal: 'SELL', confidence: 0.9 });
+  });
 });

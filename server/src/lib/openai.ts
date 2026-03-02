@@ -142,6 +142,9 @@ function buildGeminiBody(
   const body: Record<string, unknown> = { contents, generationConfig };
 
   if (systemText) {
+    if (responseFormat?.type === 'json_object') {
+      systemText += '\n\nIMPORTANT: Respond with valid JSON only. No markdown, no code fences, no extra text.';
+    }
     body.systemInstruction = { parts: [{ text: systemText }] };
   }
 
@@ -152,13 +155,26 @@ function getApiKey(): string {
   return env.GEMINI_API_KEY || env.OPENAI_API_KEY;
 }
 
+/**
+ * Strips markdown code fences that Gemini sometimes wraps around JSON responses.
+ * e.g. "```json\n{...}\n```" → "{...}"
+ */
+function stripMarkdownFences(text: string): string {
+  let s = text.trim();
+  const fenceMatch = s.match(/^```(?:json|JSON)?\s*\n?([\s\S]*?)\n?\s*```$/);
+  if (fenceMatch) {
+    return fenceMatch[1].trim();
+  }
+  return s;
+}
+
 export async function chatCompletion(options: ChatCompletionOptions): Promise<string> {
   if (isCircuitOpen()) {
     const remaining = Math.round((circuitOpenUntil - Date.now()) / 1000);
     throw new Error(`Gemini circuit breaker open — cooling down for ${remaining}s. Quota/rate limit was exceeded.`);
   }
 
-  const { messages, model = DEFAULT_MODEL, temperature = 0.7, maxTokens = 2048, responseFormat } = options;
+  const { messages, model = DEFAULT_MODEL, temperature = 0.7, maxTokens = 4096, responseFormat } = options;
 
   const apiKey = getApiKey();
   if (!apiKey) {
@@ -179,7 +195,7 @@ export async function chatCompletion(options: ChatCompletionOptions): Promise<st
 
     try {
       const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), 45_000);
+      const timer = setTimeout(() => ac.abort(), 60_000);
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -201,7 +217,7 @@ export async function chatCompletion(options: ChatCompletionOptions): Promise<st
           }
         } catch { /* ignore parse error */ }
 
-        if (consecutiveFailures >= 3 || errorBody.includes('exceeded your current quota')) {
+        if (consecutiveFailures >= 3 || errorBody.includes('RESOURCE_EXHAUSTED') || errorBody.includes('exceeded your current quota')) {
           openCircuit(retryAfterSec);
           throw new Error(`Gemini API error (429): ${errorBody}`);
         }
@@ -229,7 +245,7 @@ export async function chatCompletion(options: ChatCompletionOptions): Promise<st
         throw new Error(`Gemini returned no candidates: ${JSON.stringify(data).slice(0, 500)}`);
       }
 
-      const content = candidate.content?.parts
+      let content = candidate.content?.parts
         ?.map((p: any) => p.text ?? '')
         .join('')
         .trim();
@@ -242,11 +258,13 @@ export async function chatCompletion(options: ChatCompletionOptions): Promise<st
         throw new Error(`Gemini returned empty response (finishReason: ${reason})`);
       }
 
+      content = stripMarkdownFences(content);
+
       return content;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
 
-      if (lastError.message.includes('circuit breaker') || lastError.message.includes('exceeded your current quota')) {
+      if (lastError.message.includes('circuit breaker') || lastError.message.includes('exceeded your current quota') || lastError.message.includes('RESOURCE_EXHAUSTED')) {
         throw lastError;
       }
 
@@ -268,9 +286,19 @@ export function _resetForTesting(): void {
 }
 
 export async function chatCompletionJSON<T>(options: ChatCompletionOptions): Promise<T> {
-  const content = await chatCompletion({
+  const raw = await chatCompletion({
     ...options,
     responseFormat: { type: 'json_object' },
   });
-  return JSON.parse(content) as T;
+
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    const cleaned = stripMarkdownFences(raw);
+    try {
+      return JSON.parse(cleaned) as T;
+    } catch (e2) {
+      throw new Error(`Failed to parse AI JSON response: ${(e2 as Error).message}. Raw (first 300 chars): ${raw.slice(0, 300)}`);
+    }
+  }
 }
