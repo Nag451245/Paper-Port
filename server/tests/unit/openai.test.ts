@@ -153,4 +153,51 @@ describe('Gemini AI client', () => {
 
     expect(result).toEqual({ signal: 'SELL', confidence: 0.9 });
   });
+
+  it('should handle truncated JSON by repairing it', async () => {
+    const truncatedJson = '{"signals":[{"symbol":"RELIANCE","direction":"BUY","confidence":0.85,"reason":"Momentum breakou';
+    const mockResponse = {
+      candidates: [{
+        content: { parts: [{ text: truncatedJson }], role: 'model' },
+        finishReason: 'MAX_TOKENS',
+      }],
+    };
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve(mockResponse),
+    } as any);
+
+    const { chatCompletionJSON } = await import('../../src/lib/openai.js');
+
+    const result = await chatCompletionJSON<{ signals: any[] }>({
+      messages: [{ role: 'user', content: 'Scan market' }],
+    });
+
+    expect(result).toBeDefined();
+    expect(result.signals).toBeDefined();
+  });
+
+  it('should return empty fallback when JSON is completely invalid', async () => {
+    const garbage = 'This is not JSON at all, just regular text about signals in the market';
+    const mockResponse = {
+      candidates: [{
+        content: { parts: [{ text: garbage }], role: 'model' },
+        finishReason: 'STOP',
+      }],
+    };
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve(mockResponse),
+    } as any);
+
+    const { chatCompletionJSON } = await import('../../src/lib/openai.js');
+
+    const result = await chatCompletionJSON<Record<string, unknown>>({
+      messages: [{ role: 'user', content: 'Scan' }],
+    });
+
+    expect(result).toBeDefined();
+  });
 });

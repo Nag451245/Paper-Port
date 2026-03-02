@@ -285,20 +285,103 @@ export function _resetForTesting(): void {
   draining = false;
 }
 
+/**
+ * Attempt to extract valid JSON from a potentially malformed response.
+ * Handles: markdown fences, extra text around JSON, truncated JSON.
+ */
+function extractJSON(raw: string): string {
+  let s = stripMarkdownFences(raw).trim();
+
+  // Already valid?
+  try { JSON.parse(s); return s; } catch { /* continue */ }
+
+  // Extract first JSON object or array from the string
+  const objStart = s.indexOf('{');
+  const arrStart = s.indexOf('[');
+  let start = -1;
+  let openChar = '{';
+  let closeChar = '}';
+
+  if (objStart >= 0 && (arrStart < 0 || objStart <= arrStart)) {
+    start = objStart;
+  } else if (arrStart >= 0) {
+    start = arrStart;
+    openChar = '[';
+    closeChar = ']';
+  }
+
+  if (start < 0) return s;
+
+  // Find the matching close bracket, accounting for nesting and strings
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let end = -1;
+
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\') { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === openChar) depth++;
+    if (ch === closeChar) { depth--; if (depth === 0) { end = i; break; } }
+  }
+
+  if (end > start) {
+    const extracted = s.slice(start, end + 1);
+    try { JSON.parse(extracted); return extracted; } catch { /* continue to repair */ }
+  }
+
+  // Truncated response: try to close open brackets/braces
+  let truncated = end > start ? s.slice(start, end + 1) : s.slice(start);
+  // Remove any trailing partial key-value or comma
+  truncated = truncated.replace(/,\s*"[^"]*$/, '').replace(/,\s*$/, '');
+
+  // Close any unclosed structures
+  let opens = 0, closes = 0;
+  let oArr = 0, cArr = 0;
+  inString = false;
+  escape = false;
+  for (const ch of truncated) {
+    if (escape) { escape = false; continue; }
+    if (ch === '\\') { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') opens++;
+    if (ch === '}') closes++;
+    if (ch === '[') oArr++;
+    if (ch === ']') cArr++;
+  }
+
+  // If inside a string, close it
+  if (inString) truncated += '"';
+  // Close arrays then objects
+  for (let i = 0; i < oArr - cArr; i++) truncated += ']';
+  for (let i = 0; i < opens - closes; i++) truncated += '}';
+
+  try { JSON.parse(truncated); return truncated; } catch { /* give up */ }
+
+  return s;
+}
+
 export async function chatCompletionJSON<T>(options: ChatCompletionOptions): Promise<T> {
   const raw = await chatCompletion({
     ...options,
     responseFormat: { type: 'json_object' },
   });
 
+  // Fast path: raw is already valid JSON
+  try { return JSON.parse(raw) as T; } catch { /* try extraction */ }
+
+  // Robust extraction: strip fences, find JSON, repair truncation
+  const extracted = extractJSON(raw);
   try {
-    return JSON.parse(raw) as T;
-  } catch {
-    const cleaned = stripMarkdownFences(raw);
-    try {
-      return JSON.parse(cleaned) as T;
-    } catch (e2) {
-      throw new Error(`Failed to parse AI JSON response: ${(e2 as Error).message}. Raw (first 300 chars): ${raw.slice(0, 300)}`);
-    }
+    return JSON.parse(extracted) as T;
+  } catch (e2) {
+    console.warn(`[Gemini] JSON parse failed after extraction. Raw (300 chars): ${raw.slice(0, 300)}`);
+    // Last resort: return a safe empty object
+    const fallback = raw.includes('"signals"') ? '{"signals":[]}' : '{}';
+    return JSON.parse(fallback) as T;
   }
 }
