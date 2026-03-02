@@ -198,7 +198,7 @@ function FIIDIITab() {
                 <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickLine={false} axisLine={false} tickFormatter={(v) => `₹${Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}K` : v.toFixed(0)}Cr`} />
                 <Tooltip
                   contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '12px' }}
-                  formatter={(v: number) => [`₹${v.toLocaleString('en-IN', { maximumFractionDigits: 0 })} Cr`]}
+                  formatter={(v: any) => [`₹${Number(v).toLocaleString('en-IN', { maximumFractionDigits: 0 })} Cr`]}
                 />
                 <Bar dataKey="fiiNet" name="FII Net" fill="#4f46e5" radius={[2, 2, 0, 0]} />
                 <Bar dataKey="diiNet" name="DII Net" fill="#22c55e" radius={[2, 2, 0, 0]} />
@@ -623,21 +623,6 @@ function FlowCard({ label, value, positive, negative }: { label: string; value: 
         <p className={`text-lg font-bold font-mono ${color}`}>
           ₹{formatCr(Math.abs(value))}
         </p>
-      </div>
-    </div>
-  );
-}
-
-function FlowBar({ label, value, max, color }: { label: string; value: number; max: number; color: string }) {
-  const pct = max > 0 ? (value / max) * 100 : 0;
-  return (
-    <div>
-      <div className="flex items-center justify-between text-[10px] text-slate-500 mb-0.5">
-        <span>{label}</span>
-        <span className="font-mono">₹{formatCr(value)}</span>
-      </div>
-      <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
-        <div className={`h-full ${color} rounded-full transition-all`} style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
