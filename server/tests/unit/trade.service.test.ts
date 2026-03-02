@@ -117,20 +117,24 @@ describe('TradeService', () => {
     });
 
     it('should average up existing position on BUY', async () => {
-      mockPrisma.portfolio.findUnique.mockResolvedValue({ id: 'p1', userId: 'user1' });
+      mockPrisma.portfolio.findUnique.mockResolvedValue({ id: 'p1', userId: 'user1', currentNav: 1000000 });
       mockPrisma.order.create.mockResolvedValue({
         id: 'order-3',
         status: 'FILLED',
         side: 'BUY',
         orderType: 'MARKET',
       });
-      mockPrisma.position.findFirst.mockResolvedValue({
-        id: 'pos-existing',
-        qty: 10,
-        avgEntryPrice: 2500,
-        side: 'LONG',
-        status: 'OPEN',
-      });
+      // findFirst calls: 1) SHORT check in placeOrder, 2) SHORT check in handleBuyFill, 3) LONG check in openLongPosition
+      mockPrisma.position.findFirst
+        .mockResolvedValueOnce(null)  // no SHORT to check margin
+        .mockResolvedValueOnce(null)  // no SHORT to cover
+        .mockResolvedValueOnce({      // existing LONG to average up
+          id: 'pos-existing',
+          qty: 10,
+          avgEntryPrice: 2500,
+          side: 'LONG',
+          status: 'OPEN',
+        });
       mockPrisma.position.update.mockResolvedValue({});
       mockPrisma.order.update.mockResolvedValue({});
 

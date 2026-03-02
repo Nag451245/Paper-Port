@@ -1,4 +1,5 @@
 import { PrismaClient, type Prisma } from '@prisma/client';
+import { MarketDataService } from './market-data.service.js';
 
 export interface PortfolioSummary {
   totalNav: number;
@@ -13,7 +14,11 @@ export interface PortfolioSummary {
 }
 
 export class PortfolioService {
-  constructor(private prisma: PrismaClient) {}
+  private marketData: MarketDataService;
+
+  constructor(private prisma: PrismaClient) {
+    this.marketData = new MarketDataService();
+  }
 
   async list(userId: string) {
     return this.prisma.portfolio.findMany({
@@ -57,10 +62,34 @@ export class PortfolioService {
 
     let investedValue = 0;
     let unrealizedPnl = 0;
+
     for (const pos of openPositions) {
-      investedValue += Number(pos.avgEntryPrice) * pos.qty;
-      unrealizedPnl += Number(pos.unrealizedPnl ?? 0);
+      const entryPrice = Number(pos.avgEntryPrice);
+      investedValue += entryPrice * pos.qty;
+
+      let ltp = 0;
+      try {
+        const quote = await this.marketData.getQuote(pos.symbol, pos.exchange ?? 'NSE');
+        ltp = quote.ltp;
+      } catch { /* use 0 -- unrealized stays 0 for this position */ }
+
+      if (ltp > 0) {
+        const posUnrealized = pos.side === 'SHORT'
+          ? (entryPrice - ltp) * pos.qty
+          : (ltp - entryPrice) * pos.qty;
+        unrealizedPnl += posUnrealized;
+      }
     }
+
+    // Day P&L = unrealized P&L on open positions + realized P&L from today's closed trades
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayTrades = await this.prisma.trade.findMany({
+      where: { portfolioId, exitTime: { gte: todayStart } },
+      select: { netPnl: true },
+    });
+    const todayRealizedPnl = todayTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
+    const dayPnl = unrealizedPnl + todayRealizedPnl;
 
     const totalNav = availableCash + investedValue + unrealizedPnl;
     const totalPnl = totalNav - initialCapital;
@@ -68,8 +97,8 @@ export class PortfolioService {
 
     return {
       totalNav,
-      dayPnl: unrealizedPnl,
-      dayPnlPercent: totalNav > 0 ? (unrealizedPnl / totalNav) * 100 : 0,
+      dayPnl,
+      dayPnlPercent: totalNav > 0 ? (dayPnl / totalNav) * 100 : 0,
       totalPnl,
       totalPnlPercent,
       investedValue,

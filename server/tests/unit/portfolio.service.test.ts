@@ -1,6 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PortfolioService, PortfolioError } from '../../src/services/portfolio.service.js';
 
+vi.mock('../../src/services/market-data.service.js', () => ({
+  MarketDataService: vi.fn().mockImplementation(() => ({
+    getQuote: vi.fn().mockImplementation((symbol: string) => {
+      const prices: Record<string, number> = { RELIANCE: 3000, TCS: 1400 };
+      return Promise.resolve({ ltp: prices[symbol] ?? 0 });
+    }),
+  })),
+}));
+
 function createMockPrisma() {
   return {
     portfolio: {
@@ -109,12 +118,15 @@ describe('PortfolioService', () => {
         positions: [],
       });
       mockPrisma.position.findMany.mockResolvedValue([
-        { avgEntryPrice: 2500, qty: 10, unrealizedPnl: 5000 },
-        { avgEntryPrice: 1500, qty: 20, unrealizedPnl: -2000 },
+        { symbol: 'RELIANCE', exchange: 'NSE', side: 'LONG', avgEntryPrice: 2500, qty: 10 },
+        { symbol: 'TCS', exchange: 'NSE', side: 'LONG', avgEntryPrice: 1500, qty: 20 },
       ]);
+      // Mock today's trades (for day P&L realized component)
+      mockPrisma.trade.findMany.mockResolvedValue([]);
 
       const summary = await service.getSummary('p1', 'user1');
 
+      // unrealizedPnl: RELIANCE (3000-2500)*10=5000, TCS (1400-1500)*20=-2000 → 3000
       // totalNav = cash(1050000) + invested(55000) + unrealizedPnl(3000) = 1108000
       expect(summary.totalNav).toBe(1108000);
       expect(summary.totalPnl).toBe(108000);

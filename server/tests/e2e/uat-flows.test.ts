@@ -185,6 +185,7 @@ describe('UAT Flow 3: Portfolio Management', () => {
       initialCapital: 500000, currentNav: 500000, positions: [],
     });
     mockPrisma.position.findMany.mockResolvedValue([]);
+    mockPrisma.trade.findMany.mockResolvedValue([]);
 
     const summaryRes = await app.inject({
       method: 'GET', url: '/api/portfolio/uat-portfolio/summary', headers: auth(),

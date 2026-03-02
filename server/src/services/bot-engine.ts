@@ -586,48 +586,78 @@ Respond in JSON: {"signals": [{"symbol":"X","direction":"BUY|SELL","confidence":
 
         return { success: true, message: `Bought ${qty} ${symbol} @ ₹${Number(order.avgFillPrice ?? 0).toFixed(2)}` };
       } else {
-        const position = await this.prisma.position.findFirst({
+        // Check for existing LONG position to close
+        const longPosition = await this.prisma.position.findFirst({
           where: { portfolioId: portfolio.id, symbol, side: 'LONG', status: 'OPEN' },
         });
-        if (!position) return { success: false, message: `No open position in ${symbol} to sell` };
 
-        let exitPrice = 0;
+        if (longPosition) {
+          let exitPrice = 0;
+          try {
+            const quote = await this.marketData.getQuote(symbol, exchange);
+            exitPrice = quote.ltp;
+          } catch { /* will be fetched by closePosition */ }
+
+          if (exitPrice <= 0) return { success: false, message: `Cannot sell ${symbol}: no price available` };
+
+          const trade = await this.tradeService.closePosition(longPosition.id, userId, exitPrice);
+          const pnl = Number(trade.netPnl);
+
+          if (botId) {
+            await this.updateBotTradeStats(botId, pnl);
+          }
+
+          const strategyTag = longPosition.strategyTag || 'AI-BOT';
+          const outcome: 'WIN' | 'LOSS' | 'BREAKEVEN' = Math.abs(pnl) < 10 ? 'BREAKEVEN' : pnl > 0 ? 'WIN' : 'LOSS';
+          const accuracy = this.trackOutcome(strategyTag, outcome);
+
+          try {
+            const signal = await this.prisma.aITradeSignal.findFirst({
+              where: { userId, symbol, status: 'EXECUTED', outcomeTag: null },
+              orderBy: { createdAt: 'desc' },
+            });
+            if (signal) {
+              await this.prisma.aITradeSignal.update({
+                where: { id: signal.id },
+                data: { outcomeTag: outcome, outcomeNotes: `PnL: ₹${pnl.toFixed(2)} | Rolling accuracy: ${(accuracy * 100).toFixed(0)}%` },
+              });
+            }
+          } catch { /* best effort signal tagging */ }
+
+          if (botId) {
+            await this.checkAutoPause(userId, strategyTag, botId);
+          }
+
+          return { success: true, message: `Sold ${longPosition.qty} ${symbol} @ ₹${exitPrice.toFixed(2)} | P&L: ₹${pnl.toFixed(2)}` };
+        }
+
+        // No LONG position -- open a SHORT via placeOrder
+        let ltp = 0;
         try {
           const quote = await this.marketData.getQuote(symbol, exchange);
-          exitPrice = quote.ltp;
-        } catch { /* will be fetched by closePosition */ }
+          ltp = quote.ltp;
+        } catch { /* will be fetched by TradeService */ }
 
-        if (exitPrice <= 0) return { success: false, message: `Cannot sell ${symbol}: no price available` };
+        const kellyAllocation = await this.computeKellySize(userId, symbol, nav);
+        const maxPerTrade = nav * kellyAllocation;
+        const qty = ltp > 0 ? Math.max(1, Math.floor(maxPerTrade / ltp)) : 1;
 
-        const trade = await this.tradeService.closePosition(position.id, userId, exitPrice);
-        const pnl = Number(trade.netPnl);
-
-        if (botId) {
-          await this.updateBotTradeStats(botId, pnl);
-        }
-
-        const strategyTag = position.strategyTag || 'AI-BOT';
-        const outcome: 'WIN' | 'LOSS' | 'BREAKEVEN' = Math.abs(pnl) < 10 ? 'BREAKEVEN' : pnl > 0 ? 'WIN' : 'LOSS';
-        const accuracy = this.trackOutcome(strategyTag, outcome);
-
-        try {
-          const signal = await this.prisma.aITradeSignal.findFirst({
-            where: { userId, symbol, status: 'EXECUTED', outcomeTag: null },
-            orderBy: { createdAt: 'desc' },
-          });
-          if (signal) {
-            await this.prisma.aITradeSignal.update({
-              where: { id: signal.id },
-              data: { outcomeTag: outcome, outcomeNotes: `PnL: ₹${pnl.toFixed(2)} | Rolling accuracy: ${(accuracy * 100).toFixed(0)}%` },
-            });
-          }
-        } catch { /* best effort signal tagging */ }
+        const order = await this.tradeService.placeOrder(userId, {
+          portfolioId: portfolio.id,
+          symbol,
+          side: 'SELL',
+          orderType: 'MARKET',
+          qty,
+          instrumentToken: symbol,
+          exchange,
+          strategyTag: 'AI-BOT',
+        });
 
         if (botId) {
-          await this.checkAutoPause(userId, strategyTag, botId);
+          await this.updateBotTradeStats(botId, 0);
         }
 
-        return { success: true, message: `Sold ${position.qty} ${symbol} @ ₹${exitPrice.toFixed(2)} | P&L: ₹${pnl.toFixed(2)}` };
+        return { success: true, message: `Shorted ${qty} ${symbol} @ ₹${Number(order.avgFillPrice ?? 0).toFixed(2)}` };
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

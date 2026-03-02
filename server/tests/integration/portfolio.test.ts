@@ -116,6 +116,7 @@ describe('Portfolio Routes Integration', () => {
         id: 'p1', userId: 'test-user', initialCapital: 1000000, currentNav: 1050000, positions: [],
       });
       mockPrisma.position.findMany.mockResolvedValue([]);
+      mockPrisma.trade.findMany.mockResolvedValue([]);
 
       const res = await app.inject({
         method: 'GET',

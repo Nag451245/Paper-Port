@@ -185,11 +185,32 @@ export class TradeService {
 
     const totalValue = fillPrice * input.qty + costs.totalCost;
     const availableCash = Number(portfolio.currentNav);
-    if (input.side === 'BUY' && totalValue > availableCash) {
-      throw new TradeError(
-        `Insufficient capital. Need ₹${totalValue.toFixed(0)} but only ₹${availableCash.toFixed(0)} available.`,
-        400,
-      );
+
+    if (input.side === 'BUY') {
+      // BUY needs full capital unless closing a SHORT (which releases margin)
+      const existingShort = await this.prisma.position.findFirst({
+        where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'SHORT', status: 'OPEN' },
+      });
+      if (!existingShort && totalValue > availableCash) {
+        throw new TradeError(
+          `Insufficient capital. Need ₹${totalValue.toFixed(0)} but only ₹${availableCash.toFixed(0)} available.`,
+          400,
+        );
+      }
+    } else {
+      // SELL: if no LONG position exists, this will be a short -- check margin
+      const existingLong = await this.prisma.position.findFirst({
+        where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'LONG', status: 'OPEN' },
+      });
+      if (!existingLong) {
+        const marginRequired = this.shortMarginRequired(fillPrice, input.qty, input.exchange ?? 'NSE') + costs.totalCost;
+        if (marginRequired > availableCash) {
+          throw new TradeError(
+            `Insufficient margin for short. Need ₹${marginRequired.toFixed(0)} but only ₹${availableCash.toFixed(0)} available.`,
+            400,
+          );
+        }
+      }
     }
 
     const order = await this.prisma.order.create({
@@ -218,6 +239,12 @@ export class TradeService {
     return order;
   }
 
+  private shortMarginRequired(price: number, qty: number, exchange: string): number {
+    // Paper trading margin rates (realistic approximations)
+    const rate = exchange === 'MCX' ? 0.10 : exchange === 'CDS' ? 0.05 : 0.25;
+    return price * qty * rate;
+  }
+
   private async handleFill(
     orderId: string,
     input: PlaceOrderInput,
@@ -225,88 +252,160 @@ export class TradeService {
     costs: CostBreakdown,
   ) {
     if (input.side === 'BUY') {
-      const existingPosition = await this.prisma.position.findFirst({
-        where: {
+      await this.handleBuyFill(orderId, input, fillPrice, costs);
+    } else {
+      await this.handleSellFill(orderId, input, fillPrice, costs);
+    }
+  }
+
+  private async handleBuyFill(
+    orderId: string,
+    input: PlaceOrderInput,
+    fillPrice: number,
+    costs: CostBreakdown,
+  ) {
+    // First check if there's a SHORT position to cover
+    const existingShort = await this.prisma.position.findFirst({
+      where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'SHORT', status: 'OPEN' },
+    });
+
+    if (existingShort) {
+      const entryPrice = Number(existingShort.avgEntryPrice);
+      const coverQty = Math.min(input.qty, existingShort.qty);
+      const grossPnl = (entryPrice - fillPrice) * coverQty;
+      const netPnl = grossPnl - costs.totalCost;
+
+      await this.prisma.trade.create({
+        data: {
           portfolioId: input.portfolioId,
+          positionId: existingShort.id,
           symbol: input.symbol,
-          side: 'LONG',
-          status: 'OPEN',
+          exchange: input.exchange ?? 'NSE',
+          side: 'BUY',
+          entryPrice,
+          exitPrice: fillPrice,
+          qty: coverQty,
+          grossPnl,
+          totalCosts: costs.totalCost,
+          netPnl,
+          entryTime: existingShort.openedAt,
+          exitTime: new Date(),
+          strategyTag: input.strategyTag,
         },
       });
 
-      if (existingPosition) {
-        const oldQty = existingPosition.qty;
-        const oldAvg = Number(existingPosition.avgEntryPrice);
-        const newQty = oldQty + input.qty;
-        const newAvg = (oldAvg * oldQty + fillPrice * input.qty) / newQty;
-
+      const remainingQty = existingShort.qty - coverQty;
+      if (remainingQty <= 0) {
         await this.prisma.position.update({
-          where: { id: existingPosition.id },
-          data: { qty: newQty, avgEntryPrice: newAvg },
-        });
-
-        await this.prisma.order.update({
-          where: { id: orderId },
-          data: { positionId: existingPosition.id },
+          where: { id: existingShort.id },
+          data: { status: 'CLOSED', realizedPnl: netPnl, closedAt: new Date() },
         });
       } else {
-        const position = await this.prisma.position.create({
-          data: {
-            portfolioId: input.portfolioId,
-            instrumentToken: input.instrumentToken,
-            symbol: input.symbol,
-            exchange: input.exchange ?? 'NSE',
-            qty: input.qty,
-            avgEntryPrice: fillPrice,
-            side: 'LONG',
-            strategyTag: input.strategyTag,
-          },
-        });
-
-        await this.prisma.order.update({
-          where: { id: orderId },
-          data: { positionId: position.id },
+        await this.prisma.position.update({
+          where: { id: existingShort.id },
+          data: { qty: remainingQty },
         });
       }
 
-      // Deduct purchase cost + transaction fees from available cash
-      const portfolio = await this.prisma.portfolio.findUnique({
-        where: { id: input.portfolioId },
-      });
+      // Release blocked margin + settle P&L.  Cost to cover = buyback price * qty + costs.
+      // Margin released = original margin on covered qty.
+      const portfolio = await this.prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
       if (portfolio) {
-        const purchaseCost = fillPrice * input.qty + costs.totalCost;
+        const marginReleased = this.shortMarginRequired(entryPrice, coverQty, input.exchange ?? 'NSE');
+        const coverCost = fillPrice * coverQty + costs.totalCost;
+        // Net cash change: margin comes back, cover cost goes out, P&L settles
+        // = marginReleased - coverCost + (entryPrice * coverQty)
+        // Simplified: entryPrice*qty was received when shorting; now we pay back fillPrice*qty
+        const cashChange = marginReleased + netPnl;
         await this.prisma.portfolio.update({
           where: { id: input.portfolioId },
-          data: { currentNav: Number(portfolio.currentNav) - purchaseCost },
+          data: { currentNav: Number(portfolio.currentNav) + cashChange },
         });
       }
+
+      await this.prisma.order.update({ where: { id: orderId }, data: { positionId: existingShort.id } });
+
+      // If BUY qty exceeds SHORT qty, open a LONG with remainder
+      const excessQty = input.qty - coverQty;
+      if (excessQty > 0) {
+        await this.openLongPosition(orderId, input, fillPrice, costs, excessQty);
+      }
+      return;
+    }
+
+    // No SHORT to cover -- open or add to LONG position
+    await this.openLongPosition(orderId, input, fillPrice, costs, input.qty);
+  }
+
+  private async openLongPosition(
+    orderId: string,
+    input: PlaceOrderInput,
+    fillPrice: number,
+    costs: CostBreakdown,
+    qty: number,
+  ) {
+    const existingLong = await this.prisma.position.findFirst({
+      where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'LONG', status: 'OPEN' },
+    });
+
+    if (existingLong) {
+      const oldQty = existingLong.qty;
+      const oldAvg = Number(existingLong.avgEntryPrice);
+      const newQty = oldQty + qty;
+      const newAvg = (oldAvg * oldQty + fillPrice * qty) / newQty;
+
+      await this.prisma.position.update({
+        where: { id: existingLong.id },
+        data: { qty: newQty, avgEntryPrice: newAvg },
+      });
+      await this.prisma.order.update({ where: { id: orderId }, data: { positionId: existingLong.id } });
     } else {
-      const existingPosition = await this.prisma.position.findFirst({
-        where: {
+      const position = await this.prisma.position.create({
+        data: {
           portfolioId: input.portfolioId,
+          instrumentToken: input.instrumentToken,
           symbol: input.symbol,
+          exchange: input.exchange ?? 'NSE',
+          qty,
+          avgEntryPrice: fillPrice,
           side: 'LONG',
-          status: 'OPEN',
+          strategyTag: input.strategyTag,
         },
       });
+      await this.prisma.order.update({ where: { id: orderId }, data: { positionId: position.id } });
+    }
 
-      if (!existingPosition) {
-        await this.prisma.order.update({
-          where: { id: orderId },
-          data: { status: 'REJECTED' },
-        });
-        throw new TradeError(`No open position for ${input.symbol} to sell`, 400);
-      }
+    const portfolio = await this.prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
+    if (portfolio) {
+      const purchaseCost = fillPrice * qty + costs.totalCost;
+      await this.prisma.portfolio.update({
+        where: { id: input.portfolioId },
+        data: { currentNav: Number(portfolio.currentNav) - purchaseCost },
+      });
+    }
+  }
 
-      const entryPrice = Number(existingPosition.avgEntryPrice);
-      const closeQty = Math.min(input.qty, existingPosition.qty);
+  private async handleSellFill(
+    orderId: string,
+    input: PlaceOrderInput,
+    fillPrice: number,
+    costs: CostBreakdown,
+  ) {
+    // First check if there's a LONG position to close
+    const existingLong = await this.prisma.position.findFirst({
+      where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'LONG', status: 'OPEN' },
+    });
+
+    if (existingLong) {
+      const entryPrice = Number(existingLong.avgEntryPrice);
+      const closeQty = Math.min(input.qty, existingLong.qty);
       const grossPnl = (fillPrice - entryPrice) * closeQty;
       const netPnl = grossPnl - costs.totalCost;
 
       await this.prisma.trade.create({
         data: {
           portfolioId: input.portfolioId,
-          positionId: existingPosition.id,
+          positionId: existingLong.id,
           symbol: input.symbol,
           exchange: input.exchange ?? 'NSE',
           side: 'SELL',
@@ -316,32 +415,26 @@ export class TradeService {
           grossPnl,
           totalCosts: costs.totalCost,
           netPnl,
-          entryTime: existingPosition.openedAt,
+          entryTime: existingLong.openedAt,
           exitTime: new Date(),
           strategyTag: input.strategyTag,
         },
       });
 
-      const remainingQty = existingPosition.qty - closeQty;
+      const remainingQty = existingLong.qty - closeQty;
       if (remainingQty <= 0) {
         await this.prisma.position.update({
-          where: { id: existingPosition.id },
-          data: {
-            status: 'CLOSED',
-            realizedPnl: netPnl,
-            closedAt: new Date(),
-          },
+          where: { id: existingLong.id },
+          data: { status: 'CLOSED', realizedPnl: netPnl, closedAt: new Date() },
         });
       } else {
         await this.prisma.position.update({
-          where: { id: existingPosition.id },
+          where: { id: existingLong.id },
           data: { qty: remainingQty },
         });
       }
 
-      const portfolio = await this.prisma.portfolio.findUnique({
-        where: { id: input.portfolioId },
-      });
+      const portfolio = await this.prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
       if (portfolio) {
         const saleProceeds = fillPrice * closeQty - costs.totalCost;
         await this.prisma.portfolio.update({
@@ -350,9 +443,65 @@ export class TradeService {
         });
       }
 
-      await this.prisma.order.update({
-        where: { id: orderId },
-        data: { positionId: existingPosition.id },
+      await this.prisma.order.update({ where: { id: orderId }, data: { positionId: existingLong.id } });
+
+      // If SELL qty exceeds LONG qty, open a SHORT with remainder
+      const excessQty = input.qty - closeQty;
+      if (excessQty > 0) {
+        await this.openShortPosition(orderId, input, fillPrice, costs, excessQty);
+      }
+      return;
+    }
+
+    // No LONG to close -- open a SHORT position
+    await this.openShortPosition(orderId, input, fillPrice, costs, input.qty);
+  }
+
+  private async openShortPosition(
+    orderId: string,
+    input: PlaceOrderInput,
+    fillPrice: number,
+    costs: CostBreakdown,
+    qty: number,
+  ) {
+    const existingShort = await this.prisma.position.findFirst({
+      where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'SHORT', status: 'OPEN' },
+    });
+
+    if (existingShort) {
+      const oldQty = existingShort.qty;
+      const oldAvg = Number(existingShort.avgEntryPrice);
+      const newQty = oldQty + qty;
+      const newAvg = (oldAvg * oldQty + fillPrice * qty) / newQty;
+
+      await this.prisma.position.update({
+        where: { id: existingShort.id },
+        data: { qty: newQty, avgEntryPrice: newAvg },
+      });
+      await this.prisma.order.update({ where: { id: orderId }, data: { positionId: existingShort.id } });
+    } else {
+      const position = await this.prisma.position.create({
+        data: {
+          portfolioId: input.portfolioId,
+          instrumentToken: input.instrumentToken,
+          symbol: input.symbol,
+          exchange: input.exchange ?? 'NSE',
+          qty,
+          avgEntryPrice: fillPrice,
+          side: 'SHORT',
+          strategyTag: input.strategyTag,
+        },
+      });
+      await this.prisma.order.update({ where: { id: orderId }, data: { positionId: position.id } });
+    }
+
+    // Block margin for the short position
+    const portfolio = await this.prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
+    if (portfolio) {
+      const marginBlocked = this.shortMarginRequired(fillPrice, qty, input.exchange ?? 'NSE') + costs.totalCost;
+      await this.prisma.portfolio.update({
+        where: { id: input.portfolioId },
+        data: { currentNav: Number(portfolio.currentNav) - marginBlocked },
       });
     }
   }
