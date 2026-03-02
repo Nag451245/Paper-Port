@@ -110,14 +110,13 @@ function FIIDIITab() {
 
   if (loading) return <LoadingSpinner />;
 
-  const fiiNet = num(data?.fii?.net_value ?? data?.fii_net ?? data?.fiiNet);
-  const diiNet = num(data?.dii?.net_value ?? data?.dii_net ?? data?.diiNet);
-  const fiiBuy = num(data?.fii?.buy_value ?? data?.fii_buy ?? data?.fiiBuy);
-  const fiiSell = num(data?.fii?.sell_value ?? data?.fii_sell ?? data?.fiiSell);
-  const diiBuy = num(data?.dii?.buy_value ?? data?.dii_buy ?? data?.diiBuy);
-  const diiSell = num(data?.dii?.sell_value ?? data?.dii_sell ?? data?.diiSell);
-  const hasData = fiiBuy > 0 || fiiSell > 0 || diiBuy > 0 || diiSell > 0;
+  const fiiNet = num(data?.fiiNet ?? data?.fii_net);
+  const diiNet = num(data?.diiNet ?? data?.dii_net);
+  const niftyPrice = num(data?.niftyPrice);
+  const niftyChangePct = num(data?.niftyChangePct);
+  const hasData = fiiNet !== 0 || diiNet !== 0;
   const message = data?.message;
+  const date = data?.date ?? '';
 
   const trendData = trend.map((d: any) => ({
     date: d.date ? new Date(d.date).toLocaleDateString('en-IN', { month: 'short', day: 'numeric' }) : '',
@@ -130,7 +129,10 @@ function FIIDIITab() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-base font-semibold text-slate-800">FII / DII Cash Market Activity</h2>
-          <p className="text-xs text-slate-400 mt-0.5">Foreign & Domestic Institutional Investors — Net buy/sell in equities</p>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Foreign & Domestic Institutional Investors — Daily net flows (₹ Cr)
+            {date && <span className="ml-2 text-slate-500">· {new Date(date).toLocaleDateString('en-IN', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</span>}
+          </p>
         </div>
         <button onClick={load} className="p-1.5 rounded-md hover:bg-slate-100 text-slate-400">
           <RefreshCcw className="w-4 h-4" />
@@ -145,45 +147,59 @@ function FIIDIITab() {
       )}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <FlowCard label="FII Net" value={fiiNet} />
+        <FlowCard label="FII/FPI Net" value={fiiNet} />
         <FlowCard label="DII Net" value={diiNet} />
-        <FlowCard label="FII Bought" value={fiiBuy} positive />
-        <FlowCard label="FII Sold" value={fiiSell} negative />
+        {niftyPrice > 0 && (
+          <div className="rounded-lg border border-slate-200 p-3">
+            <p className="text-[10px] text-slate-400 uppercase font-medium mb-1">NIFTY 50</p>
+            <p className="text-lg font-bold font-mono text-slate-800">{niftyPrice.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</p>
+          </div>
+        )}
+        {niftyPrice > 0 && (
+          <div className="rounded-lg border border-slate-200 p-3">
+            <p className="text-[10px] text-slate-400 uppercase font-medium mb-1">NIFTY Change</p>
+            <div className="flex items-center gap-1.5">
+              {niftyChangePct >= 0
+                ? <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
+                : <TrendingDown className="w-3.5 h-3.5 text-red-600" />}
+              <p className={`text-lg font-bold font-mono ${niftyChangePct >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                {niftyChangePct >= 0 ? '+' : ''}{niftyChangePct.toFixed(2)}%
+              </p>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="rounded-lg border border-slate-200 p-4">
-          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Foreign Institutional Investors (FII/FPI)</h3>
-          <div className="space-y-2">
-            <FlowBar label="Gross Purchase" value={fiiBuy} max={Math.max(fiiBuy, fiiSell, 1)} color="bg-emerald-500" />
-            <FlowBar label="Gross Sale" value={fiiSell} max={Math.max(fiiBuy, fiiSell, 1)} color="bg-red-500" />
-          </div>
-          <p className={`text-sm font-bold mt-3 ${fiiNet >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-            Net: {fiiNet >= 0 ? '+' : ''}₹{formatCr(fiiNet)}
+        <div className={`rounded-lg border p-4 ${fiiNet >= 0 ? 'border-emerald-200 bg-emerald-50/30' : 'border-red-200 bg-red-50/30'}`}>
+          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-2">FII/FPI (Foreign Investors)</h3>
+          <p className={`text-2xl font-bold font-mono ${fiiNet >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+            {fiiNet >= 0 ? '+' : ''}₹{Math.abs(fiiNet).toLocaleString('en-IN', { maximumFractionDigits: 0 })} Cr
           </p>
+          <p className="text-xs text-slate-400 mt-1">{fiiNet >= 0 ? 'Net Buyers — Bullish signal' : 'Net Sellers — Bearish pressure'}</p>
         </div>
-        <div className="rounded-lg border border-slate-200 p-4">
-          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Domestic Institutional Investors (DII)</h3>
-          <div className="space-y-2">
-            <FlowBar label="Gross Purchase" value={diiBuy} max={Math.max(diiBuy, diiSell, 1)} color="bg-emerald-500" />
-            <FlowBar label="Gross Sale" value={diiSell} max={Math.max(diiBuy, diiSell, 1)} color="bg-red-500" />
-          </div>
-          <p className={`text-sm font-bold mt-3 ${diiNet >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-            Net: {diiNet >= 0 ? '+' : ''}₹{formatCr(diiNet)}
+        <div className={`rounded-lg border p-4 ${diiNet >= 0 ? 'border-emerald-200 bg-emerald-50/30' : 'border-red-200 bg-red-50/30'}`}>
+          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-2">DII (Domestic Investors)</h3>
+          <p className={`text-2xl font-bold font-mono ${diiNet >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+            {diiNet >= 0 ? '+' : ''}₹{Math.abs(diiNet).toLocaleString('en-IN', { maximumFractionDigits: 0 })} Cr
           </p>
+          <p className="text-xs text-slate-400 mt-1">{diiNet >= 0 ? 'Net Buyers — Supporting market' : 'Net Sellers — Reducing exposure'}</p>
         </div>
       </div>
 
       {trendData.length > 1 && (
         <div className="rounded-lg border border-slate-200 p-4">
-          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Net FII vs DII Trend</h3>
-          <div className="h-[250px]">
+          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">FII vs DII Net Flow — Last {trendData.length} Sessions</h3>
+          <div className="h-[280px]">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={trendData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <XAxis dataKey="date" tick={{ fontSize: 9, fill: '#94a3b8' }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickLine={false} axisLine={false} tickFormatter={(v) => `₹${formatCr(v)}`} />
-                <Tooltip contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '12px' }} />
+                <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickLine={false} axisLine={false} tickFormatter={(v) => `₹${Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}K` : v.toFixed(0)}Cr`} />
+                <Tooltip
+                  contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '12px' }}
+                  formatter={(v: number) => [`₹${v.toLocaleString('en-IN', { maximumFractionDigits: 0 })} Cr`]}
+                />
                 <Bar dataKey="fiiNet" name="FII Net" fill="#4f46e5" radius={[2, 2, 0, 0]} />
                 <Bar dataKey="diiNet" name="DII Net" fill="#22c55e" radius={[2, 2, 0, 0]} />
               </BarChart>
@@ -511,28 +527,42 @@ function GlobalTab() {
         </button>
       </div>
 
-      {indices.length > 0 && (
-        <div className="rounded-lg border border-slate-200 p-4">
-          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Global & Indian Indices</h3>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-            {indices.map((idx: any, i: number) => {
-              const change = num(idx.change ?? idx.changePercent ?? idx.change_pct);
-              return (
-                <div key={i} className="p-3 rounded-lg border border-slate-200 hover:border-slate-300 transition-colors">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs font-medium text-slate-500">{idx.name ?? idx.index}</span>
-                    {change >= 0 ? <ArrowUpRight className="w-3.5 h-3.5 text-emerald-500" /> : <ArrowDownRight className="w-3.5 h-3.5 text-red-500" />}
+      {indices.length > 0 && (() => {
+        const regions = new Map<string, any[]>();
+        for (const idx of indices) {
+          const region = idx.region ?? 'Other';
+          if (!regions.has(region)) regions.set(region, []);
+          regions.get(region)!.push(idx);
+        }
+        const regionOrder = ['India', 'US', 'UK', 'Europe', 'Japan', 'China/HK', 'China', 'Australia', 'South Korea', 'Singapore', 'Other'];
+        const sortedRegions = [...regions.entries()].sort((a, b) => {
+          const ai = regionOrder.indexOf(a[0]);
+          const bi = regionOrder.indexOf(b[0]);
+          return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+        });
+        return sortedRegions.map(([region, items]) => (
+          <div key={region} className="rounded-lg border border-slate-200 p-4">
+            <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">{region}</h3>
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+              {items.map((idx: any, i: number) => {
+                const change = num(idx.change ?? idx.changePercent ?? idx.change_pct);
+                return (
+                  <div key={i} className="p-3 rounded-lg border border-slate-200 hover:border-slate-300 transition-colors">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-medium text-slate-500">{idx.name ?? idx.index}</span>
+                      {change >= 0 ? <ArrowUpRight className="w-3.5 h-3.5 text-emerald-500" /> : <ArrowDownRight className="w-3.5 h-3.5 text-red-500" />}
+                    </div>
+                    <p className="text-sm font-bold font-mono text-slate-800">{num(idx.value ?? idx.last ?? idx.price).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</p>
+                    <p className={`text-xs font-mono ${change >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                      {change >= 0 ? '+' : ''}{change.toFixed(2)}%
+                    </p>
                   </div>
-                  <p className="text-sm font-bold font-mono text-slate-800">{num(idx.value ?? idx.last ?? idx.price).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</p>
-                  <p className={`text-xs font-mono ${change >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                    {change >= 0 ? '+' : ''}{change.toFixed(2)}%
-                  </p>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
-        </div>
-      )}
+        ));
+      })()}
 
       {commodities.length > 0 && (
         <div className="rounded-lg border border-slate-200 p-4">

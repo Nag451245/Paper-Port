@@ -86,21 +86,61 @@ async function nseFetch(url: string): Promise<any> {
   }
 }
 
-async function yahooQuotes(symbols: string[]): Promise<any[]> {
+async function yahooChart(symbol: string): Promise<{ price: number; prevClose: number; change: number; changePct: number; name: string } | null> {
   try {
-    const joined = symbols.join(',');
     const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), 10000);
+    const t = setTimeout(() => ac.abort(), 8000);
     const res = await fetch(
-      `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(joined)}&fields=symbol,shortName,regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketPreviousClose`,
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1d`,
       { headers: { 'User-Agent': UA }, signal: ac.signal },
     );
     clearTimeout(t);
-    if (!res.ok) { await drainResponse(res); return []; }
+    if (!res.ok) { await drainResponse(res); return null; }
     const json = await res.json();
-    return json?.quoteResponse?.result ?? [];
+    const meta = json?.chart?.result?.[0]?.meta;
+    if (!meta) return null;
+    const price = meta.regularMarketPrice ?? 0;
+    const prevClose = meta.chartPreviousClose ?? meta.previousClose ?? price;
+    const change = price - prevClose;
+    const changePct = prevClose > 0 ? (change / prevClose) * 100 : 0;
+    return { price, prevClose, change, changePct, name: meta.longName ?? meta.shortName ?? meta.symbol ?? symbol };
   } catch {
-    return [];
+    return null;
+  }
+}
+
+async function yahooChartBatch(symbols: string[]): Promise<Map<string, { price: number; prevClose: number; change: number; changePct: number; name: string }>> {
+  const results = new Map<string, { price: number; prevClose: number; change: number; changePct: number; name: string }>();
+  const chunks: string[][] = [];
+  for (let i = 0; i < symbols.length; i += 5) {
+    chunks.push(symbols.slice(i, i + 5));
+  }
+  for (const chunk of chunks) {
+    const batch = await Promise.all(chunk.map(s => yahooChart(s)));
+    for (let i = 0; i < chunk.length; i++) {
+      if (batch[i]) results.set(chunk[i], batch[i]!);
+    }
+  }
+  return results;
+}
+
+async function niftyTraderFiiDii(): Promise<any> {
+  try {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 10000);
+    const res = await fetch('https://webapi.niftytrader.in/webapi/Resource/fii-dii-activity-data', {
+      headers: { 'User-Agent': UA, 'Accept': 'application/json' },
+      signal: ac.signal,
+    });
+    clearTimeout(t);
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (json?.result === 1 && json?.resultData?.fii_dii_data) {
+      return json.resultData.fii_dii_data;
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 
@@ -123,10 +163,28 @@ export class IntelligenceService {
     return promise;
   }
 
-  // ── FII / DII ──
+  // ── FII / DII (NiftyTrader API — primary) ──
 
   async getFIIDII() {
     return this.cached('intel:fii-dii', async () => {
+      // Primary: NiftyTrader API (reliable, returns recent data)
+      try {
+        const rows = await niftyTraderFiiDii();
+        if (rows && rows.length > 0) {
+          const latest = rows[0];
+          return {
+            date: latest.created_at?.split('T')[0] ?? new Date().toISOString().split('T')[0],
+            fiiNet: latest.fii_net_value ?? 0,
+            diiNet: latest.dii_net_value ?? 0,
+            niftyPrice: latest.last_trade_price ?? 0,
+            niftyChange: latest.change_value ?? 0,
+            niftyChangePct: latest.change_per ?? 0,
+            source: 'niftytrader',
+          };
+        }
+      } catch { /* fall through */ }
+
+      // Fallback: NSE
       try {
         const data = await nseFetch('https://www.nseindia.com/api/fiidiiTradeReact');
         if (data && Array.isArray(data)) {
@@ -135,59 +193,40 @@ export class IntelligenceService {
           if (fii || dii) {
             return {
               date: fii?.date || new Date().toISOString().split('T')[0],
+              fiiNet: parseFloat(fii?.netValue ?? '0') * 100,
+              diiNet: parseFloat(dii?.netValue ?? '0') * 100,
               fiiBuy: parseFloat(fii?.buyValue ?? '0') * 100,
               fiiSell: parseFloat(fii?.sellValue ?? '0') * 100,
-              fiiNet: parseFloat(fii?.netValue ?? '0') * 100,
               diiBuy: parseFloat(dii?.buyValue ?? '0') * 100,
               diiSell: parseFloat(dii?.sellValue ?? '0') * 100,
-              diiNet: parseFloat(dii?.netValue ?? '0') * 100,
+              source: 'nse',
             };
           }
         }
       } catch { /* fall through */ }
 
-      // Fallback: try NSDL FPI data endpoint
-      try {
-        const data = await nseFetch('https://www.nseindia.com/api/fii-dii-activity');
-        if (data) {
-          return {
-            date: data.date ?? new Date().toISOString().split('T')[0],
-            fiiBuy: parseFloat(data.fii_buy_value ?? '0'),
-            fiiSell: parseFloat(data.fii_sell_value ?? '0'),
-            fiiNet: parseFloat(data.fii_net_value ?? '0'),
-            diiBuy: parseFloat(data.dii_buy_value ?? '0'),
-            diiSell: parseFloat(data.dii_sell_value ?? '0'),
-            diiNet: parseFloat(data.dii_net_value ?? '0'),
-          };
-        }
-      } catch { /* fallback */ }
-
       return {
         date: new Date().toISOString().split('T')[0],
-        fiiBuy: 0, fiiSell: 0, fiiNet: 0,
-        diiBuy: 0, diiSell: 0, diiNet: 0,
-        message: 'FII/DII data temporarily unavailable from NSE. Data refreshes during market hours.',
+        fiiNet: 0, diiNet: 0,
+        message: 'FII/DII data temporarily unavailable.',
       };
     });
   }
 
   async getFIIDIITrend(days = 30) {
     return this.cached(`intel:fii-dii-trend:${days}`, async () => {
+      // NiftyTrader returns ~30 days of historical FII/DII data
       try {
-        const data = await nseFetch('https://www.nseindia.com/api/fiidiiTradeReact');
-        if (!data || !Array.isArray(data)) return { daily_flows: [] };
-        // NSE returns only today's data at this endpoint; generate trend from repeated calls won't work.
-        // Return whatever single-day data we have so the frontend at least shows something
-        const fii = data.find((d: any) => d.category === 'FII/FPI *');
-        const dii = data.find((d: any) => d.category === 'DII *');
-        if (fii || dii) {
-          return {
-            daily_flows: [{
-              date: fii?.date || new Date().toISOString().split('T')[0],
-              fiiNet: parseFloat(fii?.netValue ?? '0') * 100,
-              diiNet: parseFloat(dii?.netValue ?? '0') * 100,
-            }],
-          };
+        const rows = await niftyTraderFiiDii();
+        if (rows && rows.length > 0) {
+          const flows = rows.slice(0, days).reverse().map((r: any) => ({
+            date: r.created_at?.split('T')[0] ?? '',
+            fiiNet: r.fii_net_value ?? 0,
+            diiNet: r.dii_net_value ?? 0,
+            niftyPrice: r.last_trade_price ?? 0,
+            niftyChange: r.change_per ?? 0,
+          }));
+          return { daily_flows: flows };
         }
       } catch { /* fallback */ }
       return { daily_flows: [] };
@@ -288,7 +327,7 @@ export class IntelligenceService {
         }
       } catch { /* fall through */ }
 
-      // Yahoo fallback for Indian sectors via ETFs
+      // Yahoo v8 chart fallback for Indian sectors
       try {
         const sectorSymbols = [
           { sym: '^CNXIT', name: 'IT' }, { sym: '^NSEBANK', name: 'Banking' },
@@ -296,15 +335,15 @@ export class IntelligenceService {
           { sym: '^CNXMETAL', name: 'Metal' }, { sym: '^CNXENERGY', name: 'Energy' },
           { sym: '^CNXFMCG', name: 'FMCG' }, { sym: '^CNXREALTY', name: 'Realty' },
         ];
-        const quotes = await yahooQuotes(sectorSymbols.map(s => s.sym));
-        if (quotes.length > 0) {
+        const dataMap = await yahooChartBatch(sectorSymbols.map(s => s.sym));
+        if (dataMap.size > 0) {
           return sectorSymbols.map(s => {
-            const q = quotes.find(q => q.symbol === s.sym);
+            const d = dataMap.get(s.sym);
             return {
               sector: s.name,
-              value: q?.regularMarketPrice ?? 0,
-              change: q?.regularMarketChangePercent ?? 0,
-              changePercent: q?.regularMarketChangePercent ?? 0,
+              value: d?.price ?? 0,
+              change: d?.changePct ?? 0,
+              changePercent: d?.changePct ?? 0,
             };
           }).filter(s => s.value > 0).sort((a, b) => b.change - a.change);
         }
@@ -336,115 +375,127 @@ export class IntelligenceService {
     return this.cached('intel:sectors:rotation', () => []);
   }
 
-  // ── Global Markets (Yahoo Finance) ──
+  // ── Global Markets (Yahoo Finance v8 Chart API) ──
 
   async getGlobalIndices() {
     return this.cached('intel:global:indices', async () => {
-      const symbolMap: Record<string, string> = {
-        '^GSPC': 'S&P 500', '^IXIC': 'NASDAQ', '^DJI': 'Dow Jones',
-        '^N225': 'Nikkei 225', '^HSI': 'Hang Seng', '^FTSE': 'FTSE 100',
-        '^GDAXI': 'DAX', '000001.SS': 'Shanghai',
-        '^NSEI': 'NIFTY 50', '^NSEBANK': 'BANK NIFTY', '^BSESN': 'SENSEX',
-      };
-      const quotes = await yahooQuotes(Object.keys(symbolMap));
-      if (quotes.length > 0) {
-        return quotes.map(q => ({
-          name: symbolMap[q.symbol] ?? q.shortName ?? q.symbol,
-          value: q.regularMarketPrice ?? 0,
-          change: q.regularMarketChange ?? 0,
-          changePercent: q.regularMarketChangePercent ?? 0,
-        })).filter(i => i.value > 0);
-      }
+      const indexList: { symbol: string; label: string; region: string }[] = [
+        // India
+        { symbol: '^NSEI', label: 'NIFTY 50', region: 'India' },
+        { symbol: '^BSESN', label: 'SENSEX', region: 'India' },
+        { symbol: '^NSEBANK', label: 'BANK NIFTY', region: 'India' },
+        // US
+        { symbol: '^GSPC', label: 'S&P 500', region: 'US' },
+        { symbol: '^IXIC', label: 'NASDAQ', region: 'US' },
+        { symbol: '^DJI', label: 'Dow Jones', region: 'US' },
+        { symbol: '^RUT', label: 'Russell 2000', region: 'US' },
+        { symbol: '^VIX', label: 'VIX (Fear Index)', region: 'US' },
+        // UK
+        { symbol: '^FTSE', label: 'FTSE 100', region: 'UK' },
+        // Europe
+        { symbol: '^GDAXI', label: 'DAX (Germany)', region: 'Europe' },
+        { symbol: '^FCHI', label: 'CAC 40 (France)', region: 'Europe' },
+        { symbol: '^STOXX50E', label: 'Euro Stoxx 50', region: 'Europe' },
+        // Japan
+        { symbol: '^N225', label: 'Nikkei 225', region: 'Japan' },
+        // China
+        { symbol: '000001.SS', label: 'Shanghai Composite', region: 'China' },
+        { symbol: '^HSI', label: 'Hang Seng', region: 'China/HK' },
+        { symbol: '399001.SZ', label: 'Shenzhen Component', region: 'China' },
+        // Australia
+        { symbol: '^AXJO', label: 'ASX 200', region: 'Australia' },
+        // South Korea
+        { symbol: '^KS11', label: 'KOSPI', region: 'South Korea' },
+        // Singapore
+        { symbol: '^STI', label: 'Straits Times', region: 'Singapore' },
+      ];
 
-      // Fallback to NSE for Indian indices
-      try {
-        const data = await nseFetch('https://www.nseindia.com/api/allIndices');
-        if (data?.data) {
-          return data.data
-            .filter((idx: any) => ['NIFTY 50', 'NIFTY BANK', 'NIFTY NEXT 50', 'INDIA VIX'].includes(idx.index))
-            .map((idx: any) => ({
-              name: idx.index,
-              value: idx.last ?? 0,
-              change: idx.variation ?? 0,
-              changePercent: idx.percentChange ?? 0,
-            }));
+      const symbols = indexList.map(i => i.symbol);
+      const dataMap = await yahooChartBatch(symbols);
+      const results: any[] = [];
+      for (const idx of indexList) {
+        const d = dataMap.get(idx.symbol);
+        if (d && d.price > 0) {
+          results.push({
+            name: idx.label,
+            region: idx.region,
+            value: d.price,
+            change: d.change,
+            changePercent: d.changePct,
+          });
         }
-      } catch { /* fallback */ }
-
-      return [];
+      }
+      return results;
     });
   }
 
   async getFXRates() {
     return this.cached('intel:global:fx', async () => {
-      const pairs: Record<string, string> = {
-        'USDINR=X': 'USD/INR', 'EURINR=X': 'EUR/INR',
-        'GBPINR=X': 'GBP/INR', 'JPYINR=X': 'JPY/INR',
-        'EURUSD=X': 'EUR/USD', 'GBPUSD=X': 'GBP/USD',
-      };
-      const quotes = await yahooQuotes(Object.keys(pairs));
-      if (quotes.length > 0) {
-        return quotes.map(q => ({
-          pair: pairs[q.symbol] ?? q.symbol,
-          rate: q.regularMarketPrice ?? 0,
-          change: q.regularMarketChange ?? 0,
-          changePercent: q.regularMarketChangePercent ?? 0,
-        })).filter(p => p.rate > 0);
+      const pairList: { symbol: string; label: string }[] = [
+        { symbol: 'USDINR=X', label: 'USD/INR' },
+        { symbol: 'EURINR=X', label: 'EUR/INR' },
+        { symbol: 'GBPINR=X', label: 'GBP/INR' },
+        { symbol: 'JPYINR=X', label: 'JPY/INR' },
+        { symbol: 'EURUSD=X', label: 'EUR/USD' },
+        { symbol: 'GBPUSD=X', label: 'GBP/USD' },
+        { symbol: 'AUDUSD=X', label: 'AUD/USD' },
+        { symbol: 'USDJPY=X', label: 'USD/JPY' },
+        { symbol: 'USDCNY=X', label: 'USD/CNY' },
+      ];
+      const dataMap = await yahooChartBatch(pairList.map(p => p.symbol));
+      const results: any[] = [];
+      for (const p of pairList) {
+        const d = dataMap.get(p.symbol);
+        if (d && d.price > 0) {
+          results.push({ pair: p.label, rate: d.price, change: d.change, changePercent: d.changePct });
+        }
       }
-      return [];
+      return results;
     });
   }
 
   async getCommodities() {
     return this.cached('intel:global:commodities', async () => {
-      const commodityMap: Record<string, { name: string; unit: string }> = {
-        'GC=F': { name: 'Gold', unit: 'USD/oz' },
-        'SI=F': { name: 'Silver', unit: 'USD/oz' },
-        'CL=F': { name: 'Crude Oil (WTI)', unit: 'USD/bbl' },
-        'BZ=F': { name: 'Brent Crude', unit: 'USD/bbl' },
-        'NG=F': { name: 'Natural Gas', unit: 'USD/MMBtu' },
-        'HG=F': { name: 'Copper', unit: 'USD/lb' },
-      };
-      const quotes = await yahooQuotes(Object.keys(commodityMap));
-      if (quotes.length > 0) {
-        return quotes.map(q => {
-          const info = commodityMap[q.symbol] ?? { name: q.shortName ?? q.symbol, unit: '' };
-          return {
-            name: info.name,
-            price: q.regularMarketPrice ?? 0,
-            change: q.regularMarketChange ?? 0,
-            changePercent: q.regularMarketChangePercent ?? 0,
-            unit: info.unit,
-          };
-        }).filter(c => c.price > 0);
+      const commodityList: { symbol: string; label: string; unit: string }[] = [
+        { symbol: 'GC=F', label: 'Gold', unit: 'USD/oz' },
+        { symbol: 'SI=F', label: 'Silver', unit: 'USD/oz' },
+        { symbol: 'CL=F', label: 'Crude Oil (WTI)', unit: 'USD/bbl' },
+        { symbol: 'BZ=F', label: 'Brent Crude', unit: 'USD/bbl' },
+        { symbol: 'NG=F', label: 'Natural Gas', unit: 'USD/MMBtu' },
+        { symbol: 'HG=F', label: 'Copper', unit: 'USD/lb' },
+      ];
+      const dataMap = await yahooChartBatch(commodityList.map(c => c.symbol));
+      const results: any[] = [];
+      for (const c of commodityList) {
+        const d = dataMap.get(c.symbol);
+        if (d && d.price > 0) {
+          results.push({ name: c.label, price: d.price, change: d.change, changePercent: d.changePct, unit: c.unit });
+        }
       }
-      return [];
+      return results;
     });
   }
 
   async getUSSummary() {
     return this.cached('intel:global:us-summary', async () => {
-      const quotes = await yahooQuotes(['^GSPC', '^IXIC', '^VIX']);
-      const sp500 = quotes.find(q => q.symbol === '^GSPC');
-      const nasdaq = quotes.find(q => q.symbol === '^IXIC');
-      const vix = quotes.find(q => q.symbol === '^VIX');
+      const dataMap = await yahooChartBatch(['^GSPC', '^IXIC', '^VIX']);
+      const sp500 = dataMap.get('^GSPC');
+      const nasdaq = dataMap.get('^IXIC');
+      const vix = dataMap.get('^VIX');
       return {
-        marketStatus: sp500?.marketState === 'REGULAR' ? 'open' : 'closed',
-        sp500: { value: sp500?.regularMarketPrice ?? 0, change: sp500?.regularMarketChangePercent ?? 0 },
-        nasdaq: { value: nasdaq?.regularMarketPrice ?? 0, change: nasdaq?.regularMarketChangePercent ?? 0 },
-        vix: { value: vix?.regularMarketPrice ?? 0, change: vix?.regularMarketChangePercent ?? 0 },
+        marketStatus: 'unknown',
+        sp500: { value: sp500?.price ?? 0, change: sp500?.changePct ?? 0 },
+        nasdaq: { value: nasdaq?.price ?? 0, change: nasdaq?.changePct ?? 0 },
+        vix: { value: vix?.price ?? 0, change: vix?.changePct ?? 0 },
       };
     });
   }
 
   async getSGXNifty() {
     return this.cached('intel:global:sgx-nifty', async () => {
-      const quotes = await yahooQuotes(['NQ=F']); // SGX Nifty discontinued; use NIFTY futures proxy
-      const q = quotes[0];
+      const d = await yahooChart('^NSEI');
       return {
-        value: q?.regularMarketPrice ?? 0,
-        change: q?.regularMarketChange ?? 0,
-        changePercent: q?.regularMarketChangePercent ?? 0,
+        value: d?.price ?? 0, change: d?.change ?? 0, changePercent: d?.changePct ?? 0,
         lastUpdated: new Date().toISOString(),
       };
     });
