@@ -1,14 +1,40 @@
 import { PrismaClient } from '@prisma/client';
+import { MarketDataService } from './market-data.service.js';
 
 export class WatchlistService {
+  private marketData = new MarketDataService();
+
   constructor(private prisma: PrismaClient) {}
 
   async list(userId: string) {
-    return this.prisma.watchlist.findMany({
+    const watchlists = await this.prisma.watchlist.findMany({
       where: { userId },
       include: { items: true },
       orderBy: { createdAt: 'desc' },
     });
+
+    // Enrich items with live price data (best effort, non-blocking)
+    for (const wl of watchlists) {
+      const enriched = await Promise.all(
+        wl.items.map(async (item) => {
+          try {
+            const quote = await this.marketData.getQuote(item.symbol, item.exchange);
+            return {
+              ...item,
+              ltp: quote.ltp,
+              change: quote.change,
+              changePercent: quote.changePercent,
+              volume: quote.volume ?? 0,
+            };
+          } catch {
+            return { ...item, ltp: 0, change: 0, changePercent: 0, volume: 0 };
+          }
+        }),
+      );
+      (wl as any).items = enriched;
+    }
+
+    return watchlists;
   }
 
   async create(userId: string, name: string) {

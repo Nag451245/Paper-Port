@@ -265,17 +265,45 @@ Respond in JSON:
     });
   }
 
+  // Cached briefing to avoid regenerating on every dashboard load
+  private cachedBriefing: { data: any; fetchedAt: number } | null = null;
+  private briefingInProgress = false;
+
   async getPreMarketBriefing(userId: string) {
+    // Return cached briefing if fresh enough (10 min during market, 30 min otherwise)
+    if (this.cachedBriefing) {
+      const ageMs = Date.now() - this.cachedBriefing.fetchedAt;
+      const maxAge = this.isMarketHours() ? 10 * 60_000 : 30 * 60_000;
+      if (ageMs < maxAge) return this.cachedBriefing.data;
+    }
+
+    // Prevent parallel regeneration
+    if (this.briefingInProgress && this.cachedBriefing) return this.cachedBriefing.data;
+
+    return this.regenerateBriefing();
+  }
+
+  async regenerateBriefing() {
+    if (this.briefingInProgress) return this.cachedBriefing?.data ?? this.fallbackBriefing();
+    this.briefingInProgress = true;
+
     try {
+      // 1. Fetch real news headlines from RSS feeds
+      const newsHeadlines = await this.fetchMarketNews();
+
+      // 2. Fetch live market data
       let fnoContext = '';
+      let marketContext = '';
       try {
-        const [vixData, niftyChain] = await Promise.all([
+        const [vixData, niftyChain, niftyQuote] = await Promise.all([
           this.marketData.getVIX().catch(() => null),
           this.marketData.getOptionsChain('NIFTY').catch(() => null),
+          this.marketData.getQuote('NIFTY 50', 'NSE').catch(() => null),
         ]);
 
         const parts: string[] = [];
-        if (vixData?.value) parts.push(`India VIX: ${vixData.value}`);
+        if (vixData?.value) parts.push(`India VIX: ${vixData.value} (${vixData.change >= 0 ? '+' : ''}${vixData.changePercent.toFixed(1)}%)`);
+        if (niftyQuote?.ltp) parts.push(`NIFTY 50: ${niftyQuote.ltp} (${niftyQuote.changePercent >= 0 ? '+' : ''}${niftyQuote.changePercent.toFixed(1)}%)`);
 
         if (niftyChain?.strikes?.length) {
           const callOI: Record<number, number> = {};
@@ -289,63 +317,126 @@ Respond in JSON:
           const totalCallOI = Object.values(callOI).reduce((a, b) => a + b, 0);
           const totalPutOI = Object.values(putOI).reduce((a, b) => a + b, 0);
           const pcr = totalCallOI > 0 ? (totalPutOI / totalCallOI).toFixed(2) : 'N/A';
-          parts.push(`NIFTY Max Pain: ${maxPain.maxPainStrike}`);
-          parts.push(`NIFTY PCR: ${pcr}`);
-
-          const topCallOI = strikeVals.sort((a: number, b: number) => (callOI[b] || 0) - (callOI[a] || 0)).slice(0, 3);
-          const topPutOI = strikeVals.sort((a: number, b: number) => (putOI[b] || 0) - (putOI[a] || 0)).slice(0, 3);
-          parts.push(`Highest Call OI: ${topCallOI.join(', ')} (resistance)`);
-          parts.push(`Highest Put OI: ${topPutOI.join(', ')} (support)`);
+          parts.push(`NIFTY Max Pain: ${maxPain.maxPainStrike} | PCR: ${pcr}`);
         }
-        if (parts.length > 0) fnoContext = `\nF&O Context:\n${parts.join('\n')}`;
-      } catch { /* F&O data unavailable */ }
+        if (parts.length > 0) {
+          marketContext = `\nLive Market Data:\n${parts.join('\n')}`;
+          fnoContext = marketContext;
+        }
+      } catch { /* market data unavailable */ }
+
+      const newsSection = newsHeadlines.length > 0
+        ? `\nLatest Market News (real headlines):\n${newsHeadlines.map((h, i) => `${i + 1}. ${h}`).join('\n')}`
+        : '';
 
       const prompt = `You are a senior market analyst for the Indian stock market (NSE/BSE).
-Generate a pre-market briefing for today. Include:
-- Overall market stance (bullish/bearish/neutral)
-- Key points for the day (3-5 bullet points)
-- Global cues (US markets, Asian markets, commodities)
-- Sector outlook (which sectors to watch)
-- Key support and resistance levels for NIFTY 50, GOLD, USDINR
-- F&O outlook: VIX view, PCR interpretation, max pain implications, OI build-up signals
-- Important events/data releases today
+Generate a market briefing based on REAL news headlines and live market data provided below.
+Do NOT make up news. Use only the headlines provided. If no headlines are available, focus on technical analysis from the market data.
+
+Include:
+- Overall market stance (bullish/bearish/neutral) based on actual news and data
+- Key points for the day (3-5 bullet points referencing specific news items)
+- Global cues (extract from news if available)
+- Sector outlook (which sectors are mentioned in news)
+- Key support and resistance levels for NIFTY 50
+- F&O outlook if data available
+- Important events from the news
 
 Respond in JSON format:
 {
   "date": "YYYY-MM-DD",
   "stance": "bullish|bearish|neutral",
-  "keyPoints": ["point1", "point2"],
-  "globalCues": ["cue1", "cue2"],
+  "keyPoints": ["point referencing actual news/data"],
+  "globalCues": ["cue from actual news"],
   "sectorOutlook": {"IT": "positive", "Banking": "neutral"},
   "supportLevels": [21800, 21600],
   "resistanceLevels": [22200, 22400],
   "fnoOutlook": {"vix": "low/moderate/high", "pcrView": "bullish/bearish/neutral", "maxPainImplication": "text", "oiBuildUp": "text"},
-  "keyEvents": ["event1"]
+  "keyEvents": ["event from actual news"],
+  "lastUpdated": "${new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}"
 }`;
 
       const result = await chatCompletionJSON({
         messages: [
           { role: 'system', content: prompt },
-          { role: 'user', content: `Generate briefing for ${new Date().toISOString().split('T')[0]}${fnoContext}` },
+          { role: 'user', content: `Generate briefing for ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}${fnoContext}${newsSection}` },
         ],
         temperature: 0.3,
+        maxTokens: 2048,
       });
 
       if (!result || typeof result !== 'object') throw new Error('Invalid response');
+      this.cachedBriefing = { data: result, fetchedAt: Date.now() };
       return result;
     } catch {
-      return {
-        date: new Date().toISOString().split('T')[0],
-        stance: 'neutral',
-        keyPoints: ['Pre-market briefing unavailable'],
-        globalCues: [],
-        sectorOutlook: {},
-        supportLevels: [],
-        resistanceLevels: [],
-        fnoOutlook: {},
-        keyEvents: [],
-      };
+      return this.cachedBriefing?.data ?? this.fallbackBriefing();
+    } finally {
+      this.briefingInProgress = false;
     }
+  }
+
+  private async fetchMarketNews(): Promise<string[]> {
+    const headlines: string[] = [];
+    const RSS_FEEDS = [
+      'https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms',
+      'https://www.moneycontrol.com/rss/marketreports.xml',
+      'https://www.livemint.com/rss/markets',
+    ];
+
+    for (const feedUrl of RSS_FEEDS) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        const resp = await fetch(feedUrl, {
+          signal: controller.signal,
+          headers: { 'User-Agent': 'CapitalGuard/1.0' },
+        });
+        clearTimeout(timeout);
+
+        if (!resp.ok) continue;
+        const xml = await resp.text();
+
+        // Extract titles from RSS XML using regex (lightweight, no XML parser needed)
+        const titleMatches = xml.match(/<item[^>]*>[\s\S]*?<title><!\[CDATA\[(.*?)\]\]><\/title>|<item[^>]*>[\s\S]*?<title>(.*?)<\/title>/g);
+        if (titleMatches) {
+          for (const match of titleMatches.slice(0, 5)) {
+            const titleContent = match.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/) ??
+                                 match.match(/<title>(.*?)<\/title>/);
+            if (titleContent?.[1]) {
+              const clean = titleContent[1].replace(/<[^>]+>/g, '').trim();
+              if (clean.length > 10 && clean.length < 200) headlines.push(clean);
+            }
+          }
+        }
+      } catch { /* skip failed feed */ }
+    }
+
+    // Deduplicate and limit
+    const unique = [...new Set(headlines)].slice(0, 15);
+    return unique;
+  }
+
+  private isMarketHours(): boolean {
+    const now = new Date();
+    const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const h = ist.getHours();
+    const m = ist.getMinutes();
+    const time = h * 60 + m;
+    return time >= 555 && time <= 930; // 9:15 AM to 3:30 PM IST
+  }
+
+  private fallbackBriefing() {
+    return {
+      date: new Date().toISOString().split('T')[0],
+      stance: 'neutral',
+      keyPoints: ['Market briefing is being generated. Please refresh in a minute.'],
+      globalCues: [],
+      sectorOutlook: {},
+      supportLevels: [],
+      resistanceLevels: [],
+      fnoOutlook: {},
+      keyEvents: [],
+    };
   }
 
   async getPostTradeBriefing(userId: string) {

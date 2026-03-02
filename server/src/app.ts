@@ -413,5 +413,107 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
   });
 
+  // Scheduled market briefing refresh
+  app.addHook('onReady', async () => {
+    const prisma = getPrisma();
+    const { AIAgentService } = await import('./services/ai-agent.service.js');
+    const agentService = new AIAgentService(prisma);
+
+    // During market hours (9:15 AM - 3:30 PM IST): every 20 min
+    // IST = UTC+5:30, so 9:15 IST = 3:45 UTC, 3:30 PM IST = 10:00 UTC
+    orchestrator.scheduleMarketDay('*/20 9-15 * * 1-5', async () => {
+      app.log.info('[Briefing] Refreshing market briefing (market hours)');
+      await agentService.regenerateBriefing();
+    });
+
+    // Before market (7 AM - 9 AM IST): every hour → UTC 1:30-3:30
+    orchestrator.scheduleMarketDay('30 1,2,3 * * 1-5', async () => {
+      app.log.info('[Briefing] Refreshing pre-market briefing');
+      await agentService.regenerateBriefing();
+    });
+
+    // After market (4 PM - 8 PM IST): every hour → UTC 10:30-14:30
+    orchestrator.scheduleMarketDay('30 10,11,12,13,14 * * 1-5', async () => {
+      app.log.info('[Briefing] Refreshing post-market briefing');
+      await agentService.regenerateBriefing();
+    });
+
+    // Generate initial briefing 30s after startup
+    setTimeout(() => {
+      agentService.regenerateBriefing().catch(() => {});
+      app.log.info('[Briefing] Initial briefing generation triggered');
+    }, 30_000);
+  });
+
+  // Auto-populate watchlist from open positions for users with empty watchlists
+  app.addHook('onReady', async () => {
+    const prisma = getPrisma();
+    try {
+      const users = await prisma.user.findMany({
+        where: { isActive: true },
+        select: { id: true },
+      });
+
+      for (const user of users) {
+        const watchlists = await prisma.watchlist.findMany({
+          where: { userId: user.id },
+          include: { items: true },
+        });
+
+        // Create a default watchlist if none exists
+        let defaultWatchlist = watchlists[0];
+        if (!defaultWatchlist) {
+          defaultWatchlist = await prisma.watchlist.create({
+            data: { userId: user.id, name: 'My Watchlist' },
+            include: { items: true },
+          });
+        }
+
+        // If watchlist is empty, populate with open positions + key indices
+        if (defaultWatchlist.items.length === 0) {
+          const openPositions = await prisma.position.findMany({
+            where: { portfolioId: { in: (await prisma.portfolio.findMany({ where: { userId: user.id }, select: { id: true } })).map(p => p.id) }, status: 'OPEN' },
+            select: { symbol: true, exchange: true },
+          });
+
+          const defaultSymbols = [
+            { symbol: 'RELIANCE', exchange: 'NSE' },
+            { symbol: 'TCS', exchange: 'NSE' },
+            { symbol: 'HDFCBANK', exchange: 'NSE' },
+            { symbol: 'INFY', exchange: 'NSE' },
+            { symbol: 'ITC', exchange: 'NSE' },
+          ];
+
+          const symbolsToAdd = [
+            ...openPositions.map(p => ({ symbol: p.symbol, exchange: p.exchange })),
+            ...defaultSymbols,
+          ];
+
+          const added = new Set<string>();
+          for (const s of symbolsToAdd) {
+            if (added.has(s.symbol)) continue;
+            added.add(s.symbol);
+            try {
+              await prisma.watchlistItem.create({
+                data: {
+                  watchlistId: defaultWatchlist.id,
+                  symbol: s.symbol,
+                  exchange: s.exchange as any,
+                },
+              });
+            } catch { /* skip duplicates */ }
+            if (added.size >= 10) break;
+          }
+
+          if (added.size > 0) {
+            app.log.info(`[Watchlist] Populated ${added.size} symbols for user ${user.id}`);
+          }
+        }
+      }
+    } catch (err) {
+      app.log.error({ err }, 'Failed to auto-populate watchlists');
+    }
+  });
+
   return app;
 }
