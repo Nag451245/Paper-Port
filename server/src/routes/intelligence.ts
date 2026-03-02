@@ -1,6 +1,10 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { IntelligenceService } from '../services/intelligence.service.js';
+import {
+  engineMonteCarlo, enginePortfolioOptimize, engineOptionsStrategy,
+  engineCorrelation, engineFeatureStore, isEngineAvailable,
+} from '../lib/rust-engine.js';
 
 const symbolParam = z.string().min(1).max(30).regex(/^[A-Z0-9&_-]+$/i, 'Invalid symbol');
 
@@ -75,4 +79,56 @@ export async function intelligenceRoutes(app: FastifyInstance): Promise<void> {
     return reply.send(await service.getBlackout(sym));
   });
   app.get('/earnings/event-impact', async (_req, reply) => reply.send(await service.getEventImpact()));
+
+  // ── Rust Engine Quant Endpoints ──
+
+  app.get('/engine/status', async (_req, reply) => {
+    return reply.send({ available: isEngineAvailable() });
+  });
+
+  app.post('/engine/monte-carlo', async (req, reply) => {
+    try {
+      const body = req.body as any;
+      if (!body?.returns || !Array.isArray(body.returns)) return reply.code(400).send({ error: 'returns array required' });
+      const result = await engineMonteCarlo({ returns: body.returns, initial_capital: body.initial_capital ?? 1000000, num_simulations: body.num_simulations, time_horizon: body.time_horizon });
+      return reply.send(result);
+    } catch (err: any) { return reply.code(500).send({ error: err.message }); }
+  });
+
+  app.post('/engine/portfolio-optimize', async (req, reply) => {
+    try {
+      const body = req.body as any;
+      if (!body?.assets || !Array.isArray(body.assets)) return reply.code(400).send({ error: 'assets array required' });
+      const result = await enginePortfolioOptimize(body);
+      return reply.send(result);
+    } catch (err: any) { return reply.code(500).send({ error: err.message }); }
+  });
+
+  app.post('/engine/options-strategy', async (req, reply) => {
+    try {
+      const body = req.body as any;
+      if (!body?.legs || !Array.isArray(body.legs)) return reply.code(400).send({ error: 'legs array required' });
+      if (!body?.spot) return reply.code(400).send({ error: 'spot price required' });
+      const result = await engineOptionsStrategy(body);
+      return reply.send(result);
+    } catch (err: any) { return reply.code(500).send({ error: err.message }); }
+  });
+
+  app.post('/engine/correlation', async (req, reply) => {
+    try {
+      const body = req.body as any;
+      if (!body?.pairs || !Array.isArray(body.pairs)) return reply.code(400).send({ error: 'pairs array required' });
+      const result = await engineCorrelation(body);
+      return reply.send(result);
+    } catch (err: any) { return reply.code(500).send({ error: err.message }); }
+  });
+
+  app.post('/engine/features', async (req, reply) => {
+    try {
+      const body = req.body as any;
+      if (!body?.command) return reply.code(400).send({ error: 'command required (extract_features, detect_regime, detect_anomalies)' });
+      const result = await engineFeatureStore(body);
+      return reply.send(result);
+    } catch (err: any) { return reply.code(500).send({ error: err.message }); }
+  });
 }

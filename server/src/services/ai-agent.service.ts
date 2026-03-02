@@ -557,18 +557,44 @@ Respond in JSON format:
       const dayLoss = todayPnl.reduce((s, t) => s + Math.min(0, Number(t.netPnl)), 0);
       const dayLossPct = initCap > 0 ? Math.abs(dayLoss / initCap) * 100 : 0;
 
-      // Compute Rust risk metrics if engine is available
       let rustRisk: { sharpe_ratio: number; var_95: number; max_drawdown_percent: number; volatility: number; sortino_ratio: number } | null = null;
-      if (isEngineAvailable() && positions.length > 0) {
-        try {
-          const returns = positions.map(p => {
-            const entry = Number(p.avgEntryPrice);
-            const pnl = Number(p.unrealizedPnl);
-            return entry > 0 ? pnl / (entry * Number(p.qty)) : 0;
-          });
-          const riskResult = await engineRisk({ returns, initial_capital: initCap }) as any;
-          rustRisk = riskResult;
-        } catch { /* Rust risk unavailable */ }
+      if (positions.length > 0) {
+        const returns = positions.map(p => {
+          const entry = Number(p.avgEntryPrice);
+          const pnl = Number(p.unrealizedPnl);
+          return entry > 0 ? pnl / (entry * Number(p.qty)) : 0;
+        });
+
+        if (isEngineAvailable()) {
+          try {
+            rustRisk = await engineRisk({ returns, initial_capital: initCap }) as any;
+          } catch { /* fall through to JS */ }
+        }
+
+        if (!rustRisk) {
+          const n = returns.length;
+          const mean = returns.reduce((s, r) => s + r, 0) / n;
+          const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / n;
+          const std = Math.sqrt(variance);
+          const negRet = returns.filter(r => r < 0);
+          const downDev = Math.sqrt(negRet.length > 0 ? negRet.reduce((s, r) => s + r * r, 0) / negRet.length : 0);
+          const sorted = [...returns].sort((a, b) => a - b);
+          const varIdx = Math.floor(0.05 * n);
+          let peak = initCap, maxDd = 0, nav = initCap;
+          for (const r of returns) {
+            nav *= (1 + r);
+            if (nav > peak) peak = nav;
+            const dd = (peak - nav) / peak;
+            if (dd > maxDd) maxDd = dd;
+          }
+          rustRisk = {
+            sharpe_ratio: Math.round((std > 0 ? (mean / std) * Math.sqrt(252) : 0) * 100) / 100,
+            sortino_ratio: Math.round((downDev > 0 ? (mean / downDev) * Math.sqrt(252) : 0) * 100) / 100,
+            var_95: Math.round((varIdx < sorted.length ? -sorted[varIdx] * initCap : 0) * 100) / 100,
+            max_drawdown_percent: Math.round(maxDd * 10000) / 100,
+            volatility: Math.round(std * Math.sqrt(252) * 10000) / 100,
+          };
+        }
       }
 
       const rules: Array<{ id: string; name: string; status: string; detail: string }> = [

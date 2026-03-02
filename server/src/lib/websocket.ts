@@ -106,6 +106,33 @@ class WebSocketHub {
     this.broadcastToUser(userId, { type: 'trade_executed', ...trade });
   }
 
+  broadcastEngineSignal(symbol: string, data: { indicators: Record<string, number>; signal: string; confidence: number; timestamp: string }): void {
+    const subs = this.symbolSubscriptions.get(symbol);
+    if (!subs || subs.size === 0) return;
+    const payload = JSON.stringify({ type: 'engine_signal', symbol, ...data });
+    for (const ws of subs) {
+      if (ws.readyState === 1) ws.send(payload);
+    }
+  }
+
+  broadcastRegime(data: { regime: string; confidence: number; timestamp: string }): void {
+    const payload = JSON.stringify({ type: 'regime_update', ...data });
+    for (const [, client] of this.clients) {
+      if (client.channels.has('signals') && client.socket.readyState === 1) {
+        client.socket.send(payload);
+      }
+    }
+  }
+
+  broadcastAnomaly(data: { symbol: string; anomaly_type: string; score: number; details: string; timestamp: string }): void {
+    const payload = JSON.stringify({ type: 'anomaly', ...data });
+    for (const [, client] of this.clients) {
+      if (client.channels.has('signals') && client.socket.readyState === 1) {
+        client.socket.send(payload);
+      }
+    }
+  }
+
   getConnectedCount(): number {
     return this.clients.size;
   }

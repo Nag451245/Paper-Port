@@ -1,8 +1,10 @@
-import { spawn } from 'child_process';
+import { spawn, ChildProcess } from 'child_process';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, mkdirSync, createWriteStream, chmodSync, statSync, unlinkSync } from 'fs';
 import https from 'https';
+import { createInterface, Interface as ReadlineInterface } from 'readline';
+import { randomUUID } from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -103,105 +105,157 @@ export async function ensureEngineAvailable(): Promise<boolean> {
 }
 
 interface EngineResponse {
+  id?: string;
   success: boolean;
   data: unknown;
   error?: string;
 }
 
 const ENGINE_TIMEOUT_MS = 30_000;
-const MAX_INPUT_SIZE = 2 * 1024 * 1024; // 2 MB (reduced from 10 MB)
-const MAX_CONCURRENT_ENGINE = 2;
-let activeEngineCount = 0;
-const engineQueue: Array<{ resolve: () => void }> = [];
+const MAX_INPUT_SIZE = 2 * 1024 * 1024;
 
-async function acquireEngine(): Promise<void> {
-  if (activeEngineCount < MAX_CONCURRENT_ENGINE) {
-    activeEngineCount++;
-    return;
+// ── Persistent Daemon ──
+
+let daemonProc: ChildProcess | null = null;
+let daemonRL: ReadlineInterface | null = null;
+const pendingRequests = new Map<string, { resolve: (v: EngineResponse) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+let daemonReady = false;
+
+function spawnDaemon(): boolean {
+  const binary = getBinary();
+  if (!binary) return false;
+
+  try {
+    const proc = spawn(binary, ['--daemon'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    proc.on('error', (err) => {
+      console.error(`[rust-engine] Daemon error: ${err.message}`);
+      teardownDaemon();
+    });
+    proc.on('exit', (code) => {
+      console.warn(`[rust-engine] Daemon exited with code ${code}`);
+      teardownDaemon();
+    });
+
+    const rl = createInterface({ input: proc.stdout!, crlfDelay: Infinity });
+    rl.on('line', (line) => {
+      try {
+        const resp = JSON.parse(line) as EngineResponse;
+        const reqId = resp.id;
+        if (reqId && pendingRequests.has(reqId)) {
+          const pending = pendingRequests.get(reqId)!;
+          clearTimeout(pending.timer);
+          pendingRequests.delete(reqId);
+          pending.resolve(resp);
+        }
+      } catch { /* skip malformed lines */ }
+    });
+
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      const msg = chunk.toString().trim();
+      if (msg) console.log(`[rust-engine:stderr] ${msg}`);
+    });
+
+    daemonProc = proc;
+    daemonRL = rl;
+    daemonReady = true;
+    console.log(`[rust-engine] Daemon started (PID ${proc.pid})`);
+    return true;
+  } catch (err: any) {
+    console.error(`[rust-engine] Failed to start daemon: ${err.message}`);
+    return false;
   }
-  return new Promise<void>((resolve) => {
-    engineQueue.push({ resolve });
+}
+
+function teardownDaemon() {
+  daemonReady = false;
+  for (const [id, pending] of pendingRequests) {
+    clearTimeout(pending.timer);
+    pending.reject(new Error('Daemon terminated'));
+    pendingRequests.delete(id);
+  }
+  if (daemonRL) { daemonRL.close(); daemonRL = null; }
+  if (daemonProc) {
+    try { daemonProc.kill(); } catch { /* already dead */ }
+    daemonProc = null;
+  }
+}
+
+async function sendToDaemon(command: string, data: unknown): Promise<EngineResponse> {
+  if (!daemonReady || !daemonProc || daemonProc.exitCode !== null) {
+    if (!spawnDaemon()) throw new Error('Cannot start engine daemon');
+  }
+
+  const id = randomUUID();
+  const input = JSON.stringify({ id, command, data });
+  if (input.length > MAX_INPUT_SIZE) throw new Error('Input too large for engine');
+
+  return new Promise<EngineResponse>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingRequests.delete(id);
+      reject(new Error('Engine request timed out'));
+    }, ENGINE_TIMEOUT_MS);
+
+    pendingRequests.set(id, { resolve, reject, timer });
+
+    try {
+      daemonProc!.stdin!.write(input + '\n');
+    } catch (err: any) {
+      clearTimeout(timer);
+      pendingRequests.delete(id);
+      teardownDaemon();
+      reject(new Error(`Failed to write to daemon: ${err.message}`));
+    }
   });
 }
 
-function releaseEngine(): void {
-  activeEngineCount--;
-  const next = engineQueue.shift();
-  if (next) {
-    activeEngineCount++;
-    next.resolve();
-  }
+// ── Single-shot fallback (used when daemon fails) ──
+
+async function runEngineSingleShot(command: string, data: unknown): Promise<EngineResponse> {
+  const binary = getBinary();
+  if (!binary) throw new Error('Rust engine binary not found');
+
+  const input = JSON.stringify({ command, data });
+  if (input.length > MAX_INPUT_SIZE) throw new Error('Input too large for engine');
+
+  return new Promise<EngineResponse>((resolve, reject) => {
+    const proc = spawn(binary, [], { stdio: ['pipe', 'pipe', 'pipe'], timeout: ENGINE_TIMEOUT_MS });
+    const chunks: Buffer[] = [];
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (!settled) { settled = true; proc.kill('SIGKILL'); reject(new Error('Engine timed out')); }
+    }, ENGINE_TIMEOUT_MS);
+
+    proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
+    proc.on('error', (err) => { if (!settled) { settled = true; clearTimeout(timer); reject(err); } });
+    proc.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const stdout = Buffer.concat(chunks).toString('utf-8').trim();
+      if (code !== 0) { reject(new Error(`Engine exited with code ${code}`)); return; }
+      try { resolve(JSON.parse(stdout) as EngineResponse); } catch { reject(new Error('Engine returned invalid JSON')); }
+    });
+
+    proc.stdin.write(input);
+    proc.stdin.end();
+  });
 }
 
 async function runEngine(command: string, data: unknown): Promise<EngineResponse> {
-  const binary = getBinary();
-  if (!binary) {
-    throw new Error('Rust engine binary not found');
-  }
-
-  const input = JSON.stringify({ command, data });
-  if (input.length > MAX_INPUT_SIZE) {
-    throw new Error('Input too large for engine');
-  }
-
-  await acquireEngine();
   try {
-    return await new Promise<EngineResponse>((resolve, reject) => {
-      const proc = spawn(binary, [], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: ENGINE_TIMEOUT_MS,
-      });
-
-      const chunks: Buffer[] = [];
-      const errChunks: Buffer[] = [];
-      let settled = false;
-
-      const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          proc.kill('SIGKILL');
-          reject(new Error('Engine timed out'));
-        }
-      }, ENGINE_TIMEOUT_MS);
-
-      proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-      proc.stderr.on('data', (chunk: Buffer) => errChunks.push(chunk));
-
-      proc.on('error', (err) => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          reject(err);
-        }
-      });
-
-      proc.on('close', (code) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-
-        const stdout = Buffer.concat(chunks).toString('utf-8').trim();
-
-        if (code !== 0) {
-          const stderr = Buffer.concat(errChunks).toString('utf-8').trim();
-          reject(new Error(`Engine exited with code ${code}: ${stderr.slice(0, 500)}`));
-          return;
-        }
-
-        try {
-          const parsed = JSON.parse(stdout) as EngineResponse;
-          resolve(parsed);
-        } catch {
-          reject(new Error('Engine returned invalid JSON'));
-        }
-      });
-
-      proc.stdin.write(input);
-      proc.stdin.end();
-    });
-  } finally {
-    releaseEngine();
+    return await sendToDaemon(command, data);
+  } catch {
+    return runEngineSingleShot(command, data);
   }
+}
+
+export function startDaemon(): boolean {
+  return spawnDaemon();
+}
+
+export function stopDaemon(): void {
+  teardownDaemon();
 }
 
 export async function engineBacktest(data: unknown): Promise<unknown> {
@@ -563,4 +617,67 @@ export async function engineScan(data: {
   const res = await runEngine('scan', data);
   if (!res.success) throw new Error(res.error ?? 'Scan computation failed');
   return res.data as ScanResult;
+}
+
+// ── Monte Carlo Simulation ──
+
+export async function engineMonteCarlo(data: {
+  returns: number[];
+  initial_capital: number;
+  num_simulations?: number;
+  time_horizon?: number;
+}): Promise<unknown> {
+  const res = await runEngine('monte_carlo', data);
+  if (!res.success) throw new Error(res.error ?? 'Monte Carlo failed');
+  return res.data;
+}
+
+// ── Portfolio Optimization (Markowitz + Black-Litterman) ──
+
+export async function enginePortfolioOptimize(data: {
+  assets: Array<{ symbol: string; returns: number[]; expected_return?: number }>;
+  risk_free_rate?: number;
+  num_portfolios?: number;
+  views?: Array<{ asset_index: number; expected_return: number; confidence: number }>;
+}): Promise<unknown> {
+  const res = await runEngine('optimize_portfolio', data);
+  if (!res.success) throw new Error(res.error ?? 'Portfolio optimization failed');
+  return res.data;
+}
+
+// ── Options Strategy Analyzer ──
+
+export async function engineOptionsStrategy(data: {
+  legs: Array<{ option_type: string; strike: number; premium: number; quantity: number; expiry_days?: number; iv?: number }>;
+  spot: number;
+  risk_free_rate?: number;
+  price_range?: [number, number];
+}): Promise<unknown> {
+  const res = await runEngine('options_strategy', data);
+  if (!res.success) throw new Error(res.error ?? 'Options strategy analysis failed');
+  return res.data;
+}
+
+// ── Pairs Trading Correlation Scanner ──
+
+export async function engineCorrelation(data: {
+  pairs: Array<{ symbol_a: string; symbol_b: string; prices_a: number[]; prices_b: number[] }>;
+  lookback?: number;
+  zscore_threshold?: number;
+}): Promise<unknown> {
+  const res = await runEngine('correlation', data);
+  if (!res.success) throw new Error(res.error ?? 'Correlation analysis failed');
+  return res.data;
+}
+
+// ── ML Feature Store (Feature Extraction, Regime Detection, Anomaly Detection) ──
+
+export async function engineFeatureStore(data: {
+  command: string;
+  candles?: Array<{ timestamp: string; open: number; high: number; low: number; close: number; volume: number }>;
+  lookback?: number;
+}): Promise<unknown> {
+  const res = await runEngine('feature_store', data);
+  if (!res.success) throw new Error(res.error ?? 'Feature store operation failed');
+  return res.data;
 }

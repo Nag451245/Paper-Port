@@ -1,4 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../../src/services/market-calendar.js', () => ({
+  MarketCalendar: vi.fn().mockImplementation(() => ({
+    isMarketOpen: vi.fn().mockReturnValue(true),
+  })),
+}));
+
+vi.mock('../../src/services/market-data.service.js', () => ({
+  MarketDataService: vi.fn().mockImplementation(() => ({
+    getQuote: vi.fn().mockResolvedValue({ ltp: 2500 }),
+  })),
+}));
+
 import { TradeService, TradeError } from '../../src/services/trade.service.js';
 
 function createMockPrisma() {

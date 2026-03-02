@@ -426,7 +426,7 @@ export class BacktestService {
     let trades: TradeEntry[];
     let equityCurve: { date: string; value: number }[];
 
-    const useRust = isEngineAvailable() && (strategyKey === 'ema-crossover' || strategyKey === 'ema_crossover' || strategyKey === 'supertrend');
+    const useRust = isEngineAvailable();
 
     if (useRust) {
       try {

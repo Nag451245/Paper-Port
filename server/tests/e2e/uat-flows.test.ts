@@ -31,6 +31,11 @@ vi.mock('../../src/lib/openai.js', () => ({
   _resetForTesting: vi.fn(),
 }));
 
+vi.mock('../../src/lib/rust-engine.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../../src/lib/rust-engine.js')>();
+  return { ...mod, isEngineAvailable: vi.fn().mockReturnValue(false), startDaemon: vi.fn().mockReturnValue(false) };
+});
+
 vi.mock('../../src/services/market-data.service.js', () => ({
   MarketDataService: vi.fn().mockImplementation(() => ({
     getHistory: vi.fn().mockResolvedValue(
@@ -58,7 +63,7 @@ vi.mock('../../src/services/market-data.service.js', () => ({
 vi.mock('../../src/lib/prisma.js', () => {
   const mock = {
     user: { findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
-    breezeCredential: { findUnique: vi.fn(), upsert: vi.fn() },
+    breezeCredential: { findUnique: vi.fn(), findMany: vi.fn().mockResolvedValue([]), upsert: vi.fn() },
     portfolio: { findUnique: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
     position: { findUnique: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
     order: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn(), count: vi.fn() },

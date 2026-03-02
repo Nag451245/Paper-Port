@@ -7,8 +7,6 @@ description = "High-performance computation engine for Capital Guard (backtestin
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-polars = { version = "0.45", features = ["json", "lazy"] }
-statrs = "0.18"
 
 [profile.release]
 opt-level = 3

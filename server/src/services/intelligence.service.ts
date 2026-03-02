@@ -416,11 +416,40 @@ export class IntelligenceService {
     return { strikes, pcr, maxPain, totalCallOI, totalPutOI, expiry };
   }
 
+  private jsBlackScholes(s: number, k: number, t: number, r: number, sigma: number, isCall: boolean) {
+    if (t <= 0) {
+      const intrinsic = isCall ? Math.max(s - k, 0) : Math.max(k - s, 0);
+      return { price: intrinsic, delta: isCall ? (s > k ? 1 : 0) : (s < k ? -1 : 0), gamma: 0, theta: 0, vega: 0, rho: 0 };
+    }
+    const d1 = (Math.log(s / k) + (r + sigma * sigma / 2) * t) / (sigma * Math.sqrt(t));
+    const d2 = d1 - sigma * Math.sqrt(t);
+    const nd1 = this.normCdf(d1);
+    const nd2 = this.normCdf(d2);
+    const nd1n = this.normCdf(-d1);
+    const nd2n = this.normCdf(-d2);
+    const pdfD1 = Math.exp(-d1 * d1 / 2) / Math.sqrt(2 * Math.PI);
+    const ert = Math.exp(-r * t);
+
+    const price = isCall ? s * nd1 - k * ert * nd2 : k * ert * nd2n - s * nd1n;
+    const delta = isCall ? nd1 : nd1 - 1;
+    const gamma = pdfD1 / (s * sigma * Math.sqrt(t));
+    const theta = isCall
+      ? (-(s * pdfD1 * sigma) / (2 * Math.sqrt(t)) - r * k * ert * nd2) / 365
+      : (-(s * pdfD1 * sigma) / (2 * Math.sqrt(t)) + r * k * ert * nd2n) / 365;
+    const vega = s * pdfD1 * Math.sqrt(t) / 100;
+    const rho = isCall ? k * t * ert * nd2 / 100 : -k * t * ert * nd2n / 100;
+    return { price, delta, gamma, theta, vega, rho };
+  }
+
+  private normCdf(x: number): number {
+    const t = 1 / (1 + 0.3275911 * Math.abs(x));
+    const poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    const result = 1 - poly * Math.exp(-x * x);
+    return x >= 0 ? result : 1 - result;
+  }
+
   async getGreeks(symbol: string) {
     return this.cached(`intel:greeks:${symbol}`, async () => {
-      if (!isEngineAvailable()) {
-        return { symbol, delta: 0, gamma: 0, theta: 0, vega: 0, rho: 0, price: 0, source: 'unavailable' };
-      }
 
       try {
         const chain = await this.fetchOptionsChainDeduped(symbol);
@@ -442,23 +471,18 @@ export class IntelligenceService {
         const expiry = chain.expiry ? new Date(chain.expiry) : new Date(now.getTime() + 7 * 86_400_000);
         const timeToExpiry = Math.max(0.001, (expiry.getTime() - now.getTime()) / (365.25 * 86_400_000));
 
-        const callResult = await engineGreeks({
-          spot,
-          strike,
-          time_to_expiry: timeToExpiry,
-          risk_free_rate: 0.065,
-          volatility: iv,
-          option_type: 'call',
-        }) as any;
+        let callResult: any, putResult: any;
+        const useRust = isEngineAvailable();
 
-        const putResult = await engineGreeks({
-          spot,
-          strike,
-          time_to_expiry: timeToExpiry,
-          risk_free_rate: 0.065,
-          volatility: iv,
-          option_type: 'put',
-        }) as any;
+        if (useRust) {
+          callResult = await engineGreeks({ spot, strike, time_to_expiry: timeToExpiry, risk_free_rate: 0.065, volatility: iv, option_type: 'call' });
+          putResult = await engineGreeks({ spot, strike, time_to_expiry: timeToExpiry, risk_free_rate: 0.065, volatility: iv, option_type: 'put' });
+        } else {
+          const callBS = this.jsBlackScholes(spot, strike, timeToExpiry, 0.065, iv, true);
+          callResult = { ...callBS, implied_volatility: iv, price: Math.round(callBS.price * 100) / 100 };
+          const putBS = this.jsBlackScholes(spot, strike, timeToExpiry, 0.065, iv, false);
+          putResult = { ...putBS, implied_volatility: iv, price: Math.round(putBS.price * 100) / 100 };
+        }
 
         return {
           symbol,
@@ -487,7 +511,7 @@ export class IntelligenceService {
           vega: callResult.vega,
           rho: callResult.rho,
           price: callResult.price,
-          source: 'rust-engine',
+          source: useRust ? 'rust-engine' : 'js-fallback',
         };
       } catch {
         return { symbol, delta: 0, gamma: 0, theta: 0, vega: 0, rho: 0, price: 0, source: 'error' };

@@ -1,0 +1,236 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize)]
+struct Config {
+    legs: Vec<Leg>,
+    spot: f64,
+    risk_free_rate: Option<f64>,
+    price_range: Option<(f64, f64)>,
+    num_points: Option<usize>,
+}
+
+#[derive(Deserialize, Clone)]
+struct Leg {
+    option_type: String, // "call" or "put"
+    strike: f64,
+    premium: f64,
+    quantity: i64, // positive = buy, negative = sell/write
+    expiry_days: Option<f64>,
+    iv: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct StrategyResult {
+    strategy_name: String,
+    payoff_diagram: Vec<PayoffPoint>,
+    greeks_summary: GreeksSummary,
+    risk_metrics: RiskMetrics,
+    breakeven_points: Vec<f64>,
+    max_profit: f64,
+    max_loss: f64,
+    probability_of_profit: f64,
+}
+
+#[derive(Serialize)]
+struct PayoffPoint {
+    price: f64,
+    payoff: f64,
+    pnl: f64,
+}
+
+#[derive(Serialize)]
+struct GreeksSummary {
+    net_delta: f64,
+    net_gamma: f64,
+    net_theta: f64,
+    net_vega: f64,
+}
+
+#[derive(Serialize)]
+struct RiskMetrics {
+    risk_reward_ratio: f64,
+    capital_required: f64,
+    margin_required: f64,
+    net_premium: f64,
+}
+
+pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
+    let config: Config = serde_json::from_value(data).map_err(|e| format!("Invalid input: {}", e))?;
+
+    if config.legs.is_empty() { return Err("At least one leg required".into()); }
+
+    let rf = config.risk_free_rate.unwrap_or(0.065);
+    let n_points = config.num_points.unwrap_or(100);
+    let low = config.price_range.map(|r| r.0).unwrap_or(config.spot * 0.8);
+    let high = config.price_range.map(|r| r.1).unwrap_or(config.spot * 1.2);
+    let step = (high - low) / n_points as f64;
+
+    let strategy_name = detect_strategy(&config.legs);
+
+    let net_premium: f64 = config.legs.iter().map(|l| l.premium * l.quantity as f64).sum();
+
+    let mut payoff_diagram = Vec::with_capacity(n_points + 1);
+    let mut max_profit = f64::NEG_INFINITY;
+    let mut max_loss = f64::INFINITY;
+    let mut breakevens = Vec::new();
+
+    let mut prev_pnl: Option<f64> = None;
+    let mut prev_price: Option<f64> = None;
+
+    for i in 0..=n_points {
+        let price = low + step * i as f64;
+        let mut payoff = 0.0;
+        for leg in &config.legs {
+            let intrinsic = match leg.option_type.as_str() {
+                "call" => (price - leg.strike).max(0.0),
+                "put" => (leg.strike - price).max(0.0),
+                _ => 0.0,
+            };
+            payoff += intrinsic * leg.quantity as f64;
+        }
+        let pnl = payoff - net_premium.abs() * net_premium.signum();
+        let adj_pnl = payoff + net_premium;
+
+        if adj_pnl > max_profit { max_profit = adj_pnl; }
+        if adj_pnl < max_loss { max_loss = adj_pnl; }
+
+        if let (Some(pp), Some(pprice)) = (prev_pnl, prev_price) {
+            if (pp < 0.0 && adj_pnl >= 0.0) || (pp >= 0.0 && adj_pnl < 0.0) {
+                let ratio = pp.abs() / (pp.abs() + adj_pnl.abs());
+                breakevens.push(round2(pprice + ratio * step));
+            }
+        }
+        prev_pnl = Some(adj_pnl);
+        prev_price = Some(price);
+
+        payoff_diagram.push(PayoffPoint { price: round2(price), payoff: round2(payoff), pnl: round2(adj_pnl) });
+    }
+
+    if max_profit == f64::NEG_INFINITY { max_profit = 0.0; }
+    if max_loss == f64::INFINITY { max_loss = 0.0; }
+    if max_profit > config.spot * 10.0 { max_profit = f64::INFINITY; }
+    if max_loss < -config.spot * 10.0 { max_loss = f64::NEG_INFINITY; }
+
+    let mut net_delta = 0.0;
+    let mut net_gamma = 0.0;
+    let mut net_theta = 0.0;
+    let mut net_vega = 0.0;
+
+    for leg in &config.legs {
+        let t = leg.expiry_days.unwrap_or(30.0) / 365.0;
+        let sigma = leg.iv.unwrap_or(0.2);
+        if t > 0.0 && sigma > 0.0 {
+            let (d, g, th, v) = bs_greeks(config.spot, leg.strike, t, rf, sigma, &leg.option_type);
+            net_delta += d * leg.quantity as f64;
+            net_gamma += g * leg.quantity as f64;
+            net_theta += th * leg.quantity as f64;
+            net_vega += v * leg.quantity as f64;
+        }
+    }
+
+    let capital_required: f64 = config.legs.iter()
+        .filter(|l| l.quantity > 0)
+        .map(|l| l.premium * l.quantity as f64)
+        .sum();
+    let margin_required: f64 = config.legs.iter()
+        .filter(|l| l.quantity < 0)
+        .map(|l| l.strike * l.quantity.unsigned_abs() as f64 * 0.2)
+        .sum();
+
+    let rr = if max_loss.abs() > 0.01 && max_loss.is_finite() {
+        (max_profit / max_loss.abs()).min(99.0)
+    } else { 0.0 };
+
+    let profitable_points = payoff_diagram.iter().filter(|p| p.pnl > 0.0).count();
+    let pop = profitable_points as f64 / payoff_diagram.len().max(1) as f64;
+
+    let result = StrategyResult {
+        strategy_name,
+        payoff_diagram,
+        greeks_summary: GreeksSummary {
+            net_delta: round4(net_delta),
+            net_gamma: round4(net_gamma),
+            net_theta: round4(net_theta),
+            net_vega: round4(net_vega),
+        },
+        risk_metrics: RiskMetrics {
+            risk_reward_ratio: round2(rr),
+            capital_required: round2(capital_required),
+            margin_required: round2(margin_required),
+            net_premium: round2(net_premium),
+        },
+        breakeven_points: breakevens,
+        max_profit: if max_profit.is_finite() { round2(max_profit) } else { f64::INFINITY },
+        max_loss: if max_loss.is_finite() { round2(max_loss) } else { f64::NEG_INFINITY },
+        probability_of_profit: round4(pop),
+    };
+
+    serde_json::to_value(result).map_err(|e| e.to_string())
+}
+
+fn detect_strategy(legs: &[Leg]) -> String {
+    let n = legs.len();
+    if n == 1 {
+        let l = &legs[0];
+        return if l.quantity > 0 {
+            format!("Long {}", l.option_type.to_uppercase())
+        } else {
+            format!("Short {}", l.option_type.to_uppercase())
+        };
+    }
+    if n == 2 {
+        let (a, b) = (&legs[0], &legs[1]);
+        if a.option_type == b.option_type && a.quantity.signum() != b.quantity.signum() {
+            if a.option_type == "call" { return "Bull Call Spread / Bear Call Spread".into(); }
+            return "Bull Put Spread / Bear Put Spread".into();
+        }
+        if a.option_type != b.option_type && a.strike == b.strike && a.quantity > 0 && b.quantity > 0 {
+            return "Long Straddle".into();
+        }
+        if a.option_type != b.option_type && a.strike == b.strike && a.quantity < 0 && b.quantity < 0 {
+            return "Short Straddle".into();
+        }
+        if a.option_type != b.option_type && a.strike != b.strike && a.quantity > 0 && b.quantity > 0 {
+            return "Long Strangle".into();
+        }
+    }
+    if n == 4 {
+        return "Iron Condor / Iron Butterfly".into();
+    }
+    format!("Custom {}-Leg Strategy", n)
+}
+
+fn bs_greeks(s: f64, k: f64, t: f64, r: f64, sigma: f64, opt_type: &str) -> (f64, f64, f64, f64) {
+    let d1 = ((s / k).ln() + (r + sigma * sigma / 2.0) * t) / (sigma * t.sqrt());
+    let d2 = d1 - sigma * t.sqrt();
+    let pdf_d1 = (-d1 * d1 / 2.0).exp() / (2.0 * std::f64::consts::PI).sqrt();
+    let nd1 = norm_cdf(d1);
+
+    let delta = if opt_type == "call" { nd1 } else { nd1 - 1.0 };
+    let gamma = pdf_d1 / (s * sigma * t.sqrt());
+    let theta = -(s * pdf_d1 * sigma) / (2.0 * t.sqrt()) / 365.0;
+    let vega = s * pdf_d1 * t.sqrt() / 100.0;
+
+    (delta, gamma, theta, vega)
+}
+
+fn norm_cdf(x: f64) -> f64 {
+    0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
+}
+
+fn erf(x: f64) -> f64 {
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let p = 0.3275911;
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+    let t = 1.0 / (1.0 + p * x);
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
+    sign * y
+}
+
+fn round2(v: f64) -> f64 { (v * 100.0).round() / 100.0 }
+fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }

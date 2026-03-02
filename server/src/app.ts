@@ -220,9 +220,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // Download Rust engine binary at startup if not already present
   app.addHook('onReady', async () => {
     try {
-      const { ensureEngineAvailable } = await import('./lib/rust-engine.js');
+      const { ensureEngineAvailable, startDaemon } = await import('./lib/rust-engine.js');
       const ok = await ensureEngineAvailable();
-      console.log(`[startup] Rust engine: ${ok ? 'ACTIVE' : 'JS fallbacks'}`);
+      if (ok) {
+        const daemonOk = startDaemon();
+        console.log(`[startup] Rust engine: ACTIVE (daemon: ${daemonOk ? 'persistent' : 'single-shot'})`);
+      } else {
+        console.log(`[startup] Rust engine: JS fallbacks`);
+      }
     } catch (err: any) {
       console.error('[startup] Rust engine check failed:', err.message);
     }

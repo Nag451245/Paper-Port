@@ -2,7 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import { chatCompletionJSON, getOpenAIStatus } from '../lib/openai.js';
 import { MarketDataService, type MarketMover } from './market-data.service.js';
 import { TradeService } from './trade.service.js';
-import { engineScan, engineRisk, isEngineAvailable, type ScanSignal } from '../lib/rust-engine.js';
+import { engineScan, engineRisk, engineSignals, isEngineAvailable, type ScanSignal } from '../lib/rust-engine.js';
 import { calculateMaxPain, calculateIVPercentile, calculateGreeks } from './options.service.js';
 
 const DEFAULT_TICK_INTERVAL = 3 * 60_000;
@@ -1041,6 +1041,39 @@ Approve or reject?` },
     return parts.length > 0 ? `\nF&O Data:\n${parts.join('\n')}` : '';
   }
 
+  private async computeRustIndicators(symbols: string[], userId: string): Promise<string> {
+    if (!this.rustAvailable) return '';
+    const candleData = await this.fetchCandles(symbols, userId);
+    if (candleData.length === 0) return '';
+
+    const parts: string[] = ['\n=== RUST ENGINE INDICATORS ==='];
+    for (const { symbol, candles } of candleData.slice(0, 5)) {
+      try {
+        const result = await engineSignals({ candles }) as any;
+        if (!result) continue;
+        const n = candles.length - 1;
+        const last = (arr: number[]) => arr?.length > 0 ? arr[arr.length - 1] : null;
+        const ema9 = last(result.ema_9);
+        const ema21 = last(result.ema_21);
+        const rsi = last(result.rsi_14);
+        const macdH = last(result.macd_histogram);
+        const bbU = last(result.bollinger_upper);
+        const bbL = last(result.bollinger_lower);
+        const vwap = last(result.vwap);
+        const st = last(result.supertrend);
+        const close = candles[n].close;
+
+        const emaTrend = ema9 !== null && ema21 !== null
+          ? (ema9 > ema21 ? 'BULLISH' : 'BEARISH') : '?';
+        const rsiLabel = rsi !== null
+          ? (rsi > 70 ? 'OVERBOUGHT' : rsi < 30 ? 'OVERSOLD' : 'NEUTRAL') : '?';
+
+        parts.push(`${symbol}: EMA9=${ema9?.toFixed(1)} EMA21=${ema21?.toFixed(1)} [${emaTrend}] | RSI=${rsi?.toFixed(1)} [${rsiLabel}] | MACD-H=${macdH?.toFixed(2)} | BB[${bbL?.toFixed(1)}-${bbU?.toFixed(1)}] | VWAP=${vwap?.toFixed(1)} | SuperTrend=${st?.toFixed(1)} | Close=${close.toFixed(1)}`);
+      } catch { /* skip symbol */ }
+    }
+    return parts.length > 1 ? parts.join('\n') : '';
+  }
+
   // ---- Original GPT-only cycle (fallback) ----
   private async runGptBotCycle(botId: string, userId: string, bot: any, symbols: string[]): Promise<void> {
     let quotes: string;
@@ -1057,6 +1090,11 @@ Approve or reject?` },
         fnoContext = await this.fetchFnOContext(symbols);
       } catch { /* skip */ }
     }
+
+    let rustIndicators = '';
+    try {
+      rustIndicators = await this.computeRustIndicators(symbols, userId);
+    } catch { /* Rust indicators unavailable */ }
 
     const systemPrompt = ROLE_PROMPTS[bot.role] || ROLE_PROMPTS.SCANNER;
 
@@ -1075,7 +1113,7 @@ Approve or reject?` },
         { role: 'user', content: `Bot: ${bot.name} | Strategy: ${bot.assignedStrategy || 'General'}
 Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
 
-${quotes}${fnoContext}
+${quotes}${fnoContext}${rustIndicators}
 ${positions ? `\nOpen Positions:\n${positions}` : ''}
 
 INSTRUCTIONS:
