@@ -68,16 +68,40 @@ jobs:
   rust-engine:
     name: Rust Engine Build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('engine/Cargo.lock', 'engine/Cargo.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
 
       - name: Build engine
         run: cargo build --release
         working-directory: engine
 
-      - name: Upload binary
+      - name: Upload binary (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: capital-guard-engine
           path: engine/target/release/capital-guard-engine
+
+      - name: Publish engine release
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: engine-latest
+          name: Rust Engine (latest)
+          body: "Auto-published Rust engine binary from CI. Updated on every push to main."
+          prerelease: true
+          make_latest: false
+          files: engine/target/release/capital-guard-engine
