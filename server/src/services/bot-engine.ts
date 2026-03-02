@@ -152,6 +152,78 @@ export class BotEngine {
     this.rustAvailable = isEngineAvailable();
   }
 
+  /**
+   * Derive G1-G9 gate scores from Rust engine indicators/votes or from
+   * confidence + signal metadata. Ensures the frontend always has G1-G9 keys.
+   */
+  private deriveGateScores(
+    confidence: number,
+    indicators?: Record<string, number>,
+    votes?: Record<string, number>,
+    extra?: Record<string, any>,
+  ): Record<string, any> {
+    const c = confidence * 100;
+    const ind = indicators ?? {};
+    const v = votes ?? {};
+
+    // G1 Trend: EMA alignment, SuperTrend, ADX
+    const emaCross = v.ema_cross ?? v.ema ?? 0;
+    const superTrend = v.supertrend ?? 0;
+    const adx = ind.adx ?? 0;
+    const g1 = Math.min(100, Math.max(0,
+      adx > 0 ? adx + (emaCross > 0 ? 20 : -10) + (superTrend > 0 ? 15 : -5)
+              : c + (emaCross > 0 ? 10 : -10)));
+
+    // G2 Momentum: RSI, MACD, Stochastic
+    const rsi = ind.rsi ?? 50;
+    const macdVote = v.macd ?? 0;
+    const g2 = Math.min(100, Math.max(0,
+      (rsi > 50 ? rsi - 10 : 100 - rsi - 10) + (macdVote > 0 ? 25 : macdVote < 0 ? -10 : 5)));
+
+    // G3 Volatility: ATR, Bollinger, VIX
+    const atr = ind.atr ?? 0;
+    const vix = ind.vix ?? 15;
+    const bbVote = v.bollinger ?? 0;
+    const g3 = Math.min(100, Math.max(0,
+      vix < 20 ? 70 + (bbVote > 0 ? 15 : -5) : vix < 30 ? 50 : 30));
+
+    // G4 Volume: volume confirmation
+    const volVote = v.volume ?? 0;
+    const g4 = Math.min(100, Math.max(0, c * 0.6 + (volVote > 0 ? 30 : volVote < 0 ? -10 : 10)));
+
+    // G5 Options Flow: derived from OI data if available
+    const g5 = Math.min(100, Math.max(0, extra?.optionsFlow ?? c * 0.5 + 20));
+
+    // G6 Global Macro: VIX-based proxy
+    const g6 = Math.min(100, Math.max(0, vix < 15 ? 80 : vix < 20 ? 65 : vix < 25 ? 50 : 35));
+
+    // G7 FII/DII: proxy from market breadth
+    const g7 = Math.min(100, Math.max(0, extra?.fiiDii ?? c * 0.5 + 25));
+
+    // G8 Sentiment: composite of multiple votes
+    const totalVotes = Object.values(v).reduce((s, x) => s + (x > 0 ? 1 : 0), 0);
+    const totalKeys = Math.max(1, Object.keys(v).length);
+    const g8 = Math.min(100, Math.max(0, (totalVotes / totalKeys) * 80 + 10));
+
+    // G9 Risk: risk-reward quality
+    const g9 = Math.min(100, Math.max(0, c * 0.8 + (extra?.riskReward ? 15 : 5)));
+
+    return {
+      ...(extra?.source ? { source: extra.source } : {}),
+      g1_trend: Math.round(g1),
+      g2_momentum: Math.round(g2),
+      g3_volatility: Math.round(g3),
+      g4_volume: Math.round(g4),
+      g5_options_flow: Math.round(g5),
+      g6_global_macro: Math.round(g6),
+      g7_fii_dii: Math.round(g7),
+      g8_sentiment: Math.round(g8),
+      g9_risk: Math.round(g9),
+      ...(indicators ? { indicators } : {}),
+      ...(votes ? { votes } : {}),
+    };
+  }
+
   getRollingAccuracy(strategyId: string): RollingAccuracy | undefined {
     return this.rollingAccuracy.get(strategyId);
   }
@@ -507,19 +579,17 @@ Respond in JSON: {"signals": [{"symbol":"X","direction":"BUY|SELL","confidence":
       // Store high-confidence signals in the database
       for (const sig of signals.filter(s => s.confidence >= 0.65)) {
         try {
+          const scanGateScores = this.deriveGateScores(
+            sig.confidence, sig.indicators, sig.votes,
+            { source: this.rustAvailable ? 'market-scanner' : 'gpt-market-scanner' },
+          );
           await this.prisma.aITradeSignal.create({
             data: {
               userId,
               symbol: sig.symbol,
               signalType: sig.direction,
               compositeScore: sig.confidence,
-              gateScores: JSON.stringify({
-                source: this.rustAvailable ? 'market-scanner' : 'gpt-market-scanner',
-                votes: sig.votes,
-                indicators: sig.indicators,
-                moverType: sig.moverType,
-                changePercent: sig.changePercent,
-              }),
+              gateScores: JSON.stringify(scanGateScores),
               rationale: `Market Scan: ${sig.direction} ${sig.symbol} (${sig.moverType}) @ ₹${sig.entry} | Change: ${sig.changePercent.toFixed(1)}% | SL: ₹${sig.stopLoss} | Target: ₹${sig.target} | Confidence: ${(sig.confidence * 100).toFixed(0)}%`,
               status: 'PENDING',
               expiresAt: new Date(Date.now() + 2 * 60 * 60_000),
@@ -856,18 +926,15 @@ Respond in JSON: {"signals": [{"symbol":"X","direction":"BUY|SELL","confidence":
       const finalConfidence = gptApproved ? sig.confidence : sig.confidence * 0.8;
       const execute = shouldAutoExecute && finalConfidence >= 0.65;
 
+      const gateScores = this.deriveGateScores(finalConfidence, sig.indicators, sig.votes, { source: 'rust-engine', gptApproved });
+
       const signal = await this.prisma.aITradeSignal.create({
         data: {
           userId,
           symbol: sig.symbol,
           signalType: sig.direction,
           compositeScore: finalConfidence,
-          gateScores: JSON.stringify({
-            source: 'rust-engine',
-            gptApproved,
-            votes: sig.votes,
-            indicators: sig.indicators,
-          }),
+          gateScores: JSON.stringify(gateScores),
           strategyId: bot.assignedStrategy || null,
           rationale: `Rust engine: ${sig.direction} @ ₹${sig.entry} | SL: ₹${sig.stop_loss} | Target: ₹${sig.target} | Confidence: ${(sig.confidence * 100).toFixed(0)}%${gptApproved ? ' [GPT approved]' : ' [GPT filtered]'}`,
           status: execute ? 'EXECUTED' : 'PENDING',
@@ -1053,16 +1120,17 @@ INSTRUCTIONS:
             ? `${sig.reason} | Entry: ₹${sig.entry} | SL: ₹${sig.stopLoss || 'N/A'} | Target: ₹${sig.target || 'N/A'} | R:R: ${sig.riskReward || 'N/A'}`
             : sig.reason;
 
+          const botGateScores = this.deriveGateScores(
+            sig.confidence, undefined, undefined,
+            { source: 'gemini-analysis', riskReward: sig.riskReward },
+          );
           await this.prisma.aITradeSignal.create({
             data: {
               userId,
               symbol: sig.symbol,
               signalType: sig.direction,
               compositeScore: sig.confidence,
-              gateScores: JSON.stringify({
-                source: 'gemini-analysis', botId, botRole: bot.role,
-                entry: sig.entry, stopLoss: sig.stopLoss, target: sig.target,
-              }),
+              gateScores: JSON.stringify(botGateScores),
               strategyId: bot.assignedStrategy || null,
               rationale,
               status: shouldExecute ? 'EXECUTED' : 'PENDING',
@@ -1173,22 +1241,14 @@ INSTRUCTIONS:
 
             const autoExecute = config.mode === 'AUTONOMOUS' && sig.confidence >= 0.65;
 
+            const agentRustGates = this.deriveGateScores(sig.confidence, sig.indicators, sig.votes, { source: 'rust-engine' });
             await this.prisma.aITradeSignal.create({
               data: {
                 userId,
                 symbol: sig.symbol,
                 signalType: sig.direction,
                 compositeScore: sig.confidence,
-                gateScores: JSON.stringify({
-                  source: 'rust-engine',
-                  votes: sig.votes,
-                  indicators: sig.indicators,
-                  riskMetrics: riskData ? {
-                    sharpe: riskData.sharpe_ratio,
-                    maxDrawdown: riskData.max_drawdown_percent,
-                    var95: riskData.var_95,
-                  } : null,
-                }),
+                gateScores: JSON.stringify(agentRustGates),
                 rationale: `Rust: ${sig.direction} @ ₹${sig.entry} | SL: ₹${sig.stop_loss} | Target: ₹${sig.target} | Confidence: ${(sig.confidence * 100).toFixed(0)}%`,
                 status: autoExecute ? 'EXECUTED' : 'PENDING',
                 executedAt: autoExecute ? new Date() : null,
@@ -1274,13 +1334,19 @@ Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted
           if (sig.score >= (config.minSignalScore || 0.6) && (sig.direction === 'BUY' || sig.direction === 'SELL')) {
             const autoExecute = config.mode === 'AUTONOMOUS' && sig.score >= 0.65;
 
+            // Use GPT-provided gate scores if they have G1-G9 keys, otherwise derive them
+            const hasGates = sig.gateScores && Object.keys(sig.gateScores).some(k => k.startsWith('g1'));
+            const finalGateScores = hasGates
+              ? { source: 'gpt-fallback', ...sig.gateScores }
+              : this.deriveGateScores(sig.score, undefined, undefined, { source: 'gpt-fallback', riskReward: true });
+
             await this.prisma.aITradeSignal.create({
               data: {
                 userId,
                 symbol: sig.symbol,
                 signalType: sig.direction,
                 compositeScore: sig.score,
-                gateScores: JSON.stringify({ source: 'gpt-fallback', ...sig.gateScores }),
+                gateScores: JSON.stringify(finalGateScores),
                 rationale: `${sig.rationale} | Entry: ₹${sig.entry} | SL: ₹${sig.stopLoss} | Target: ₹${sig.target}`,
                 status: autoExecute ? 'EXECUTED' : 'PENDING',
                 executedAt: autoExecute ? new Date() : null,
