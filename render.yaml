@@ -5,7 +5,7 @@ services:
     region: oregon
     plan: free
     rootDir: server
-    buildCommand: "mkdir -p bin && (curl -sfL -o bin/capital-guard-engine 'https://github.com/Nag451245/Paper-Port/releases/download/engine-latest/capital-guard-engine' && chmod +x bin/capital-guard-engine && echo 'Rust engine downloaded') || echo 'Engine binary not available, using JS fallbacks' && NODE_ENV=development npm ci && npx prisma generate && npm run build"
+    buildCommand: "mkdir -p bin && for i in 1 2 3 4 5; do curl -sfL -o bin/capital-guard-engine 'https://github.com/Nag451245/Paper-Port/releases/download/engine-latest/capital-guard-engine' && chmod +x bin/capital-guard-engine && echo 'Rust engine downloaded' && break || echo \"Attempt $i: engine not ready, waiting 30s...\" && sleep 30; done && NODE_ENV=development npm ci && npx prisma generate && npm run build"
     startCommand: npx prisma db push --skip-generate --accept-data-loss && node --max-old-space-size=512 dist/index.js
     healthCheckPath: /health
     envVars:
