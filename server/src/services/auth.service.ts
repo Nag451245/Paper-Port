@@ -3,12 +3,10 @@ import { PrismaClient, type User } from '@prisma/client';
 type RiskAppetite = string;
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import https from 'https';
-import axios from 'axios';
 import * as OTPAuth from 'otpauth';
 import { env } from '../config.js';
 
 const SALT_ROUNDS = 12;
-const breezeHttpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 function httpsRequestWithBody(options: https.RequestOptions, body?: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
@@ -279,29 +277,40 @@ export class AuthService {
 
     const apiKey = decrypt(credential.encryptedApiKey, this.encKey);
 
-    // Exchange API_Session for real session_token via CustomerDetails API (uses axios like official SDK)
+    // Exchange API_Session for real session_token via CustomerDetails API
     let realSessionToken = apiSession;
     try {
-      const result = await axios({
-        method: 'GET',
-        url: 'https://api.icicidirect.com/breezeapi/api/v1/customerdetails',
-        headers: { 'Content-Type': 'application/json' },
-        data: { SessionToken: apiSession, AppKey: apiKey },
-        timeout: 20_000,
-        httpsAgent: breezeHttpsAgent,
-        validateStatus: () => true,
+      const exchangeBody = JSON.stringify({ SessionToken: apiSession, AppKey: apiKey });
+      const exchangeResult = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = https.request({
+          hostname: 'api.icicidirect.com',
+          path: '/breezeapi/api/v1/customerdetails',
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': String(Buffer.byteLength(exchangeBody)),
+          },
+        }, (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString() }));
+        });
+        req.on('error', reject);
+        req.setTimeout(20_000, () => req.destroy(new Error('Timeout')));
+        req.write(exchangeBody);
+        req.end();
       });
 
-      const data = result.data;
-      console.log(`[Breeze] CustomerDetails response status=${result.status}, apiStatus=${data?.Status}`);
+      const data = JSON.parse(exchangeResult.body);
+      console.log(`[Breeze] CustomerDetails response HTTP=${exchangeResult.status}, apiStatus=${data?.Status}`);
       if (data?.Success?.session_token) {
         realSessionToken = data.Success.session_token;
-        console.log(`[Breeze] Session token exchanged successfully`);
+        console.log(`[Breeze] Session token exchanged successfully (length: ${realSessionToken.length})`);
       } else {
         console.log(`[Breeze] CustomerDetails did not return session_token: ${JSON.stringify(data).substring(0, 300)}`);
       }
     } catch (err: any) {
-      console.log(`[Breeze] CustomerDetails exchange failed: ${err.message} — storing raw token`);
+      console.log(`[Breeze] CustomerDetails exchange failed: ${err.code ?? ''} ${err.message} — storing raw token`);
     }
 
     await this.prisma.breezeCredential.update({
