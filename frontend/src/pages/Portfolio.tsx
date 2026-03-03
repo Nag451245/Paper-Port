@@ -40,8 +40,10 @@ function formatINR(val: number): string {
   return val.toLocaleString('en-IN', { maximumFractionDigits: 0 });
 }
 
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
 export default function PortfolioPage() {
-  const { positions, activePortfolio, fetchPortfolios } = usePortfolioStore();
+  const { positions, activePortfolio, summary, fetchPortfolios, refreshActivePortfolio } = usePortfolioStore();
   const [riskMetrics, setRiskMetrics] = useState<RiskMetrics | null>(null);
   const [equityCurve, setEquityCurve] = useState<{ date: string; value: number }[]>([]);
   const [dailyPnl, setDailyPnl] = useState<{ date: string; totalPnl: number }[]>([]);
@@ -117,8 +119,17 @@ export default function PortfolioPage() {
     value: totalInvested > 0 ? Math.round((value / totalInvested) * 100) : 0,
   }));
 
-  const nav = safeNum((activePortfolio as any)?.currentNav ?? activePortfolio?.currentValue ?? (activePortfolio as any)?.current_nav);
-  const initCap = safeNum((activePortfolio as any)?.initialCapital ?? activePortfolio?.capital ?? (activePortfolio as any)?.initial_capital, 1000000);
+  const nav = safeNum(summary?.totalNav ?? summary?.currentValue);
+  const initCap = safeNum(
+    (activePortfolio as any)?.initialCapital ?? activePortfolio?.capital ?? (activePortfolio as any)?.initial_capital,
+    1000000,
+  );
+  const totalPnl = summary ? safeNum(summary.totalPnl) : nav - initCap;
+  const totalPnlPct = summary ? safeNum(summary.totalPnlPercent) : (initCap > 0 ? (totalPnl / initCap) * 100 : 0);
+  const dayPnl = safeNum(summary?.dayPnl);
+  const dayPnlPct = safeNum(summary?.dayPnlPercent);
+  const investedValue = safeNum(summary?.investedValue);
+  const availableMargin = safeNum(summary?.availableMargin);
 
   if (loading) {
     return (
@@ -135,21 +146,20 @@ export default function PortfolioPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-slate-900">Portfolio Analytics</h1>
-        <button onClick={() => fetchPortfolios()} className="p-2 hover:bg-slate-100 rounded-lg transition" title="Refresh">
+        <button onClick={() => refreshActivePortfolio()} className="p-2 hover:bg-slate-100 rounded-lg transition" title="Refresh">
           <RefreshCcw className="w-4 h-4 text-slate-500" />
         </button>
       </div>
 
-      {/* NAV summary */}
       {activePortfolio && (
         <div className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-xl p-5 shadow-lg">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
             <div>
               <p className="text-xs text-indigo-200 uppercase">Portfolio</p>
               <p className="text-lg font-bold">{(activePortfolio as any).name || 'Default'}</p>
             </div>
             <div>
-              <p className="text-xs text-indigo-200 uppercase">Current NAV</p>
+              <p className="text-xs text-indigo-200 uppercase">Total NAV</p>
               <p className="text-lg font-bold font-mono">₹{formatINR(nav)}</p>
             </div>
             <div>
@@ -158,18 +168,28 @@ export default function PortfolioPage() {
             </div>
             <div>
               <p className="text-xs text-indigo-200 uppercase">Total P&L</p>
-              <p className={`text-lg font-bold font-mono ${nav - initCap >= 0 ? '' : 'text-red-200'}`}>
-                {nav - initCap >= 0 ? '+' : ''}₹{formatINR(nav - initCap)}
-                <span className="text-xs ml-1">
-                  ({initCap > 0 ? ((nav - initCap) / initCap * 100).toFixed(2) : '0.00'}%)
-                </span>
+              <p className={`text-lg font-bold font-mono ${totalPnl >= 0 ? '' : 'text-red-200'}`}>
+                {totalPnl >= 0 ? '+' : ''}₹{formatINR(totalPnl)}
+                <span className="text-xs ml-1">({totalPnlPct >= 0 ? '+' : ''}{totalPnlPct.toFixed(2)}%)</span>
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-indigo-200 uppercase">Today's P&L</p>
+              <p className={`text-lg font-bold font-mono ${dayPnl >= 0 ? '' : 'text-red-200'}`}>
+                {dayPnl >= 0 ? '+' : ''}₹{formatINR(dayPnl)}
+                <span className="text-xs ml-1">({dayPnlPct >= 0 ? '+' : ''}{dayPnlPct.toFixed(2)}%)</span>
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-indigo-200 uppercase">Invested / Free Cash</p>
+              <p className="text-sm font-bold font-mono">
+                ₹{formatINR(investedValue)} <span className="text-indigo-200">/</span> ₹{formatINR(availableMargin)}
               </p>
             </div>
           </div>
         </div>
       )}
 
-      {/* Risk metric cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <MetricCard icon={Activity} label="Sharpe Ratio" value={sharpe.toFixed(2)} color={sharpe >= 1 ? 'text-emerald-600' : 'text-amber-600'} />
         <MetricCard icon={ArrowDown} label="Max Drawdown" value={`${maxDDPct.toFixed(1)}%`} color={maxDDPct > -10 ? 'text-emerald-600' : 'text-red-600'} />
@@ -179,14 +199,13 @@ export default function PortfolioPage() {
         <MetricCard icon={Percent} label="Alpha" value={`${alpha >= 0 ? '+' : ''}${alpha.toFixed(2)}%`} color={alpha >= 0 ? 'text-emerald-600' : 'text-red-600'} />
       </div>
 
-      {/* Equity curve */}
       <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
         <div className="flex items-center gap-2 mb-4">
           <TrendingUp className="w-4 h-4 text-indigo-500" />
           <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Equity Curve</h2>
         </div>
         <div className="h-[300px]">
-          {equityCurve.length > 0 ? (
+          {equityCurve.length > 1 ? (
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={equityCurve}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
@@ -205,7 +224,6 @@ export default function PortfolioPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Daily P&L bar chart */}
         <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
           <div className="flex items-center gap-2 mb-4">
             <BarChart3 className="w-4 h-4 text-indigo-500" />
@@ -234,7 +252,6 @@ export default function PortfolioPage() {
           </div>
         </div>
 
-        {/* Sector allocation */}
         <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
           <div className="flex items-center gap-2 mb-4">
             <PieChartIcon className="w-4 h-4 text-indigo-500" />
@@ -272,7 +289,6 @@ export default function PortfolioPage() {
         </div>
       </div>
 
-      {/* Positions table */}
       <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
         <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-4">Open Positions</h2>
         <div className="overflow-x-auto">

@@ -125,13 +125,28 @@ export class PortfolioService {
       { date: portfolio!.createdAt.toISOString().split('T')[0], value: initialCapital },
     ];
 
+    const dateMap: Record<string, number> = {};
     for (const trade of trades) {
       runningNav += Number(trade.netPnl);
-      curve.push({
-        date: trade.exitTime.toISOString().split('T')[0],
-        value: runningNav,
-      });
+      const day = trade.exitTime.toISOString().split('T')[0];
+      dateMap[day] = runningNav;
     }
+
+    for (const [date, value] of Object.entries(dateMap).sort(([a], [b]) => a.localeCompare(b))) {
+      curve.push({ date, value });
+    }
+
+    // Append today's live NAV including open positions
+    try {
+      const summary = await this.getSummary(portfolioId, userId);
+      const today = new Date().toISOString().split('T')[0];
+      const lastDate = curve[curve.length - 1]?.date;
+      if (today !== lastDate) {
+        curve.push({ date: today, value: summary.totalNav });
+      } else {
+        curve[curve.length - 1].value = summary.totalNav;
+      }
+    } catch { /* fall through — curve still valid without live point */ }
 
     return curve;
   }
@@ -233,6 +248,13 @@ export class PortfolioService {
       const day = t.exitTime.toISOString().split('T')[0];
       dayMap[day] = (dayMap[day] || 0) + Number(t.netPnl);
     }
+
+    // Include today's unrealized P&L from open positions
+    try {
+      const summary = await this.getSummary(portfolioId, userId);
+      const today = new Date().toISOString().split('T')[0];
+      dayMap[today] = (dayMap[today] || 0) + summary.dayPnl;
+    } catch { /* skip */ }
 
     return Object.entries(dayMap)
       .sort(([a], [b]) => a.localeCompare(b))

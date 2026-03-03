@@ -14,6 +14,7 @@ interface PortfolioState {
 
   fetchPortfolios: () => Promise<void>;
   selectPortfolio: (id: string) => Promise<void>;
+  refreshActivePortfolio: () => Promise<void>;
   fetchPositions: () => Promise<void>;
   fetchOrders: () => Promise<void>;
   cancelOrder: (id: string) => Promise<void>;
@@ -32,8 +33,10 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
     try {
       const { data } = await portfolioApi.list();
       set({ portfolios: data, isLoading: false });
-      if (data.length > 0 && !get().activePortfolio) {
-        await get().selectPortfolio(data[0].id);
+      const current = get().activePortfolio;
+      if (data.length > 0) {
+        const targetId = current ? current.id : data[0].id;
+        await get().selectPortfolio(targetId);
       }
     } catch {
       set({ isLoading: false });
@@ -52,20 +55,26 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
       const raw = summaryRes.data as any;
       const summary: PortfolioSummary | null = raw
         ? {
-            totalNav: Number(raw.current_nav ?? raw.totalNav ?? 0),
-            dayPnl: Number(raw.day_pnl ?? raw.dayPnl ?? 0),
-            dayPnlPercent: Number(raw.day_pnl_pct ?? raw.dayPnlPercent ?? 0),
-            totalPnl: Number(raw.total_pnl ?? raw.totalPnl ?? 0),
-            totalPnlPercent: Number(raw.total_pnl_pct ?? raw.totalPnlPercent ?? 0),
-            investedValue: Number(raw.initial_capital ?? raw.investedValue ?? 0),
-            currentValue: Number(raw.current_nav ?? raw.currentValue ?? 0),
-            availableMargin: Number(raw.availableMargin ?? 0),
-            usedMargin: Number(raw.usedMargin ?? 0),
+            totalNav: Number(raw.totalNav ?? raw.current_nav ?? 0),
+            dayPnl: Number(raw.dayPnl ?? raw.day_pnl ?? 0),
+            dayPnlPercent: Number(raw.dayPnlPercent ?? raw.day_pnl_pct ?? 0),
+            totalPnl: Number(raw.totalPnl ?? raw.total_pnl ?? 0),
+            totalPnlPercent: Number(raw.totalPnlPercent ?? raw.total_pnl_pct ?? 0),
+            investedValue: Number(raw.investedValue ?? raw.invested_value ?? 0),
+            currentValue: Number(raw.currentValue ?? raw.totalNav ?? 0),
+            availableMargin: Number(raw.availableMargin ?? raw.available_margin ?? 0),
+            usedMargin: Number(raw.usedMargin ?? raw.used_margin ?? 0),
           }
         : null;
+
+      const allPositions = (positionsRes.data ?? []) as any[];
+      const filtered = allPositions.filter(
+        (p: any) => !p.portfolioId || p.portfolioId === id,
+      );
+
       set({
         summary,
-        positions: (positionsRes.data ?? []) as any[],
+        positions: filtered,
         isLoading: false,
       });
     } catch {
@@ -73,10 +82,22 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
     }
   },
 
+  refreshActivePortfolio: async () => {
+    const current = get().activePortfolio;
+    if (current) {
+      await get().selectPortfolio(current.id);
+    }
+  },
+
   fetchPositions: async () => {
     try {
       const { data } = await tradingApi.positions();
-      set({ positions: (data ?? []) as any[] });
+      const allPositions = (data ?? []) as any[];
+      const activeId = get().activePortfolio?.id;
+      const filtered = activeId
+        ? allPositions.filter((p: any) => !p.portfolioId || p.portfolioId === activeId)
+        : allPositions;
+      set({ positions: filtered });
     } catch { /* silent */ }
   },
 
