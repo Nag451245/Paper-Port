@@ -2,7 +2,11 @@ import { CacheService } from '../lib/redis.js';
 import { getPrisma } from '../lib/prisma.js';
 import { createHash, createDecipheriv } from 'crypto';
 import https from 'https';
+import { createRequire } from 'module';
 import { env } from '../config.js';
+
+const require = createRequire(import.meta.url);
+const BreezeConnect = require('breezeconnect');
 
 const CACHE_TTL_QUOTE = 30;
 const CACHE_TTL_HISTORY = 300;
@@ -11,6 +15,9 @@ const CACHE_TTL_INDICES = 60;
 const FETCH_TIMEOUT_MS = 10_000;
 const BREEZE_TIMEOUT_MS = 20_000;
 
+// Cache a live BreezeConnect instance to avoid re-exchanging session on every call
+let breezeInstance: any = null;
+let breezeInstanceExpiry = 0;
 
 const POPULAR_NSE_STOCKS: [string, string][] = [
   ['RELIANCE', 'Reliance Industries Ltd'],
@@ -989,38 +996,31 @@ export class MarketDataService {
 
   // ── Breeze API (fallback) ──
 
-  private breezeRequest(path: string, headers: Record<string, string>, body?: string): Promise<{ status: number; data: string }> {
-    return new Promise((resolve, reject) => {
-      const allHeaders: Record<string, string> = { ...headers };
-      if (body) allHeaders['Content-Length'] = String(Buffer.byteLength(body));
+  private async getBreezeSDK(): Promise<any> {
+    if (breezeInstance && Date.now() < breezeInstanceExpiry) {
+      return breezeInstance;
+    }
 
-      const req = https.request({
-        hostname: 'api.icicidirect.com',
-        path,
-        method: 'GET',
-        headers: allHeaders,
-      }, (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (c: Buffer) => chunks.push(c));
-        res.on('end', () => {
-          const data = Buffer.concat(chunks).toString();
-          console.log(`[breezeRequest] ${path} → HTTP ${res.statusCode} (${data.length} bytes)`);
-          resolve({ status: res.statusCode ?? 0, data });
-        });
-      });
+    const creds = await this.getAnyBreezeCredentials();
+    if (!creds) return null;
 
-      req.on('error', (err: any) => {
-        console.error(`[breezeRequest] ${path} network error: code=${err.code} message=${err.message}`);
-        reject(err);
-      });
-      req.setTimeout(BREEZE_TIMEOUT_MS, () => {
-        console.error(`[breezeRequest] ${path} timed out after ${BREEZE_TIMEOUT_MS}ms`);
-        req.destroy(new Error(`Breeze API timeout after ${BREEZE_TIMEOUT_MS}ms`));
-      });
+    try {
+      const breeze = new BreezeConnect({ appKey: creds.apiKey });
+      await breeze.generateSession(creds.secretKey, creds.sessionToken);
 
-      if (body) req.write(body);
-      req.end();
-    });
+      if (!breeze.apiSession) {
+        console.log('[Breeze SDK] generateSession succeeded but no apiSession');
+        return null;
+      }
+
+      console.log(`[Breeze SDK] Session initialized, apiSession length: ${breeze.apiSession.length}`);
+      breezeInstance = breeze;
+      breezeInstanceExpiry = Date.now() + 30 * 60 * 1000; // cache for 30 min
+      return breeze;
+    } catch (err: any) {
+      console.log(`[Breeze SDK] generateSession failed: ${err.message}`);
+      return null;
+    }
   }
 
   private async fetchFromBreeze(
@@ -1042,24 +1042,24 @@ export class MarketDataService {
     const productType = exchange === 'MCX' ? 'Futures' : exchange === 'CDS' ? 'Currency' : 'Cash';
 
     try {
-      const payload = this.buildBreezePayload({
+      const breeze = await this.getBreezeSDK();
+      if (!breeze) return [];
+
+      const body: Record<string, string> = {
         interval: breezeInterval,
         from_date: from,
         to_date: to,
         stock_code: symbol,
         exchange_code: breezeExchange,
         product_type: productType,
-      });
-      const { headers } = this.buildBreezeHeaders(creds, payload);
+      };
+      const headers = breeze.generateHeaders(body);
+      const response = await breeze.makeRequest('GET', 'historicalcharts', body, headers);
+      const data = response?.data;
 
-      const res = await this.breezeRequest('/breezeapi/api/v1/historicalcharts', headers, payload);
+      if (data?.Error) return [];
 
-      if (res.status !== 200) return [];
-
-      const data = JSON.parse(res.data);
-      if (data.Error) return [];
-
-      const records = data.Success ?? data.data ?? data;
+      const records = data?.Success ?? data?.data ?? data;
       if (!Array.isArray(records)) return [];
 
       return records.map((bar: any) => ({
@@ -1181,62 +1181,38 @@ export class MarketDataService {
 
     if (!creds) return { steps, result: 'FAIL — no credentials' };
 
-    // Step 2: Test option chain call with next expiry
-    const nextExpiry = this.getNextExpiry();
-    steps.nextExpiry = nextExpiry;
+    // Step 2: Initialize SDK (handles session exchange internally)
     try {
-      const payload = this.buildBreezePayload({
+      const breeze = await this.getBreezeSDK();
+      steps.sdkInit = breeze
+        ? { success: true, apiSessionLength: breeze.apiSession?.length ?? 0, userId: breeze.userId ?? 'unknown' }
+        : { success: false };
+
+      if (!breeze) return { steps, result: 'FAIL — SDK session exchange failed' };
+
+      // Step 3: Test option chain call via SDK
+      const body: Record<string, string> = {
         stock_code: 'NIFTY',
         exchange_code: 'NFO',
         product_type: 'options',
-        expiry_date: nextExpiry,
         right: 'call',
-      });
-      steps.requestPayload = payload;
-      const { headers } = this.buildBreezeHeaders(creds, payload);
-      steps.requestHeaders = { ...headers, 'X-SessionToken': headers['X-SessionToken'].substring(0, 10) + '...', 'X-Checksum': headers['X-Checksum'].substring(0, 20) + '...' };
+        strike_price: '24000',
+      };
+      const headers = breeze.generateHeaders(body);
+      const response = await breeze.makeRequest('GET', 'optionchain', body, headers);
+      const data = response?.data;
 
-      const chainRes = await this.breezeRequest('/breezeapi/api/v1/optionchain', headers, payload);
-      const parsed = JSON.parse(chainRes.data);
       steps.optionChain = {
-        httpStatus: chainRes.status,
-        apiStatus: parsed.Status,
-        recordCount: Array.isArray(parsed.Success) ? parsed.Success.length : 0,
-        error: parsed.Error ?? null,
-        sampleRecord: Array.isArray(parsed.Success) && parsed.Success.length > 0 ? parsed.Success[0] : null,
+        apiStatus: data?.Status,
+        recordCount: Array.isArray(data?.Success) ? data.Success.length : 0,
+        error: data?.Error ?? null,
+        sampleRecord: Array.isArray(data?.Success) && data.Success.length > 0 ? data.Success[0] : null,
       };
     } catch (err: any) {
-      steps.optionChain = { error: err.message };
+      steps.sdkError = { message: err.message, code: err.code, stack: err.stack?.substring(0, 300) };
     }
 
-    // Step 3: If first test failed, try without expiry_date (use right+strike_price)
-    if (!steps.optionChain?.recordCount) {
-      try {
-        const payload2 = this.buildBreezePayload({
-          stock_code: 'NIFTY',
-          exchange_code: 'NFO',
-          product_type: 'options',
-          right: 'call',
-          strike_price: '24000',
-        });
-        steps.fallbackPayload = payload2;
-        const { headers: headers2 } = this.buildBreezeHeaders(creds, payload2);
-
-        const chainRes2 = await this.breezeRequest('/breezeapi/api/v1/optionchain', headers2, payload2);
-        const parsed2 = JSON.parse(chainRes2.data);
-        steps.optionChainFallback = {
-          httpStatus: chainRes2.status,
-          apiStatus: parsed2.Status,
-          recordCount: Array.isArray(parsed2.Success) ? parsed2.Success.length : 0,
-          error: parsed2.Error ?? null,
-          sampleRecord: Array.isArray(parsed2.Success) && parsed2.Success.length > 0 ? parsed2.Success[0] : null,
-        };
-      } catch (err: any) {
-        steps.optionChainFallback = { error: err.message };
-      }
-    }
-
-    const ok = (steps.optionChain?.recordCount > 0) || (steps.optionChainFallback?.recordCount > 0);
+    const ok = steps.optionChain?.recordCount > 0;
     return { steps, result: ok ? 'OK' : 'FAIL' };
   }
 
@@ -1269,8 +1245,8 @@ export class MarketDataService {
   }
 
   private async fetchOptionsChainFromBreeze(symbol: string, expiryDate?: string) {
-    const creds = await this.getAnyBreezeCredentials();
-    if (!creds) return null;
+    const breeze = await this.getBreezeSDK();
+    if (!breeze) return null;
 
     const expiry = expiryDate ? `${expiryDate}T06:00:00.000Z` : this.getNextExpiry();
 
@@ -1279,26 +1255,21 @@ export class MarketDataService {
 
     for (const right of ['call', 'put'] as const) {
       try {
-        const payload = this.buildBreezePayload({
+        const body: Record<string, string> = {
           stock_code: symbol,
           exchange_code: 'NFO',
           product_type: 'options',
           expiry_date: expiry,
           right,
-        });
-        const { headers } = this.buildBreezeHeaders(creds, payload);
+        };
+        const headers = breeze.generateHeaders(body);
 
         console.log(`[Breeze Chain] Requesting ${right} for ${symbol} expiry=${expiry}`);
-        const res = await this.breezeRequest('/breezeapi/api/v1/optionchain', headers, payload);
+        const response = await breeze.makeRequest('GET', 'optionchain', body, headers);
+        const data = response?.data;
 
-        if (res.status !== 200) {
-          console.log(`[Breeze Chain] ${right} HTTP ${res.status} — ${res.data?.substring(0, 300)}`);
-          continue;
-        }
-
-        const data = JSON.parse(res.data);
-        if (data.Error || data.Status !== 200) {
-          console.log(`[Breeze Chain] ${right} API error — Status: ${data.Status}, Error: ${JSON.stringify(data.Error)?.substring(0, 300)}`);
+        if (!data || data.Status !== 200 || data.Error) {
+          console.log(`[Breeze Chain] ${right} API error — Status: ${data?.Status}, Error: ${JSON.stringify(data?.Error)?.substring(0, 300)}`);
           continue;
         }
 
@@ -1344,7 +1315,9 @@ export class MarketDataService {
 
           allStrikes.set(strike, existing);
         }
-      } catch { /* skip this right type */ }
+      } catch (err: any) {
+        console.log(`[Breeze Chain] ${right} exception: ${err.message}`);
+      }
     }
 
     if (allStrikes.size === 0) return null;
@@ -1379,39 +1352,31 @@ export class MarketDataService {
   }
 
   private async fetchExpiryDatesFromBreeze(symbol: string): Promise<string[]> {
-    const creds = await this.getAnyBreezeCredentials();
-    if (!creds) return [];
+    const breeze = await this.getBreezeSDK();
+    if (!breeze) return [];
 
     try {
-      // Breeze requires at least 2 of 3 optional fields (expiry_date, right, strike_price).
-      // To discover ALL expiry dates, omit expiry_date and provide right + strike_price.
-      // Use a reasonable ATM strike estimate based on symbol.
       const defaultStrike = symbol.toUpperCase() === 'NIFTY' ? '24000'
         : symbol.toUpperCase() === 'BANKNIFTY' ? '50000'
         : symbol.toUpperCase() === 'FINNIFTY' ? '23000'
         : symbol.toUpperCase() === 'MIDCPNIFTY' ? '12000'
         : '20000';
 
-      const payload = this.buildBreezePayload({
+      const body: Record<string, string> = {
         stock_code: symbol.toUpperCase(),
         exchange_code: 'NFO',
         product_type: 'options',
         right: 'call',
         strike_price: defaultStrike,
-      });
-      const { headers } = this.buildBreezeHeaders(creds, payload);
+      };
+      const headers = breeze.generateHeaders(body);
 
       console.log(`[Breeze Expiries] Requesting expiries for ${symbol} with strike=${defaultStrike}`);
-      const res = await this.breezeRequest('/breezeapi/api/v1/optionchain', headers, payload);
+      const response = await breeze.makeRequest('GET', 'optionchain', body, headers);
+      const data = response?.data;
 
-      if (res.status !== 200) {
-        console.log(`[Breeze Expiries] HTTP ${res.status} — ${res.data?.substring(0, 300)}`);
-        return [];
-      }
-
-      const data = JSON.parse(res.data);
-      if (data.Error || data.Status !== 200) {
-        console.log(`[Breeze Expiries] API error — Status: ${data.Status}, Error: ${JSON.stringify(data.Error)?.substring(0, 300)}`);
+      if (!data || data.Status !== 200 || data.Error) {
+        console.log(`[Breeze Expiries] API error — Status: ${data?.Status}, Error: ${JSON.stringify(data?.Error)?.substring(0, 300)}`);
         return [];
       }
 
@@ -1437,8 +1402,8 @@ export class MarketDataService {
       }
 
       return [...expirySet].sort();
-    } catch (err) {
-      console.log(`[Breeze Expiries] Exception: ${err}`);
+    } catch (err: any) {
+      console.log(`[Breeze Expiries] Exception: ${err.message}`);
       return [];
     }
   }
