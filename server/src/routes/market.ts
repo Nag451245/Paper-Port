@@ -70,14 +70,26 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
     return reply.send(data);
   });
 
-  app.get('/options-chain/:symbol', async (request, reply) => {
+  app.get('/options-chain/:symbol/expiries', async (request, reply) => {
     const sym = symbolParam.safeParse((request.params as any).symbol);
     if (!sym.success) return reply.code(400).send({ error: 'Invalid symbol' });
     try {
-      const data = await service.getOptionsChain(sym.data);
+      const expiries = await service.getAvailableExpiries(sym.data);
+      return reply.send({ symbol: sym.data, expiries });
+    } catch {
+      return reply.send({ symbol: sym.data, expiries: [] });
+    }
+  });
+
+  app.get('/options-chain/:symbol', async (request, reply) => {
+    const sym = symbolParam.safeParse((request.params as any).symbol);
+    if (!sym.success) return reply.code(400).send({ error: 'Invalid symbol' });
+    const query = request.query as { expiry?: string };
+    try {
+      const data = await service.getOptionsChain(sym.data, query.expiry);
       return reply.send(data);
     } catch {
-      return reply.send({ symbol: sym.data, expiry: '', strikes: [], message: 'Options data temporarily unavailable' });
+      return reply.send({ symbol: sym.data, expiry: '', strikes: [], expiries: [], message: 'Options data temporarily unavailable' });
     }
   });
 

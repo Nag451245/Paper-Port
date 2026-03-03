@@ -534,11 +534,12 @@ Rules:
 - Calculate risk/reward: (target-entry)/(entry-stopLoss) should be >= 1.5
 - This is paper trading — be aggressive, generate at least 3 signals
 
-Respond in JSON: {"signals": [{"symbol":"X","direction":"BUY|SELL","confidence":0.0-1.0,"entry":price,"stopLoss":price,"target":price,"reason":"specific technical reason"}]}` },
+Respond in JSON: {"signals": [{"symbol":"X","direction":"BUY|SELL","confidence":0.0-1.0,"entry":price,"stopLoss":price,"target":price,"reason":"specific technical reason"}]}
+IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra text outside JSON.` },
               { role: 'user', content: `Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n\nTop Movers:\n${moverSummary}\n\nGenerate detailed trade signals with entry, stop-loss, and target prices.` },
             ],
             temperature: 0.3,
-            maxTokens: 2048,
+            maxTokens: 4096,
           });
 
           if (gptResult.signals) {
@@ -1099,8 +1100,10 @@ Approve or reject?` },
     const systemPrompt = ROLE_PROMPTS[bot.role] || ROLE_PROMPTS.SCANNER;
 
     const responseFormat = bot.role === 'FNO_STRATEGIST'
-      ? `Respond in JSON: { "message": "detailed analysis (5-8 sentences with specific price levels and reasoning)", "messageType": "signal|alert|info", "action": "1-line summary with key numbers", "signals": [{"symbol":"X","direction":"BUY_CE|BUY_PE|SELL_CE|SELL_PE|IRON_CONDOR|STRADDLE|STRANGLE|BULL_SPREAD|BEAR_SPREAD|BUY|SELL|HOLD","confidence":0.0-1.0,"entry":price,"stopLoss":price,"target":price,"reason":"technical reason with specific levels","strategy":"strategy name","riskReward":"1:2.5","legs":[{"type":"CE|PE","strike":0,"action":"BUY|SELL","qty":1}]}] }`
-      : `Respond in JSON: { "message": "detailed analysis (5-8 sentences referencing actual prices, volumes, trends, support/resistance levels)", "messageType": "signal|alert|info", "action": "1-line summary e.g. 'SELL RELIANCE @1350 SL:1375 TGT:1310 (R:R 1:1.6)'", "signals": [{"symbol":"X","direction":"BUY|SELL","confidence":0.0-1.0,"entry":current_price,"stopLoss":price,"target":price,"reason":"specific technical reason with price levels","riskReward":"1:2.5"}] }`;
+      ? `Respond in JSON: { "message": "analysis (3-5 sentences with price levels)", "messageType": "signal|alert|info", "action": "1-line summary", "signals": [{"symbol":"X","direction":"BUY_CE|BUY_PE|SELL_CE|SELL_PE|IRON_CONDOR|STRADDLE|STRANGLE|BULL_SPREAD|BEAR_SPREAD|BUY|SELL|HOLD","confidence":0.0-1.0,"entry":price,"stopLoss":price,"target":price,"reason":"<25 words","strategy":"name","riskReward":"1:2.5","legs":[{"type":"CE|PE","strike":0,"action":"BUY|SELL","qty":1}]}] }
+IMPORTANT: Max 4 signals. Keep total response under 1500 chars. No extra text outside JSON.`
+      : `Respond in JSON: { "message": "analysis (3-5 sentences with prices and trends)", "messageType": "signal|alert|info", "action": "1-line summary e.g. 'SELL RELIANCE @1350 SL:1375 TGT:1310'", "signals": [{"symbol":"X","direction":"BUY|SELL","confidence":0.0-1.0,"entry":price,"stopLoss":price,"target":price,"reason":"<25 words","riskReward":"1:2.5"}] }
+IMPORTANT: Max 4 signals. Keep total response under 1500 chars. No extra text outside JSON.`;
 
     const analysis = await chatCompletionJSON<{
       message: string;
@@ -1361,10 +1364,10 @@ Positions:\n${posInfo}
 
 Market Data:\n${quotes}${fnoCtx}
 
-Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted.` },
+Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted. Keep reasons concise (<30 words each).` },
         ],
         temperature: 0.4,
-        maxTokens: 2048,
+        maxTokens: 4096,
       });
 
       if (result.signals) {

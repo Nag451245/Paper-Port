@@ -31,3 +31,6 @@ engine/target/
 
 # Engine binary
 server/bin/
+
+# Local Netlify folder
+.netlify

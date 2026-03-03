@@ -250,11 +250,12 @@ export async function chatCompletion(options: ChatCompletionOptions): Promise<st
         .join('')
         .trim();
 
+      const reason = candidate.finishReason;
+      if (reason === 'MAX_TOKENS') {
+        console.warn(`[Gemini] Response truncated (MAX_TOKENS). Got ${content?.length ?? 0} chars — will attempt repair.`);
+      }
+
       if (!content) {
-        const reason = candidate.finishReason;
-        if (reason === 'MAX_TOKENS') {
-          throw new Error('Gemini response truncated (token limit too low)');
-        }
         throw new Error(`Gemini returned empty response (finishReason: ${reason})`);
       }
 
@@ -287,7 +288,8 @@ export function _resetForTesting(): void {
 
 /**
  * Attempt to extract valid JSON from a potentially malformed response.
- * Handles: markdown fences, extra text around JSON, truncated JSON.
+ * Handles: markdown fences, extra text around JSON, truncated JSON,
+ * incomplete values, trailing commas, partial key-value pairs.
  */
 function extractJSON(raw: string): string {
   let s = stripMarkdownFences(raw).trim();
@@ -333,34 +335,45 @@ function extractJSON(raw: string): string {
     try { JSON.parse(extracted); return extracted; } catch { /* continue to repair */ }
   }
 
-  // Truncated response: try to close open brackets/braces
+  // Truncated response: try aggressive repair
   let truncated = end > start ? s.slice(start, end + 1) : s.slice(start);
-  // Remove any trailing partial key-value or comma
-  truncated = truncated.replace(/,\s*"[^"]*$/, '').replace(/,\s*$/, '');
+  truncated = repairTruncatedJSON(truncated);
+  try { JSON.parse(truncated); return truncated; } catch { /* give up */ }
 
-  // Close any unclosed structures
-  let opens = 0, closes = 0;
-  let oArr = 0, cArr = 0;
-  inString = false;
-  escape = false;
-  for (const ch of truncated) {
-    if (escape) { escape = false; continue; }
-    if (ch === '\\') { escape = true; continue; }
-    if (ch === '"') { inString = !inString; continue; }
-    if (inString) continue;
+  return s;
+}
+
+function repairTruncatedJSON(s: string): string {
+  // Strip trailing incomplete string value (e.g. `"reason": "some text that got cu`)
+  s = s.replace(/,\s*"[^"]*"\s*:\s*"[^"]*$/, '');
+  // Strip trailing incomplete number value (e.g. `"entry": 175`)
+  s = s.replace(/,\s*"[^"]*"\s*:\s*[\d.]+$/, '');
+  // Strip trailing incomplete key (e.g. `"targ`)
+  s = s.replace(/,\s*"[^"]*$/, '');
+  // Strip trailing incomplete key-value without value (e.g. `"target":`)
+  s = s.replace(/,\s*"[^"]*"\s*:\s*$/, '');
+  // Strip trailing comma + whitespace
+  s = s.replace(/,\s*$/, '');
+
+  // Count unclosed structures
+  let opens = 0, closes = 0, oArr = 0, cArr = 0;
+  let inStr = false, esc = false;
+  for (const ch of s) {
+    if (esc) { esc = false; continue; }
+    if (ch === '\\') { esc = true; continue; }
+    if (ch === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
     if (ch === '{') opens++;
     if (ch === '}') closes++;
     if (ch === '[') oArr++;
     if (ch === ']') cArr++;
   }
 
-  // If inside a string, close it
-  if (inString) truncated += '"';
-  // Close arrays then objects
-  for (let i = 0; i < oArr - cArr; i++) truncated += ']';
-  for (let i = 0; i < opens - closes; i++) truncated += '}';
-
-  try { JSON.parse(truncated); return truncated; } catch { /* give up */ }
+  if (inStr) s += '"';
+  // Re-strip trailing partial value after closing string
+  s = s.replace(/,\s*$/, '');
+  for (let i = 0; i < oArr - cArr; i++) s += ']';
+  for (let i = 0; i < opens - closes; i++) s += '}';
 
   return s;
 }
@@ -378,10 +391,53 @@ export async function chatCompletionJSON<T>(options: ChatCompletionOptions): Pro
   const extracted = extractJSON(raw);
   try {
     return JSON.parse(extracted) as T;
-  } catch (e2) {
-    console.warn(`[Gemini] JSON parse failed after extraction. Raw (300 chars): ${raw.slice(0, 300)}`);
-    // Last resort: return a safe empty object
+  } catch {
+    console.warn(`[Gemini] JSON parse failed after extraction. Raw length: ${raw.length}, first 500 chars: ${raw.slice(0, 500)}`);
+
+    // Attempt partial extraction: find the last complete object in an array
+    const partialArray = tryExtractPartialArray(raw);
+    if (partialArray) {
+      try { return JSON.parse(partialArray) as T; } catch { /* continue to fallback */ }
+    }
+
     const fallback = raw.includes('"signals"') ? '{"signals":[]}' : '{}';
     return JSON.parse(fallback) as T;
   }
+}
+
+function tryExtractPartialArray(raw: string): string | null {
+  const signalsIdx = raw.indexOf('"signals"');
+  if (signalsIdx < 0) return null;
+
+  const arrStart = raw.indexOf('[', signalsIdx);
+  if (arrStart < 0) return null;
+
+  // Find complete objects within the array by looking for },{ pattern
+  let lastCompleteObj = -1;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+
+  for (let i = arrStart + 1; i < raw.length; i++) {
+    const ch = raw[i];
+    if (esc) { esc = false; continue; }
+    if (ch === '\\') { esc = true; continue; }
+    if (ch === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (ch === '{') depth++;
+    if (ch === '}') {
+      depth--;
+      if (depth === 0) lastCompleteObj = i;
+    }
+  }
+
+  if (lastCompleteObj > arrStart) {
+    const completeSignals = raw.slice(arrStart, lastCompleteObj + 1) + ']';
+    const prefix = raw.slice(0, arrStart);
+    const objStart = prefix.lastIndexOf('{');
+    if (objStart >= 0) {
+      return prefix.slice(objStart) + completeSignals + '}';
+    }
+  }
+  return null;
 }

@@ -141,7 +141,10 @@ export const marketApi = {
     api.get<HistoricalData[]>(`/market/history/${encodeURIComponent(symbol)}`, { params: { interval, from_date: from, to_date: to, exchange } }),
 
   optionsChain: (symbol: string, expiry?: string) =>
-    api.get<OptionsChain>(`/market/options-chain/${encodeURIComponent(symbol)}`, { params: { expiry } }),
+    api.get<OptionsChain>(`/market/options-chain/${encodeURIComponent(symbol)}`, { params: expiry ? { expiry } : undefined }),
+
+  optionsExpiries: (symbol: string) =>
+    api.get<{ symbol: string; expiries: string[] }>(`/market/options-chain/${encodeURIComponent(symbol)}/expiries`),
 
   marketDepth: (symbol: string, exchange?: string) =>
     api.get<MarketDepth>(`/market/market-depth/${encodeURIComponent(symbol)}`, { params: { exchange } }),
@@ -154,6 +157,23 @@ export const marketApi = {
 
   search: (query: string, exchange?: string) =>
     api.get<{ symbol: string; name: string; exchange: string; segment?: string }[]>('/market/search', { params: { q: query, exchange } }),
+};
+
+// ─── Options Strategy ─────────────────────────────────────────────
+export const optionsApi = {
+  templates: () => api.get('/options/templates'),
+
+  payoffEngine: (legs: any[], spotPrice: number, riskFreeRate?: number) =>
+    api.post('/options/payoff-engine', { legs, spotPrice, riskFreeRate }),
+
+  optimize: (symbol: string, expiry?: string, view?: string) =>
+    api.post('/options/optimize', { symbol, expiry, view }),
+
+  explain: (strategyName: string, legs: any[], spotPrice: number) =>
+    api.post('/options/explain', { strategyName, legs, spotPrice }),
+
+  scenario: (legs: any[], spotPrice: number, scenarios: any[]) =>
+    api.post('/options/scenario', { legs, spotPrice, scenarios }),
 };
 
 // ─── AI Agent ─────────────────────────────────────────────────────

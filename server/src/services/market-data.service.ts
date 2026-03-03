@@ -607,8 +607,49 @@ export class MarketDataService {
     };
   }
 
-  async getOptionsChain(symbol: string) {
-    const cacheKey = `options:${symbol}`;
+  async getAvailableExpiries(symbol: string): Promise<string[]> {
+    const cacheKey = `expiries:${symbol}`;
+    if (this.cache) {
+      const cached = await this.cache.get<string[]>(cacheKey);
+      if (cached) return cached;
+    }
+
+    // Primary: NSE India returns all expiry dates natively
+    try {
+      const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50'].includes(symbol.toUpperCase());
+      const nseUrl = isIndex
+        ? `https://www.nseindia.com/api/option-chain-indices?symbol=${encodeURIComponent(symbol.toUpperCase())}`
+        : `https://www.nseindia.com/api/option-chain-equities?symbol=${encodeURIComponent(symbol.toUpperCase())}`;
+      const res = await this.nseFetch(nseUrl);
+      if (res.ok) {
+        const data = await res.json() as any;
+        const records = data?.records ?? data?.filtered ?? {};
+        const expiries: string[] = (records?.expiryDates ?? []).map((d: string) => d.split('T')[0]);
+        if (expiries.length > 0) {
+          if (this.cache) await this.cache.set(cacheKey, expiries, 3600);
+          return expiries;
+        }
+      }
+    } catch { /* NSE failed, generate from known schedule */ }
+
+    // Fallback: generate next 5 weekly expiries (Thursdays)
+    const expiries: string[] = [];
+    const now = new Date();
+    let d = new Date(now);
+    for (let i = 0; i < 8; i++) {
+      const daysUntilThurs = (4 - d.getDay() + 7) % 7 || 7;
+      d = new Date(d.getTime() + daysUntilThurs * 86400000);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      expiries.push(`${y}-${m}-${dd}`);
+    }
+    if (this.cache) await this.cache.set(cacheKey, expiries, 3600);
+    return expiries;
+  }
+
+  async getOptionsChain(symbol: string, expiry?: string) {
+    const cacheKey = expiry ? `options:${symbol}:${expiry}` : `options:${symbol}`;
     if (this.cache) {
       const cached = await this.cache.get<any>(cacheKey);
       if (cached) return cached;
@@ -616,52 +657,46 @@ export class MarketDataService {
 
     // Primary: NiftyTrader API (reliable, no auth needed)
     try {
-      const result = await this.fetchOptionsChainFromNiftyTrader(symbol);
+      const result = await this.fetchOptionsChainFromNiftyTrader(symbol, expiry);
       if (result && result.strikes.length > 0) {
         if (this.cache) await this.cache.set(cacheKey, result, 2);
         return result;
       }
-    } catch { /* NiftyTrader unavailable, try Breeze */ }
+    } catch { /* NiftyTrader unavailable, try NSE */ }
 
-    // Fallback 1: Breeze API
+    // Fallback 1: NSE India (supports filtering by expiry natively)
+    try {
+      const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50'].includes(symbol.toUpperCase());
+      const url = isIndex
+        ? `https://www.nseindia.com/api/option-chain-indices?symbol=${encodeURIComponent(symbol.toUpperCase())}`
+        : `https://www.nseindia.com/api/option-chain-equities?symbol=${encodeURIComponent(symbol.toUpperCase())}`;
+      const res = await this.nseFetch(url);
+      if (res.ok) {
+        const data = await res.json() as any;
+        const result = this.parseOptionsChain(symbol, data, expiry);
+        if (result.strikes.length > 0) {
+          if (this.cache) await this.cache.set(cacheKey, result, 60);
+          return result;
+        }
+      }
+    } catch { /* NSE failed, try Breeze */ }
+
+    // Fallback 2: Breeze API
     try {
       const breezeResult = await this.fetchOptionsChainFromBreeze(symbol);
       if (breezeResult && breezeResult.strikes.length > 0) {
         if (this.cache) await this.cache.set(cacheKey, breezeResult, 60);
         return breezeResult;
       }
-    } catch { /* Breeze unavailable, try NSE */ }
+    } catch { /* Breeze unavailable */ }
 
-    // Fallback 2: NSE India
-    try {
-      const url = `https://www.nseindia.com/api/option-chain-indices?symbol=${encodeURIComponent(symbol)}`;
-      const res = await this.nseFetch(url);
-      if (!res.ok) {
-        await res.text().catch(() => {});
-        const equityUrl = `https://www.nseindia.com/api/option-chain-equities?symbol=${encodeURIComponent(symbol)}`;
-        const equityRes = await this.nseFetch(equityUrl);
-        if (!equityRes.ok) {
-          await equityRes.text().catch(() => {});
-          return { symbol, strikes: [], expiry: '' };
-        }
-        const data = await equityRes.json() as any;
-        return this.parseOptionsChain(symbol, data);
-      }
-      const data = await res.json() as any;
-      const result = this.parseOptionsChain(symbol, data);
-
-      if (result.strikes.length > 0 && this.cache) {
-        await this.cache.set(cacheKey, result, 60);
-      }
-      return result;
-    } catch {
-      return { symbol, strikes: [], expiry: '' };
-    }
+    return { symbol, strikes: [], expiry: expiry ?? '', expiries: [] };
   }
 
-  private async fetchOptionsChainFromNiftyTrader(symbol: string) {
+  private async fetchOptionsChainFromNiftyTrader(symbol: string, expiry?: string) {
     const sym = symbol.toUpperCase().replace(/\s+/g, '').toLowerCase();
-    const url = `https://webapi.niftytrader.in/webapi/option/option-chain-data?symbol=${encodeURIComponent(sym)}`;
+    let url = `https://webapi.niftytrader.in/webapi/option/option-chain-data?symbol=${encodeURIComponent(sym)}`;
+    if (expiry) url += `&expiry_date=${encodeURIComponent(expiry)}`;
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 15000);
     try {
@@ -729,6 +764,8 @@ export class MarketDataService {
         if (pain < minPain) { minPain = pain; maxPainStrike = st.strike; }
       }
 
+      const uniqueExpiries = [...new Set(rows.map((r: any) => r.expiry_date ? r.expiry_date.split('T')[0] : '').filter(Boolean))].sort();
+
       return {
         symbol: symbol.toUpperCase(),
         expiry,
@@ -739,6 +776,7 @@ export class MarketDataService {
         maxPain: maxPainStrike,
         totalCallOI,
         totalPutOI,
+        expiries: uniqueExpiries,
         source: 'niftytrader',
       };
     } catch {
@@ -1218,14 +1256,20 @@ export class MarketDataService {
     return `${y}-${m}-${d}T06:00:00.000Z`;
   }
 
-  private parseOptionsChain(symbol: string, data: any) {
+  private parseOptionsChain(symbol: string, data: any, targetExpiry?: string) {
     const records = data?.records ?? data?.filtered ?? {};
     const allData = records?.data ?? [];
-    const expiry = records?.expiryDates?.[0] ?? '';
+    const expiries: string[] = (records?.expiryDates ?? []).map((d: string) => d.split('T')[0]);
+    const expiry = targetExpiry
+      ? expiries.find(e => e === targetExpiry) ?? expiries[0] ?? ''
+      : expiries[0] ?? '';
     const underlyingValue = records?.underlyingValue ?? 0;
 
-    const nearestExpiry = allData.filter((d: any) => d.expiryDate === expiry);
-    const strikes = nearestExpiry.map((d: any) => ({
+    const filtered = allData.filter((d: any) => {
+      const dExp = (d.expiryDate ?? '').split('T')[0];
+      return dExp === expiry;
+    });
+    const strikes = filtered.map((d: any) => ({
       strike: d.strikePrice,
       callOI: d.CE?.openInterest ?? 0,
       callOIChange: d.CE?.changeinOpenInterest ?? 0,
@@ -1255,7 +1299,7 @@ export class MarketDataService {
       symbol, expiry, underlyingValue,
       strikes, pcr: Math.round(pcr * 100) / 100,
       maxPain: maxPainStrike,
-      totalCallOI, totalPutOI,
+      totalCallOI, totalPutOI, expiries,
     };
   }
 
