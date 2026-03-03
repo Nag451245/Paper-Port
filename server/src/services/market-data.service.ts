@@ -1161,60 +1161,71 @@ export class MarketDataService {
     return bars;
   }
 
+  private buildBreezePayload(fields: Record<string, string>): string {
+    const body: Record<string, string> = {};
+    for (const [key, val] of Object.entries(fields)) {
+      if (val !== '' && val != null) body[key] = val;
+    }
+    return JSON.stringify(body);
+  }
+
+  private buildBreezeHeaders(
+    creds: { apiKey: string; secretKey: string; sessionToken: string },
+    payload: string,
+  ): { headers: Record<string, string>; timestamp: string } {
+    const timestamp = new Date().toISOString().split('.')[0] + '.000Z';
+    const checksum = createHash('sha256')
+      .update(timestamp + payload + creds.secretKey)
+      .digest('hex');
+    return {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-AppKey': creds.apiKey,
+        'X-SessionToken': creds.sessionToken,
+        'X-Timestamp': timestamp,
+        'X-Checksum': `token ${checksum}`,
+      },
+      timestamp,
+    };
+  }
+
   private async fetchOptionsChainFromBreeze(symbol: string, expiryDate?: string) {
     const creds = await this.getAnyBreezeCredentials();
     if (!creds) return null;
 
     const expiry = expiryDate ? `${expiryDate}T06:00:00.000Z` : this.getNextExpiry();
-    const exchangeCode = 'NFO';
-    const productType = 'options';
 
     const allStrikes: Map<number, any> = new Map();
     let spotPrice = 0;
 
     for (const right of ['call', 'put'] as const) {
       try {
-        const payload = JSON.stringify({
+        const payload = this.buildBreezePayload({
           stock_code: symbol,
-          exchange_code: exchangeCode,
-          product_type: productType,
+          exchange_code: 'NFO',
+          product_type: 'options',
           expiry_date: expiry,
           right,
-          strike_price: '',
         });
+        const { headers } = this.buildBreezeHeaders(creds, payload);
 
-        const now = new Date();
-        now.setMilliseconds(0);
-        const timestamp = now.toISOString();
-        const checksum = createHash('sha256')
-          .update(timestamp + payload + creds.secretKey)
-          .digest('hex');
-
-        const res = await this.breezeRequest(
-          '/breezeapi/api/v1/optionchain',
-          {
-            'Content-Type': 'application/json',
-            'X-AppKey': creds.apiKey,
-            'X-SessionToken': creds.sessionToken,
-            'X-Timestamp': timestamp,
-            'X-Checksum': `token ${checksum}`,
-          },
-          payload,
-        );
+        console.log(`[Breeze Chain] Requesting ${right} for ${symbol} expiry=${expiry}`);
+        const res = await this.breezeRequest('/breezeapi/api/v1/optionchain', headers, payload);
 
         if (res.status !== 200) {
-          console.log(`[Breeze Chain] ${right} HTTP ${res.status} — ${res.data?.substring(0, 200)}`);
+          console.log(`[Breeze Chain] ${right} HTTP ${res.status} — ${res.data?.substring(0, 300)}`);
           continue;
         }
 
         const data = JSON.parse(res.data);
         if (data.Error || data.Status !== 200) {
-          console.log(`[Breeze Chain] ${right} API error — Status: ${data.Status}, Error: ${JSON.stringify(data.Error)?.substring(0, 200)}`);
+          console.log(`[Breeze Chain] ${right} API error — Status: ${data.Status}, Error: ${JSON.stringify(data.Error)?.substring(0, 300)}`);
           continue;
         }
 
         const records = data.Success ?? [];
         if (!Array.isArray(records)) continue;
+        console.log(`[Breeze Chain] ${right} returned ${records.length} records`);
 
         for (const rec of records) {
           const strike = Number(rec.strike_price) || 0;
@@ -1293,42 +1304,35 @@ export class MarketDataService {
     if (!creds) return [];
 
     try {
-      const payload = JSON.stringify({
+      // Breeze requires at least 2 of 3 optional fields (expiry_date, right, strike_price).
+      // To discover ALL expiry dates, omit expiry_date and provide right + strike_price.
+      // Use a reasonable ATM strike estimate based on symbol.
+      const defaultStrike = symbol.toUpperCase() === 'NIFTY' ? '24000'
+        : symbol.toUpperCase() === 'BANKNIFTY' ? '50000'
+        : symbol.toUpperCase() === 'FINNIFTY' ? '23000'
+        : symbol.toUpperCase() === 'MIDCPNIFTY' ? '12000'
+        : '20000';
+
+      const payload = this.buildBreezePayload({
         stock_code: symbol.toUpperCase(),
         exchange_code: 'NFO',
         product_type: 'options',
-        expiry_date: '',
         right: 'call',
-        strike_price: '',
+        strike_price: defaultStrike,
       });
+      const { headers } = this.buildBreezeHeaders(creds, payload);
 
-      const now = new Date();
-      now.setMilliseconds(0);
-      const timestamp = now.toISOString();
-      const checksum = createHash('sha256')
-        .update(timestamp + payload + creds.secretKey)
-        .digest('hex');
-
-      const res = await this.breezeRequest(
-        '/breezeapi/api/v1/optionchain',
-        {
-          'Content-Type': 'application/json',
-          'X-AppKey': creds.apiKey,
-          'X-SessionToken': creds.sessionToken,
-          'X-Timestamp': timestamp,
-          'X-Checksum': `token ${checksum}`,
-        },
-        payload,
-      );
+      console.log(`[Breeze Expiries] Requesting expiries for ${symbol} with strike=${defaultStrike}`);
+      const res = await this.breezeRequest('/breezeapi/api/v1/optionchain', headers, payload);
 
       if (res.status !== 200) {
-        console.log(`[Breeze Expiries] HTTP ${res.status} — ${res.data?.substring(0, 200)}`);
+        console.log(`[Breeze Expiries] HTTP ${res.status} — ${res.data?.substring(0, 300)}`);
         return [];
       }
 
       const data = JSON.parse(res.data);
       if (data.Error || data.Status !== 200) {
-        console.log(`[Breeze Expiries] API error — Status: ${data.Status}, Error: ${JSON.stringify(data.Error)?.substring(0, 200)}`);
+        console.log(`[Breeze Expiries] API error — Status: ${data.Status}, Error: ${JSON.stringify(data.Error)?.substring(0, 300)}`);
         return [];
       }
 
@@ -1337,6 +1341,8 @@ export class MarketDataService {
         console.log(`[Breeze Expiries] No records returned`);
         return [];
       }
+
+      console.log(`[Breeze Expiries] Got ${records.length} records, extracting unique expiry dates`);
 
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -1352,7 +1358,8 @@ export class MarketDataService {
       }
 
       return [...expirySet].sort();
-    } catch {
+    } catch (err) {
+      console.log(`[Breeze Expiries] Exception: ${err}`);
       return [];
     }
   }
