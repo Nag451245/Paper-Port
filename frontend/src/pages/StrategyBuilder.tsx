@@ -27,9 +27,11 @@ import {
   Search,
   Wifi,
   ChevronDown,
+  ChevronUp,
   Star,
   ArrowUpRight,
   ArrowDownRight,
+  BookOpen,
 } from 'lucide-react';
 import api, { marketApi, optionsApi } from '@/services/api';
 
@@ -136,6 +138,35 @@ const QUICK_STRATEGIES = [
   { id: 'bear-spread', label: 'Bear Spread', build: (atm: number, qty: number, chain: Strike[]) => buildBearSpread(atm, qty, chain) },
   { id: 'iron-condor', label: 'Iron Condor', build: (atm: number, qty: number, chain: Strike[]) => buildIronCondor(atm, qty, chain) },
   { id: 'butterfly', label: 'Butterfly', build: (atm: number, qty: number, chain: Strike[]) => buildButterfly(atm, qty, chain) },
+];
+
+type TemplateCategory = 'All' | 'Bullish' | 'Bearish' | 'Neutral' | 'Volatile';
+interface StrategyTemplate {
+  id: string;
+  name: string;
+  category: TemplateCategory;
+  risk: 'low' | 'medium' | 'high';
+  description: string;
+  build: (atm: number, qty: number, chain: Strike[]) => StrategyLeg[];
+}
+
+const STRATEGY_TEMPLATES: StrategyTemplate[] = [
+  { id: 'long-call', name: 'Long Call', category: 'Bullish', risk: 'medium', description: 'Buy a call option expecting price to rise. Unlimited profit, loss limited to premium.', build: buildLongCall },
+  { id: 'long-put', name: 'Long Put', category: 'Bearish', risk: 'medium', description: 'Buy a put option expecting price to fall. Profit potential up to strike, loss limited to premium.', build: buildLongPut },
+  { id: 'bull-call-spread', name: 'Bull Call Spread', category: 'Bullish', risk: 'low', description: 'Buy lower strike call, sell higher strike call. Limited profit and limited risk.', build: buildBullSpread },
+  { id: 'bear-put-spread', name: 'Bear Put Spread', category: 'Bearish', risk: 'low', description: 'Buy higher strike put, sell lower strike put. Limited risk bearish strategy.', build: buildBearSpread },
+  { id: 'bull-put-spread', name: 'Bull Put Spread', category: 'Bullish', risk: 'low', description: 'Sell ATM put, buy OTM put. Credit strategy profiting from bullish or flat market.', build: buildBullPutSpread },
+  { id: 'bear-call-spread', name: 'Bear Call Spread', category: 'Bearish', risk: 'low', description: 'Sell ATM call, buy OTM call. Credit strategy profiting from bearish or flat market.', build: buildBearCallSpread },
+  { id: 'long-straddle', name: 'Long Straddle', category: 'Volatile', risk: 'medium', description: 'Buy call and put at same strike. Profit from big moves in either direction.', build: buildLongStraddle },
+  { id: 'short-straddle', name: 'Short Straddle', category: 'Neutral', risk: 'high', description: 'Sell call and put at same strike. Profit from time decay if price stays near strike.', build: buildStraddle },
+  { id: 'long-strangle', name: 'Long Strangle', category: 'Volatile', risk: 'medium', description: 'Buy OTM call and OTM put. Cheaper than straddle, needs a bigger move to profit.', build: buildLongStrangle },
+  { id: 'short-strangle', name: 'Short Strangle', category: 'Neutral', risk: 'high', description: 'Sell OTM call and OTM put. Profit from time decay in a range-bound market.', build: buildStrangle },
+  { id: 'iron-condor', name: 'Iron Condor', category: 'Neutral', risk: 'low', description: 'Combine bull put spread and bear call spread. Defined risk, profit in range-bound market.', build: buildIronCondor },
+  { id: 'iron-butterfly', name: 'Iron Butterfly', category: 'Neutral', risk: 'medium', description: 'Short straddle with protective wings. Higher premium collected but narrower profit zone.', build: buildIronButterfly },
+  { id: 'butterfly-spread', name: 'Butterfly Spread', category: 'Neutral', risk: 'low', description: 'Buy 1 lower call, sell 2 middle calls, buy 1 upper call. Max profit at middle strike.', build: buildButterfly },
+  { id: 'covered-call', name: 'Covered Call', category: 'Bullish', risk: 'low', description: 'Sell a call against existing stock. Earn premium, cap upside. Limited risk strategy.', build: buildCoveredCall },
+  { id: 'jade-lizard', name: 'Jade Lizard', category: 'Bullish', risk: 'medium', description: 'Short put + bear call spread. No upside risk if total credit exceeds call spread width.', build: buildJadeLizard },
+  { id: 'ratio-call-spread', name: 'Ratio Call Spread', category: 'Bullish', risk: 'high', description: 'Buy 1 ATM call, sell 2 OTM calls. Risk on large up-moves. Can be zero or net credit.', build: buildRatioCallSpread },
 ];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -265,6 +296,108 @@ function buildButterfly(atm: number, qty: number, chain: Strike[]): StrategyLeg[
   ];
 }
 
+function buildLongCall(atm: number, qty: number, chain: Strike[]): StrategyLeg[] {
+  const s = findStrike(chain, atm);
+  if (!s) return [];
+  return [{ type: 'CE', strike: s.strike, action: 'BUY', qty, premium: s.callLTP, iv: s.callIV }];
+}
+
+function buildLongPut(atm: number, qty: number, chain: Strike[]): StrategyLeg[] {
+  const s = findStrike(chain, atm);
+  if (!s) return [];
+  return [{ type: 'PE', strike: s.strike, action: 'BUY', qty, premium: s.putLTP, iv: s.putIV }];
+}
+
+function buildLongStraddle(atm: number, qty: number, chain: Strike[]): StrategyLeg[] {
+  const s = findStrike(chain, atm);
+  if (!s) return [];
+  return [
+    { type: 'CE', strike: s.strike, action: 'BUY', qty, premium: s.callLTP, iv: s.callIV },
+    { type: 'PE', strike: s.strike, action: 'BUY', qty, premium: s.putLTP, iv: s.putIV },
+  ];
+}
+
+function buildLongStrangle(atm: number, qty: number, chain: Strike[]): StrategyLeg[] {
+  const step = getStrikeStep(chain);
+  const ce = findStrike(chain, atm + step * 2);
+  const pe = findStrike(chain, atm - step * 2);
+  if (!ce || !pe) return [];
+  return [
+    { type: 'CE', strike: ce.strike, action: 'BUY', qty, premium: ce.callLTP, iv: ce.callIV },
+    { type: 'PE', strike: pe.strike, action: 'BUY', qty, premium: pe.putLTP, iv: pe.putIV },
+  ];
+}
+
+function buildBullPutSpread(atm: number, qty: number, chain: Strike[]): StrategyLeg[] {
+  const step = getStrikeStep(chain);
+  const sell = findStrike(chain, atm);
+  const buy = findStrike(chain, atm - step * 2);
+  if (!sell || !buy) return [];
+  return [
+    { type: 'PE', strike: sell.strike, action: 'SELL', qty, premium: sell.putLTP, iv: sell.putIV },
+    { type: 'PE', strike: buy.strike, action: 'BUY', qty, premium: buy.putLTP, iv: buy.putIV },
+  ];
+}
+
+function buildBearCallSpread(atm: number, qty: number, chain: Strike[]): StrategyLeg[] {
+  const step = getStrikeStep(chain);
+  const sell = findStrike(chain, atm);
+  const buy = findStrike(chain, atm + step * 2);
+  if (!sell || !buy) return [];
+  return [
+    { type: 'CE', strike: sell.strike, action: 'SELL', qty, premium: sell.callLTP, iv: sell.callIV },
+    { type: 'CE', strike: buy.strike, action: 'BUY', qty, premium: buy.callLTP, iv: buy.callIV },
+  ];
+}
+
+function buildIronButterfly(atm: number, qty: number, chain: Strike[]): StrategyLeg[] {
+  const step = getStrikeStep(chain);
+  const lower = findStrike(chain, atm - step * 2);
+  const mid = findStrike(chain, atm);
+  const upper = findStrike(chain, atm + step * 2);
+  if (!lower || !mid || !upper) return [];
+  return [
+    { type: 'PE', strike: lower.strike, action: 'BUY', qty, premium: lower.putLTP, iv: lower.putIV },
+    { type: 'PE', strike: mid.strike, action: 'SELL', qty, premium: mid.putLTP, iv: mid.putIV },
+    { type: 'CE', strike: mid.strike, action: 'SELL', qty, premium: mid.callLTP, iv: mid.callIV },
+    { type: 'CE', strike: upper.strike, action: 'BUY', qty, premium: upper.callLTP, iv: upper.callIV },
+  ];
+}
+
+function buildCoveredCall(atm: number, qty: number, chain: Strike[]): StrategyLeg[] {
+  const step = getStrikeStep(chain);
+  const sell = findStrike(chain, atm + step * 2);
+  if (!sell) return [];
+  return [
+    { type: 'CE', strike: atm, action: 'BUY', qty, premium: 0, iv: 0 },
+    { type: 'CE', strike: sell.strike, action: 'SELL', qty, premium: sell.callLTP, iv: sell.callIV },
+  ];
+}
+
+function buildJadeLizard(atm: number, qty: number, chain: Strike[]): StrategyLeg[] {
+  const step = getStrikeStep(chain);
+  const put = findStrike(chain, atm - step);
+  const callSell = findStrike(chain, atm + step);
+  const callBuy = findStrike(chain, atm + step * 3);
+  if (!put || !callSell || !callBuy) return [];
+  return [
+    { type: 'PE', strike: put.strike, action: 'SELL', qty, premium: put.putLTP, iv: put.putIV },
+    { type: 'CE', strike: callSell.strike, action: 'SELL', qty, premium: callSell.callLTP, iv: callSell.callIV },
+    { type: 'CE', strike: callBuy.strike, action: 'BUY', qty, premium: callBuy.callLTP, iv: callBuy.callIV },
+  ];
+}
+
+function buildRatioCallSpread(atm: number, qty: number, chain: Strike[]): StrategyLeg[] {
+  const step = getStrikeStep(chain);
+  const buy = findStrike(chain, atm);
+  const sell = findStrike(chain, atm + step * 2);
+  if (!buy || !sell) return [];
+  return [
+    { type: 'CE', strike: buy.strike, action: 'BUY', qty, premium: buy.callLTP, iv: buy.callIV },
+    { type: 'CE', strike: sell.strike, action: 'SELL', qty: qty * 2, premium: sell.callLTP, iv: sell.callIV },
+  ];
+}
+
 function computeLocalPayoff(legs: StrategyLeg[], spotPrice: number): PayoffResult {
   const range = spotPrice * 0.12;
   const step = Math.round(range / 50 / 10) * 10 || 10;
@@ -327,6 +460,12 @@ export default function StrategyBuilder() {
   const [payoff, setPayoff] = useState<PayoffResult | null>(null);
   const [loadingPayoff, setLoadingPayoff] = useState(false);
   const [lotSize] = useState(25);
+
+  // UI toggles
+  const [showChain, setShowChain] = useState(false);
+  const [showTemplateDropdown, setShowTemplateDropdown] = useState(false);
+  const [templateCategory, setTemplateCategory] = useState<TemplateCategory>('All');
+  const templateDropdownRef = useRef<HTMLDivElement>(null);
 
   // Scenarios & explanation
   const [scenarioResults, setScenarioResults] = useState<ScenarioResult[]>([]);
@@ -580,72 +719,173 @@ export default function StrategyBuilder() {
     return SYMBOLS.filter(s => s.toLowerCase().includes(searchInput.toLowerCase()));
   }, [searchInput]);
 
+  // ── Filtered templates ────────────────────────────────────────────────
+  const filteredTemplates = useMemo(() => {
+    if (templateCategory === 'All') return STRATEGY_TEMPLATES;
+    return STRATEGY_TEMPLATES.filter(t => t.category === templateCategory);
+  }, [templateCategory]);
+
+  // ── Close template dropdown on outside click ──────────────────────────
+  useEffect(() => {
+    if (!showTemplateDropdown) return;
+    const handler = (e: MouseEvent) => {
+      if (templateDropdownRef.current && !templateDropdownRef.current.contains(e.target as Node)) {
+        setShowTemplateDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showTemplateDropdown]);
+
+  const applyTemplate = (t: StrategyTemplate) => {
+    if (chain.length === 0) return;
+    const built = t.build(atmStrike, lotSize, chain);
+    if (built.length > 0) {
+      setLegs(built.map(l => ({ ...l, expiry: selectedExpiry, expiryDays: dte(selectedExpiry) })));
+    }
+    setShowTemplateDropdown(false);
+  };
+
+  const RISK_COLORS: Record<string, string> = {
+    low: 'bg-emerald-100 text-emerald-700',
+    medium: 'bg-amber-100 text-amber-700',
+    high: 'bg-red-100 text-red-700',
+  };
+
+  const CATEGORY_ICONS: Record<string, typeof TrendingUp> = {
+    All: Layers,
+    Bullish: TrendingUp,
+    Bearish: TrendingDown,
+    Neutral: Activity,
+    Volatile: Zap,
+  };
+
   // ────────────────────────────────────────────────────────────────────────
   //  RENDER
   // ────────────────────────────────────────────────────────────────────────
 
   return (
     <div className="space-y-4">
-      {/* ── Header ─────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Options Strategy Builder</h1>
-          <p className="text-sm text-slate-500 mt-0.5">Live multi-expiry option chain with Rust-powered analytics</p>
-        </div>
-        <div className="flex items-center gap-3">
-          {lastUpdated && (
-            <span className="flex items-center gap-1.5 text-xs text-slate-400">
-              {isMarketOpen() && <Wifi className="w-3 h-3 text-emerald-500" />}
-              {isMarketOpen() ? (
-                <span className="text-emerald-600 font-semibold">LIVE</span>
-              ) : (
-                <span>Off-market</span>
-              )}
-              <span>{Math.round((Date.now() - lastUpdated.getTime()) / 1000)}s ago</span>
-            </span>
-          )}
-          <button
-            onClick={() => fetchChain()}
-            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-500 transition"
-          >
-            {chainLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCcw className="w-4 h-4" />}
-            Refresh
-          </button>
-        </div>
-      </div>
-
-      {/* ── Symbol + Expiry Bar ─────────────────────────────────────────── */}
+      {/* ── Header Bar ────────────────────────────────────────────────── */}
       <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm p-4">
-        <div className="flex items-center gap-4 flex-wrap">
+        <div className="flex items-center justify-between flex-wrap gap-3 mb-3">
+          <div className="flex items-center gap-3">
+            <h1 className="text-xl font-bold text-slate-900">Options Strategy Builder</h1>
+            {lastUpdated && (
+              <span className="flex items-center gap-1.5 text-xs text-slate-400">
+                {isMarketOpen() && <Wifi className="w-3 h-3 text-emerald-500" />}
+                {isMarketOpen() ? (
+                  <span className="text-emerald-600 font-semibold">LIVE</span>
+                ) : (
+                  <span>Off-market</span>
+                )}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => fetchChain()}
+              className="flex items-center gap-2 px-3 py-1.5 bg-indigo-600 text-white text-xs font-medium rounded-lg hover:bg-indigo-500 transition"
+            >
+              {chainLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCcw className="w-3.5 h-3.5" />}
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        {/* Controls Row: Symbol | Strategy Dropdown | Spot | Expiry Tabs */}
+        <div className="flex items-center gap-3 flex-wrap">
           {/* Symbol picker */}
           <div className="relative">
             <button
               onClick={() => setShowSearch(!showSearch)}
-              className="flex items-center gap-2 px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-semibold text-slate-800 hover:bg-slate-100 transition"
+              className="flex items-center gap-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-semibold text-slate-800 hover:bg-slate-100 transition"
             >
-              <Search className="w-4 h-4 text-slate-400" />
+              <Search className="w-3.5 h-3.5 text-slate-400" />
               {symbol}
               <ChevronDown className="w-3 h-3 text-slate-400" />
             </button>
             {showSearch && (
-              <div className="absolute top-full left-0 mt-1 z-50 bg-white border border-slate-200 rounded-xl shadow-lg p-2 w-52">
+              <div className="absolute top-full left-0 mt-1 z-50 bg-white border border-slate-200 rounded-xl shadow-lg p-2 w-48">
                 <input
                   type="text"
                   value={searchInput}
                   onChange={e => setSearchInput(e.target.value)}
                   placeholder="Search symbol..."
-                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg mb-2 focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                  className="w-full px-3 py-1.5 text-sm border border-slate-200 rounded-lg mb-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-300"
                   autoFocus
                 />
                 {filteredSymbols.map(s => (
                   <button
                     key={s}
                     onClick={() => { setSymbol(s); setShowSearch(false); setSearchInput(''); setLegs([]); }}
-                    className={`w-full text-left px-3 py-2 text-sm rounded-lg transition ${s === symbol ? 'bg-indigo-50 text-indigo-700 font-semibold' : 'hover:bg-slate-50 text-slate-700'}`}
+                    className={`w-full text-left px-3 py-1.5 text-sm rounded-lg transition ${s === symbol ? 'bg-indigo-50 text-indigo-700 font-semibold' : 'hover:bg-slate-50 text-slate-700'}`}
                   >
                     {s}
                   </button>
                 ))}
+              </div>
+            )}
+          </div>
+
+          {/* Strategy Template Dropdown */}
+          <div className="relative" ref={templateDropdownRef}>
+            <button
+              onClick={() => setShowTemplateDropdown(!showTemplateDropdown)}
+              className="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-200 rounded-lg text-sm font-semibold text-indigo-700 hover:from-indigo-100 hover:to-purple-100 transition"
+            >
+              <BookOpen className="w-3.5 h-3.5" />
+              Strategy Templates
+              <ChevronDown className={`w-3 h-3 transition-transform ${showTemplateDropdown ? 'rotate-180' : ''}`} />
+            </button>
+            {showTemplateDropdown && (
+              <div className="absolute top-full left-0 mt-1 z-50 bg-white border border-slate-200 rounded-2xl shadow-xl w-[420px] max-h-[480px] overflow-hidden">
+                {/* Category tabs */}
+                <div className="flex items-center gap-1 p-3 pb-2 border-b border-slate-100 overflow-x-auto">
+                  {(['All', 'Bullish', 'Bearish', 'Neutral', 'Volatile'] as TemplateCategory[]).map(cat => {
+                    const CatIcon = CATEGORY_ICONS[cat];
+                    return (
+                      <button
+                        key={cat}
+                        onClick={() => setTemplateCategory(cat)}
+                        className={`flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg whitespace-nowrap transition ${
+                          templateCategory === cat
+                            ? 'bg-indigo-100 text-indigo-700'
+                            : 'text-slate-500 hover:bg-slate-50'
+                        }`}
+                      >
+                        <CatIcon className="w-3 h-3" />
+                        {cat}
+                      </button>
+                    );
+                  })}
+                </div>
+                {/* Template list */}
+                <div className="p-2 max-h-[400px] overflow-y-auto space-y-1">
+                  {filteredTemplates.map(t => {
+                    const meta = CATEGORY_META[t.category] || CATEGORY_META.Neutral;
+                    const Icon = meta.icon;
+                    return (
+                      <button
+                        key={t.id}
+                        onClick={() => applyTemplate(t)}
+                        disabled={chain.length === 0}
+                        className="w-full text-left p-3 rounded-xl hover:bg-slate-50 disabled:opacity-40 transition group"
+                      >
+                        <div className="flex items-center justify-between mb-0.5">
+                          <div className="flex items-center gap-2">
+                            <Icon className={`w-3.5 h-3.5 ${meta.text}`} />
+                            <span className="text-sm font-semibold text-slate-800 group-hover:text-indigo-700 transition">{t.name}</span>
+                          </div>
+                          <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${RISK_COLORS[t.risk]}`}>
+                            {t.risk}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-500 leading-snug ml-5">{t.description}</p>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </div>
@@ -665,7 +905,7 @@ export default function StrategyBuilder() {
               <button
                 key={exp}
                 onClick={() => setSelectedExpiry(exp)}
-                className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium transition whitespace-nowrap ${
+                className={`flex-shrink-0 px-2.5 py-1.5 rounded-lg text-xs font-medium transition whitespace-nowrap ${
                   selectedExpiry === exp
                     ? 'bg-indigo-100 text-indigo-700 ring-1 ring-indigo-200'
                     : 'text-slate-500 hover:bg-slate-100'
@@ -683,134 +923,11 @@ export default function StrategyBuilder() {
         </div>
       </div>
 
-      {/* ── Quick Build + Option Chain + Legs ───────────────────────────── */}
+      {/* ── Main Content: Legs + Payoff + Greeks ─────────────────────── */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
 
-        {/* Option Chain Panel */}
-        <div className="xl:col-span-7 bg-white rounded-2xl border border-slate-200/60 shadow-sm p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-teal-500 to-emerald-500 flex items-center justify-center">
-                <Layers className="w-3.5 h-3.5 text-white" />
-              </div>
-              <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Option Chain</h2>
-              <span className="text-[10px] text-slate-400 font-mono">
-                {selectedExpiry && `Exp: ${fmtDate(selectedExpiry)} (${dte(selectedExpiry)}d)`}
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <label className="flex items-center gap-1.5 text-[10px] text-slate-500">
-                <input type="checkbox" checked={showGreeks} onChange={e => setShowGreeks(e.target.checked)} className="rounded" />
-                Greeks
-              </label>
-            </div>
-          </div>
-
-          {/* Quick Build */}
-          <div className="flex items-center gap-1.5 mb-3 flex-wrap">
-            <span className="text-[10px] font-semibold text-slate-400 uppercase">Quick:</span>
-            {QUICK_STRATEGIES.map(qs => (
-              <button
-                key={qs.id}
-                onClick={() => quickBuild(qs.build)}
-                disabled={chain.length === 0}
-                className="px-2.5 py-1 text-[10px] font-semibold bg-indigo-50 text-indigo-600 rounded-md hover:bg-indigo-100 disabled:opacity-40 transition"
-              >
-                {qs.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Chain Table */}
-          <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
-            {chainLoading && chain.length === 0 ? (
-              <div className="flex items-center justify-center py-16">
-                <Loader2 className="w-6 h-6 text-indigo-400 animate-spin" />
-                <span className="ml-2 text-sm text-slate-400">Loading chain...</span>
-              </div>
-            ) : displayChain.length === 0 ? (
-              <div className="text-sm text-slate-400 text-center py-16">No chain data available</div>
-            ) : (
-              <table className="w-full text-[11px]">
-                <thead className="sticky top-0 bg-white z-10">
-                  <tr className="border-b border-slate-200">
-                    <th className="py-1.5 px-1 text-right text-emerald-600">OI</th>
-                    <th className="py-1.5 px-1 text-right text-emerald-600">IV</th>
-                    <th className="py-1.5 px-1 text-right text-emerald-600">LTP</th>
-                    {showGreeks && <th className="py-1.5 px-1 text-right text-emerald-600">Δ</th>}
-                    <th className="py-1.5 px-1 text-center font-bold text-slate-800 bg-slate-50">Strike</th>
-                    {showGreeks && <th className="py-1.5 px-1 text-left text-red-600">Δ</th>}
-                    <th className="py-1.5 px-1 text-left text-red-600">LTP</th>
-                    <th className="py-1.5 px-1 text-left text-red-600">IV</th>
-                    <th className="py-1.5 px-1 text-left text-red-600">OI</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {displayChain.map(s => {
-                    const isATM = s.strike === atmStrike;
-                    const isITMCall = s.strike < spotPrice;
-                    const isITMPut = s.strike > spotPrice;
-                    return (
-                      <tr key={s.strike} className={`border-b border-slate-50 ${isATM ? 'bg-indigo-50/60 font-semibold' : ''}`}>
-                        <td className={`py-1 px-1 text-right font-mono ${isITMCall ? 'bg-emerald-50/40' : ''}`}>
-                          {formatNum(s.callOI)}
-                        </td>
-                        <td className={`py-1 px-1 text-right font-mono ${isITMCall ? 'bg-emerald-50/40' : ''}`}>
-                          {s.callIV > 0 ? s.callIV.toFixed(1) : '—'}
-                        </td>
-                        <td className={`py-1 px-1 text-right font-mono ${isITMCall ? 'bg-emerald-50/40' : ''}`}>
-                          <button
-                            onClick={() => addLegFromChain(s, 'CE', 'BUY')}
-                            onContextMenu={e => { e.preventDefault(); addLegFromChain(s, 'CE', 'SELL'); }}
-                            className="hover:bg-emerald-100 px-1 py-0.5 rounded transition text-emerald-700 font-semibold"
-                            title="Click=BUY, Right-click=SELL"
-                          >
-                            {s.callLTP > 0 ? s.callLTP.toFixed(2) : '—'}
-                          </button>
-                        </td>
-                        {showGreeks && (
-                          <td className={`py-1 px-1 text-right font-mono text-[10px] text-slate-500 ${isITMCall ? 'bg-emerald-50/40' : ''}`}>
-                            {s.callDelta ? s.callDelta.toFixed(3) : ''}
-                          </td>
-                        )}
-                        <td className={`py-1 px-1 text-center font-bold font-mono ${isATM ? 'text-indigo-700 bg-indigo-100/60' : 'text-slate-700 bg-slate-50'}`}>
-                          {s.strike.toLocaleString('en-IN')}
-                          {isATM && <span className="ml-1 text-[8px] text-indigo-500">ATM</span>}
-                        </td>
-                        {showGreeks && (
-                          <td className={`py-1 px-1 text-left font-mono text-[10px] text-slate-500 ${isITMPut ? 'bg-red-50/40' : ''}`}>
-                            {s.putDelta ? s.putDelta.toFixed(3) : ''}
-                          </td>
-                        )}
-                        <td className={`py-1 px-1 text-left font-mono ${isITMPut ? 'bg-red-50/40' : ''}`}>
-                          <button
-                            onClick={() => addLegFromChain(s, 'PE', 'BUY')}
-                            onContextMenu={e => { e.preventDefault(); addLegFromChain(s, 'PE', 'SELL'); }}
-                            className="hover:bg-red-100 px-1 py-0.5 rounded transition text-red-700 font-semibold"
-                            title="Click=BUY, Right-click=SELL"
-                          >
-                            {s.putLTP > 0 ? s.putLTP.toFixed(2) : '—'}
-                          </button>
-                        </td>
-                        <td className={`py-1 px-1 text-left font-mono ${isITMPut ? 'bg-red-50/40' : ''}`}>
-                          {s.putIV > 0 ? s.putIV.toFixed(1) : '—'}
-                        </td>
-                        <td className={`py-1 px-1 text-left font-mono ${isITMPut ? 'bg-red-50/40' : ''}`}>
-                          {formatNum(s.putOI)}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </div>
-          <p className="text-[10px] text-slate-400 mt-2">Click LTP to BUY, right-click to SELL</p>
-        </div>
-
-        {/* Legs + Metrics Panel */}
-        <div className="xl:col-span-5 space-y-4">
-          {/* Strategy Legs */}
+        {/* Strategy Legs (Left panel) */}
+        <div className="xl:col-span-4 space-y-4">
           <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm p-4">
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
@@ -829,9 +946,24 @@ export default function StrategyBuilder() {
               </button>
             </div>
 
+            {/* Quick Build */}
+            <div className="flex items-center gap-1 mb-3 flex-wrap">
+              <span className="text-[9px] font-semibold text-slate-400 uppercase">Quick:</span>
+              {QUICK_STRATEGIES.map(qs => (
+                <button
+                  key={qs.id}
+                  onClick={() => quickBuild(qs.build)}
+                  disabled={chain.length === 0}
+                  className="px-2 py-0.5 text-[9px] font-semibold bg-indigo-50 text-indigo-600 rounded hover:bg-indigo-100 disabled:opacity-40 transition"
+                >
+                  {qs.label}
+                </button>
+              ))}
+            </div>
+
             {legs.length === 0 ? (
-              <div className="text-sm text-slate-400 text-center py-8">
-                Click strikes from the option chain or use Quick Build to add legs
+              <div className="text-sm text-slate-400 text-center py-6">
+                Select a strategy template or click the option chain to add legs
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -933,7 +1065,7 @@ export default function StrategyBuilder() {
               )}
             </div>
             {payoff ? (
-              <div className="grid grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 <GreekCard label="Delta" symbol="Δ" value={payoff.greeks.delta} color={payoff.greeks.delta >= 0 ? 'emerald' : 'red'} />
                 <GreekCard label="Gamma" symbol="Γ" value={payoff.greeks.gamma} color="indigo" />
                 <GreekCard label="Theta" symbol="Θ" value={payoff.greeks.theta} color={payoff.greeks.theta >= 0 ? 'emerald' : 'amber'} />
@@ -944,52 +1076,202 @@ export default function StrategyBuilder() {
             )}
           </div>
         </div>
+
+        {/* Payoff Chart (Right panel - larger) */}
+        <div className="xl:col-span-8 bg-white rounded-2xl border border-slate-200/60 shadow-sm p-5">
+          <div className="flex items-center gap-2 mb-4">
+            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-blue-500 flex items-center justify-center">
+              <Activity className="w-3.5 h-3.5 text-white" />
+            </div>
+            <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Payoff Diagram</h2>
+            {loadingPayoff && <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />}
+          </div>
+          <div className="h-[500px]">
+            {payoff && payoff.payoffCurve?.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={payoff.payoffCurve} margin={{ top: 10, right: 30, left: 10, bottom: 20 }}>
+                  <defs>
+                    <linearGradient id="profitGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#10b981" stopOpacity={0.35} />
+                      <stop offset="100%" stopColor="#10b981" stopOpacity={0} />
+                    </linearGradient>
+                    <linearGradient id="lossGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#ef4444" stopOpacity={0} />
+                      <stop offset="100%" stopColor="#ef4444" stopOpacity={0.15} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis
+                    dataKey="spot"
+                    tick={{ fontSize: 11, fill: '#94a3b8' }}
+                    tickFormatter={(v: number) => v.toLocaleString('en-IN')}
+                    label={{ value: 'Spot Price', position: 'insideBottom', offset: -10, fontSize: 11, fill: '#94a3b8' }}
+                  />
+                  <YAxis
+                    tick={{ fontSize: 11, fill: '#94a3b8' }}
+                    tickFormatter={(v: number) => `₹${formatNum(v)}`}
+                    label={{ value: 'P&L', angle: -90, position: 'insideLeft', offset: 5, fontSize: 11, fill: '#94a3b8' }}
+                  />
+                  <Tooltip content={<PayoffTooltip spotPrice={spotPrice} />} />
+                  <ReferenceLine y={0} stroke="#64748b" strokeDasharray="4 4" strokeWidth={1.5} />
+                  <ReferenceLine
+                    x={spotPrice}
+                    stroke="#6366f1"
+                    strokeDasharray="4 4"
+                    strokeWidth={1.5}
+                    label={{ value: `Spot ${spotPrice.toLocaleString('en-IN')}`, fontSize: 11, fill: '#6366f1', position: 'top' }}
+                  />
+                  {(payoff.breakevens ?? []).map((be, idx) => (
+                    <ReferenceLine
+                      key={idx}
+                      x={be}
+                      stroke="#f59e0b"
+                      strokeDasharray="3 3"
+                      strokeWidth={1.5}
+                      label={{ value: `BE ${be.toLocaleString('en-IN')}`, fontSize: 10, fill: '#d97706', position: 'top' }}
+                    />
+                  ))}
+                  <Area
+                    type="monotone"
+                    dataKey="pnl"
+                    stroke="#6366f1"
+                    strokeWidth={2.5}
+                    fill="url(#profitGrad)"
+                    dot={false}
+                    activeDot={{ r: 6, fill: '#6366f1', stroke: '#fff', strokeWidth: 2 }}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-3">
+                <Activity className="w-12 h-12 text-slate-200" />
+                <div className="text-center">
+                  <p className="text-sm font-medium">No payoff diagram yet</p>
+                  <p className="text-xs mt-1">Select a strategy template or add legs to see the payoff curve</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
-      {/* ── Payoff Chart ───────────────────────────────────────────────── */}
-      <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm p-5">
-        <div className="flex items-center gap-2 mb-4">
-          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-blue-500 flex items-center justify-center">
-            <Activity className="w-3.5 h-3.5 text-white" />
-          </div>
-          <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Payoff Diagram</h2>
-          {loadingPayoff && <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />}
-        </div>
-        <div className="h-72">
-          {payoff && payoff.payoffCurve?.length > 0 ? (
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={payoff.payoffCurve} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="profitGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#10b981" stopOpacity={0.3} />
-                    <stop offset="100%" stopColor="#10b981" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis dataKey="spot" tick={{ fontSize: 10, fill: '#94a3b8' }}
-                  tickFormatter={(v: number) => v.toLocaleString('en-IN')} interval="preserveStartEnd" />
-                <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }}
-                  tickFormatter={(v: number) => `₹${formatNum(v)}`} />
-                <Tooltip
-                  contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
-                  formatter={(value: number | undefined) => [`₹${formatNum(value ?? 0)}`, 'P&L']}
-                  labelFormatter={(label: any) => `Spot: ${Number(label).toLocaleString('en-IN')}`} />
-                <ReferenceLine y={0} stroke="#64748b" strokeDasharray="4 4" strokeWidth={1.5} />
-                <ReferenceLine x={spotPrice} stroke="#6366f1" strokeDasharray="4 4" label={{ value: 'Spot', fontSize: 10, fill: '#6366f1' }} />
-                {(payoff.breakevens ?? []).map((be, idx) => (
-                  <ReferenceLine key={idx} x={be} stroke="#f59e0b" strokeDasharray="3 3"
-                    label={{ value: `BE ${be.toLocaleString('en-IN')}`, fontSize: 9, fill: '#d97706' }} />
-                ))}
-                <Area type="monotone" dataKey="pnl" stroke="#6366f1" strokeWidth={2}
-                  fill="url(#profitGrad)" dot={false} activeDot={{ r: 4, fill: '#6366f1' }} />
-              </AreaChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="flex items-center justify-center h-full text-sm text-slate-400">
-              Add legs to see the payoff diagram
+      {/* ── Collapsible Option Chain ──────────────────────────────────── */}
+      <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm">
+        <button
+          onClick={() => setShowChain(!showChain)}
+          className="w-full flex items-center justify-between p-4 hover:bg-slate-50/50 transition rounded-2xl"
+        >
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-teal-500 to-emerald-500 flex items-center justify-center">
+              <Layers className="w-3.5 h-3.5 text-white" />
             </div>
-          )}
-        </div>
+            <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Option Chain</h2>
+            <span className="text-[10px] text-slate-400 font-mono">
+              {selectedExpiry && `Exp: ${fmtDate(selectedExpiry)} (${dte(selectedExpiry)}d)`}
+            </span>
+            {chain.length > 0 && (
+              <span className="text-[10px] px-2 py-0.5 bg-teal-50 text-teal-600 font-semibold rounded-full">
+                {chain.length} strikes
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-1.5 text-[10px] text-slate-500" onClick={e => e.stopPropagation()}>
+              <input type="checkbox" checked={showGreeks} onChange={e => setShowGreeks(e.target.checked)} className="rounded" />
+              Greeks
+            </label>
+            {showChain ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
+          </div>
+        </button>
+
+        {showChain && (
+          <div className="px-4 pb-4">
+            <div className="overflow-x-auto max-h-[480px] overflow-y-auto border border-slate-100 rounded-xl">
+              {chainLoading && chain.length === 0 ? (
+                <div className="flex items-center justify-center py-16">
+                  <Loader2 className="w-6 h-6 text-indigo-400 animate-spin" />
+                  <span className="ml-2 text-sm text-slate-400">Loading chain...</span>
+                </div>
+              ) : displayChain.length === 0 ? (
+                <div className="text-sm text-slate-400 text-center py-16">No chain data available</div>
+              ) : (
+                <table className="w-full text-[11px]">
+                  <thead className="sticky top-0 bg-slate-50 z-10">
+                    <tr className="border-b border-slate-200">
+                      <th className="py-2 px-2 text-right text-emerald-600 font-semibold">OI</th>
+                      <th className="py-2 px-2 text-right text-emerald-600 font-semibold">IV</th>
+                      <th className="py-2 px-2 text-right text-emerald-600 font-semibold">LTP (CE)</th>
+                      {showGreeks && <th className="py-2 px-2 text-right text-emerald-600 font-semibold">Δ</th>}
+                      <th className="py-2 px-2 text-center font-bold text-slate-800 bg-slate-100">Strike</th>
+                      {showGreeks && <th className="py-2 px-2 text-left text-red-600 font-semibold">Δ</th>}
+                      <th className="py-2 px-2 text-left text-red-600 font-semibold">LTP (PE)</th>
+                      <th className="py-2 px-2 text-left text-red-600 font-semibold">IV</th>
+                      <th className="py-2 px-2 text-left text-red-600 font-semibold">OI</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {displayChain.map(s => {
+                      const isATM = s.strike === atmStrike;
+                      const isITMCall = s.strike < spotPrice;
+                      const isITMPut = s.strike > spotPrice;
+                      return (
+                        <tr key={s.strike} className={`border-b border-slate-50 hover:bg-slate-50/50 ${isATM ? 'bg-indigo-50/60 font-semibold' : ''}`}>
+                          <td className={`py-1.5 px-2 text-right font-mono ${isITMCall ? 'bg-emerald-50/40' : ''}`}>
+                            {formatNum(s.callOI)}
+                          </td>
+                          <td className={`py-1.5 px-2 text-right font-mono ${isITMCall ? 'bg-emerald-50/40' : ''}`}>
+                            {s.callIV > 0 ? s.callIV.toFixed(1) : '—'}
+                          </td>
+                          <td className={`py-1.5 px-2 text-right font-mono ${isITMCall ? 'bg-emerald-50/40' : ''}`}>
+                            <button
+                              onClick={() => addLegFromChain(s, 'CE', 'BUY')}
+                              onContextMenu={e => { e.preventDefault(); addLegFromChain(s, 'CE', 'SELL'); }}
+                              className="hover:bg-emerald-100 px-1.5 py-0.5 rounded transition text-emerald-700 font-semibold"
+                              title="Click=BUY, Right-click=SELL"
+                            >
+                              {s.callLTP > 0 ? s.callLTP.toFixed(2) : '—'}
+                            </button>
+                          </td>
+                          {showGreeks && (
+                            <td className={`py-1.5 px-2 text-right font-mono text-[10px] text-slate-500 ${isITMCall ? 'bg-emerald-50/40' : ''}`}>
+                              {s.callDelta ? s.callDelta.toFixed(3) : ''}
+                            </td>
+                          )}
+                          <td className={`py-1.5 px-2 text-center font-bold font-mono ${isATM ? 'text-indigo-700 bg-indigo-100/60' : 'text-slate-700 bg-slate-50'}`}>
+                            {s.strike.toLocaleString('en-IN')}
+                            {isATM && <span className="ml-1 text-[8px] text-indigo-500">ATM</span>}
+                          </td>
+                          {showGreeks && (
+                            <td className={`py-1.5 px-2 text-left font-mono text-[10px] text-slate-500 ${isITMPut ? 'bg-red-50/40' : ''}`}>
+                              {s.putDelta ? s.putDelta.toFixed(3) : ''}
+                            </td>
+                          )}
+                          <td className={`py-1.5 px-2 text-left font-mono ${isITMPut ? 'bg-red-50/40' : ''}`}>
+                            <button
+                              onClick={() => addLegFromChain(s, 'PE', 'BUY')}
+                              onContextMenu={e => { e.preventDefault(); addLegFromChain(s, 'PE', 'SELL'); }}
+                              className="hover:bg-red-100 px-1.5 py-0.5 rounded transition text-red-700 font-semibold"
+                              title="Click=BUY, Right-click=SELL"
+                            >
+                              {s.putLTP > 0 ? s.putLTP.toFixed(2) : '—'}
+                            </button>
+                          </td>
+                          <td className={`py-1.5 px-2 text-left font-mono ${isITMPut ? 'bg-red-50/40' : ''}`}>
+                            {s.putIV > 0 ? s.putIV.toFixed(1) : '—'}
+                          </td>
+                          <td className={`py-1.5 px-2 text-left font-mono ${isITMPut ? 'bg-red-50/40' : ''}`}>
+                            {formatNum(s.putOI)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            <p className="text-[10px] text-slate-400 mt-2">Click LTP to BUY, right-click to SELL</p>
+          </div>
+        )}
       </div>
 
       {/* ── Bottom Grid: Scenarios + Explain + Optimizer ─────────────── */}
@@ -1158,6 +1440,34 @@ function GreekCard({ label, symbol: sym, value, color }: {
     <div className={`rounded-xl border p-2.5 text-center ${colorClasses[color] || colorClasses.indigo}`}>
       <p className="text-[10px] font-semibold opacity-70">{label} ({sym})</p>
       <p className="text-sm font-bold font-mono mt-0.5">{value >= 0 ? '+' : ''}{typeof value === 'number' ? value.toFixed(4) : value}</p>
+    </div>
+  );
+}
+
+function PayoffTooltip({ active, payload, label, spotPrice }: any) {
+  if (!active || !payload?.length) return null;
+  const pnl = payload[0]?.value ?? 0;
+  const spot = Number(label) || 0;
+  const distance = spot - spotPrice;
+  const distPct = spotPrice > 0 ? ((distance / spotPrice) * 100).toFixed(2) : '0';
+  return (
+    <div className="bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl shadow-lg p-3 min-w-[200px]">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] font-semibold text-slate-400 uppercase">Spot Price</span>
+        <span className="text-sm font-bold font-mono text-slate-800">₹{spot.toLocaleString('en-IN')}</span>
+      </div>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] font-semibold text-slate-400 uppercase">P&L at Expiry</span>
+        <span className={`text-sm font-bold font-mono ${pnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+          {pnl >= 0 ? '+' : ''}₹{formatNum(pnl)}
+        </span>
+      </div>
+      <div className="flex items-center justify-between border-t border-slate-100 pt-1.5 mt-1.5">
+        <span className="text-[10px] text-slate-400">From current spot</span>
+        <span className={`text-xs font-semibold font-mono ${distance >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+          {distance >= 0 ? '+' : ''}{distPct}% ({distance >= 0 ? '+' : ''}{distance.toLocaleString('en-IN')} pts)
+        </span>
+      </div>
     </div>
   );
 }
