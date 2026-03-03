@@ -496,13 +496,38 @@ export default function StrategyBuilder() {
           setSelectedExpiry(data.expiries[0]);
         }
       } catch {
+        // Fallback: try fetching chain to discover the real nearest expiry
+        try {
+          const chainRes = await marketApi.optionsChain(symbol);
+          const chainData = chainRes.data as any;
+          if (chainData?.expiries?.length > 0) {
+            if (!cancelled) { setExpiries(chainData.expiries); setSelectedExpiry(chainData.expiries[0]); }
+            return;
+          }
+          if (chainData?.expiry) {
+            const nearestExpiry = new Date(chainData.expiry);
+            const fallback: string[] = [];
+            let d = new Date(nearestExpiry);
+            for (let i = 0; i < 8; i++) {
+              fallback.push(d.toISOString().split('T')[0]);
+              d = new Date(d.getTime() + 7 * 86400000);
+            }
+            if (!cancelled && fallback.length > 0) {
+              setExpiries(fallback);
+              setSelectedExpiry(fallback[0]);
+            }
+            return;
+          }
+        } catch { /* chain also failed */ }
+        // Last resort: project Mondays (current NIFTY weekly expiry day)
         const fallback: string[] = [];
         const now = new Date();
         let d = new Date(now);
+        const daysUntilMon = ((1 - d.getDay()) + 7) % 7 || 7;
+        d = new Date(d.getTime() + daysUntilMon * 86400000);
         for (let i = 0; i < 8; i++) {
-          const daysUntilThurs = (4 - d.getDay() + 7) % 7 || 7;
-          d = new Date(d.getTime() + daysUntilThurs * 86400000);
           fallback.push(d.toISOString().split('T')[0]);
+          d = new Date(d.getTime() + 7 * 86400000);
         }
         if (!cancelled) { setExpiries(fallback); setSelectedExpiry(fallback[0]); }
       }

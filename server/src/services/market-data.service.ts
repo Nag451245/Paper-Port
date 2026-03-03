@@ -614,7 +614,48 @@ export class MarketDataService {
       if (cached) return cached;
     }
 
-    // Primary: NSE India returns all expiry dates natively
+    const fmtD = (d: Date) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${dd}`;
+    };
+
+    // Primary: Fetch NiftyTrader option chain to get the REAL nearest expiry date,
+    // then project forward using the correct day-of-week for that symbol.
+    try {
+      const chainResult = await this.fetchOptionsChainFromNiftyTrader(symbol);
+      if (chainResult?.expiry) {
+        const nearestExpiry = new Date(chainResult.expiry + 'T12:00:00Z');
+        const expiryDow = nearestExpiry.getUTCDay();
+        const now = new Date();
+
+        // Start from the nearest expiry, skip if already past
+        const startDate = nearestExpiry.getTime() < now.getTime() - 86400000
+          ? new Date(now.getTime())
+          : nearestExpiry;
+
+        // Align to the correct day-of-week
+        const daysUntilExpiry = ((expiryDow - startDate.getUTCDay()) + 7) % 7;
+        let d = new Date(startDate.getTime() + daysUntilExpiry * 86400000);
+        if (d.getTime() < now.getTime() - 86400000) {
+          d = new Date(d.getTime() + 7 * 86400000);
+        }
+
+        const expiries: string[] = [];
+        for (let i = 0; i < 8; i++) {
+          expiries.push(fmtD(d));
+          d = new Date(d.getTime() + 7 * 86400000);
+        }
+
+        if (expiries.length > 0) {
+          if (this.cache) await this.cache.set(cacheKey, expiries, 1800);
+          return expiries;
+        }
+      }
+    } catch { /* NiftyTrader unavailable */ }
+
+    // Fallback: NSE India returns all expiry dates natively
     try {
       const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50'].includes(symbol.toUpperCase());
       const nseUrl = isIndex
@@ -630,21 +671,21 @@ export class MarketDataService {
           return expiries;
         }
       }
-    } catch { /* NSE failed, generate from known schedule */ }
+    } catch { /* NSE failed */ }
 
-    // Fallback: generate next 5 weekly expiries (Thursdays)
+    // Last resort: generate from the nearest NiftyTrader expiry day-of-week
+    // Default to Monday for NIFTY (current NSE schedule) if we can't determine
     const expiries: string[] = [];
     const now = new Date();
     let d = new Date(now);
+    const defaultExpiryDay = 1; // Monday (current NIFTY weekly expiry day)
+    const daysUntil = ((defaultExpiryDay - d.getDay()) + 7) % 7 || 7;
+    d = new Date(d.getTime() + daysUntil * 86400000);
     for (let i = 0; i < 8; i++) {
-      const daysUntilThurs = (4 - d.getDay() + 7) % 7 || 7;
-      d = new Date(d.getTime() + daysUntilThurs * 86400000);
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, '0');
-      const dd = String(d.getDate()).padStart(2, '0');
-      expiries.push(`${y}-${m}-${dd}`);
+      expiries.push(fmtD(d));
+      d = new Date(d.getTime() + 7 * 86400000);
     }
-    if (this.cache) await this.cache.set(cacheKey, expiries, 3600);
+    if (this.cache) await this.cache.set(cacheKey, expiries, 1800);
     return expiries;
   }
 
