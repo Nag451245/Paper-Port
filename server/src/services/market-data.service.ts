@@ -614,16 +614,25 @@ export class MarketDataService {
       if (cached) return cached;
     }
 
-    // Try Breeze API first (works reliably from server environments)
+    // Primary: NiftyTrader API (reliable, no auth needed)
+    try {
+      const result = await this.fetchOptionsChainFromNiftyTrader(symbol);
+      if (result && result.strikes.length > 0) {
+        if (this.cache) await this.cache.set(cacheKey, result, 30);
+        return result;
+      }
+    } catch { /* NiftyTrader unavailable, try Breeze */ }
+
+    // Fallback 1: Breeze API
     try {
       const breezeResult = await this.fetchOptionsChainFromBreeze(symbol);
       if (breezeResult && breezeResult.strikes.length > 0) {
-        if (this.cache) await this.cache.set(cacheKey, breezeResult, 120);
+        if (this.cache) await this.cache.set(cacheKey, breezeResult, 60);
         return breezeResult;
       }
     } catch { /* Breeze unavailable, try NSE */ }
 
-    // Fallback: NSE India scraping
+    // Fallback 2: NSE India
     try {
       const url = `https://www.nseindia.com/api/option-chain-indices?symbol=${encodeURIComponent(symbol)}`;
       const res = await this.nseFetch(url);
@@ -642,11 +651,99 @@ export class MarketDataService {
       const result = this.parseOptionsChain(symbol, data);
 
       if (result.strikes.length > 0 && this.cache) {
-        await this.cache.set(cacheKey, result, 120);
+        await this.cache.set(cacheKey, result, 60);
       }
       return result;
     } catch {
       return { symbol, strikes: [], expiry: '' };
+    }
+  }
+
+  private async fetchOptionsChainFromNiftyTrader(symbol: string) {
+    const sym = symbol.toUpperCase().replace(/\s+/g, '').toLowerCase();
+    const url = `https://webapi.niftytrader.in/webapi/option/option-chain-data?symbol=${encodeURIComponent(sym)}`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 15000);
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'application/json',
+        },
+        signal: ac.signal,
+      });
+      clearTimeout(timer);
+      if (!res.ok) return null;
+
+      const json = await res.json() as any;
+      if (json.result !== 1 || !json.resultData?.opDatas?.length) return null;
+
+      const rows = json.resultData.opDatas as any[];
+      const spotPrice = Number(rows[0]?.index_close) || 0;
+      const expiry = rows[0]?.expiry_date
+        ? rows[0].expiry_date.split('T')[0]
+        : '';
+
+      const strikes = rows.map((r: any) => ({
+        strike: Number(r.strike_price) || 0,
+        callOI: Number(r.calls_oi) || 0,
+        callOIChange: Number(r.calls_change_oi) || 0,
+        callVolume: Number(r.calls_volume) || 0,
+        callIV: Number(r.calls_iv) || 0,
+        callLTP: Number(r.calls_ltp) || 0,
+        callNetChange: Number(r.calls_net_change) || 0,
+        callBidPrice: Number(r.calls_bid_price) || 0,
+        callAskPrice: Number(r.calls_ask_price) || 0,
+        callDelta: Number(r.call_delta) || 0,
+        callGamma: Number(r.call_gamma) || 0,
+        callTheta: Number(r.call_theta) || 0,
+        callVega: Number(r.call_vega) || 0,
+        callBuildup: r.calls_builtup ?? '',
+        putOI: Number(r.puts_oi) || 0,
+        putOIChange: Number(r.puts_change_oi) || 0,
+        putVolume: Number(r.puts_volume) || 0,
+        putIV: Number(r.puts_iv) || 0,
+        putLTP: Number(r.puts_ltp) || 0,
+        putNetChange: Number(r.puts_net_change) || 0,
+        putBidPrice: Number(r.puts_bid_price) || 0,
+        putAskPrice: Number(r.puts_ask_price) || 0,
+        putDelta: Number(r.put_delta) || 0,
+        putGamma: Number(r.put_gamma) || 0,
+        putTheta: Number(r.put_theta) || 0,
+        putVega: Number(r.put_vega) || 0,
+        putBuildup: r.puts_builtup ?? '',
+      })).filter((s: any) => s.strike > 0)
+        .sort((a: any, b: any) => a.strike - b.strike);
+
+      const totalCallOI = strikes.reduce((s: number, st: any) => s + st.callOI, 0);
+      const totalPutOI = strikes.reduce((s: number, st: any) => s + st.putOI, 0);
+      const pcr = totalCallOI > 0 ? Math.round((totalPutOI / totalCallOI) * 100) / 100 : 0;
+
+      let maxPainStrike = 0, minPain = Infinity;
+      for (const st of strikes) {
+        let pain = 0;
+        for (const s2 of strikes) {
+          if (s2.strike < st.strike) pain += (st.strike - s2.strike) * s2.putOI;
+          if (s2.strike > st.strike) pain += (s2.strike - st.strike) * s2.callOI;
+        }
+        if (pain < minPain) { minPain = pain; maxPainStrike = st.strike; }
+      }
+
+      return {
+        symbol: symbol.toUpperCase(),
+        expiry,
+        underlyingValue: spotPrice,
+        spotPrice,
+        strikes,
+        pcr,
+        maxPain: maxPainStrike,
+        totalCallOI,
+        totalPutOI,
+        source: 'niftytrader',
+      };
+    } catch {
+      clearTimeout(timer);
+      return null;
     }
   }
 
