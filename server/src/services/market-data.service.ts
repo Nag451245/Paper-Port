@@ -607,22 +607,39 @@ export class MarketDataService {
     };
   }
 
-  async getAvailableExpiries(symbol: string): Promise<string[]> {
+  async getAvailableExpiries(symbol: string): Promise<{ expiries: string[]; sessionError?: boolean }> {
     const cacheKey = `expiries:${symbol}`;
     if (this.cache) {
       const cached = await this.cache.get<string[]>(cacheKey);
-      if (cached) return cached;
+      if (cached) return { expiries: cached };
     }
 
-    const fmtD = (d: Date) => {
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, '0');
-      const dd = String(d.getDate()).padStart(2, '0');
-      return `${y}-${m}-${dd}`;
-    };
+    // Source 1: Breeze API (primary) - discover all available expiry dates
+    const creds = await this.getAnyBreezeCredentials();
+    if (!creds) {
+      console.log(`[Expiries] ${symbol} → No Breeze session available`);
+      return { expiries: [], sessionError: true };
+    }
 
-    // Source 1: NSE India - authoritative source with ALL expiry dates
     try {
+      const breezeExpiries = await this.fetchExpiryDatesFromBreeze(symbol);
+      if (breezeExpiries.length > 0) {
+        console.log(`[Expiries] ${symbol} → Breeze API: ${breezeExpiries.join(', ')}`);
+        if (this.cache) await this.cache.set(cacheKey, breezeExpiries, 3600);
+        return { expiries: breezeExpiries };
+      }
+    } catch {
+      console.log(`[Expiries] ${symbol} → Breeze API call failed`);
+    }
+
+    // Fallback: NSE India - authoritative source with ALL expiry dates
+    try {
+      const fmtD = (d: Date) => {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${dd}`;
+      };
       const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50'].includes(symbol.toUpperCase());
       const nseUrl = isIndex
         ? `https://www.nseindia.com/api/option-chain-indices?symbol=${encodeURIComponent(symbol.toUpperCase())}`
@@ -645,49 +662,12 @@ export class MarketDataService {
 
         if (expiries.length > 0) {
           if (this.cache) await this.cache.set(cacheKey, expiries, 3600);
-          return expiries;
+          return { expiries };
         }
       }
     } catch { /* NSE may be blocked from cloud servers */ }
 
-    // Source 2: Breeze API - pass empty expiry_date to discover all available expiries
-    try {
-      const breezeExpiries = await this.fetchExpiryDatesFromBreeze(symbol);
-      if (breezeExpiries.length > 0) {
-        console.log(`[Expiries] ${symbol} → Breeze API: ${breezeExpiries.join(', ')}`);
-        if (this.cache) await this.cache.set(cacheKey, breezeExpiries, 3600);
-        return breezeExpiries;
-      }
-    } catch { /* Breeze unavailable */ }
-
-    // Source 3: NiftyTrader - only returns nearest expiry, project forward from it
-    try {
-      const chainResult = await this.fetchOptionsChainFromNiftyTrader(symbol);
-      if (chainResult?.expiry) {
-        const nearestExpiry = new Date(chainResult.expiry + 'T12:00:00Z');
-        const expiryDow = nearestExpiry.getUTCDay();
-        const now = new Date();
-
-        let d = new Date(nearestExpiry);
-        if (d.getTime() < now.getTime() - 86400000) {
-          const daysAhead = ((expiryDow - now.getUTCDay()) + 7) % 7 || 7;
-          d = new Date(now.getTime() + daysAhead * 86400000);
-        }
-
-        const expiries: string[] = [];
-        for (let i = 0; i < 8; i++) {
-          expiries.push(fmtD(d));
-          d = new Date(d.getTime() + 7 * 86400000);
-        }
-
-        if (expiries.length > 0) {
-          if (this.cache) await this.cache.set(cacheKey, expiries, 1800);
-          return expiries;
-        }
-      }
-    } catch { /* NiftyTrader unavailable */ }
-
-    return [];
+    return { expiries: [] };
   }
 
   async getOptionsChain(symbol: string, expiry?: string) {
@@ -697,22 +677,14 @@ export class MarketDataService {
       if (cached) return cached;
     }
 
-    // NiftyTrader always returns only the nearest expiry regardless of what date we pass.
-    // Strategy: try NiftyTrader first; if it returns data AND the expiry matches what was
-    // requested (or no specific expiry was requested), use it. Otherwise fall back to Breeze.
-    try {
-      const ntResult = await this.fetchOptionsChainFromNiftyTrader(symbol);
-      if (ntResult && ntResult.strikes.length > 0) {
-        const isMatch = !expiry || ntResult.expiry === expiry;
-        if (isMatch) {
-          console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → NiftyTrader (${ntResult.strikes.length} strikes)`);
-          if (this.cache) await this.cache.set(cacheKey, ntResult, 2);
-          return ntResult;
-        }
-      }
-    } catch { /* NiftyTrader unavailable */ }
+    // Primary: Breeze API (supports any expiry date)
+    const creds = await this.getAnyBreezeCredentials();
+    if (!creds) {
+      console.log(`[OptionChain] ${symbol} → No Breeze session available`);
+      return { symbol, strikes: [], expiry: expiry ?? '', expiries: [], sessionError: true,
+        message: 'Breeze API session not configured. Please enter your ICICI Breeze session key in Settings.' };
+    }
 
-    // Future weeks or NiftyTrader failed: Breeze API (supports any expiry date)
     try {
       const breezeResult = await this.fetchOptionsChainFromBreeze(symbol, expiry);
       if (breezeResult && breezeResult.strikes.length > 0) {
@@ -720,7 +692,9 @@ export class MarketDataService {
         if (this.cache) await this.cache.set(cacheKey, breezeResult, 10);
         return breezeResult;
       }
-    } catch { /* Breeze unavailable */ }
+    } catch {
+      console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze API call failed`);
+    }
 
     // Fallback: NSE India (supports filtering by expiry natively)
     try {

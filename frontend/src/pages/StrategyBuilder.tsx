@@ -32,6 +32,7 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   BookOpen,
+  AlertTriangle,
 } from 'lucide-react';
 import api, { marketApi, optionsApi } from '@/services/api';
 
@@ -449,6 +450,7 @@ export default function StrategyBuilder() {
   const [expiries, setExpiries] = useState<string[]>([]);
   const [selectedExpiry, setSelectedExpiry] = useState('');
   const [spotPrice, setSpotPrice] = useState(0);
+  const [sessionError, setSessionError] = useState(false);
 
   // Option chain
   const [chain, setChain] = useState<Strike[]>([]);
@@ -491,38 +493,22 @@ export default function StrategyBuilder() {
     (async () => {
       try {
         const { data } = await marketApi.optionsExpiries(symbol);
-        if (!cancelled && data?.expiries?.length > 0) {
+        if (cancelled) return;
+        if (data?.sessionError) {
+          setSessionError(true);
+          setExpiries([]);
+          setSelectedExpiry('');
+          return;
+        }
+        setSessionError(false);
+        if (data?.expiries?.length > 0) {
           setExpiries(data.expiries);
           setSelectedExpiry(data.expiries[0]);
+        } else {
+          setExpiries([]);
+          setSelectedExpiry('');
         }
       } catch {
-        // Fallback: fetch option chain directly to discover real expiry dates
-        try {
-          const chainRes = await marketApi.optionsChain(symbol);
-          const chainData = chainRes.data as any;
-          if (chainData?.expiries?.length > 0) {
-            if (!cancelled) { setExpiries(chainData.expiries); setSelectedExpiry(chainData.expiries[0]); }
-            return;
-          }
-          // If chain response has a single expiry, project forward from it (same day-of-week)
-          if (chainData?.expiry) {
-            const nearestExpiry = new Date(chainData.expiry);
-            if (!isNaN(nearestExpiry.getTime())) {
-              const fallback: string[] = [];
-              let d = new Date(nearestExpiry);
-              for (let i = 0; i < 8; i++) {
-                fallback.push(d.toISOString().split('T')[0]);
-                d = new Date(d.getTime() + 7 * 86400000);
-              }
-              if (!cancelled && fallback.length > 0) {
-                setExpiries(fallback);
-                setSelectedExpiry(fallback[0]);
-              }
-              return;
-            }
-          }
-        } catch { /* chain also failed */ }
-        // No data sources available - show empty state instead of fake dates
         if (!cancelled) { setExpiries([]); setSelectedExpiry(''); }
       }
     })();
@@ -532,6 +518,7 @@ export default function StrategyBuilder() {
   // ── Fetch chain + spot on symbol/expiry change ──────────────────────────
   const fetchChain = useCallback(async (silent = false) => {
     if (!symbol) return;
+    if (sessionError) return;
     if (!silent) setChainLoading(true);
     try {
       const [chainRes, quoteRes] = await Promise.allSettled([
@@ -540,6 +527,11 @@ export default function StrategyBuilder() {
       ]);
       if (chainRes.status === 'fulfilled') {
         const d = chainRes.value.data as any;
+        if (d?.sessionError) {
+          setSessionError(true);
+          if (!silent) setChainLoading(false);
+          return;
+        }
         const strikes: Strike[] = (d?.strikes ?? []).map((r: any) => ({
           strike: Number(r.strike) || 0,
           callOI: Number(r.callOI) || 0, callOIChange: Number(r.callOIChange) || 0,
@@ -567,7 +559,7 @@ export default function StrategyBuilder() {
       setLastUpdated(new Date());
     } catch { /* silent */ }
     if (!silent) setChainLoading(false);
-  }, [symbol, selectedExpiry, spotPrice]);
+  }, [symbol, selectedExpiry, spotPrice, sessionError]);
 
   useEffect(() => { fetchChain(); }, [fetchChain]);
 
@@ -917,30 +909,46 @@ export default function StrategyBuilder() {
             </span>
           </div>
 
-          {/* Expiry tabs */}
-          <div className="flex items-center gap-1 overflow-x-auto flex-1">
+          {/* Expiry dropdown */}
+          <div className="relative flex items-center gap-2">
             <Calendar className="w-4 h-4 text-slate-400 flex-shrink-0" />
-            {expiries.slice(0, 8).map(exp => (
-              <button
-                key={exp}
-                onClick={() => setSelectedExpiry(exp)}
-                className={`flex-shrink-0 px-2.5 py-1.5 rounded-lg text-xs font-medium transition whitespace-nowrap ${
-                  selectedExpiry === exp
-                    ? 'bg-indigo-100 text-indigo-700 ring-1 ring-indigo-200'
-                    : 'text-slate-500 hover:bg-slate-100'
-                }`}
-              >
-                {fmtDate(exp)}
-                <span className={`ml-1 px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                  selectedExpiry === exp ? 'bg-indigo-200 text-indigo-800' : 'bg-slate-200 text-slate-600'
-                }`}>
-                  {dte(exp)}d
-                </span>
-              </button>
-            ))}
+            <select
+              value={selectedExpiry}
+              onChange={e => setSelectedExpiry(e.target.value)}
+              className="appearance-none pl-3 pr-8 py-2 bg-white border border-slate-200 rounded-lg text-sm font-semibold text-slate-800 hover:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-200 transition cursor-pointer min-w-[200px]"
+            >
+              {expiries.length === 0 && <option value="">No expiries available</option>}
+              {expiries.map(exp => (
+                <option key={exp} value={exp}>
+                  {fmtDate(exp)} — {dte(exp)}d to expiry
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 pointer-events-none" />
           </div>
         </div>
       </div>
+
+      {/* ── Session Error Banner ──────────────────────────────────────── */}
+      {sessionError && (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 flex items-start gap-4">
+          <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center flex-shrink-0">
+            <AlertTriangle className="w-5 h-5 text-amber-600" />
+          </div>
+          <div>
+            <h3 className="text-sm font-bold text-amber-800 mb-1">Breeze API Session Required</h3>
+            <p className="text-xs text-amber-700 leading-relaxed mb-3">
+              Option chain data requires a valid ICICI Breeze API session. Please enter your session key to access live option chain data, expiry dates, and strategy building features.
+            </p>
+            <a
+              href="/settings"
+              className="inline-flex items-center gap-2 px-4 py-2 bg-amber-600 text-white text-xs font-semibold rounded-lg hover:bg-amber-500 transition shadow-sm"
+            >
+              Go to Settings — Enter Breeze Session Key
+            </a>
+          </div>
+        </div>
+      )}
 
       {/* ── Main Content: Legs + Payoff + Greeks ─────────────────────── */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">

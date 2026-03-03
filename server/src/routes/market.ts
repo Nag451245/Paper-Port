@@ -74,8 +74,12 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
     const sym = symbolParam.safeParse((request.params as any).symbol);
     if (!sym.success) return reply.code(400).send({ error: 'Invalid symbol' });
     try {
-      const expiries = await service.getAvailableExpiries(sym.data);
-      return reply.send({ symbol: sym.data, expiries });
+      const result = await service.getAvailableExpiries(sym.data);
+      return reply.send({
+        symbol: sym.data,
+        expiries: result.expiries,
+        ...(result.sessionError ? { sessionError: true, message: 'Breeze API session not configured. Please enter your ICICI Breeze session key in Settings.' } : {}),
+      });
     } catch {
       return reply.send({ symbol: sym.data, expiries: [] });
     }
