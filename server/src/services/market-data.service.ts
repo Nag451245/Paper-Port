@@ -607,7 +607,7 @@ export class MarketDataService {
     };
   }
 
-  async getAvailableExpiries(symbol: string): Promise<{ expiries: string[]; sessionError?: boolean }> {
+  async getAvailableExpiries(symbol: string): Promise<{ expiries: string[]; sessionError?: boolean; message?: string }> {
     const cacheKey = `expiries:${symbol}`;
     if (this.cache) {
       const cached = await this.cache.get<string[]>(cacheKey);
@@ -617,10 +617,11 @@ export class MarketDataService {
     // Source 1: Breeze API (primary) - discover all available expiry dates
     const creds = await this.getAnyBreezeCredentials();
     if (!creds) {
-      console.log(`[Expiries] ${symbol} → No Breeze session available`);
-      return { expiries: [], sessionError: true };
+      console.log(`[Expiries] ${symbol} → No Breeze credentials found`);
+      return { expiries: [], sessionError: true, message: 'No Breeze API credentials found. Please enter your ICICI Breeze session key in Settings.' };
     }
 
+    let breezeAuthFailed = false;
     try {
       const breezeExpiries = await this.fetchExpiryDatesFromBreeze(symbol);
       if (breezeExpiries.length > 0) {
@@ -628,8 +629,11 @@ export class MarketDataService {
         if (this.cache) await this.cache.set(cacheKey, breezeExpiries, 3600);
         return { expiries: breezeExpiries };
       }
-    } catch {
-      console.log(`[Expiries] ${symbol} → Breeze API call failed`);
+      breezeAuthFailed = true;
+      console.log(`[Expiries] ${symbol} → Breeze API returned 0 expiries (session may be expired)`);
+    } catch (err) {
+      breezeAuthFailed = true;
+      console.log(`[Expiries] ${symbol} → Breeze API call failed: ${err}`);
     }
 
     // Fallback: NSE India - authoritative source with ALL expiry dates
@@ -667,6 +671,9 @@ export class MarketDataService {
       }
     } catch { /* NSE may be blocked from cloud servers */ }
 
+    if (breezeAuthFailed) {
+      return { expiries: [], sessionError: true, message: 'Breeze API session expired or invalid. Please update your session key in Settings.' };
+    }
     return { expiries: [] };
   }
 
@@ -680,11 +687,12 @@ export class MarketDataService {
     // Primary: Breeze API (supports any expiry date)
     const creds = await this.getAnyBreezeCredentials();
     if (!creds) {
-      console.log(`[OptionChain] ${symbol} → No Breeze session available`);
+      console.log(`[OptionChain] ${symbol} → No Breeze credentials found`);
       return { symbol, strikes: [], expiry: expiry ?? '', expiries: [], sessionError: true,
-        message: 'Breeze API session not configured. Please enter your ICICI Breeze session key in Settings.' };
+        message: 'No Breeze API credentials found. Please enter your ICICI Breeze session key in Settings.' };
     }
 
+    let breezeAuthFailed = false;
     try {
       const breezeResult = await this.fetchOptionsChainFromBreeze(symbol, expiry);
       if (breezeResult && breezeResult.strikes.length > 0) {
@@ -692,8 +700,11 @@ export class MarketDataService {
         if (this.cache) await this.cache.set(cacheKey, breezeResult, 10);
         return breezeResult;
       }
-    } catch {
-      console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze API call failed`);
+      breezeAuthFailed = true;
+      console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze returned 0 strikes (session may be expired)`);
+    } catch (err) {
+      breezeAuthFailed = true;
+      console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze API call failed: ${err}`);
     }
 
     // Fallback: NSE India (supports filtering by expiry natively)
@@ -713,6 +724,12 @@ export class MarketDataService {
         }
       }
     } catch { /* NSE failed */ }
+
+    if (breezeAuthFailed) {
+      console.log(`[OptionChain] ${symbol} → Breeze session expired/invalid, no fallback data`);
+      return { symbol, strikes: [], expiry: expiry ?? '', expiries: [], sessionError: true,
+        message: 'Breeze API session expired or invalid. Please update your session key in Settings.' };
+    }
 
     console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → No data from any source`);
     return { symbol, strikes: [], expiry: expiry ?? '', expiries: [] };
@@ -1185,10 +1202,16 @@ export class MarketDataService {
           payload,
         );
 
-        if (res.status !== 200) continue;
+        if (res.status !== 200) {
+          console.log(`[Breeze Chain] ${right} HTTP ${res.status} — ${res.data?.substring(0, 200)}`);
+          continue;
+        }
 
         const data = JSON.parse(res.data);
-        if (data.Error || data.Status !== 200) continue;
+        if (data.Error || data.Status !== 200) {
+          console.log(`[Breeze Chain] ${right} API error — Status: ${data.Status}, Error: ${JSON.stringify(data.Error)?.substring(0, 200)}`);
+          continue;
+        }
 
         const records = data.Success ?? [];
         if (!Array.isArray(records)) continue;
@@ -1298,13 +1321,22 @@ export class MarketDataService {
         payload,
       );
 
-      if (res.status !== 200) return [];
+      if (res.status !== 200) {
+        console.log(`[Breeze Expiries] HTTP ${res.status} — ${res.data?.substring(0, 200)}`);
+        return [];
+      }
 
       const data = JSON.parse(res.data);
-      if (data.Error || data.Status !== 200) return [];
+      if (data.Error || data.Status !== 200) {
+        console.log(`[Breeze Expiries] API error — Status: ${data.Status}, Error: ${JSON.stringify(data.Error)?.substring(0, 200)}`);
+        return [];
+      }
 
       const records = data.Success ?? [];
-      if (!Array.isArray(records) || records.length === 0) return [];
+      if (!Array.isArray(records) || records.length === 0) {
+        console.log(`[Breeze Expiries] No records returned`);
+        return [];
+      }
 
       const today = new Date();
       today.setHours(0, 0, 0, 0);
