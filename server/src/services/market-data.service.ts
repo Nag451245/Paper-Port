@@ -650,8 +650,17 @@ export class MarketDataService {
       }
     } catch { /* NSE may be blocked from cloud servers */ }
 
-    // Source 2: NiftyTrader - only returns nearest expiry, but that gives us
-    // the correct day-of-week. We project forward from it.
+    // Source 2: Breeze API - pass empty expiry_date to discover all available expiries
+    try {
+      const breezeExpiries = await this.fetchExpiryDatesFromBreeze(symbol);
+      if (breezeExpiries.length > 0) {
+        console.log(`[Expiries] ${symbol} → Breeze API: ${breezeExpiries.join(', ')}`);
+        if (this.cache) await this.cache.set(cacheKey, breezeExpiries, 3600);
+        return breezeExpiries;
+      }
+    } catch { /* Breeze unavailable */ }
+
+    // Source 3: NiftyTrader - only returns nearest expiry, project forward from it
     try {
       const chainResult = await this.fetchOptionsChainFromNiftyTrader(symbol);
       if (chainResult?.expiry) {
@@ -660,7 +669,6 @@ export class MarketDataService {
         const now = new Date();
 
         let d = new Date(nearestExpiry);
-        // If nearest expiry is past, advance to the next occurrence of the same weekday
         if (d.getTime() < now.getTime() - 86400000) {
           const daysAhead = ((expiryDow - now.getUTCDay()) + 7) % 7 || 7;
           d = new Date(now.getTime() + daysAhead * 86400000);
@@ -679,7 +687,6 @@ export class MarketDataService {
       }
     } catch { /* NiftyTrader unavailable */ }
 
-    // No expiry data available at all
     return [];
   }
 
@@ -690,16 +697,32 @@ export class MarketDataService {
       if (cached) return cached;
     }
 
-    // Primary: NiftyTrader API (reliable, no auth needed)
+    // NiftyTrader always returns only the nearest expiry regardless of what date we pass.
+    // Strategy: try NiftyTrader first; if it returns data AND the expiry matches what was
+    // requested (or no specific expiry was requested), use it. Otherwise fall back to Breeze.
     try {
-      const result = await this.fetchOptionsChainFromNiftyTrader(symbol, expiry);
-      if (result && result.strikes.length > 0) {
-        if (this.cache) await this.cache.set(cacheKey, result, 2);
-        return result;
+      const ntResult = await this.fetchOptionsChainFromNiftyTrader(symbol);
+      if (ntResult && ntResult.strikes.length > 0) {
+        const isMatch = !expiry || ntResult.expiry === expiry;
+        if (isMatch) {
+          console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → NiftyTrader (${ntResult.strikes.length} strikes)`);
+          if (this.cache) await this.cache.set(cacheKey, ntResult, 2);
+          return ntResult;
+        }
       }
-    } catch { /* NiftyTrader unavailable, try NSE */ }
+    } catch { /* NiftyTrader unavailable */ }
 
-    // Fallback 1: NSE India (supports filtering by expiry natively)
+    // Future weeks or NiftyTrader failed: Breeze API (supports any expiry date)
+    try {
+      const breezeResult = await this.fetchOptionsChainFromBreeze(symbol, expiry);
+      if (breezeResult && breezeResult.strikes.length > 0) {
+        console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze API (${breezeResult.strikes.length} strikes)`);
+        if (this.cache) await this.cache.set(cacheKey, breezeResult, 10);
+        return breezeResult;
+      }
+    } catch { /* Breeze unavailable */ }
+
+    // Fallback: NSE India (supports filtering by expiry natively)
     try {
       const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50'].includes(symbol.toUpperCase());
       const url = isIndex
@@ -710,21 +733,14 @@ export class MarketDataService {
         const data = await res.json() as any;
         const result = this.parseOptionsChain(symbol, data, expiry);
         if (result.strikes.length > 0) {
+          console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → NSE India (${result.strikes.length} strikes)`);
           if (this.cache) await this.cache.set(cacheKey, result, 60);
           return result;
         }
       }
-    } catch { /* NSE failed, try Breeze */ }
+    } catch { /* NSE failed */ }
 
-    // Fallback 2: Breeze API
-    try {
-      const breezeResult = await this.fetchOptionsChainFromBreeze(symbol);
-      if (breezeResult && breezeResult.strikes.length > 0) {
-        if (this.cache) await this.cache.set(cacheKey, breezeResult, 60);
-        return breezeResult;
-      }
-    } catch { /* Breeze unavailable */ }
-
+    console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → No data from any source`);
     return { symbol, strikes: [], expiry: expiry ?? '', expiries: [] };
   }
 
@@ -1154,11 +1170,11 @@ export class MarketDataService {
     return bars;
   }
 
-  private async fetchOptionsChainFromBreeze(symbol: string) {
+  private async fetchOptionsChainFromBreeze(symbol: string, expiryDate?: string) {
     const creds = await this.getAnyBreezeCredentials();
     if (!creds) return null;
 
-    const expiry = this.getNextExpiry();
+    const expiry = expiryDate ? `${expiryDate}T06:00:00.000Z` : this.getNextExpiry();
     const exchangeCode = 'NFO';
     const productType = 'options';
 
@@ -1273,6 +1289,66 @@ export class MarketDataService {
       totalCallOI,
       totalPutOI,
     };
+  }
+
+  private async fetchExpiryDatesFromBreeze(symbol: string): Promise<string[]> {
+    const creds = await this.getAnyBreezeCredentials();
+    if (!creds) return [];
+
+    try {
+      const payload = JSON.stringify({
+        stock_code: symbol.toUpperCase(),
+        exchange_code: 'NFO',
+        product_type: 'options',
+        expiry_date: '',
+        right: 'call',
+        strike_price: '',
+      });
+
+      const now = new Date();
+      now.setMilliseconds(0);
+      const timestamp = now.toISOString();
+      const checksum = createHash('sha256')
+        .update(timestamp + payload + creds.secretKey)
+        .digest('hex');
+
+      const res = await this.breezeRequest(
+        '/breezeapi/api/v1/optionchain',
+        {
+          'Content-Type': 'application/json',
+          'X-AppKey': creds.apiKey,
+          'X-SessionToken': creds.sessionToken,
+          'X-Timestamp': timestamp,
+          'X-Checksum': `token ${checksum}`,
+        },
+        payload,
+      );
+
+      if (res.status !== 200) return [];
+
+      const data = JSON.parse(res.data);
+      if (data.Error || data.Status !== 200) return [];
+
+      const records = data.Success ?? [];
+      if (!Array.isArray(records) || records.length === 0) return [];
+
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const expirySet = new Set<string>();
+      for (const rec of records) {
+        const raw = rec.expiry_date ?? '';
+        if (!raw) continue;
+        const dateStr = typeof raw === 'string' ? raw.split('T')[0] : '';
+        if (dateStr && new Date(dateStr + 'T12:00:00Z') >= today) {
+          expirySet.add(dateStr);
+        }
+      }
+
+      return [...expirySet].sort();
+    } catch {
+      return [];
+    }
   }
 
   private getNextExpiry(): string {
