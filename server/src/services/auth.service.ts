@@ -3,6 +3,7 @@ import { PrismaClient, type User } from '@prisma/client';
 type RiskAppetite = string;
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import https from 'https';
+import axios from 'axios';
 import * as OTPAuth from 'otpauth';
 import { env } from '../config.js';
 
@@ -277,26 +278,28 @@ export class AuthService {
 
     const apiKey = decrypt(credential.encryptedApiKey, this.encKey);
 
-    // Exchange API_Session for real session_token via CustomerDetails API
+    // Exchange API_Session for real session_token via CustomerDetails API (uses axios like official SDK)
     let realSessionToken = apiSession;
     try {
-      const payload = JSON.stringify({ SessionToken: apiSession, AppKey: apiKey });
-      const result = await httpsRequestWithBody({
-        hostname: 'api.icicidirect.com',
-        path: '/breezeapi/api/v1/customerdetails',
+      const result = await axios({
         method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(payload),
-        },
-      }, payload);
+        url: 'https://api.icicidirect.com/breezeapi/api/v1/customerdetails',
+        headers: { 'Content-Type': 'application/json' },
+        data: { SessionToken: apiSession, AppKey: apiKey },
+        timeout: 20_000,
+        validateStatus: () => true,
+      });
 
-      const data = JSON.parse(result.body);
-      if (data.Success?.session_token) {
+      const data = result.data;
+      console.log(`[Breeze] CustomerDetails response status=${result.status}, apiStatus=${data?.Status}`);
+      if (data?.Success?.session_token) {
         realSessionToken = data.Success.session_token;
+        console.log(`[Breeze] Session token exchanged successfully`);
+      } else {
+        console.log(`[Breeze] CustomerDetails did not return session_token: ${JSON.stringify(data).substring(0, 300)}`);
       }
-    } catch {
-      // If exchange fails, store the raw token as-is (may still work for some flows)
+    } catch (err: any) {
+      console.log(`[Breeze] CustomerDetails exchange failed: ${err.message} — storing raw token`);
     }
 
     await this.prisma.breezeCredential.update({

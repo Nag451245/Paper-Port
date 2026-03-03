@@ -1,7 +1,7 @@
 import { CacheService } from '../lib/redis.js';
 import { getPrisma } from '../lib/prisma.js';
 import { createHash, createDecipheriv } from 'crypto';
-import https from 'https';
+import axios from 'axios';
 import { env } from '../config.js';
 
 const CACHE_TTL_QUOTE = 30;
@@ -9,6 +9,7 @@ const CACHE_TTL_HISTORY = 300;
 const CACHE_TTL_SEARCH = 3600;
 const CACHE_TTL_INDICES = 60;
 const FETCH_TIMEOUT_MS = 10_000;
+const BREEZE_TIMEOUT_MS = 20_000;
 
 const POPULAR_NSE_STOCKS: [string, string][] = [
   ['RELIANCE', 'Reliance Industries Ltd'],
@@ -987,24 +988,22 @@ export class MarketDataService {
 
   // ── Breeze API (fallback) ──
 
-  private breezeRequest(path: string, headers: Record<string, string>, body?: string): Promise<{ status: number; data: string }> {
-    return new Promise((resolve, reject) => {
-      const opts: https.RequestOptions = {
-        hostname: 'api.icicidirect.com',
-        path,
+  private async breezeRequest(path: string, headers: Record<string, string>, body?: string): Promise<{ status: number; data: string }> {
+    try {
+      const url = `https://api.icicidirect.com${path}`;
+      const res = await axios({
         method: 'GET',
-        headers: { ...headers, ...(body ? { 'Content-Length': String(Buffer.byteLength(body)) } : {}) },
-      };
-      const req = https.request(opts, (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (c: Buffer) => chunks.push(c));
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, data: Buffer.concat(chunks).toString() }));
+        url,
+        headers,
+        data: body ? JSON.parse(body) : undefined,
+        timeout: BREEZE_TIMEOUT_MS,
+        validateStatus: () => true,
       });
-      req.on('error', reject);
-      req.setTimeout(FETCH_TIMEOUT_MS, () => req.destroy(new Error('Timeout')));
-      if (body) req.write(body);
-      req.end();
-    });
+      return { status: res.status, data: typeof res.data === 'string' ? res.data : JSON.stringify(res.data) };
+    } catch (err: any) {
+      console.error(`[breezeRequest] ${path} failed:`, err.message);
+      throw err;
+    }
   }
 
   private async fetchFromBreeze(
@@ -1026,7 +1025,7 @@ export class MarketDataService {
     const productType = exchange === 'MCX' ? 'Futures' : exchange === 'CDS' ? 'Currency' : 'Cash';
 
     try {
-      const payload = JSON.stringify({
+      const payload = this.buildBreezePayload({
         interval: breezeInterval,
         from_date: from,
         to_date: to,
@@ -1034,23 +1033,9 @@ export class MarketDataService {
         exchange_code: breezeExchange,
         product_type: productType,
       });
+      const { headers } = this.buildBreezeHeaders(creds, payload);
 
-      const now = new Date();
-      now.setMilliseconds(0);
-      const timestamp = now.toISOString();
-      const checksum = createHash('sha256').update(timestamp + payload + creds.secretKey).digest('hex');
-
-      const res = await this.breezeRequest(
-        '/breezeapi/api/v1/historicalcharts',
-        {
-          'Content-Type': 'application/json',
-          'X-AppKey': creds.apiKey,
-          'X-SessionToken': creds.sessionToken,
-          'X-Timestamp': timestamp,
-          'X-Checksum': `token ${checksum}`,
-        },
-        payload,
-      );
+      const res = await this.breezeRequest('/breezeapi/api/v1/historicalcharts', headers, payload);
 
       if (res.status !== 200) return [];
 
@@ -1089,9 +1074,13 @@ export class MarketDataService {
         });
       }
 
-      if (!credential?.sessionToken) return null;
+      if (!credential?.sessionToken) {
+        console.log('[Breeze Creds] No credential with sessionToken found in DB');
+        return null;
+      }
 
       if (credential.sessionExpiresAt && new Date(credential.sessionExpiresAt) < new Date()) {
+        console.log(`[Breeze Creds] Session expired at ${credential.sessionExpiresAt}`);
         return null;
       }
 
@@ -1111,12 +1100,60 @@ export class MarketDataService {
       } catch {
         // might be stored unencrypted from an older version
       }
-      return {
-        apiKey: decryptField(credential.encryptedApiKey),
-        secretKey: decryptField(credential.encryptedSecret),
-        sessionToken,
-      };
-    } catch {
+
+      const apiKey = decryptField(credential.encryptedApiKey);
+      const secretKey = decryptField(credential.encryptedSecret);
+
+      console.log(`[Breeze Creds] Found credentials — apiKey: ${apiKey.substring(0, 8)}..., sessionToken length: ${sessionToken.length}, expires: ${credential.sessionExpiresAt}`);
+
+      // Validate the session by calling customerdetails — if the stored
+      // token is raw (exchange failed during save), re-exchange it now.
+      try {
+        const testRes = await axios({
+          method: 'GET',
+          url: 'https://api.icicidirect.com/breezeapi/api/v1/customerdetails',
+          headers: { 'Content-Type': 'application/json' },
+          data: { SessionToken: sessionToken, AppKey: apiKey },
+          timeout: BREEZE_TIMEOUT_MS,
+          validateStatus: () => true,
+        });
+
+        const testData = testRes.data;
+        if (testData?.Status === 200 && testData?.Success?.session_token) {
+          const exchangedToken = testData.Success.session_token;
+          if (exchangedToken !== sessionToken) {
+            console.log(`[Breeze Creds] Session token exchanged successfully (was raw, now apiSession)`);
+            sessionToken = exchangedToken;
+            // Persist the exchanged token so next call doesn't need to re-exchange
+            try {
+              const { createCipheriv, randomBytes } = await import('crypto');
+              const iv = randomBytes(16);
+              const cipher = createCipheriv('aes-256-cbc', key, iv);
+              let encrypted = cipher.update(exchangedToken, 'utf8', 'hex');
+              encrypted += cipher.final('hex');
+              await prisma.breezeCredential.update({
+                where: { userId: credential.userId },
+                data: { sessionToken: `${iv.toString('hex')}:${encrypted}` },
+              });
+            } catch { /* persist failure is non-critical */ }
+          } else {
+            console.log(`[Breeze Creds] Session token validated OK (already exchanged)`);
+          }
+        } else if (testData?.Status === 500) {
+          console.log(`[Breeze Creds] CustomerDetails returned 500 — session invalid/expired. Response: ${JSON.stringify(testData).substring(0, 300)}`);
+          return null;
+        } else {
+          console.log(`[Breeze Creds] CustomerDetails unexpected response: ${JSON.stringify(testData).substring(0, 300)}`);
+          // Continue with existing token — it might still work
+        }
+      } catch (err: any) {
+        console.log(`[Breeze Creds] CustomerDetails validation call failed: ${err.message}`);
+        // Continue with existing token
+      }
+
+      return { apiKey, secretKey, sessionToken };
+    } catch (err: any) {
+      console.log(`[Breeze Creds] Exception: ${err.message}`);
       return null;
     }
   }
@@ -1159,6 +1196,59 @@ export class MarketDataService {
       currentPrice = close;
     }
     return bars;
+  }
+
+  async diagnoseBreezeConnection(): Promise<Record<string, any>> {
+    const steps: Record<string, any> = {};
+
+    // Step 1: Check credentials in DB
+    const creds = await this.getAnyBreezeCredentials();
+    steps.credentials = creds
+      ? { found: true, apiKeyPrefix: creds.apiKey.substring(0, 8) + '...', sessionTokenLength: creds.sessionToken.length }
+      : { found: false };
+
+    if (!creds) return { steps, result: 'FAIL — no credentials' };
+
+    // Step 2: Test customerdetails
+    try {
+      const custRes = await axios({
+        method: 'GET',
+        url: 'https://api.icicidirect.com/breezeapi/api/v1/customerdetails',
+        headers: { 'Content-Type': 'application/json' },
+        data: { SessionToken: creds.sessionToken, AppKey: creds.apiKey },
+        timeout: BREEZE_TIMEOUT_MS,
+        validateStatus: () => true,
+      });
+      steps.customerDetails = { status: custRes.status, data: custRes.data };
+    } catch (err: any) {
+      steps.customerDetails = { error: err.message };
+    }
+
+    // Step 3: Test option chain call
+    try {
+      const payload = this.buildBreezePayload({
+        stock_code: 'NIFTY',
+        exchange_code: 'NFO',
+        product_type: 'options',
+        expiry_date: this.getNextExpiry(),
+        right: 'call',
+      });
+      const { headers } = this.buildBreezeHeaders(creds, payload);
+
+      const chainRes = await this.breezeRequest('/breezeapi/api/v1/optionchain', headers, payload);
+      const parsed = JSON.parse(chainRes.data);
+      steps.optionChain = {
+        httpStatus: chainRes.status,
+        apiStatus: parsed.Status,
+        recordCount: Array.isArray(parsed.Success) ? parsed.Success.length : 0,
+        error: parsed.Error ?? null,
+        sampleRecord: Array.isArray(parsed.Success) && parsed.Success.length > 0 ? parsed.Success[0] : null,
+      };
+    } catch (err: any) {
+      steps.optionChain = { error: err.message };
+    }
+
+    return { steps, result: steps.optionChain?.recordCount > 0 ? 'OK' : 'FAIL' };
   }
 
   private buildBreezePayload(fields: Record<string, string>): string {

@@ -102,4 +102,13 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
     if (!sym.success) return reply.code(400).send({ error: 'Invalid symbol' });
     return reply.send({ symbol: sym.data, bids: [], asks: [] });
   });
+
+  app.get('/breeze-diag', async (_request, reply) => {
+    try {
+      const result = await service.diagnoseBreezeConnection();
+      return reply.send(result);
+    } catch (err: any) {
+      return reply.send({ error: err.message });
+    }
+  });
 }
