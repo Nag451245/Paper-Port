@@ -618,7 +618,7 @@ export class MarketDataService {
     try {
       const result = await this.fetchOptionsChainFromNiftyTrader(symbol);
       if (result && result.strikes.length > 0) {
-        if (this.cache) await this.cache.set(cacheKey, result, 30);
+        if (this.cache) await this.cache.set(cacheKey, result, 2);
         return result;
       }
     } catch { /* NiftyTrader unavailable, try Breeze */ }

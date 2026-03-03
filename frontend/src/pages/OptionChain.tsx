@@ -124,7 +124,7 @@ function isMarketOpen(): boolean {
   return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
 }
 
-const REFRESH_MARKET = 10_000;
+const REFRESH_MARKET = 2_000;
 const REFRESH_OFF = 5 * 60_000;
 
 export default function OptionChain() {
