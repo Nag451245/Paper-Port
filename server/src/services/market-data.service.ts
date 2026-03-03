@@ -1,6 +1,7 @@
 import { CacheService } from '../lib/redis.js';
 import { getPrisma } from '../lib/prisma.js';
 import { createHash, createDecipheriv } from 'crypto';
+import https from 'https';
 import axios from 'axios';
 import { env } from '../config.js';
 
@@ -10,6 +11,10 @@ const CACHE_TTL_SEARCH = 3600;
 const CACHE_TTL_INDICES = 60;
 const FETCH_TIMEOUT_MS = 10_000;
 const BREEZE_TIMEOUT_MS = 20_000;
+
+// Breeze API server has TLS certificate issues — the official SDK sets
+// NODE_TLS_REJECT_UNAUTHORIZED=0 globally. We scope it to a dedicated agent.
+const breezeHttpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 const POPULAR_NSE_STOCKS: [string, string][] = [
   ['RELIANCE', 'Reliance Industries Ltd'],
@@ -997,11 +1002,12 @@ export class MarketDataService {
         headers,
         data: body ? JSON.parse(body) : undefined,
         timeout: BREEZE_TIMEOUT_MS,
+        httpsAgent: breezeHttpsAgent,
         validateStatus: () => true,
       });
       return { status: res.status, data: typeof res.data === 'string' ? res.data : JSON.stringify(res.data) };
     } catch (err: any) {
-      console.error(`[breezeRequest] ${path} failed:`, err.message);
+      console.error(`[breezeRequest] ${path} failed: code=${err.code ?? 'none'} message=${err.message ?? 'none'} cause=${err.cause?.message ?? 'none'}`);
       throw err;
     }
   }

@@ -8,6 +8,7 @@ import * as OTPAuth from 'otpauth';
 import { env } from '../config.js';
 
 const SALT_ROUNDS = 12;
+const breezeHttpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 function httpsRequestWithBody(options: https.RequestOptions, body?: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
@@ -287,6 +288,7 @@ export class AuthService {
         headers: { 'Content-Type': 'application/json' },
         data: { SessionToken: apiSession, AppKey: apiKey },
         timeout: 20_000,
+        httpsAgent: breezeHttpsAgent,
         validateStatus: () => true,
       });
 
