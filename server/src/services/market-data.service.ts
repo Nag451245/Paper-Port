@@ -2,7 +2,6 @@ import { CacheService } from '../lib/redis.js';
 import { getPrisma } from '../lib/prisma.js';
 import { createHash, createDecipheriv } from 'crypto';
 import https from 'https';
-import axios from 'axios';
 import { env } from '../config.js';
 
 const CACHE_TTL_QUOTE = 30;
@@ -12,9 +11,6 @@ const CACHE_TTL_INDICES = 60;
 const FETCH_TIMEOUT_MS = 10_000;
 const BREEZE_TIMEOUT_MS = 20_000;
 
-// Breeze API server has TLS certificate issues — the official SDK sets
-// NODE_TLS_REJECT_UNAUTHORIZED=0 globally. We scope it to a dedicated agent.
-const breezeHttpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 const POPULAR_NSE_STOCKS: [string, string][] = [
   ['RELIANCE', 'Reliance Industries Ltd'],
@@ -993,23 +989,38 @@ export class MarketDataService {
 
   // ── Breeze API (fallback) ──
 
-  private async breezeRequest(path: string, headers: Record<string, string>, body?: string): Promise<{ status: number; data: string }> {
-    try {
-      const url = `https://api.icicidirect.com${path}`;
-      const res = await axios({
+  private breezeRequest(path: string, headers: Record<string, string>, body?: string): Promise<{ status: number; data: string }> {
+    return new Promise((resolve, reject) => {
+      const allHeaders: Record<string, string> = { ...headers };
+      if (body) allHeaders['Content-Length'] = String(Buffer.byteLength(body));
+
+      const req = https.request({
+        hostname: 'api.icicidirect.com',
+        path,
         method: 'GET',
-        url,
-        headers,
-        data: body ? JSON.parse(body) : undefined,
-        timeout: BREEZE_TIMEOUT_MS,
-        httpsAgent: breezeHttpsAgent,
-        validateStatus: () => true,
+        headers: allHeaders,
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          const data = Buffer.concat(chunks).toString();
+          console.log(`[breezeRequest] ${path} → HTTP ${res.statusCode} (${data.length} bytes)`);
+          resolve({ status: res.statusCode ?? 0, data });
+        });
       });
-      return { status: res.status, data: typeof res.data === 'string' ? res.data : JSON.stringify(res.data) };
-    } catch (err: any) {
-      console.error(`[breezeRequest] ${path} failed: code=${err.code ?? 'none'} message=${err.message ?? 'none'} cause=${err.cause?.message ?? 'none'}`);
-      throw err;
-    }
+
+      req.on('error', (err: any) => {
+        console.error(`[breezeRequest] ${path} network error: code=${err.code} message=${err.message}`);
+        reject(err);
+      });
+      req.setTimeout(BREEZE_TIMEOUT_MS, () => {
+        console.error(`[breezeRequest] ${path} timed out after ${BREEZE_TIMEOUT_MS}ms`);
+        req.destroy(new Error(`Breeze API timeout after ${BREEZE_TIMEOUT_MS}ms`));
+      });
+
+      if (body) req.write(body);
+      req.end();
+    });
   }
 
   private async fetchFromBreeze(
