@@ -127,7 +127,7 @@ interface StrikeData {
 function generateNarrative(
   vixValue: number, vixChange: number,
   pcr: number,
-  fiiNet: number, diiNet: number,
+  fiiNet: number, _diiNet: number,
   spotPrice: number, maxPain: number,
   topCallOIStrike: number, topPutOIStrike: number,
 ): { text: string; sentiment: string; volatility: string; bias: string } {
@@ -212,7 +212,7 @@ export default function FnOAnalytics() {
   const [isLiveData, setIsLiveData] = useState(false);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const fetchAll = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);

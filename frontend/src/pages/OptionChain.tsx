@@ -134,12 +134,12 @@ export default function OptionChain() {
   const [strikes, setStrikes] = useState<Strike[]>([]);
   const [spotPrice, setSpotPrice] = useState(0);
   const [expiry, setExpiry] = useState('');
-  const [source, setSource] = useState('');
+  const [, setSource] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [showGreeks, setShowGreeks] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const fetchData = useCallback(async (sym: string, silent = false) => {
     if (!silent) setLoading(true);
