@@ -144,7 +144,7 @@ export const marketApi = {
     api.get<OptionsChain>(`/market/options-chain/${encodeURIComponent(symbol)}`, { params: expiry ? { expiry } : undefined }),
 
   optionsExpiries: (symbol: string) =>
-    api.get<{ symbol: string; expiries: string[] }>(`/market/options-chain/${encodeURIComponent(symbol)}/expiries`),
+    api.get<{ symbol: string; expiries: string[]; sessionError?: boolean; message?: string }>(`/market/options-chain/${encodeURIComponent(symbol)}/expiries`),
 
   marketDepth: (symbol: string, exchange?: string) =>
     api.get<MarketDepth>(`/market/market-depth/${encodeURIComponent(symbol)}`, { params: { exchange } }),
