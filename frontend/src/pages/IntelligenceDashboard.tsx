@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   BarChart3,
   Activity,
@@ -42,10 +42,35 @@ function num(v: any): number {
   return typeof v === 'string' ? parseFloat(v) || 0 : Number(v) || 0;
 }
 
-function formatCr(value: number): string {
-  const cr = value / 100;
-  if (Math.abs(cr) >= 1000) return `${(cr / 1000).toFixed(1)}K Cr`;
-  return `${cr.toFixed(0)} Cr`;
+function isIndianMarketOpen(): boolean {
+  const now = new Date();
+  const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const day = ist.getDay();
+  if (day === 0 || day === 6) return false;
+  const minutes = ist.getHours() * 60 + ist.getMinutes();
+  return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
+}
+
+const REFRESH_MARKET = 5_000;
+const REFRESH_OFF = 3_600_000;
+
+function useAutoRefresh(loadFn: () => void, enabled: boolean) {
+  const fnRef = useRef(loadFn);
+  fnRef.current = loadFn;
+
+  useEffect(() => {
+    if (!enabled) return;
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      const interval = isIndianMarketOpen() ? REFRESH_MARKET : REFRESH_OFF;
+      timer = setTimeout(() => {
+        fnRef.current();
+        schedule();
+      }, interval);
+    };
+    schedule();
+    return () => clearTimeout(timer);
+  }, [enabled]);
 }
 
 export default function IntelligenceDashboard() {
@@ -90,9 +115,9 @@ function FIIDIITab() {
   const [data, setData] = useState<any>(null);
   const [trend, setTrend] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const load = useCallback(async () => {
-    setLoading(true);
     try {
       const [fiiRes, trendRes] = await Promise.all([
         intelligenceApi.fiiDii().catch(() => ({ data: null })),
@@ -101,12 +126,14 @@ function FIIDIITab() {
       setData(fiiRes.data);
       const trendArray = trendRes.data?.daily_flows ?? trendRes.data;
       setTrend(Array.isArray(trendArray) ? trendArray : []);
+      setLastUpdated(new Date());
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => { load(); }, [load]);
+  useAutoRefresh(load, !loading);
 
   if (loading) return <LoadingSpinner />;
 
@@ -134,9 +161,7 @@ function FIIDIITab() {
             {date && <span className="ml-2 text-slate-500">· {new Date(date).toLocaleDateString('en-IN', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</span>}
           </p>
         </div>
-        <button onClick={load} className="p-1.5 rounded-md hover:bg-slate-100 text-slate-400">
-          <RefreshCcw className="w-4 h-4" />
-        </button>
+        <RefreshButton onClick={load} lastUpdated={lastUpdated} />
       </div>
 
       {message && !hasData && (
@@ -218,21 +243,28 @@ function OptionsTab() {
   const [ivPercentile, setIvPercentile] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [symbol, setSymbol] = useState('NIFTY');
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-  useEffect(() => {
-    setLoading(true);
-    Promise.all([
-      intelligenceApi.pcr(symbol).catch(() => ({ data: null })),
-      intelligenceApi.maxPain(symbol).catch(() => ({ data: null })),
-      intelligenceApi.oiHeatmap(symbol).catch(() => ({ data: null })),
-      intelligenceApi.ivPercentile(symbol).catch(() => ({ data: null })),
-    ]).then(([pcrRes, mpRes, oiRes, ivRes]) => {
+  const load = useCallback(async () => {
+    try {
+      const [pcrRes, mpRes, oiRes, ivRes] = await Promise.all([
+        intelligenceApi.pcr(symbol).catch(() => ({ data: null })),
+        intelligenceApi.maxPain(symbol).catch(() => ({ data: null })),
+        intelligenceApi.oiHeatmap(symbol).catch(() => ({ data: null })),
+        intelligenceApi.ivPercentile(symbol).catch(() => ({ data: null })),
+      ]);
       setPcr(pcrRes.data);
       setMaxPain(mpRes.data);
       setOiHeatmap(oiRes.data);
       setIvPercentile(ivRes.data);
-    }).finally(() => setLoading(false));
+      setLastUpdated(new Date());
+    } finally {
+      setLoading(false);
+    }
   }, [symbol]);
+
+  useEffect(() => { setLoading(true); load(); }, [load]);
+  useAutoRefresh(load, !loading);
 
   if (loading) return <LoadingSpinner />;
 
@@ -251,7 +283,7 @@ function OptionsTab() {
           <h2 className="text-base font-semibold text-slate-800">Derivatives Analytics</h2>
           <p className="text-xs text-slate-400 mt-0.5">Options chain, PCR, Max Pain & IV analysis</p>
         </div>
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-2">
           <select
             value={symbol}
             onChange={(e) => setSymbol(e.target.value)}
@@ -261,6 +293,7 @@ function OptionsTab() {
             <option value="BANKNIFTY">BANK NIFTY</option>
             <option value="FINNIFTY">FIN NIFTY</option>
           </select>
+          <RefreshButton onClick={load} lastUpdated={lastUpdated} />
         </div>
       </div>
 
@@ -323,17 +356,24 @@ function SectorsTab() {
   const [performance, setPerformance] = useState<any[]>([]);
   const [heatmap, setHeatmap] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-  useEffect(() => {
-    setLoading(true);
-    Promise.all([
-      intelligenceApi.sectorPerformance().catch(() => ({ data: [] })),
-      intelligenceApi.sectorHeatmap().catch(() => ({ data: [] })),
-    ]).then(([perfRes, heatRes]) => {
+  const load = useCallback(async () => {
+    try {
+      const [perfRes, heatRes] = await Promise.all([
+        intelligenceApi.sectorPerformance().catch(() => ({ data: [] })),
+        intelligenceApi.sectorHeatmap().catch(() => ({ data: [] })),
+      ]);
       setPerformance(Array.isArray(perfRes.data) ? perfRes.data : []);
       setHeatmap(Array.isArray(heatRes.data) ? heatRes.data : []);
-    }).finally(() => setLoading(false));
+      setLastUpdated(new Date());
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => { load(); }, [load]);
+  useAutoRefresh(load, !loading);
 
   if (loading) return <LoadingSpinner />;
 
@@ -350,9 +390,12 @@ function SectorsTab() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-base font-semibold text-slate-800">NSE Sector Performance</h2>
-        <p className="text-xs text-slate-400 mt-0.5">Live Nifty sectoral indices — intraday change %</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-slate-800">NSE Sector Performance</h2>
+          <p className="text-xs text-slate-400 mt-0.5">Live Nifty sectoral indices — intraday change %</p>
+        </div>
+        <RefreshButton onClick={load} lastUpdated={lastUpdated} />
       </div>
 
       {perfData.length > 0 && (
@@ -494,9 +537,9 @@ function GlobalTab() {
   const [fx, setFx] = useState<any[]>([]);
   const [commodities, setCommodities] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const load = useCallback(async () => {
-    setLoading(true);
     try {
       const [idxRes, fxRes, comRes] = await Promise.all([
         intelligenceApi.globalIndices().catch(() => ({ data: [] })),
@@ -506,12 +549,14 @@ function GlobalTab() {
       setIndices(Array.isArray(idxRes.data) ? idxRes.data : []);
       setFx(Array.isArray(fxRes.data) ? fxRes.data : []);
       setCommodities(Array.isArray(comRes.data) ? comRes.data : []);
+      setLastUpdated(new Date());
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => { load(); }, [load]);
+  useAutoRefresh(load, !loading);
 
   if (loading) return <LoadingSpinner />;
 
@@ -520,11 +565,9 @@ function GlobalTab() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-base font-semibold text-slate-800">World Markets Overview</h2>
-          <p className="text-xs text-slate-400 mt-0.5">Live quotes from Yahoo Finance — indices, currencies & commodities</p>
+          <p className="text-xs text-slate-400 mt-0.5">Live quotes — indices, currencies & commodities</p>
         </div>
-        <button onClick={load} className="p-1.5 rounded-md hover:bg-slate-100 text-slate-400">
-          <RefreshCcw className="w-4 h-4" />
-        </button>
+        <RefreshButton onClick={load} lastUpdated={lastUpdated} />
       </div>
 
       {indices.length > 0 && (() => {
@@ -545,16 +588,17 @@ function GlobalTab() {
             <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">{region}</h3>
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
               {items.map((idx: any, i: number) => {
-                const change = num(idx.change ?? idx.changePercent ?? idx.change_pct);
+                const absChange = num(idx.change);
+                const pctChange = num(idx.changePercent);
                 return (
                   <div key={i} className="p-3 rounded-lg border border-slate-200 hover:border-slate-300 transition-colors">
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs font-medium text-slate-500">{idx.name ?? idx.index}</span>
-                      {change >= 0 ? <ArrowUpRight className="w-3.5 h-3.5 text-emerald-500" /> : <ArrowDownRight className="w-3.5 h-3.5 text-red-500" />}
+                      {pctChange >= 0 ? <ArrowUpRight className="w-3.5 h-3.5 text-emerald-500" /> : <ArrowDownRight className="w-3.5 h-3.5 text-red-500" />}
                     </div>
-                    <p className="text-sm font-bold font-mono text-slate-800">{num(idx.value ?? idx.last ?? idx.price).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</p>
-                    <p className={`text-xs font-mono ${change >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                      {change >= 0 ? '+' : ''}{change.toFixed(2)}%
+                    <p className="text-sm font-bold font-mono text-slate-800">{num(idx.value).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</p>
+                    <p className={`text-xs font-mono ${pctChange >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                      {absChange >= 0 ? '+' : ''}{absChange.toFixed(2)} ({pctChange >= 0 ? '+' : ''}{pctChange.toFixed(2)}%)
                     </p>
                   </div>
                 );
@@ -569,14 +613,15 @@ function GlobalTab() {
           <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Commodities</h3>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
             {commodities.map((c: any, i: number) => {
-              const change = num(c.change ?? c.changePercent ?? c.change_pct);
+              const absChange = num(c.change);
+              const pctChange = num(c.changePercent);
               return (
                 <div key={i} className="p-3 rounded-lg border border-slate-200">
                   <span className="text-xs font-medium text-slate-500">{c.name ?? c.commodity}</span>
                   {c.unit && <span className="text-[10px] text-slate-300 ml-1">({c.unit})</span>}
                   <p className="text-sm font-bold font-mono text-slate-800 mt-1">${num(c.price ?? c.value ?? c.last).toLocaleString('en-US', { maximumFractionDigits: 2 })}</p>
-                  <p className={`text-xs font-mono ${change >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                    {change >= 0 ? '+' : ''}{change.toFixed(2)}%
+                  <p className={`text-xs font-mono ${pctChange >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {absChange >= 0 ? '+' : ''}{absChange.toFixed(2)} ({pctChange >= 0 ? '+' : ''}{pctChange.toFixed(2)}%)
                   </p>
                 </div>
               );
@@ -590,13 +635,14 @@ function GlobalTab() {
           <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Currency Rates</h3>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
             {fx.map((pair: any, i: number) => {
-              const change = num(pair.change ?? pair.changePercent ?? pair.change_pct);
+              const absChange = num(pair.change);
+              const pctChange = num(pair.changePercent);
               return (
                 <div key={i} className="p-3 rounded-lg border border-slate-200">
                   <span className="text-xs font-medium text-slate-500">{pair.pair ?? pair.name}</span>
                   <p className="text-sm font-bold font-mono text-slate-800 mt-1">{num(pair.rate ?? pair.value ?? pair.price).toFixed(4)}</p>
-                  <p className={`text-xs font-mono ${change >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                    {change >= 0 ? '+' : ''}{change.toFixed(2)}%
+                  <p className={`text-xs font-mono ${pctChange >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {absChange >= 0 ? '+' : ''}{absChange.toFixed(4)} ({pctChange >= 0 ? '+' : ''}{pctChange.toFixed(2)}%)
                   </p>
                 </div>
               );
@@ -612,8 +658,8 @@ function GlobalTab() {
   );
 }
 
-function FlowCard({ label, value, positive, negative }: { label: string; value: number; positive?: boolean; negative?: boolean }) {
-  const color = positive ? 'text-emerald-600' : negative ? 'text-red-600' : value >= 0 ? 'text-emerald-600' : 'text-red-600';
+function FlowCard({ label, value }: { label: string; value: number; positive?: boolean; negative?: boolean }) {
+  const color = value >= 0 ? 'text-emerald-600' : 'text-red-600';
   const Icon = value >= 0 ? TrendingUp : TrendingDown;
   return (
     <div className="rounded-lg border border-slate-200 p-3">
@@ -621,7 +667,7 @@ function FlowCard({ label, value, positive, negative }: { label: string; value: 
       <div className="flex items-center gap-1.5">
         <Icon className={`w-3.5 h-3.5 ${color}`} />
         <p className={`text-lg font-bold font-mono ${color}`}>
-          ₹{formatCr(Math.abs(value))}
+          {value >= 0 ? '+' : ''}₹{Math.abs(value).toLocaleString('en-IN', { maximumFractionDigits: 0 })} Cr
         </p>
       </div>
     </div>
@@ -633,6 +679,26 @@ function MetricBox({ label, value, color }: { label: string; value: string; colo
     <div className="rounded-lg border border-slate-200 p-3 text-center">
       <p className="text-[10px] text-slate-400 uppercase font-medium mb-1">{label}</p>
       <p className={`text-lg font-bold ${color}`}>{value}</p>
+    </div>
+  );
+}
+
+function RefreshButton({ onClick, lastUpdated }: { onClick: () => void; lastUpdated: Date | null }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick(n => n + 1), 5000);
+    return () => clearInterval(t);
+  }, []);
+  const ago = lastUpdated ? Math.round((Date.now() - lastUpdated.getTime()) / 1000) : null;
+  const label = ago !== null ? (ago < 10 ? 'just now' : ago < 60 ? `${ago}s ago` : `${Math.floor(ago / 60)}m ago`) : '';
+  const live = isIndianMarketOpen();
+  return (
+    <div className="flex items-center gap-2">
+      {live && <span className="flex items-center gap-1 text-[10px] text-emerald-600 font-semibold"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />LIVE</span>}
+      {label && <span className="text-[10px] text-slate-400">{label}</span>}
+      <button onClick={onClick} className="p-1.5 rounded-md hover:bg-slate-100 text-slate-400">
+        <RefreshCcw className="w-4 h-4" />
+      </button>
     </div>
   );
 }
