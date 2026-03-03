@@ -209,6 +209,7 @@ export const intelligenceApi = {
   oiHeatmap: (symbol: string) => api.get(`/intelligence/options/oi-heatmap/${encodeURIComponent(symbol)}`),
   maxPain: (symbol: string) => api.get(`/intelligence/options/max-pain/${encodeURIComponent(symbol)}`),
   ivPercentile: (symbol: string) => api.get(`/intelligence/options/iv-percentile/${encodeURIComponent(symbol)}`),
+  greeks: (symbol: string) => api.get(`/intelligence/options/greeks/${encodeURIComponent(symbol)}`),
 
   sectorPerformance: () => api.get('/intelligence/sectors/performance'),
   sectorHeatmap: () => api.get('/intelligence/sectors/heatmap'),
