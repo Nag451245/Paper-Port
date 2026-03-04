@@ -286,27 +286,30 @@ export class AuthService {
     const bridgePort = parseInt(process.env.BREEZE_BRIDGE_PORT || '8001', 10);
     try {
       const bridgeBody = JSON.stringify({ api_key: apiKey, api_secret: secretKey, session_token: apiSession });
-      const bridgeResult = await new Promise<{ success: boolean; error?: string }>((resolve, reject) => {
-        const bridgeReq = http.request({ hostname: '127.0.0.1', port: bridgePort, path: '/init', method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(bridgeBody)) },
-        }, (res) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (c: Buffer) => chunks.push(c));
-          res.on('end', () => {
-            try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
-            catch { resolve({ success: false, error: 'Invalid JSON response' }); }
+      const bridgeResult = await new Promise<{ success: boolean; error?: string }>((resolve) => {
+        try {
+          const bridgeReq = http.request({ hostname: '127.0.0.1', port: bridgePort, path: '/init', method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(bridgeBody)) },
+          }, (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (c: Buffer) => chunks.push(c));
+            res.on('end', () => {
+              try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+              catch { resolve({ success: false, error: 'Invalid JSON' }); }
+            });
+            res.on('error', () => resolve({ success: false, error: 'Response error' }));
           });
-        });
-        bridgeReq.on('error', (err) => resolve({ success: false, error: err.message }));
-        bridgeReq.setTimeout(60_000, () => { bridgeReq.destroy(); resolve({ success: false, error: 'Timeout' }); });
-        bridgeReq.write(bridgeBody);
-        bridgeReq.end();
+          bridgeReq.on('error', () => resolve({ success: false, error: 'Bridge unreachable' }));
+          bridgeReq.setTimeout(20_000, () => { bridgeReq.destroy(); resolve({ success: false, error: 'Timeout' }); });
+          bridgeReq.write(bridgeBody);
+          bridgeReq.end();
+        } catch { resolve({ success: false, error: 'Request setup error' }); }
       });
 
       console.log(`[Breeze Bridge] Init result: ${JSON.stringify(bridgeResult)}`);
       bridgeConsumedToken = bridgeResult.success === true;
-    } catch (err: any) {
-      console.log(`[Breeze Bridge] Init error: ${err.message}`);
+    } catch {
+      console.log('[Breeze Bridge] Init failed unexpectedly');
     }
 
     // Exchange token via CustomerDetails API only if bridge didn't consume it

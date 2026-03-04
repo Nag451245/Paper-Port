@@ -24,23 +24,20 @@ session_expiry = None
 def init_breeze(api_key: str, api_secret: str, session_token: str) -> dict:
     global breeze_instance, session_expiry
 
-    # Strategy 1: Normal generate_session (works with raw API session tokens)
     try:
         b = BreezeConnect(api_key=api_key)
-        b.generate_session(api_secret=api_secret, session_token=session_token)
-        if getattr(b, "api_session", None):
-            breeze_instance = b
-            session_expiry = datetime.now() + timedelta(hours=23)
-            return {"success": True, "message": "Session initialized (generate_session)"}
-    except Exception as e:
-        print(f"[Breeze Bridge] generate_session failed: {e}")
 
-    # Strategy 2: Token might already be exchanged by Node.js backend.
-    # Set api_session directly and verify with a test call.
-    try:
-        b = BreezeConnect(api_key=api_key)
-        b.api_session = session_token
+        # Do session exchange manually (api_util), but SKIP the heavy
+        # get_stock_script_list() which downloads a multi-MB security master
+        # ZIP and can crash on low-memory VMs. We don't need it for option chain.
+        b.session_key = session_token
         b.secret_key = api_secret
+        b.api_util()
+
+        from breeze_connect.breeze_connect import ApificationBreeze
+        b.api_handler = ApificationBreeze(b)
+
+        # Verify session works with a quick test call
         test = b.get_option_chain_quotes(
             stock_code="NIFTY",
             exchange_code="NFO",
@@ -51,13 +48,16 @@ def init_breeze(api_key: str, api_secret: str, session_token: str) -> dict:
         if test and test.get("Status") == 200:
             breeze_instance = b
             session_expiry = datetime.now() + timedelta(hours=23)
-            return {"success": True, "message": "Session initialized (direct token)"}
-        print(f"[Breeze Bridge] Direct token test returned: {test}")
-    except Exception as e:
-        print(f"[Breeze Bridge] Direct token failed: {e}")
+            print(f"[Breeze Bridge] Session initialized, user_id={b.user_id}")
+            return {"success": True, "message": "Session initialized"}
 
-    breeze_instance = None
-    return {"success": False, "error": "Both session strategies failed. Token may be expired — generate a new session via the app Settings."}
+        print(f"[Breeze Bridge] Test call failed: {test}")
+        breeze_instance = None
+        return {"success": False, "error": f"Session created but test call failed: {test}"}
+    except Exception as e:
+        breeze_instance = None
+        print(f"[Breeze Bridge] Init failed: {e}")
+        return {"success": False, "error": str(e)}
 
 
 def get_option_chain(symbol: str, expiry: str = None, right: str = None) -> dict:
