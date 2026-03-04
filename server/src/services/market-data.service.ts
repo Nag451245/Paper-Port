@@ -696,10 +696,8 @@ export class MarketDataService {
       }
     } catch { /* NSE may be blocked from cloud servers */ }
 
-    if (breezeAuthFailed) {
-      return { expiries: [], sessionError: true, message: 'Breeze API session expired or invalid. Please update your session key in Settings.' };
-    }
-    return { expiries: [] };
+    // No bridge, no NSE — session error
+    return { expiries: [], sessionError: true, message: 'Breeze API session not active. Please generate a session in Settings.' };
   }
 
   async getOptionsChain(symbol: string, expiry?: string) {
