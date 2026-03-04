@@ -23,14 +23,41 @@ session_expiry = None
 
 def init_breeze(api_key: str, api_secret: str, session_token: str) -> dict:
     global breeze_instance, session_expiry
+
+    # Strategy 1: Normal generate_session (works with raw API session tokens)
     try:
-        breeze_instance = BreezeConnect(api_key=api_key)
-        breeze_instance.generate_session(api_secret=api_secret, session_token=session_token)
-        session_expiry = datetime.now() + timedelta(hours=23)
-        return {"success": True, "message": "Session initialized"}
+        b = BreezeConnect(api_key=api_key)
+        b.generate_session(api_secret=api_secret, session_token=session_token)
+        if getattr(b, "api_session", None):
+            breeze_instance = b
+            session_expiry = datetime.now() + timedelta(hours=23)
+            return {"success": True, "message": "Session initialized (generate_session)"}
     except Exception as e:
-        breeze_instance = None
-        return {"success": False, "error": str(e)}
+        print(f"[Breeze Bridge] generate_session failed: {e}")
+
+    # Strategy 2: Token might already be exchanged by Node.js backend.
+    # Set api_session directly and verify with a test call.
+    try:
+        b = BreezeConnect(api_key=api_key)
+        b.api_session = session_token
+        b.secret_key = api_secret
+        test = b.get_option_chain_quotes(
+            stock_code="NIFTY",
+            exchange_code="NFO",
+            product_type="options",
+            right="call",
+            strike_price="24000",
+        )
+        if test and test.get("Status") == 200:
+            breeze_instance = b
+            session_expiry = datetime.now() + timedelta(hours=23)
+            return {"success": True, "message": "Session initialized (direct token)"}
+        print(f"[Breeze Bridge] Direct token test returned: {test}")
+    except Exception as e:
+        print(f"[Breeze Bridge] Direct token failed: {e}")
+
+    breeze_instance = None
+    return {"success": False, "error": "Both session strategies failed. Token may be expired — generate a new session via the app Settings."}
 
 
 def get_option_chain(symbol: str, expiry: str = None, right: str = None) -> dict:

@@ -710,16 +710,6 @@ export class MarketDataService {
       }
     } catch { /* NSE may be blocked from cloud servers */ }
 
-    // Fallback 2: NiftyTrader (works from cloud IPs)
-    try {
-      const ntResult = await this.fetchOptionsChainFromNiftyTrader(symbol);
-      if (ntResult && ntResult.expiries && ntResult.expiries.length > 0) {
-        console.log(`[Expiries] ${symbol} → NiftyTrader: ${ntResult.expiries.join(', ')}`);
-        if (this.cache) await this.cache.set(cacheKey, ntResult.expiries, 3600);
-        return { expiries: ntResult.expiries };
-      }
-    } catch { /* NiftyTrader failed */ }
-
     if (breezeAuthFailed) {
       return { expiries: [], sessionError: true, message: 'Breeze API session expired or invalid. Please update your session key in Settings.' };
     }
@@ -781,16 +771,6 @@ export class MarketDataService {
         }
       }
     } catch { /* NSE failed */ }
-
-    // Fallback 2: NiftyTrader (works from cloud IPs)
-    try {
-      const ntResult = await this.fetchOptionsChainFromNiftyTrader(symbol, expiry);
-      if (ntResult && ntResult.strikes.length > 0) {
-        console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → NiftyTrader (${ntResult.strikes.length} strikes)`);
-        if (this.cache) await this.cache.set(cacheKey, ntResult, 60);
-        return ntResult;
-      }
-    } catch { /* NiftyTrader failed */ }
 
     if (breezeAuthFailed) {
       console.log(`[OptionChain] ${symbol} → Breeze session expired/invalid, no fallback data`);
