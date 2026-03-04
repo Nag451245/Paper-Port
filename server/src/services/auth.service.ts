@@ -277,41 +277,74 @@ export class AuthService {
     }
 
     const apiKey = decrypt(credential.encryptedApiKey, this.encKey);
+    const secretKey = decrypt(credential.encryptedSecret, this.encKey);
 
-    // Exchange API_Session for real session_token via CustomerDetails API
-    let realSessionToken = apiSession;
+    // IMPORTANT: The raw API session token is SINGLE-USE.
+    // Send it to the Python Breeze Bridge FIRST (it calls generate_session internally).
+    // Only if the bridge is unavailable, fall back to the Node.js exchange.
+    let bridgeConsumedToken = false;
+    const bridgePort = parseInt(process.env.BREEZE_BRIDGE_PORT || '8001', 10);
     try {
-      const exchangeBody = JSON.stringify({ SessionToken: apiSession, AppKey: apiKey });
-      const exchangeResult = await new Promise<{ status: number; body: string }>((resolve, reject) => {
-        const req = https.request({
-          hostname: 'api.icicidirect.com',
-          path: '/breezeapi/api/v1/customerdetails',
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': String(Buffer.byteLength(exchangeBody)),
-          },
+      const bridgeBody = JSON.stringify({ api_key: apiKey, api_secret: secretKey, session_token: apiSession });
+      const bridgeResult = await new Promise<{ success: boolean; error?: string }>((resolve, reject) => {
+        const bridgeReq = http.request({ hostname: '127.0.0.1', port: bridgePort, path: '/init', method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(bridgeBody)) },
         }, (res) => {
           const chunks: Buffer[] = [];
           res.on('data', (c: Buffer) => chunks.push(c));
-          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString() }));
+          res.on('end', () => {
+            try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+            catch { resolve({ success: false, error: 'Invalid JSON response' }); }
+          });
         });
-        req.on('error', reject);
-        req.setTimeout(20_000, () => req.destroy(new Error('Timeout')));
-        req.write(exchangeBody);
-        req.end();
+        bridgeReq.on('error', (err) => resolve({ success: false, error: err.message }));
+        bridgeReq.setTimeout(60_000, () => { bridgeReq.destroy(); resolve({ success: false, error: 'Timeout' }); });
+        bridgeReq.write(bridgeBody);
+        bridgeReq.end();
       });
 
-      const data = JSON.parse(exchangeResult.body);
-      console.log(`[Breeze] CustomerDetails response HTTP=${exchangeResult.status}, apiStatus=${data?.Status}`);
-      if (data?.Success?.session_token) {
-        realSessionToken = data.Success.session_token;
-        console.log(`[Breeze] Session token exchanged successfully (length: ${realSessionToken.length})`);
-      } else {
-        console.log(`[Breeze] CustomerDetails did not return session_token: ${JSON.stringify(data).substring(0, 300)}`);
-      }
+      console.log(`[Breeze Bridge] Init result: ${JSON.stringify(bridgeResult)}`);
+      bridgeConsumedToken = bridgeResult.success === true;
     } catch (err: any) {
-      console.log(`[Breeze] CustomerDetails exchange failed: ${err.code ?? ''} ${err.message} — storing raw token`);
+      console.log(`[Breeze Bridge] Init error: ${err.message}`);
+    }
+
+    // Exchange token via CustomerDetails API only if bridge didn't consume it
+    let realSessionToken = apiSession;
+    if (!bridgeConsumedToken) {
+      try {
+        const exchangeBody = JSON.stringify({ SessionToken: apiSession, AppKey: apiKey });
+        const exchangeResult = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+          const req = https.request({
+            hostname: 'api.icicidirect.com',
+            path: '/breezeapi/api/v1/customerdetails',
+            method: 'GET',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': String(Buffer.byteLength(exchangeBody)),
+            },
+          }, (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (c: Buffer) => chunks.push(c));
+            res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString() }));
+          });
+          req.on('error', reject);
+          req.setTimeout(20_000, () => req.destroy(new Error('Timeout')));
+          req.write(exchangeBody);
+          req.end();
+        });
+
+        const data = JSON.parse(exchangeResult.body);
+        console.log(`[Breeze] CustomerDetails response HTTP=${exchangeResult.status}, apiStatus=${data?.Status}`);
+        if (data?.Success?.session_token) {
+          realSessionToken = data.Success.session_token;
+          console.log(`[Breeze] Session token exchanged successfully (length: ${realSessionToken.length})`);
+        }
+      } catch (err: any) {
+        console.log(`[Breeze] CustomerDetails exchange failed: ${err.message} — storing raw token`);
+      }
+    } else {
+      console.log(`[Breeze] Skipping CustomerDetails exchange — Python bridge consumed the token`);
     }
 
     await this.prisma.breezeCredential.update({
@@ -321,31 +354,6 @@ export class AuthService {
         sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       },
     });
-
-    // Initialize Python Breeze Bridge with the RAW token (before exchange)
-    const secretKey = decrypt(credential.encryptedSecret, this.encKey);
-    const bridgePort = parseInt(process.env.BREEZE_BRIDGE_PORT || '8001', 10);
-    try {
-      const bridgeBody = JSON.stringify({ api_key: apiKey, api_secret: secretKey, session_token: apiSession });
-      const bridgeReq = http.request({ hostname: '127.0.0.1', port: bridgePort, path: '/init', method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(bridgeBody)) },
-      }, (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (c: Buffer) => chunks.push(c));
-        res.on('end', () => {
-          try {
-            const result = JSON.parse(Buffer.concat(chunks).toString());
-            console.log(`[Breeze Bridge] Init on session save: ${JSON.stringify(result)}`);
-          } catch { /* ignore */ }
-        });
-      });
-      bridgeReq.on('error', (err) => console.log(`[Breeze Bridge] Init call failed: ${err.message}`));
-      bridgeReq.setTimeout(30_000, () => bridgeReq.destroy());
-      bridgeReq.write(bridgeBody);
-      bridgeReq.end();
-    } catch (err: any) {
-      console.log(`[Breeze Bridge] Init error: ${err.message}`);
-    }
 
     return { success: true };
   }
