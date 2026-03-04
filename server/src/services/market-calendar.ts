@@ -34,7 +34,7 @@ const NSE_HOLIDAYS: HolidayEntry[] = [
   // 2026
   { date: '2026-01-26', name: 'Republic Day', exchanges: ['NSE', 'BSE'] },
   { date: '2026-02-17', name: 'Mahashivratri', exchanges: ['NSE', 'BSE'] },
-  { date: '2026-03-04', name: 'Holi', exchanges: ['NSE', 'BSE'] },
+  { date: '2026-03-03', name: 'Holi', exchanges: ['NSE', 'BSE'] },
   { date: '2026-03-20', name: 'Id-Ul-Fitr (Ramadan)', exchanges: ['NSE', 'BSE'] },
   { date: '2026-03-25', name: 'Shri Ram Navami', exchanges: ['NSE', 'BSE'] },
   { date: '2026-04-01', name: 'Shri Mahavir Jayanti', exchanges: ['NSE', 'BSE'] },
