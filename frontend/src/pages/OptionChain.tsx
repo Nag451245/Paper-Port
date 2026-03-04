@@ -134,6 +134,8 @@ export default function OptionChain() {
   const [strikes, setStrikes] = useState<Strike[]>([]);
   const [spotPrice, setSpotPrice] = useState(0);
   const [expiry, setExpiry] = useState('');
+  const [expiries, setExpiries] = useState<string[]>([]);
+  const [selectedExpiry, setSelectedExpiry] = useState('');
   const [, setSource] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -141,11 +143,33 @@ export default function OptionChain() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
+  // Fetch expiries when symbol changes
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await marketApi.optionsExpiries(symbol);
+        if (cancelled) return;
+        if (data?.expiries?.length > 0) {
+          setExpiries(data.expiries);
+          setSelectedExpiry(data.expiries[0]);
+        } else {
+          setExpiries([]);
+          setSelectedExpiry('');
+        }
+      } catch {
+        if (!cancelled) { setExpiries([]); setSelectedExpiry(''); }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [symbol]);
+
   const fetchData = useCallback(async (sym: string, silent = false) => {
+    if (!selectedExpiry) return;
     if (!silent) setLoading(true);
     setError('');
     try {
-      const res = await marketApi.optionsChain(sym);
+      const res = await marketApi.optionsChain(sym, selectedExpiry);
       const data = res.data as any;
       if (data?.strikes?.length) {
         setStrikes(data.strikes.map((s: any) => ({
@@ -185,9 +209,9 @@ export default function OptionChain() {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, []);
+  }, [selectedExpiry]);
 
-  useEffect(() => { fetchData(symbol); }, [symbol, fetchData]);
+  useEffect(() => { fetchData(symbol); }, [symbol, selectedExpiry, fetchData]);
 
   useEffect(() => {
     const schedule = () => {

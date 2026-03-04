@@ -519,10 +519,11 @@ export default function StrategyBuilder() {
   const fetchChain = useCallback(async (silent = false) => {
     if (!symbol) return;
     if (sessionError) return;
+    if (!selectedExpiry) return;
     if (!silent) setChainLoading(true);
     try {
       const [chainRes, quoteRes] = await Promise.allSettled([
-        marketApi.optionsChain(symbol, selectedExpiry || undefined),
+        marketApi.optionsChain(symbol, selectedExpiry),
         marketApi.quote(symbol),
       ]);
       if (chainRes.status === 'fulfilled') {
