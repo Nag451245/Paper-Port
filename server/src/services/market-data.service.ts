@@ -642,7 +642,7 @@ export class MarketDataService {
       await this.ensureBreezeBridgeSession();
       const bridgeUrl = `${BREEZE_BRIDGE_URL}/expiries/${encodeURIComponent(symbol)}`;
       const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), 15_000);
+      const timer = setTimeout(() => ac.abort(), 45_000);
       const res = await fetch(bridgeUrl, { signal: ac.signal });
       clearTimeout(timer);
       if (res.ok) {
@@ -1333,7 +1333,7 @@ export class MarketDataService {
     await this.ensureBreezeBridgeSession();
     const url = `${BREEZE_BRIDGE_URL}/option-chain/${encodeURIComponent(symbol)}${expiry ? `?expiry=${encodeURIComponent(expiry)}` : ''}`;
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 20_000);
+    const timer = setTimeout(() => ac.abort(), 60_000);
     const res = await fetch(url, { signal: ac.signal });
     clearTimeout(timer);
     if (!res.ok) throw new Error(`Bridge returned ${res.status}`);

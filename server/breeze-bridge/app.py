@@ -7,60 +7,113 @@ Runs on port 8001, called internally by the Node.js backend.
 import os
 import json
 import sys
+import signal
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 try:
     from breeze_connect import BreezeConnect
+    from breeze_connect.breeze_connect import ApificationBreeze
 except ImportError:
     print("ERROR: breeze-connect not installed. Run: pip install breeze-connect")
     sys.exit(1)
 
 breeze_instance = None
 session_expiry = None
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SESSION_FILE = os.path.join(SCRIPT_DIR, ".breeze_session.json")
 
 
-def init_breeze(api_key: str, api_secret: str, session_token: str) -> dict:
+def save_session_to_disk(api_key, api_secret, user_id, session_key):
+    try:
+        with open(SESSION_FILE, "w") as f:
+            json.dump({
+                "api_key": api_key,
+                "api_secret": api_secret,
+                "user_id": user_id,
+                "session_key": session_key,
+                "saved_at": datetime.now().isoformat(),
+            }, f)
+        print(f"[Breeze Bridge] Session persisted to disk")
+    except Exception as e:
+        print(f"[Breeze Bridge] Failed to persist session: {e}")
+
+
+def restore_session_from_disk():
+    global breeze_instance, session_expiry
+    if not os.path.exists(SESSION_FILE):
+        return False
+
+    try:
+        with open(SESSION_FILE, "r") as f:
+            data = json.load(f)
+
+        saved_at = datetime.fromisoformat(data["saved_at"])
+        if datetime.now() - saved_at > timedelta(hours=23):
+            print("[Breeze Bridge] Saved session expired, removing file")
+            os.remove(SESSION_FILE)
+            return False
+
+        b = BreezeConnect(api_key=data["api_key"])
+        b.user_id = data["user_id"]
+        b.session_key = data["session_key"]
+        b.secret_key = data["api_secret"]
+        b.api_handler = ApificationBreeze(b)
+
+        test = b.get_option_chain_quotes(
+            stock_code="NIFTY", exchange_code="NFO",
+            product_type="options", right="call", strike_price="24000",
+        )
+        if test and test.get("Status") == 200:
+            breeze_instance = b
+            session_expiry = saved_at + timedelta(hours=23)
+            print(f"[Breeze Bridge] Session restored from disk (user_id={data['user_id']})")
+            return True
+
+        print(f"[Breeze Bridge] Restored session failed test call, removing file")
+        os.remove(SESSION_FILE)
+        return False
+    except Exception as e:
+        print(f"[Breeze Bridge] Failed to restore session: {e}")
+        try:
+            os.remove(SESSION_FILE)
+        except OSError:
+            pass
+        return False
+
+
+def init_breeze(api_key, api_secret, session_token):
     global breeze_instance, session_expiry
 
     try:
         b = BreezeConnect(api_key=api_key)
-
-        # Do session exchange manually (api_util), but SKIP the heavy
-        # get_stock_script_list() which downloads a multi-MB security master
-        # ZIP and can crash on low-memory VMs. We don't need it for option chain.
         b.session_key = session_token
         b.secret_key = api_secret
         b.api_util()
-
-        from breeze_connect.breeze_connect import ApificationBreeze
         b.api_handler = ApificationBreeze(b)
 
-        # Verify session works with a quick test call
         test = b.get_option_chain_quotes(
-            stock_code="NIFTY",
-            exchange_code="NFO",
-            product_type="options",
-            right="call",
-            strike_price="24000",
+            stock_code="NIFTY", exchange_code="NFO",
+            product_type="options", right="call", strike_price="24000",
         )
         if test and test.get("Status") == 200:
             breeze_instance = b
             session_expiry = datetime.now() + timedelta(hours=23)
+            save_session_to_disk(api_key, api_secret, b.user_id, b.session_key)
             print(f"[Breeze Bridge] Session initialized, user_id={b.user_id}")
             return {"success": True, "message": "Session initialized"}
 
-        print(f"[Breeze Bridge] Test call failed: {test}")
+        print(f"[Breeze Bridge] Test call returned: {test}")
         breeze_instance = None
-        return {"success": False, "error": f"Session created but test call failed: {test}"}
+        return {"success": False, "error": f"Test call failed: {test}"}
     except Exception as e:
         breeze_instance = None
         print(f"[Breeze Bridge] Init failed: {e}")
         return {"success": False, "error": str(e)}
 
 
-def get_option_chain(symbol: str, expiry: str = None, right: str = None) -> dict:
+def get_option_chain(symbol, expiry=None, right=None):
     if not breeze_instance:
         return {"error": "Breeze session not initialized", "strikes": []}
 
@@ -175,7 +228,7 @@ def get_option_chain(symbol: str, expiry: str = None, right: str = None) -> dict
         return {"error": str(e), "strikes": []}
 
 
-def get_expiries(symbol: str) -> dict:
+def get_expiries(symbol):
     if not breeze_instance:
         return {"error": "Breeze session not initialized", "expiries": []}
 
@@ -187,15 +240,12 @@ def get_expiries(symbol: str) -> dict:
         strike = default_strikes.get(symbol.upper(), "20000")
 
         result = breeze_instance.get_option_chain_quotes(
-            stock_code=symbol.upper(),
-            exchange_code="NFO",
-            product_type="options",
-            right="call",
-            strike_price=strike,
+            stock_code=symbol.upper(), exchange_code="NFO",
+            product_type="options", right="call", strike_price=strike,
         )
 
         if not result or result.get("Status") != 200:
-            return {"expiries": [], "error": f"API returned status {result.get('Status')}"}
+            return {"expiries": [], "error": f"API status {result.get('Status') if result else 'None'}"}
 
         records = result.get("Success", [])
         if not isinstance(records, list):
@@ -222,80 +272,104 @@ def get_expiries(symbol: str) -> dict:
 
 
 class BreezeHandler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args):
+    def log_message(self, fmt, *args):
         print(f"[Breeze Bridge] {args[0]}")
 
-    def send_json(self, data: dict, status: int = 200):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
+    def send_json(self, data, status=200):
+        try:
+            body = json.dumps(data).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        except BrokenPipeError:
+            print("[Breeze Bridge] Client disconnected (BrokenPipeError) — ignoring")
+        except ConnectionResetError:
+            print("[Breeze Bridge] Client reset connection — ignoring")
+        except Exception as e:
+            print(f"[Breeze Bridge] Error sending response: {e}")
 
     def do_GET(self):
-        parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/")
-        params = parse_qs(parsed.query)
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path.rstrip("/")
+            params = parse_qs(parsed.query)
 
-        if path == "/health":
-            self.send_json({
-                "status": "ok",
-                "session_active": breeze_instance is not None,
-                "session_expiry": session_expiry.isoformat() if session_expiry else None,
-            })
+            if path == "/health":
+                self.send_json({
+                    "status": "ok",
+                    "session_active": breeze_instance is not None,
+                    "session_expiry": session_expiry.isoformat() if session_expiry else None,
+                })
 
-        elif path.startswith("/option-chain/"):
-            symbol = path.split("/")[-1]
-            expiry = params.get("expiry", [None])[0]
-            data = get_option_chain(symbol, expiry)
-            self.send_json(data)
+            elif path.startswith("/option-chain/"):
+                symbol = path.split("/")[-1]
+                expiry = params.get("expiry", [None])[0]
+                data = get_option_chain(symbol, expiry)
+                self.send_json(data)
 
-        elif path.startswith("/expiries/"):
-            symbol = path.split("/")[-1]
-            data = get_expiries(symbol)
-            self.send_json(data)
+            elif path.startswith("/expiries/"):
+                symbol = path.split("/")[-1]
+                data = get_expiries(symbol)
+                self.send_json(data)
 
-        elif path == "/status":
-            self.send_json({
-                "session_active": breeze_instance is not None,
-                "session_expiry": session_expiry.isoformat() if session_expiry else None,
-            })
-
-        else:
-            self.send_json({"error": "Not found"}, 404)
+            else:
+                self.send_json({"error": "Not found"}, 404)
+        except BrokenPipeError:
+            pass
+        except Exception as e:
+            print(f"[Breeze Bridge] GET error: {e}")
+            try:
+                self.send_json({"error": str(e)}, 500)
+            except Exception:
+                pass
 
     def do_POST(self):
-        parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/")
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path.rstrip("/")
 
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
 
-        if path == "/init":
-            api_key = body.get("api_key", "")
-            api_secret = body.get("api_secret", "")
-            session_token = body.get("session_token", "")
+            if path == "/init":
+                api_key = body.get("api_key", "")
+                api_secret = body.get("api_secret", "")
+                session_token = body.get("session_token", "")
 
-            if not all([api_key, api_secret, session_token]):
-                self.send_json({"error": "api_key, api_secret, and session_token are required"}, 400)
-                return
+                if not all([api_key, api_secret, session_token]):
+                    self.send_json({"error": "api_key, api_secret, and session_token required"}, 400)
+                    return
 
-            result = init_breeze(api_key, api_secret, session_token)
-            self.send_json(result, 200 if result["success"] else 500)
+                result = init_breeze(api_key, api_secret, session_token)
+                self.send_json(result, 200 if result.get("success") else 500)
+            else:
+                self.send_json({"error": "Not found"}, 404)
+        except BrokenPipeError:
+            pass
+        except Exception as e:
+            print(f"[Breeze Bridge] POST error: {e}")
+            try:
+                self.send_json({"error": str(e)}, 500)
+            except Exception:
+                pass
 
-        else:
-            self.send_json({"error": "Not found"}, 404)
+
+# Ignore SIGPIPE to prevent crashes on broken connections
+if hasattr(signal, "SIGPIPE"):
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("BREEZE_BRIDGE_PORT", 8001))
+
+    print(f"[Breeze Bridge] Starting on http://127.0.0.1:{port}")
+    restore_session_from_disk()
+
     server = HTTPServer(("127.0.0.1", port), BreezeHandler)
-    print(f"[Breeze Bridge] Running on http://127.0.0.1:{port}")
-    print(f"[Breeze Bridge] Endpoints:")
-    print(f"  POST /init              — Initialize Breeze session")
-    print(f"  GET  /option-chain/NIFTY — Get option chain")
-    print(f"  GET  /expiries/NIFTY     — Get expiry dates")
-    print(f"  GET  /health             — Health check")
+    print(f"[Breeze Bridge] Ready. Session active: {breeze_instance is not None}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
