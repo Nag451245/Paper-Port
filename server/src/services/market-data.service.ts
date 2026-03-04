@@ -6,7 +6,19 @@ import { createRequire } from 'module';
 import { env } from '../config.js';
 
 const require = createRequire(import.meta.url);
-const BreezeConnect = require('breezeconnect');
+
+let BreezeConnect: any = null;
+function getBreezeConnectClass(): any {
+  if (!BreezeConnect) {
+    try {
+      const mod = require('breezeconnect');
+      BreezeConnect = mod.BreezeConnect || mod.default || mod;
+    } catch (err: any) {
+      console.log(`[Breeze] Failed to load breezeconnect module: ${err.message}`);
+    }
+  }
+  return BreezeConnect;
+}
 
 const CACHE_TTL_QUOTE = 30;
 const CACHE_TTL_HISTORY = 300;
@@ -18,6 +30,7 @@ const BREEZE_TIMEOUT_MS = 20_000;
 // Cache a live BreezeConnect instance to avoid re-exchanging session on every call
 let breezeInstance: any = null;
 let breezeInstanceExpiry = 0;
+let breezeInitPromise: Promise<any> | null = null;
 
 const POPULAR_NSE_STOCKS: [string, string][] = [
   ['RELIANCE', 'Reliance Industries Ltd'],
@@ -680,6 +693,16 @@ export class MarketDataService {
       }
     } catch { /* NSE may be blocked from cloud servers */ }
 
+    // Fallback 2: NiftyTrader (works from cloud IPs)
+    try {
+      const ntResult = await this.fetchOptionsChainFromNiftyTrader(symbol);
+      if (ntResult && ntResult.expiries && ntResult.expiries.length > 0) {
+        console.log(`[Expiries] ${symbol} → NiftyTrader: ${ntResult.expiries.join(', ')}`);
+        if (this.cache) await this.cache.set(cacheKey, ntResult.expiries, 3600);
+        return { expiries: ntResult.expiries };
+      }
+    } catch { /* NiftyTrader failed */ }
+
     if (breezeAuthFailed) {
       return { expiries: [], sessionError: true, message: 'Breeze API session expired or invalid. Please update your session key in Settings.' };
     }
@@ -733,6 +756,16 @@ export class MarketDataService {
         }
       }
     } catch { /* NSE failed */ }
+
+    // Fallback 2: NiftyTrader (works from cloud IPs)
+    try {
+      const ntResult = await this.fetchOptionsChainFromNiftyTrader(symbol, expiry);
+      if (ntResult && ntResult.strikes.length > 0) {
+        console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → NiftyTrader (${ntResult.strikes.length} strikes)`);
+        if (this.cache) await this.cache.set(cacheKey, ntResult, 60);
+        return ntResult;
+      }
+    } catch { /* NiftyTrader failed */ }
 
     if (breezeAuthFailed) {
       console.log(`[OptionChain] ${symbol} → Breeze session expired/invalid, no fallback data`);
@@ -1001,11 +1034,35 @@ export class MarketDataService {
       return breezeInstance;
     }
 
+    // Prevent concurrent generateSession calls which each download a huge security
+    // master file and parse it synchronously, blocking the event loop
+    if (breezeInitPromise) return breezeInitPromise;
+
+    breezeInitPromise = this._initBreezeSDK();
+    try {
+      return await breezeInitPromise;
+    } finally {
+      breezeInitPromise = null;
+    }
+  }
+
+  private async _initBreezeSDK(): Promise<any> {
     const creds = await this.getAnyBreezeCredentials();
     if (!creds) return null;
 
     try {
-      const breeze = new BreezeConnect({ appKey: creds.apiKey });
+      const BreezeClass = getBreezeConnectClass();
+      if (!BreezeClass) {
+        console.log('[Breeze SDK] breezeconnect module not available');
+        return null;
+      }
+      const breeze = new BreezeClass({ appKey: creds.apiKey });
+
+      // Monkey-patch: skip the heavy getStockScriptList() which downloads a multi-MB
+      // security master ZIP and parses it synchronously, blocking the event loop for 30-60s.
+      // We don't need it — we build our own option chain requests.
+      breeze.getStockScriptList = async function () { /* no-op */ };
+
       await breeze.generateSession(creds.secretKey, creds.sessionToken);
 
       if (!breeze.apiSession) {
@@ -1015,10 +1072,10 @@ export class MarketDataService {
 
       console.log(`[Breeze SDK] Session initialized, apiSession length: ${breeze.apiSession.length}`);
       breezeInstance = breeze;
-      breezeInstanceExpiry = Date.now() + 30 * 60 * 1000; // cache for 30 min
+      breezeInstanceExpiry = Date.now() + 30 * 60 * 1000;
       return breeze;
     } catch (err: any) {
-      console.log(`[Breeze SDK] generateSession failed: ${err.message}`);
+      console.log(`[Breeze SDK] generateSession failed: ${err?.message ?? err}`);
       return null;
     }
   }
