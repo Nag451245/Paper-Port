@@ -133,7 +133,6 @@ export default function OptionChain() {
   const [exchange, setExchange] = useState('NSE');
   const [strikes, setStrikes] = useState<Strike[]>([]);
   const [spotPrice, setSpotPrice] = useState(0);
-  const [expiry, setExpiry] = useState('');
   const [expiries, setExpiries] = useState<string[]>([]);
   const [selectedExpiry, setSelectedExpiry] = useState('');
   const [, setSource] = useState('');
@@ -198,7 +197,6 @@ export default function OptionChain() {
           putBuildup: s.putBuildup ?? '',
         })));
         setSpotPrice(data.spotPrice ?? data.underlyingValue ?? 0);
-        setExpiry(data.expiry ?? '');
         setSource(data.source ?? '');
         setLastUpdated(new Date());
       } else {
@@ -327,10 +325,18 @@ export default function OptionChain() {
           <option value="BSE">BSE</option>
         </select>
 
-        {expiry && (
-          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
-            Expiry: <span className="font-semibold">{new Date(expiry).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</span>
-          </div>
+        {expiries.length > 0 && (
+          <select
+            value={selectedExpiry}
+            onChange={e => setSelectedExpiry(e.target.value)}
+            className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500/30"
+          >
+            {expiries.map(exp => (
+              <option key={exp} value={exp}>
+                {new Date(exp + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+              </option>
+            ))}
+          </select>
         )}
 
         <label className="flex items-center gap-2 text-xs text-slate-500 cursor-pointer select-none ml-auto">
