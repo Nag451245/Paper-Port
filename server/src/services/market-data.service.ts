@@ -638,41 +638,27 @@ export class MarketDataService {
     }
 
     // Source 1: Python Breeze Bridge (official SDK — most reliable)
-    try {
-      await this.ensureBreezeBridgeSession();
-      const bridgeUrl = `${BREEZE_BRIDGE_URL}/expiries/${encodeURIComponent(symbol)}`;
-      const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), 45_000);
-      const res = await fetch(bridgeUrl, { signal: ac.signal });
-      clearTimeout(timer);
-      if (res.ok) {
-        const data = await res.json() as any;
-        if (data.expiries && data.expiries.length > 0) {
-          console.log(`[Expiries] ${symbol} → Breeze Python Bridge: ${data.expiries.join(', ')}`);
-          if (this.cache) await this.cache.set(cacheKey, data.expiries, 3600);
-          return { expiries: data.expiries };
-        }
-      }
-    } catch (err) {
-      console.log(`[Expiries] ${symbol} → Breeze Python Bridge unavailable: ${err}`);
-    }
-
-    // Source 2: Node.js Breeze SDK
-    const creds = await this.getAnyBreezeCredentials();
-    let breezeAuthFailed = !creds;
-    if (creds) {
+    const bridgeActive = await this.ensureBreezeBridgeSession();
+    if (bridgeActive) {
       try {
-        const breezeExpiries = await this.fetchExpiryDatesFromBreeze(symbol);
-        if (breezeExpiries.length > 0) {
-          console.log(`[Expiries] ${symbol} → Breeze Node SDK: ${breezeExpiries.join(', ')}`);
-          if (this.cache) await this.cache.set(cacheKey, breezeExpiries, 3600);
-          return { expiries: breezeExpiries };
+        const bridgeUrl = `${BREEZE_BRIDGE_URL}/expiries/${encodeURIComponent(symbol)}`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 45_000);
+        const res = await fetch(bridgeUrl, { signal: ac.signal });
+        clearTimeout(timer);
+        if (res.ok) {
+          const data = await res.json() as any;
+          if (data.expiries && data.expiries.length > 0) {
+            console.log(`[Expiries] ${symbol} → Breeze Python Bridge: ${data.expiries.join(', ')}`);
+            if (this.cache) await this.cache.set(cacheKey, data.expiries, 3600);
+            return { expiries: data.expiries };
+          }
         }
-        breezeAuthFailed = true;
       } catch (err) {
-        breezeAuthFailed = true;
-        console.log(`[Expiries] ${symbol} → Breeze Node SDK failed: ${err}`);
+        console.log(`[Expiries] ${symbol} → Breeze Python Bridge error: ${err}`);
       }
+      // Bridge active but no expiries — not a session error
+      return { expiries: [] };
     }
 
     // Fallback: NSE India - authoritative source with ALL expiry dates
@@ -724,37 +710,24 @@ export class MarketDataService {
     }
 
     // Primary: Python Breeze Bridge (official Python SDK — most reliable)
-    try {
-      const bridgeResult = await this.fetchFromBreezeBridge(symbol, expiry);
-      if (bridgeResult && bridgeResult.strikes && bridgeResult.strikes.length > 0) {
-        console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze Python Bridge (${bridgeResult.strikes.length} strikes)`);
-        if (this.cache) await this.cache.set(cacheKey, bridgeResult, 10);
-        return bridgeResult;
-      }
-    } catch (err) {
-      console.log(`[OptionChain] ${symbol} → Breeze Python Bridge unavailable: ${err}`);
-    }
-
-    // Fallback 1: Node.js Breeze SDK
-    const creds = await this.getAnyBreezeCredentials();
-    let breezeAuthFailed = !creds;
-    if (creds) {
+    const bridgeActive = await this.ensureBreezeBridgeSession();
+    if (bridgeActive) {
       try {
-        const breezeResult = await this.fetchOptionsChainFromBreeze(symbol, expiry);
-        if (breezeResult && breezeResult.strikes.length > 0) {
-          console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze Node SDK (${breezeResult.strikes.length} strikes)`);
-          if (this.cache) await this.cache.set(cacheKey, breezeResult, 10);
-          return breezeResult;
+        const bridgeResult = await this.fetchFromBreezeBridge(symbol, expiry);
+        if (bridgeResult && bridgeResult.strikes && bridgeResult.strikes.length > 0) {
+          console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze Python Bridge (${bridgeResult.strikes.length} strikes)`);
+          if (this.cache) await this.cache.set(cacheKey, bridgeResult, 10);
+          return bridgeResult;
         }
-        breezeAuthFailed = true;
-        console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze Node SDK returned 0 strikes`);
+        console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Bridge returned 0 strikes`);
       } catch (err) {
-        breezeAuthFailed = true;
-        console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze Node SDK failed: ${err}`);
+        console.log(`[OptionChain] ${symbol} → Breeze Python Bridge error: ${err}`);
       }
+      // Bridge is active but no data — don't flag as sessionError
+      return { symbol, strikes: [], expiry: expiry ?? '', expiries: [] };
     }
 
-    // Fallback: NSE India (supports filtering by expiry natively)
+    // Fallback: NSE India
     try {
       const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50'].includes(symbol.toUpperCase());
       const url = isIndex
@@ -770,16 +743,12 @@ export class MarketDataService {
           return result;
         }
       }
-    } catch { /* NSE failed */ }
+    } catch { /* NSE blocked from cloud */ }
 
-    if (breezeAuthFailed) {
-      console.log(`[OptionChain] ${symbol} → Breeze session expired/invalid, no fallback data`);
-      return { symbol, strikes: [], expiry: expiry ?? '', expiries: [], sessionError: true,
-        message: 'Breeze API session expired or invalid. Please update your session key in Settings.' };
-    }
-
-    console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → No data from any source`);
-    return { symbol, strikes: [], expiry: expiry ?? '', expiries: [] };
+    // No bridge, no NSE — session error
+    console.log(`[OptionChain] ${symbol} → No Breeze bridge session, no fallback`);
+    return { symbol, strikes: [], expiry: expiry ?? '', expiries: [], sessionError: true,
+      message: 'Breeze API session not active. Please generate a session in Settings.' };
   }
 
   private async fetchOptionsChainFromNiftyTrader(symbol: string, expiry?: string) {
