@@ -1323,30 +1323,8 @@ export class MarketDataService {
       const hRes = await fetch(`${BREEZE_BRIDGE_URL}/health`, { signal: AbortSignal.timeout(3_000) });
       if (!hRes.ok) return false;
       const health = await hRes.json() as any;
-      if (health.session_active) return true;
+      return health.session_active === true;
     } catch {
-      return false;
-    }
-
-    const creds = await this.getAnyBreezeCredentials();
-    if (!creds) return false;
-
-    try {
-      const initRes = await fetch(`${BREEZE_BRIDGE_URL}/init`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ api_key: creds.apiKey, api_secret: creds.secretKey, session_token: creds.sessionToken }),
-        signal: AbortSignal.timeout(30_000),
-      });
-      const result = await initRes.json() as any;
-      if (result.success) {
-        console.log('[Breeze Bridge] Session initialized via Python SDK');
-        return true;
-      }
-      console.log(`[Breeze Bridge] Init failed: ${result.error}`);
-      return false;
-    } catch (err) {
-      console.log(`[Breeze Bridge] Init error: ${err}`);
       return false;
     }
   }

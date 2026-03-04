@@ -3,6 +3,7 @@ import { PrismaClient, type User } from '@prisma/client';
 type RiskAppetite = string;
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import https from 'https';
+import http from 'http';
 import * as OTPAuth from 'otpauth';
 import { env } from '../config.js';
 
@@ -320,6 +321,31 @@ export class AuthService {
         sessionExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       },
     });
+
+    // Initialize Python Breeze Bridge with the RAW token (before exchange)
+    const secretKey = decrypt(credential.encryptedSecret, this.encKey);
+    const bridgePort = parseInt(process.env.BREEZE_BRIDGE_PORT || '8001', 10);
+    try {
+      const bridgeBody = JSON.stringify({ api_key: apiKey, api_secret: secretKey, session_token: apiSession });
+      const bridgeReq = http.request({ hostname: '127.0.0.1', port: bridgePort, path: '/init', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(bridgeBody)) },
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          try {
+            const result = JSON.parse(Buffer.concat(chunks).toString());
+            console.log(`[Breeze Bridge] Init on session save: ${JSON.stringify(result)}`);
+          } catch { /* ignore */ }
+        });
+      });
+      bridgeReq.on('error', (err) => console.log(`[Breeze Bridge] Init call failed: ${err.message}`));
+      bridgeReq.setTimeout(30_000, () => bridgeReq.destroy());
+      bridgeReq.write(bridgeBody);
+      bridgeReq.end();
+    } catch (err: any) {
+      console.log(`[Breeze Bridge] Init error: ${err.message}`);
+    }
 
     return { success: true };
   }
