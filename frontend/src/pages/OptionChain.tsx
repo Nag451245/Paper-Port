@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { ALL_FNO_SYMBOLS, INDEX_SYMBOLS } from '../constants/fno-symbols';
 import {
   Search,
   RefreshCcw,
@@ -223,9 +224,23 @@ export default function OptionChain() {
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
   }, [symbol, fetchData]);
 
+  const [showSymbolDropdown, setShowSymbolDropdown] = useState(false);
+
+  const filteredSymbols = useMemo(() => {
+    if (!searchInput) return [...INDEX_SYMBOLS];
+    const q = searchInput.toLowerCase();
+    return ALL_FNO_SYMBOLS.filter(s => s.toLowerCase().includes(q));
+  }, [searchInput]);
+
   const handleSearch = () => {
     const s = searchInput.trim().toUpperCase();
-    if (s) setSymbol(s);
+    if (s) { setSymbol(s); setShowSymbolDropdown(false); }
+  };
+
+  const selectSymbol = (s: string) => {
+    setSymbol(s);
+    setSearchInput(s);
+    setShowSymbolDropdown(false);
   };
 
   const strikeDivisor = spotPrice > 40000 ? 100 : 50;
@@ -303,16 +318,31 @@ export default function OptionChain() {
       {/* Top Bar */}
       <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm flex flex-wrap items-center gap-3">
         <div className="relative flex-1 min-w-[180px] max-w-xs">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 z-10" />
           <input
             value={searchInput}
-            onChange={e => setSearchInput(e.target.value.toUpperCase())}
-            onKeyDown={e => e.key === 'Enter' && handleSearch()}
-            placeholder="Symbol e.g. NIFTY"
+            onChange={e => { setSearchInput(e.target.value.toUpperCase()); setShowSymbolDropdown(true); }}
+            onFocus={() => setShowSymbolDropdown(true)}
+            onKeyDown={e => { if (e.key === 'Enter') handleSearch(); if (e.key === 'Escape') setShowSymbolDropdown(false); }}
+            placeholder="Search symbol..."
             className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500/30 focus:border-teal-400"
           />
+          {showSymbolDropdown && filteredSymbols.length > 0 && (
+            <div className="absolute z-20 top-full mt-1 w-full bg-white border border-slate-200 rounded-xl shadow-lg max-h-60 overflow-y-auto">
+              {filteredSymbols.slice(0, 50).map(s => (
+                <button
+                  key={s}
+                  onMouseDown={e => e.preventDefault()}
+                  onClick={() => selectSymbol(s)}
+                  className={`w-full text-left px-3 py-1.5 text-sm transition ${s === symbol ? 'bg-teal-50 text-teal-700 font-semibold' : 'hover:bg-slate-50 text-slate-700'}`}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-        <button onClick={handleSearch} className="rounded-xl bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700 transition-colors">
+        <button onClick={() => { handleSearch(); setShowSymbolDropdown(false); }} className="rounded-xl bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700 transition-colors">
           Search
         </button>
 

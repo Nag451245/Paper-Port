@@ -108,7 +108,8 @@ interface OptimizedStrategy {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50'];
+import { ALL_FNO_SYMBOLS, INDEX_SYMBOLS } from '../constants/fno-symbols';
+const SYMBOLS = ALL_FNO_SYMBOLS;
 
 const CATEGORY_META: Record<string, { icon: typeof TrendingUp; gradient: string; text: string }> = {
   Bullish: { icon: TrendingUp, gradient: 'from-emerald-500 to-teal-500', text: 'text-emerald-700' },
