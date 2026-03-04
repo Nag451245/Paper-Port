@@ -26,6 +26,7 @@ const CACHE_TTL_SEARCH = 3600;
 const CACHE_TTL_INDICES = 60;
 const FETCH_TIMEOUT_MS = 10_000;
 const BREEZE_TIMEOUT_MS = 20_000;
+const BREEZE_BRIDGE_URL = process.env.BREEZE_BRIDGE_URL || 'http://127.0.0.1:8001';
 
 // Cache a live BreezeConnect instance to avoid re-exchanging session on every call
 let breezeInstance: any = null;
@@ -636,26 +637,42 @@ export class MarketDataService {
       if (cached) return { expiries: cached };
     }
 
-    // Source 1: Breeze API (primary) - discover all available expiry dates
-    const creds = await this.getAnyBreezeCredentials();
-    if (!creds) {
-      console.log(`[Expiries] ${symbol} → No Breeze credentials found`);
-      return { expiries: [], sessionError: true, message: 'No Breeze API credentials found. Please enter your ICICI Breeze session key in Settings.' };
+    // Source 1: Python Breeze Bridge (official SDK — most reliable)
+    try {
+      await this.ensureBreezeBridgeSession();
+      const bridgeUrl = `${BREEZE_BRIDGE_URL}/expiries/${encodeURIComponent(symbol)}`;
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 15_000);
+      const res = await fetch(bridgeUrl, { signal: ac.signal });
+      clearTimeout(timer);
+      if (res.ok) {
+        const data = await res.json() as any;
+        if (data.expiries && data.expiries.length > 0) {
+          console.log(`[Expiries] ${symbol} → Breeze Python Bridge: ${data.expiries.join(', ')}`);
+          if (this.cache) await this.cache.set(cacheKey, data.expiries, 3600);
+          return { expiries: data.expiries };
+        }
+      }
+    } catch (err) {
+      console.log(`[Expiries] ${symbol} → Breeze Python Bridge unavailable: ${err}`);
     }
 
-    let breezeAuthFailed = false;
-    try {
-      const breezeExpiries = await this.fetchExpiryDatesFromBreeze(symbol);
-      if (breezeExpiries.length > 0) {
-        console.log(`[Expiries] ${symbol} → Breeze API: ${breezeExpiries.join(', ')}`);
-        if (this.cache) await this.cache.set(cacheKey, breezeExpiries, 3600);
-        return { expiries: breezeExpiries };
+    // Source 2: Node.js Breeze SDK
+    const creds = await this.getAnyBreezeCredentials();
+    let breezeAuthFailed = !creds;
+    if (creds) {
+      try {
+        const breezeExpiries = await this.fetchExpiryDatesFromBreeze(symbol);
+        if (breezeExpiries.length > 0) {
+          console.log(`[Expiries] ${symbol} → Breeze Node SDK: ${breezeExpiries.join(', ')}`);
+          if (this.cache) await this.cache.set(cacheKey, breezeExpiries, 3600);
+          return { expiries: breezeExpiries };
+        }
+        breezeAuthFailed = true;
+      } catch (err) {
+        breezeAuthFailed = true;
+        console.log(`[Expiries] ${symbol} → Breeze Node SDK failed: ${err}`);
       }
-      breezeAuthFailed = true;
-      console.log(`[Expiries] ${symbol} → Breeze API returned 0 expiries (session may be expired)`);
-    } catch (err) {
-      breezeAuthFailed = true;
-      console.log(`[Expiries] ${symbol} → Breeze API call failed: ${err}`);
     }
 
     // Fallback: NSE India - authoritative source with ALL expiry dates
@@ -716,27 +733,35 @@ export class MarketDataService {
       if (cached) return cached;
     }
 
-    // Primary: Breeze API (supports any expiry date)
-    const creds = await this.getAnyBreezeCredentials();
-    if (!creds) {
-      console.log(`[OptionChain] ${symbol} → No Breeze credentials found`);
-      return { symbol, strikes: [], expiry: expiry ?? '', expiries: [], sessionError: true,
-        message: 'No Breeze API credentials found. Please enter your ICICI Breeze session key in Settings.' };
+    // Primary: Python Breeze Bridge (official Python SDK — most reliable)
+    try {
+      const bridgeResult = await this.fetchFromBreezeBridge(symbol, expiry);
+      if (bridgeResult && bridgeResult.strikes && bridgeResult.strikes.length > 0) {
+        console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze Python Bridge (${bridgeResult.strikes.length} strikes)`);
+        if (this.cache) await this.cache.set(cacheKey, bridgeResult, 10);
+        return bridgeResult;
+      }
+    } catch (err) {
+      console.log(`[OptionChain] ${symbol} → Breeze Python Bridge unavailable: ${err}`);
     }
 
-    let breezeAuthFailed = false;
-    try {
-      const breezeResult = await this.fetchOptionsChainFromBreeze(symbol, expiry);
-      if (breezeResult && breezeResult.strikes.length > 0) {
-        console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze API (${breezeResult.strikes.length} strikes)`);
-        if (this.cache) await this.cache.set(cacheKey, breezeResult, 10);
-        return breezeResult;
+    // Fallback 1: Node.js Breeze SDK
+    const creds = await this.getAnyBreezeCredentials();
+    let breezeAuthFailed = !creds;
+    if (creds) {
+      try {
+        const breezeResult = await this.fetchOptionsChainFromBreeze(symbol, expiry);
+        if (breezeResult && breezeResult.strikes.length > 0) {
+          console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze Node SDK (${breezeResult.strikes.length} strikes)`);
+          if (this.cache) await this.cache.set(cacheKey, breezeResult, 10);
+          return breezeResult;
+        }
+        breezeAuthFailed = true;
+        console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze Node SDK returned 0 strikes`);
+      } catch (err) {
+        breezeAuthFailed = true;
+        console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze Node SDK failed: ${err}`);
       }
-      breezeAuthFailed = true;
-      console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze returned 0 strikes (session may be expired)`);
-    } catch (err) {
-      breezeAuthFailed = true;
-      console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze API call failed: ${err}`);
     }
 
     // Fallback: NSE India (supports filtering by expiry natively)
@@ -1269,7 +1294,19 @@ export class MarketDataService {
       steps.sdkError = { message: err.message, code: err.code, stack: err.stack?.substring(0, 300) };
     }
 
-    const ok = steps.optionChain?.recordCount > 0;
+    // Step 4: Check Python Breeze Bridge
+    try {
+      const hRes = await fetch(`${BREEZE_BRIDGE_URL}/health`, { signal: AbortSignal.timeout(3_000) });
+      if (hRes.ok) {
+        steps.pythonBridge = await hRes.json();
+      } else {
+        steps.pythonBridge = { status: 'unreachable', httpStatus: hRes.status };
+      }
+    } catch (err: any) {
+      steps.pythonBridge = { status: 'unreachable', error: err.message };
+    }
+
+    const ok = steps.optionChain?.recordCount > 0 || steps.pythonBridge?.session_active;
     return { steps, result: ok ? 'OK' : 'FAIL' };
   }
 
@@ -1299,6 +1336,52 @@ export class MarketDataService {
       },
       timestamp,
     };
+  }
+
+  private async ensureBreezeBridgeSession(): Promise<boolean> {
+    try {
+      const hRes = await fetch(`${BREEZE_BRIDGE_URL}/health`, { signal: AbortSignal.timeout(3_000) });
+      if (!hRes.ok) return false;
+      const health = await hRes.json() as any;
+      if (health.session_active) return true;
+    } catch {
+      return false;
+    }
+
+    const creds = await this.getAnyBreezeCredentials();
+    if (!creds) return false;
+
+    try {
+      const initRes = await fetch(`${BREEZE_BRIDGE_URL}/init`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: creds.apiKey, api_secret: creds.secretKey, session_token: creds.sessionToken }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      const result = await initRes.json() as any;
+      if (result.success) {
+        console.log('[Breeze Bridge] Session initialized via Python SDK');
+        return true;
+      }
+      console.log(`[Breeze Bridge] Init failed: ${result.error}`);
+      return false;
+    } catch (err) {
+      console.log(`[Breeze Bridge] Init error: ${err}`);
+      return false;
+    }
+  }
+
+  private async fetchFromBreezeBridge(symbol: string, expiry?: string): Promise<any> {
+    await this.ensureBreezeBridgeSession();
+    const url = `${BREEZE_BRIDGE_URL}/option-chain/${encodeURIComponent(symbol)}${expiry ? `?expiry=${encodeURIComponent(expiry)}` : ''}`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 20_000);
+    const res = await fetch(url, { signal: ac.signal });
+    clearTimeout(timer);
+    if (!res.ok) throw new Error(`Bridge returned ${res.status}`);
+    const data = await res.json() as any;
+    if (data.error) throw new Error(data.error);
+    return data;
   }
 
   private async fetchOptionsChainFromBreeze(symbol: string, expiryDate?: string) {

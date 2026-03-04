@@ -28,6 +28,7 @@
     "@fastify/sensible": "^6.0.0",
     "@fastify/websocket": "^11.0.0",
     "@prisma/client": "^6.0.0",
+    "adm-zip": "^0.5.16",
     "axios": "^1.13.6",
     "bcryptjs": "^2.4.3",
     "breezeconnect": "^1.0.30",

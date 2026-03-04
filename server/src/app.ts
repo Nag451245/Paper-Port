@@ -37,6 +37,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const app = Fastify({
     logger: options.logger ?? true,
     bodyLimit: 1_048_576, // 1 MB max body
+    pluginTimeout: 120_000,
   });
 
   const authService = new AuthService(getPrisma(), env.JWT_SECRET);
