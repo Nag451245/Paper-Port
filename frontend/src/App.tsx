@@ -24,6 +24,7 @@ const OptionChain = lazy(() => import('@/pages/OptionChain'));
 const FnOAnalytics = lazy(() => import('@/pages/FnOAnalytics'));
 const LearningIntelligence = lazy(() => import('@/pages/LearningIntelligence'));
 const EdgeLab = lazy(() => import('@/pages/EdgeLab'));
+const CommandCenter = lazy(() => import('@/pages/CommandCenter'));
 const Onboarding = lazy(() => import('@/pages/Onboarding'));
 
 const queryClient = new QueryClient({
@@ -122,6 +123,7 @@ export default function App() {
             <Route path="/fno-analytics" element={<Suspense fallback={<PageLoader />}><FnOAnalytics /></Suspense>} />
             <Route path="/learning" element={<Suspense fallback={<PageLoader />}><LearningIntelligence /></Suspense>} />
             <Route path="/edge-lab" element={<Suspense fallback={<PageLoader />}><EdgeLab /></Suspense>} />
+            <Route path="/command-center" element={<Suspense fallback={<PageLoader />}><CommandCenter /></Suspense>} />
           </Route>
 
           <Route path="*" element={<Navigate to="/dashboard" replace />} />

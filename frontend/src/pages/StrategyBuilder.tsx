@@ -108,7 +108,7 @@ interface OptimizedStrategy {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-import { ALL_FNO_SYMBOLS, INDEX_SYMBOLS } from '../constants/fno-symbols';
+import { ALL_FNO_SYMBOLS } from '../constants/fno-symbols';
 const SYMBOLS = ALL_FNO_SYMBOLS;
 
 const CATEGORY_META: Record<string, { icon: typeof TrendingUp; gradient: string; text: string }> = {

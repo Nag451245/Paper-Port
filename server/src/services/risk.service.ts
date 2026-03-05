@@ -1,4 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
+import { TargetTracker } from './target-tracker.service.js';
 
 export interface RiskConfig {
   maxPositionPct: number;       // max % of capital in a single position (default 10)
@@ -23,7 +24,47 @@ export interface RiskCheck {
 }
 
 export class RiskService {
-  constructor(private prisma: PrismaClient) {}
+  private targetTracker: TargetTracker;
+
+  constructor(private prisma: PrismaClient) {
+    this.targetTracker = new TargetTracker(prisma);
+  }
+
+  async enforceTargetRisk(
+    userId: string,
+    orderValue: number,
+    symbol: string,
+    side: string,
+  ): Promise<RiskCheck> {
+    const violations: string[] = [];
+    const warnings: string[] = [];
+
+    const target = await this.targetTracker.getActiveTarget(userId);
+    if (!target) return { allowed: true, violations, warnings };
+
+    const progress = await this.targetTracker.updateProgress(userId);
+    if (!progress) return { allowed: true, violations, warnings };
+
+    if (!progress.tradingAllowed) {
+      violations.push(progress.reason || 'Trading not allowed by target policy');
+      return { allowed: false, violations, warnings };
+    }
+
+    if (progress.aggression === 'none') {
+      violations.push('Aggression level is NONE — approaching loss limit');
+      return { allowed: false, violations, warnings };
+    }
+
+    // Scale position if target nearly hit
+    if (progress.aggression === 'low') {
+      const maxAllowed = target.capitalBase * 0.02;
+      if (orderValue > maxAllowed) {
+        warnings.push(`Target nearly hit — position capped at ₹${maxAllowed.toFixed(0)}`);
+      }
+    }
+
+    return { allowed: true, violations, warnings };
+  }
 
   async preTradeCheck(
     userId: string,

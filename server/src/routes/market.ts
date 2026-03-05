@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { MarketDataService } from '../services/market-data.service.js';
+import { GlobalMarketService } from '../services/global-market.service.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 
 const symbolParam = z.string().min(1).max(30).regex(/^[A-Z0-9&_-]+$/i, 'Invalid symbol');
@@ -118,6 +119,28 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
       return reply.send(result);
     } catch (err: any) {
       return reply.send({ error: err.message });
+    }
+  });
+
+  const globalMarketService = new GlobalMarketService();
+
+  app.get('/global-intelligence', async (_request, reply) => {
+    const intel = globalMarketService.getLatestIntelligence();
+    if (intel) {
+      return reply.send(intel);
+    }
+    return reply.send({
+      message: 'Intelligence scan not yet run. Will be available after pre-market scan.',
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  app.post('/global-intelligence/refresh', async (_request, reply) => {
+    try {
+      const intel = await globalMarketService.runDailyIntelligenceScan();
+      return reply.send(intel);
+    } catch (err: any) {
+      return reply.code(500).send({ error: err.message });
     }
   });
 }

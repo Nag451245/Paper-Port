@@ -16,10 +16,12 @@ import {
   BarChart3,
   GraduationCap,
   Rocket,
+  Target,
 } from 'lucide-react';
 
 const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', color: 'from-amber-500 to-yellow-500' },
+  { to: '/command-center', icon: Target, label: 'Command Center', color: 'from-emerald-500 to-green-500' },
   { to: '/terminal', icon: Monitor, label: 'Trading Terminal', color: 'from-blue-500 to-cyan-500' },
   { to: '/ai-agent', icon: Bot, label: 'AI Agent', color: 'from-emerald-500 to-teal-500' },
   { to: '/bots', icon: Users, label: 'Bot Team', color: 'from-amber-500 to-orange-500' },

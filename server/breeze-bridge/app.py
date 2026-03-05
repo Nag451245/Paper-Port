@@ -64,18 +64,18 @@ _lot_size_cache_time = None
 _LOT_SIZE_CACHE_HOURS = 6
 
 FALLBACK_LOT_SIZES = {
-    # Indices (as of Mar 2026)
-    "NIFTY": 65, "BANKNIFTY": 30, "FINNIFTY": 60, "MIDCPNIFTY": 120,
+    # Indices — updated as of SEBI Nov-2024 circular
+    "NIFTY": 75, "BANKNIFTY": 30, "FINNIFTY": 25, "MIDCPNIFTY": 75,
     "NIFTYNXT50": 25, "SENSEX": 20,
-    # Top stocks (as of Mar 2026, from NSE fo_mktlots.csv)
-    "RELIANCE": 500, "TCS": 175, "HDFCBANK": 550, "INFY": 400,
+    # Top stocks — approximate lot sizes (NSE CSV is authoritative)
+    "RELIANCE": 250, "TCS": 175, "HDFCBANK": 550, "INFY": 400,
     "ICICIBANK": 700, "HINDUNILVR": 300, "SBIN": 750, "BHARTIARTL": 475,
-    "KOTAKBANK": 2000, "ITC": 1600, "LT": 175, "AXISBANK": 625,
-    "BAJFINANCE": 750, "WIPRO": 3000, "HCLTECH": 350, "MARUTI": 50,
-    "TMPV": 800, "SUNPHARMA": 350, "TITAN": 175, "ASIANPAINT": 250,
-    "ADANIENT": 309, "TATASTEEL": 5500, "NTPC": 1500, "POWERGRID": 1900,
+    "KOTAKBANK": 400, "ITC": 1600, "LT": 150, "AXISBANK": 625,
+    "BAJFINANCE": 125, "WIPRO": 1500, "HCLTECH": 350, "MARUTI": 50,
+    "TATAMOTORS": 575, "SUNPHARMA": 350, "TITAN": 175, "ASIANPAINT": 250,
+    "ADANIENT": 250, "TATASTEEL": 5500, "NTPC": 1500, "POWERGRID": 1900,
     "ONGC": 2250, "JSWSTEEL": 675, "M&M": 200, "BAJAJFINSV": 250,
-    "ULTRACEMCO": 50, "NESTLEIND": 500, "DRREDDY": 625, "CIPLA": 375,
+    "ULTRACEMCO": 50, "NESTLEIND": 50, "DRREDDY": 125, "CIPLA": 375,
     "DIVISLAB": 100, "HEROMOTOCO": 150, "HINDALCO": 700, "TATACONSUM": 550,
     "TATAPOWER": 1450, "EICHERMOT": 100, "INDIGO": 150, "DLF": 825,
     "APOLLOHOSP": 125, "BRITANNIA": 125, "COALINDIA": 1350, "GRASIM": 250,
@@ -396,10 +396,23 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
                 params["strike_price"] = _guess_strike(symbol)
 
             result = breeze_instance.get_option_chain_quotes(**params)
+
+            # Retry with different strike offsets if first attempt fails
+            if (not result or result.get("Status") != 200 or not result.get("Success")) and not expiry:
+                base = int(_guess_strike(symbol))
+                step = _get_strike_step(symbol.upper())
+                for offset_mult in [-2, 2, -5, 5]:
+                    alt_strike = str(base + offset_mult * step)
+                    params["strike_price"] = alt_strike
+                    result = breeze_instance.get_option_chain_quotes(**params)
+                    if result and result.get("Status") == 200 and result.get("Success"):
+                        print(f"[Breeze Bridge] {symbol} {r}: succeeded with alternate strike {alt_strike}")
+                        break
+
             if not result or result.get("Status") != 200 or result.get("Error"):
                 err_msg = result.get("Error") if result else "no result"
                 status = result.get("Status") if result else None
-                print(f"[Breeze Bridge] {r} API error: Status={status}, Error={err_msg}")
+                print(f"[Breeze Bridge] {symbol} {r} API error: Status={status}, Error={err_msg}")
                 continue
 
             records = result.get("Success", [])
@@ -578,22 +591,73 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
         return {"error": str(e), "strikes": []}
 
 
+_spot_price_cache = {}
+_spot_price_cache_lock = threading.Lock()
+
+def _fetch_spot_from_yahoo(symbol):
+    """Fetch live spot price from Yahoo Finance for dynamic ATM calculation."""
+    yahoo_map = {
+        "NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK", "FINNIFTY": "NIFTY_FIN_SERVICE.NS",
+        "MIDCPNIFTY": "NIFTY_MID_SELECT.NS", "SENSEX": "^BSESN", "NIFTYNXT50": "^NSMIDCP",
+    }
+    ticker = yahoo_map.get(symbol.upper(), f"{symbol.upper()}.NS")
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1d"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        })
+        resp = urllib.request.urlopen(req, timeout=8)
+        data = json.loads(resp.read().decode())
+        price = data.get("chart", {}).get("result", [{}])[0].get("meta", {}).get("regularMarketPrice", 0)
+        if price and price > 0:
+            with _spot_price_cache_lock:
+                _spot_price_cache[symbol.upper()] = {"price": price, "at": datetime.now()}
+            return price
+    except Exception as e:
+        print(f"[Breeze Bridge] Yahoo spot fetch for {symbol}: {e}")
+    return None
+
+
 def _guess_strike(symbol):
-    """Return a reasonable ATM-ish strike for a symbol to bootstrap expiry lookups.
-    Breeze API requires at least one of strike_price or expiry_date to be non-empty."""
+    """Return a reasonable ATM-ish strike. Tries Yahoo spot price first, falls back to hardcoded."""
+    sym = symbol.upper()
+
+    with _spot_price_cache_lock:
+        cached = _spot_price_cache.get(sym)
+        if cached and (datetime.now() - cached["at"]).total_seconds() < 300:
+            spot = cached["price"]
+            step = _get_strike_step(sym)
+            atm = round(spot / step) * step
+            return str(int(atm))
+
+    spot = _fetch_spot_from_yahoo(sym)
+    if spot:
+        step = _get_strike_step(sym)
+        atm = round(spot / step) * step
+        return str(int(atm))
+
     known = {
-        "NIFTY": "24500", "BANKNIFTY": "51000", "FINNIFTY": "23000",
-        "MIDCPNIFTY": "12000", "NIFTYNXT50": "24000", "SENSEX": "80000",
-        "RELIANCE": "1300", "TCS": "3500", "HDFCBANK": "1800", "INFY": "1500",
+        "NIFTY": "23500", "BANKNIFTY": "50000", "FINNIFTY": "23000",
+        "MIDCPNIFTY": "12500", "NIFTYNXT50": "24000", "SENSEX": "78000",
+        "RELIANCE": "1300", "TCS": "3500", "HDFCBANK": "1800", "INFY": "1600",
         "ICICIBANK": "1300", "SBIN": "750", "BHARTIARTL": "1700", "KOTAKBANK": "1900",
-        "ITC": "430", "LT": "3400", "AXISBANK": "1100", "BAJFINANCE": "9000",
-        "WIPRO": "250", "HCLTECH": "1600", "MARUTI": "12000", "TATAMOTORS": "650",
-        "SUNPHARMA": "1700", "TITAN": "3200", "ADANIENT": "2400", "HINDUNILVR": "2300",
+        "ITC": "430", "LT": "3500", "AXISBANK": "1100", "BAJFINANCE": "9000",
+        "WIPRO": "250", "HCLTECH": "1700", "MARUTI": "12000", "TATAMOTORS": "650",
+        "SUNPHARMA": "1800", "TITAN": "3200", "ADANIENT": "2400", "HINDUNILVR": "2300",
         "TATASTEEL": "140", "NTPC": "340", "POWERGRID": "290", "ONGC": "250",
         "JSWSTEEL": "1000", "M&M": "2700", "BAJAJFINSV": "1800",
         "ULTRACEMCO": "11000", "NESTLEIND": "2300",
     }
-    return known.get(symbol.upper(), "5000")
+    return known.get(sym, "5000")
+
+
+def _get_strike_step(symbol):
+    """Return strike price step size for a symbol."""
+    steps = {
+        "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "MIDCPNIFTY": 25,
+        "NIFTYNXT50": 50, "SENSEX": 100,
+    }
+    return steps.get(symbol.upper(), 50)
 
 
 def get_expiries(symbol):
@@ -612,6 +676,20 @@ def get_expiries(symbol):
             stock_code=sym, exchange_code="NFO",
             product_type="options", right="call", strike_price=strike,
         )
+
+        # Retry with alternative strikes if first attempt fails
+        if not result or result.get("Status") != 200 or not result.get("Success"):
+            base = int(strike)
+            step = _get_strike_step(sym)
+            for offset_mult in [-3, 3, -6, 6, -10, 10]:
+                alt_strike = str(base + offset_mult * step)
+                result = breeze_instance.get_option_chain_quotes(
+                    stock_code=sym, exchange_code="NFO",
+                    product_type="options", right="call", strike_price=alt_strike,
+                )
+                if result and result.get("Status") == 200 and result.get("Success"):
+                    print(f"[Breeze Bridge] Expiries {sym}: succeeded with alternate strike {alt_strike}")
+                    break
 
         if not result or result.get("Status") != 200:
             print(f"[Breeze Bridge] Expiries {sym}: status={result.get('Status') if result else None}, err={result.get('Error') if result else ''}")
@@ -637,9 +715,9 @@ def get_expiries(symbol):
                     expiry_set.add(date_str)
 
         print(f"[Breeze Bridge] Expiries {sym}: {len(expiry_set)} found")
-        result = {"expiries": sorted(expiry_set)}
-        _cache_set(cache_key, result)
-        return result
+        result_data = {"expiries": sorted(expiry_set)}
+        _cache_set(cache_key, result_data)
+        return result_data
     except Exception as e:
         print(f"[Breeze Bridge] get_expiries error for {symbol}: {e}")
         return {"expiries": [], "error": str(e)}

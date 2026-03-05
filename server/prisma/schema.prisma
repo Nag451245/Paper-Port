@@ -47,6 +47,10 @@ model User {
   strategyLedgers  StrategyLedger[]
   learningInsights LearningInsight[]
   strategyParams   StrategyParam[]
+  tradingTargets   TradingTarget[]
+  dailyPnlRecords  DailyPnlRecord[]
+  eodReports       EODReport[]
+  commandMessages  CommandMessage[]
 
   @@map("users")
 }
@@ -515,4 +519,80 @@ model StrategyParam {
 
   @@index([userId, strategyId, isActive])
   @@map("strategy_params")
+}
+
+model TradingTarget {
+  id                  String    @id @default(uuid())
+  userId              String    @map("user_id")
+  type                String    @default("DAILY")
+  capitalBase         Float     @map("capital_base")
+  profitTargetPct     Float     @map("profit_target_pct")
+  maxLossPct          Float     @default(0.3) @map("max_loss_pct")
+  instruments         String    @default("ALL")
+  status              String    @default("ACTIVE")
+  currentPnl          Float     @default(0) @map("current_pnl")
+  consecutiveLossDays Int       @default(0) @map("consecutive_loss_days")
+  lastReviewDate      DateTime? @map("last_review_date")
+  startDate           DateTime  @default(now()) @map("start_date")
+  endDate             DateTime? @map("end_date")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@map("trading_targets")
+}
+
+model DailyPnlRecord {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  date       DateTime
+  grossPnl   Float    @map("gross_pnl")
+  netPnl     Float    @map("net_pnl")
+  tradeCount Int      @map("trade_count")
+  winCount   Int      @map("win_count")
+  lossCount  Int      @map("loss_count")
+  status     String
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@map("daily_pnl_records")
+}
+
+model EODReport {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  date            DateTime
+  totalPnl        Float    @map("total_pnl")
+  targetPnl       Float    @map("target_pnl")
+  targetAchieved  Boolean  @map("target_achieved")
+  tradesSummary   String   @default("[]") @map("trades_summary")
+  falsePositives  String   @default("[]") @map("false_positives")
+  decisionsReview String   @default("{}") @map("decisions_review")
+  improvements    String   @default("{}") @map("improvements")
+  marketContext   String   @default("{}") @map("market_context")
+  riskEvents      String   @default("[]") @map("risk_events")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@map("eod_reports")
+}
+
+model CommandMessage {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  role      String
+  content   String
+  metadata  String   @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("command_messages")
 }

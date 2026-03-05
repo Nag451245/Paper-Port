@@ -645,15 +645,59 @@ export class MarketDataService {
       if (cached) return cached;
     }
 
-    return {
+    const empty = {
       date: new Date().toISOString().split('T')[0],
-      fiiBuy: 0,
-      fiiSell: 0,
-      fiiNet: 0,
-      diiBuy: 0,
-      diiSell: 0,
-      diiNet: 0,
+      fiiBuy: 0, fiiSell: 0, fiiNet: 0,
+      diiBuy: 0, diiSell: 0, diiNet: 0,
     };
+
+    // Primary: NSE FII/DII activity
+    try {
+      const res = await this.nseFetch('https://www.nseindia.com/api/fiidiiActivity/WDM');
+      if (res.ok) {
+        const data = await res.json() as any;
+        const fii = (data ?? []).find((r: any) => (r.category ?? '').toLowerCase().includes('fii') || (r.category ?? '').toLowerCase().includes('fpi'));
+        const dii = (data ?? []).find((r: any) => (r.category ?? '').toLowerCase().includes('dii'));
+        if (fii || dii) {
+          const result = {
+            date: fii?.date ?? dii?.date ?? empty.date,
+            fiiBuy: Number(fii?.buyValue ?? 0),
+            fiiSell: Number(fii?.sellValue ?? 0),
+            fiiNet: Number(fii?.netValue ?? 0),
+            diiBuy: Number(dii?.buyValue ?? 0),
+            diiSell: Number(dii?.sellValue ?? 0),
+            diiNet: Number(dii?.netValue ?? 0),
+          };
+          if (this.cache) await this.cache.set(cacheKey, result, 600);
+          return result;
+        }
+      }
+    } catch { /* NSE failed */ }
+
+    // Fallback: MoneyControl / NSDL
+    try {
+      const res = await this.nseFetch('https://www.nseindia.com/api/fiidiiActivity');
+      if (res.ok) {
+        const data = await res.json() as any;
+        if (data?.fpiDayData || data?.diiDayData) {
+          const fpi = data.fpiDayData ?? {};
+          const dii = data.diiDayData ?? {};
+          const result = {
+            date: fpi.date ?? dii.date ?? empty.date,
+            fiiBuy: Number(fpi.buyValue ?? 0),
+            fiiSell: Number(fpi.sellValue ?? 0),
+            fiiNet: Number(fpi.netValue ?? 0),
+            diiBuy: Number(dii.buyValue ?? 0),
+            diiSell: Number(dii.sellValue ?? 0),
+            diiNet: Number(dii.netValue ?? 0),
+          };
+          if (this.cache) await this.cache.set(cacheKey, result, 600);
+          return result;
+        }
+      }
+    } catch { /* fallback failed */ }
+
+    return empty;
   }
 
   async getAvailableExpiries(symbol: string): Promise<{ expiries: string[]; sessionError?: boolean; message?: string }> {

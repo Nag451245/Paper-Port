@@ -95,7 +95,7 @@ function isMarketOpen(): boolean {
   return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
 }
 
-const REFRESH_MARKET = 10_000;
+const REFRESH_MARKET = 3_000;
 const REFRESH_OFF = 60_000;
 const STRIKES_AROUND_ATM = 20;
 

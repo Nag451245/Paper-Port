@@ -20,12 +20,16 @@ import { analyticsRoutes } from './routes/analytics.js';
 import { optionsRoutes } from './routes/options.js';
 import { learningRoutes } from './routes/learning.js';
 import { edgeRoutes } from './routes/edge.js';
+import commandCenterRoutes from './routes/command-center.js';
 import { disconnectPrisma, getPrisma } from './lib/prisma.js';
 import { AuthService } from './services/auth.service.js';
 import { BotEngine } from './services/bot-engine.js';
 import { LearningEngine } from './services/learning-engine.js';
 import { MorningBoot } from './services/morning-boot.js';
 import { ServerOrchestrator } from './services/server-orchestrator.js';
+import { TargetTracker } from './services/target-tracker.service.js';
+import { EODReviewService } from './services/eod-review.service.js';
+import { GlobalMarketService } from './services/global-market.service.js';
 import { registerWebSocket, wsHub } from './lib/websocket.js';
 import { getOpenAIStatus } from './lib/openai.js';
 
@@ -172,6 +176,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(optionsRoutes, { prefix: '/api/options' });
   await app.register(learningRoutes, { prefix: '/api/learning' });
   await app.register(edgeRoutes, { prefix: '/api/edge' });
+  await app.register(commandCenterRoutes, { prefix: '/api/command' });
 
   await registerWebSocket(app);
   app.decorate('wsHub', wsHub);
@@ -200,14 +205,75 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
   });
 
-  // Nightly learning — only on market days (skips holidays & weekends)
+  const targetTracker = new TargetTracker(getPrisma());
+  const eodReviewService = new EODReviewService(getPrisma());
+  const globalMarketService = new GlobalMarketService();
+
+  // Target progress update — every 5 min during market hours (3:45-10:00 UTC = 9:15-15:30 IST)
+  orchestrator.scheduleMarketDay('*/5 3-10 * * 1-5', async () => {
+    try {
+      const db = getPrisma();
+      const users = await db.user.findMany({ where: { isActive: true }, select: { id: true } });
+      for (const user of users) {
+        try { await targetTracker.updateProgress(user.id); } catch { /* skip */ }
+      }
+    } catch (err) { console.error('[TargetTracker Cron] Error:', (err as Error).message); }
+  });
+
+  // EOD Review — 15:35 IST = 10:05 UTC
+  orchestrator.scheduleMarketDay('5 10 * * 1-5', async () => {
+    console.log('[EODReview Cron] Starting end-of-day review...');
+    await eodReviewService.runReview();
+    console.log('[EODReview Cron] Review complete');
+  });
+
+  // Record daily P&L — 15:45 IST = 10:15 UTC
+  orchestrator.scheduleMarketDay('15 10 * * 1-5', async () => {
+    try {
+      const db = getPrisma();
+      const users = await db.user.findMany({ where: { isActive: true }, select: { id: true } });
+      for (const user of users) {
+        try { await targetTracker.recordDailyPnl(user.id); } catch { /* skip */ }
+      }
+      console.log(`[DailyPnl Cron] Recorded P&L for ${users.length} users`);
+    } catch (err) { console.error('[DailyPnl Cron] Error:', (err as Error).message); }
+  });
+
+  // Nightly learning — only on market days (skips holidays & weekends) — 16:00 IST = 10:30 UTC
   orchestrator.scheduleMarketDay('30 10 * * 1-5', async () => {
     const result = await learningEngine.runNightlyLearning();
     console.log(`[Learning Cron] Processed ${result.usersProcessed} users, ${result.insights} insights generated`);
   });
 
-  // Morning boot — only on market days
+  // Morning target reset — 08:30 IST = 03:00 UTC
+  orchestrator.scheduleMarketDay('0 3 * * 1-5', async () => {
+    try {
+      const db = getPrisma();
+      const users = await db.user.findMany({ where: { isActive: true }, select: { id: true } });
+      for (const user of users) {
+        try { await targetTracker.resetDailyTarget(user.id); } catch { /* skip */ }
+      }
+      console.log(`[Morning Reset] Reset daily targets for ${users.length} users`);
+    } catch (err) { console.error('[Morning Reset] Error:', (err as Error).message); }
+  });
+
+  // Global market intelligence scan — 08:45 IST = 03:15 UTC (before market open)
   orchestrator.scheduleMarketDay('15 3 * * 1-5', async () => {
+    try {
+      const intel = await globalMarketService.runDailyIntelligenceScan();
+      console.log(`[GlobalMarket Cron] Pre-market scan done — Sentiment: ${intel.sentiment}, ${intel.globalIndices.length} global indices, ${intel.sectorPerformance.length} sectors`);
+    } catch (err) { console.error('[GlobalMarket Cron] Error:', (err as Error).message); }
+  });
+
+  // Intra-day intelligence refresh — every 30 min during market hours (9:15-15:30 IST = 3:45-10:00 UTC)
+  orchestrator.scheduleMarketDay('*/30 3-10 * * 1-5', async () => {
+    try {
+      await globalMarketService.runDailyIntelligenceScan();
+    } catch { /* silent refresh */ }
+  });
+
+  // Morning boot — only on market days
+  orchestrator.scheduleMarketDay('20 3 * * 1-5', async () => {
     const result = await morningBoot.runMorningBoot();
     console.log(`[Morning Boot] Processed ${result.usersProcessed} users, activated ${result.strategiesActivated} strategies`);
   });

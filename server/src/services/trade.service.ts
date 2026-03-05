@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
 import { MarketCalendar } from './market-calendar.js';
+import { RiskService } from './risk.service.js';
 type OrderSide = string;
 type OrderType = string;
 type Exchange = string;
@@ -151,10 +152,12 @@ function simulateExecution(
 export class TradeService {
   private marketData: MarketDataService;
   private calendar: MarketCalendar;
+  private riskService: RiskService;
 
   constructor(private prisma: PrismaClient) {
     this.marketData = new MarketDataService();
     this.calendar = new MarketCalendar();
+    this.riskService = new RiskService(prisma);
   }
 
   async placeOrder(userId: string, input: PlaceOrderInput, skipMarketCheck = false) {
@@ -168,6 +171,27 @@ export class TradeService {
 
     const exchange = input.exchange ?? 'NSE';
     const marketOpen = skipMarketCheck || this.calendar.isMarketOpen(exchange);
+
+    // Risk gate: enforce target-aware and position limits before any order
+    try {
+      const estPrice = input.price ?? 0;
+      const orderValue = estPrice > 0 ? estPrice * input.qty : 0;
+
+      const targetRisk = await this.riskService.enforceTargetRisk(userId, orderValue, input.symbol, input.side);
+      if (!targetRisk.allowed) {
+        throw new TradeError(`Risk gate blocked: ${targetRisk.violations.join('; ')}`, 400);
+      }
+
+      if (estPrice > 0) {
+        const positionRisk = await this.riskService.preTradeCheck(userId, input.symbol, input.side, input.qty, estPrice);
+        if (!positionRisk.allowed) {
+          throw new TradeError(`Risk check failed: ${positionRisk.violations.join('; ')}`, 400);
+        }
+      }
+    } catch (err) {
+      if (err instanceof TradeError) throw err;
+      console.error('[TradeService] Risk check error (non-blocking):', (err as Error).message);
+    }
 
     let fillPrice = input.price ?? 0;
 

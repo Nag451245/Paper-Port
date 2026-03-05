@@ -4,6 +4,8 @@ import { MarketDataService, type MarketMover } from './market-data.service.js';
 import { TradeService } from './trade.service.js';
 import { engineScan, engineRisk, engineSignals, isEngineAvailable, type ScanSignal } from '../lib/rust-engine.js';
 import { calculateMaxPain, calculateIVPercentile, calculateGreeks } from './options.service.js';
+import { TargetTracker, type TargetProgress } from './target-tracker.service.js';
+import { GlobalMarketService } from './global-market.service.js';
 
 const DEFAULT_TICK_INTERVAL = 3 * 60_000;
 const DEFAULT_SIGNAL_INTERVAL = 5 * 60_000;
@@ -147,8 +149,13 @@ export class BotEngine {
   private signalInterval = DEFAULT_SIGNAL_INTERVAL;
   private marketScanInterval = DEFAULT_MARKET_SCAN_INTERVAL;
 
+  private targetTracker: TargetTracker;
+  private globalMarket: GlobalMarketService;
+
   constructor(private prisma: PrismaClient) {
     this.tradeService = new TradeService(prisma);
+    this.targetTracker = new TargetTracker(prisma);
+    this.globalMarket = new GlobalMarketService();
     this.rustAvailable = isEngineAvailable();
     console.log(`[BotEngine] Initialized — Rust engine: ${this.rustAvailable ? 'AVAILABLE' : 'NOT FOUND (using Gemini AI only)'}`);
   }
@@ -939,14 +946,30 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
       const symbols = (bot.assignedSymbols || 'RELIANCE,TCS,INFY,HDFCBANK,ITC')
         .split(',').map(s => s.trim()).filter(Boolean);
 
-      console.log(`[BotEngine] Bot ${botId} (${bot.name}/${bot.role}): starting cycle for ${symbols.length} symbols, Rust: ${this.rustAvailable}`);
+      // Target-aware: check if trading is allowed
+      let targetProgress: TargetProgress | null = null;
+      try {
+        targetProgress = await this.targetTracker.updateProgress(userId);
+      } catch { /* no target set — proceed normally */ }
+
+      if (targetProgress && !targetProgress.tradingAllowed) {
+        console.log(`[BotEngine] Bot ${botId}: trading blocked — ${targetProgress.reason}`);
+        await this.prisma.tradingBot.update({
+          where: { id: botId },
+          data: { lastAction: `Halted: ${targetProgress.reason}`, lastActionAt: new Date() },
+        });
+        return;
+      }
+
+      const aggression = targetProgress?.aggression ?? 'high';
+      console.log(`[BotEngine] Bot ${botId} (${bot.name}/${bot.role}): starting cycle for ${symbols.length} symbols, Rust: ${this.rustAvailable}, aggression: ${aggression}`);
 
       // --- Step 1: Rust engine scan (fast, deterministic) ---
       if (this.rustAvailable) {
         const candleData = await this.fetchCandles(symbols, userId);
 
         if (candleData.length > 0) {
-          const aggressiveness = 'high';
+          const aggressiveness = aggression === 'none' ? 'low' : aggression;
           let rustSignals: ScanSignal[] = [];
 
           try {
@@ -1189,7 +1212,7 @@ IMPORTANT: Max 4 signals. Keep total response under 1500 chars. No extra text ou
         { role: 'system', content: `${systemPrompt}\n${responseFormat}` },
         { role: 'user', content: `Bot: ${bot.name} | Strategy: ${bot.assignedStrategy || 'General'}
 Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
-
+${await this.getTargetContextString(userId)}
 ${quotes}${fnoContext}${rustIndicators}
 ${positions ? `\nOpen Positions:\n${positions}` : ''}
 
@@ -1305,6 +1328,17 @@ INSTRUCTIONS:
         return;
       }
       console.log(`[BotEngine] Agent cycle starting for user ${userId}, Rust: ${this.rustAvailable}`);
+
+      // Target-aware: check if trading is allowed
+      let agentTargetProgress: TargetProgress | null = null;
+      try {
+        agentTargetProgress = await this.targetTracker.updateProgress(userId);
+      } catch { /* no target — proceed */ }
+
+      if (agentTargetProgress && !agentTargetProgress.tradingAllowed) {
+        console.log(`[BotEngine] Agent: trading blocked — ${agentTargetProgress.reason}`);
+        return;
+      }
 
       const config = await this.prisma.aIAgentConfig.findUnique({ where: { userId } });
       if (!config || !config.isActive) {
@@ -1511,8 +1545,26 @@ Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted
     return returns;
   }
 
+  private async getTargetContextString(userId: string): Promise<string> {
+    try {
+      const progress = await this.targetTracker.updateProgress(userId);
+      if (!progress) return '';
+      const pnlSign = progress.currentPnl >= 0 ? '+' : '';
+      return `\nTRADING TARGET: Capital ₹${(progress.capitalBase / 100000).toFixed(1)}L | Target: ${pnlSign}₹${progress.profitTargetAbs.toFixed(0)} (${progress.profitTargetPct}%) | Max Loss: -₹${progress.maxLossAbs.toFixed(0)} (${progress.maxLossPct}%) | Current P&L: ${pnlSign}₹${progress.currentPnl.toFixed(0)} (${progress.progressPct.toFixed(0)}% of target) | Aggression: ${progress.aggression.toUpperCase()} | Status: ${progress.status}`;
+    } catch {
+      return '';
+    }
+  }
+
   private async fetchQuotes(symbols: string[]): Promise<string> {
     const lines: string[] = [];
+
+    // Global market intelligence context
+    const globalContext = this.globalMarket.getIntelligenceContextForBots();
+    if (globalContext) {
+      lines.push(globalContext);
+      lines.push('');
+    }
 
     // Fetch NIFTY 50 as market context
     try {

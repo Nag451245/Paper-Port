@@ -2,6 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import { chatCompletionJSON, chatCompletion } from '../lib/openai.js';
 import { MarketDataService } from './market-data.service.js';
 import { engineOptimize, isEngineAvailable, type OptimizeInput } from '../lib/rust-engine.js';
+import { LearningStoreService } from './learning-store.service.js';
 
 const STRATEGIES = ['ema-crossover', 'supertrend', 'sma_crossover', 'mean_reversion', 'momentum', 'rsi_reversal', 'orb'];
 
@@ -17,6 +18,7 @@ const DEFAULT_PARAM_GRIDS: Record<string, Record<string, number[]>> = {
 
 export class LearningEngine {
   private marketData = new MarketDataService();
+  private learningStore = new LearningStoreService();
   private running = false;
 
   constructor(private prisma: PrismaClient) {}
@@ -78,6 +80,11 @@ export class LearningEngine {
     });
     const insight = await this.generateLearningInsight(userId, today, ledgers, marketContext, trades.length);
     await this.runParameterOptimization(userId, today);
+
+    // Enhanced: false positive analysis, regime tracking, strategy evolution
+    await this.analyzeFalsePositives(userId, today, signals, trades);
+    await this.trackRegimeAndAdjust(userId, today, insight.marketRegime, ledgers);
+    await this.trackStrategyEvolution(userId, today, ledgers);
 
     console.log(`[LearningEngine] User ${userId}: ${trades.length} trades, regime=${insight.marketRegime}`);
   }
@@ -461,6 +468,106 @@ Top losers: ${JSON.stringify(topLosers)}`,
         });
       } catch (err) {
         console.error(`[LearningEngine] Optimization failed for ${strategy}:`, (err as Error).message);
+      }
+    }
+  }
+
+  private async analyzeFalsePositives(
+    userId: string,
+    date: Date,
+    signals: Array<{ id: string; symbol: string; signalType: string; compositeScore: number; status: string; outcomeTag: string | null }>,
+    trades: Array<{ symbol: string; netPnl: any }>,
+  ): Promise<void> {
+    const falsePositives = signals.filter(s => {
+      if (s.outcomeTag === 'LOSS') return true;
+      if (s.status === 'EXPIRED' || s.status === 'REJECTED') return true;
+      if (s.status === 'EXECUTED') {
+        const trade = trades.find(t => t.symbol === s.symbol);
+        return trade && Number(trade.netPnl) < 0;
+      }
+      return false;
+    });
+
+    if (falsePositives.length === 0) return;
+
+    // Group by symbol to find pattern
+    const bySymbol = new Map<string, number>();
+    for (const fp of falsePositives) {
+      bySymbol.set(fp.symbol, (bySymbol.get(fp.symbol) || 0) + 1);
+    }
+
+    const fpData = {
+      date: date.toISOString().split('T')[0],
+      total: falsePositives.length,
+      bySymbol: Object.fromEntries(bySymbol),
+      avgConfidence: falsePositives.reduce((s, fp) => s + fp.compositeScore, 0) / falsePositives.length,
+      signals: falsePositives.map(fp => ({
+        symbol: fp.symbol,
+        type: fp.signalType,
+        confidence: fp.compositeScore,
+        status: fp.status,
+        outcome: fp.outcomeTag,
+      })),
+    };
+
+    try {
+      await this.learningStore.writeFalsePositives(date, fpData);
+    } catch (err) {
+      console.error('[LearningEngine] FP store write failed:', (err as Error).message);
+    }
+  }
+
+  private async trackRegimeAndAdjust(
+    userId: string,
+    date: Date,
+    regime: string,
+    ledgers: Array<{ strategyId: string; winRate: number; netPnl: any; sharpeRatio: number }>,
+  ): Promise<void> {
+    // Record regime
+    const performanceSummary: Record<string, { winRate: number; pnl: number; sharpe: number }> = {};
+    for (const l of ledgers) {
+      performanceSummary[l.strategyId] = {
+        winRate: l.winRate,
+        pnl: Number(l.netPnl),
+        sharpe: l.sharpeRatio,
+      };
+    }
+
+    try {
+      await this.learningStore.writeRegimeLog(date, regime, {
+        strategyPerformance: performanceSummary,
+      });
+    } catch (err) {
+      console.error('[LearningEngine] Regime log write failed:', (err as Error).message);
+    }
+  }
+
+  private async trackStrategyEvolution(
+    userId: string,
+    date: Date,
+    ledgers: Array<{ strategyId: string; winRate: number; netPnl: any; sharpeRatio: number; tradesCount: number }>,
+  ): Promise<void> {
+    for (const ledger of ledgers) {
+      if (ledger.tradesCount === 0) continue;
+
+      const activeParam = await this.prisma.strategyParam.findFirst({
+        where: { userId, strategyId: ledger.strategyId, isActive: true },
+        select: { params: true, version: true },
+      });
+
+      try {
+        await this.learningStore.writeStrategyEvolution(ledger.strategyId, {
+          date: date.toISOString().split('T')[0],
+          userId,
+          winRate: ledger.winRate,
+          pnl: Number(ledger.netPnl),
+          sharpe: ledger.sharpeRatio,
+          trades: ledger.tradesCount,
+          paramVersion: activeParam?.version ?? 0,
+          params: activeParam?.params ? JSON.parse(activeParam.params) : null,
+        });
+      } catch (err) {
+        console.error(`[LearningEngine] Strategy evolution write failed for ${ledger.strategyId}:`, (err as Error).message);
       }
     }
   }

@@ -181,6 +181,12 @@ export const marketApi = {
 
   lotSizes: () =>
     api.get<{ lotSizes: Record<string, number>; source: string }>('/market/lot-sizes'),
+
+  globalIntelligence: () =>
+    api.get<any>('/market/global-intelligence'),
+
+  refreshGlobalIntelligence: () =>
+    api.post<any>('/market/global-intelligence/refresh'),
 };
 
 // ─── Options Strategy ─────────────────────────────────────────────
@@ -409,6 +415,22 @@ export const edgeApi = {
   ivSurface: (data: { spot: number; strikes: unknown[] }) =>
     api.post('/edge/iv-surface', data),
   getTrackRecord: () => api.get('/edge/track-record'),
+};
+
+// ─── Command Center ──────────────────────────────────────────────
+export const commandApi = {
+  chat: (message: string) =>
+    api.post<{ role: string; content: string; intent: string }>('/command/chat', { message }),
+  getTarget: () =>
+    api.get<{ target: any }>('/command/target'),
+  getDashboard: () =>
+    api.get<{ target: any; risk: any; bots: any[]; recentPnl: any[]; todaySignals: any[] }>('/command/dashboard'),
+  getReports: (limit = 30) =>
+    api.get<any[]>('/command/reports', { params: { limit } }),
+  getReport: (date: string) =>
+    api.get<any>(`/command/reports/${date}`),
+  getMessages: (limit = 50) =>
+    api.get<any[]>('/command/messages', { params: { limit } }),
 };
 
 export default api;
