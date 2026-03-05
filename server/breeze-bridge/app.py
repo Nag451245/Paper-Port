@@ -347,10 +347,12 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
                 "exchange_code": "NFO",
                 "product_type": "options",
                 "right": r,
-                "strike_price": "",
             }
             if expiry:
                 params["expiry_date"] = f"{expiry}T06:00:00.000Z"
+                params["strike_price"] = ""
+            else:
+                params["strike_price"] = _guess_strike(symbol)
 
             result = breeze_instance.get_option_chain_quotes(**params)
             if not result or result.get("Status") != 200 or result.get("Error"):
@@ -528,19 +530,38 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
         return {"error": str(e), "strikes": []}
 
 
+def _guess_strike(symbol):
+    """Return a reasonable ATM-ish strike for a symbol to bootstrap expiry lookups.
+    Breeze API requires at least one of strike_price or expiry_date to be non-empty."""
+    known = {
+        "NIFTY": "24500", "BANKNIFTY": "51000", "FINNIFTY": "23000",
+        "MIDCPNIFTY": "12000", "NIFTYNXT50": "24000", "SENSEX": "80000",
+        "RELIANCE": "1300", "TCS": "3500", "HDFCBANK": "1800", "INFY": "1500",
+        "ICICIBANK": "1300", "SBIN": "750", "BHARTIARTL": "1700", "KOTAKBANK": "1900",
+        "ITC": "430", "LT": "3400", "AXISBANK": "1100", "BAJFINANCE": "9000",
+        "WIPRO": "250", "HCLTECH": "1600", "MARUTI": "12000", "TATAMOTORS": "650",
+        "SUNPHARMA": "1700", "TITAN": "3200", "ADANIENT": "2400", "HINDUNILVR": "2300",
+        "TATASTEEL": "140", "NTPC": "340", "POWERGRID": "290", "ONGC": "250",
+        "JSWSTEEL": "1000", "M&M": "2700", "BAJAJFINSV": "1800",
+        "ULTRACEMCO": "11000", "NESTLEIND": "2300",
+    }
+    return known.get(symbol.upper(), "5000")
+
+
 def get_expiries(symbol):
     if not breeze_instance:
         return {"error": "Breeze session not initialized", "expiries": []}
 
     try:
         sym = symbol.upper()
+        strike = _guess_strike(sym)
         result = breeze_instance.get_option_chain_quotes(
             stock_code=sym, exchange_code="NFO",
-            product_type="options", right="call", strike_price="",
+            product_type="options", right="call", strike_price=strike,
         )
 
         if not result or result.get("Status") != 200:
-            print(f"[Breeze Bridge] Expiries {sym}: status={result.get('Status') if result else None}")
+            print(f"[Breeze Bridge] Expiries {sym}: status={result.get('Status') if result else None}, err={result.get('Error') if result else ''}")
             return {"expiries": [], "error": f"API status {result.get('Status') if result else 'None'}"}
 
         records = result.get("Success", [])
