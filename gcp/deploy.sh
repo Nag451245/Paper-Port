@@ -31,6 +31,18 @@ cd "$APP_DIR"
 
 # ── 2. Build Rust engine ──
 echo "[2/7] Building Rust engine..."
+
+# Ensure swap exists for low-RAM VMs (Rust compiler needs ~800MB)
+if [ ! -f /swapfile ]; then
+  echo "  Creating 2GB swap (needed for Rust compilation)..."
+  sudo fallocate -l 2G /swapfile
+  sudo chmod 600 /swapfile
+  sudo mkswap /swapfile
+  sudo swapon /swapfile
+  echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab > /dev/null
+  echo "  Swap enabled: $(free -h | grep Swap)"
+fi
+
 if ! command -v cargo &> /dev/null; then
   echo "  Installing Rust toolchain..."
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -39,7 +51,7 @@ fi
 
 if [ -d "$APP_DIR/engine" ]; then
   cd "$APP_DIR/engine"
-  echo "  Compiling engine (release mode)..."
+  echo "  Compiling engine (release mode, thin LTO)..."
   cargo build --release 2>&1 | tail -5
   echo "  Engine binary: $(ls -lh target/release/capital-guard-engine 2>/dev/null || echo 'NOT FOUND')"
 fi
