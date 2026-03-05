@@ -400,6 +400,30 @@ function buildRatioCallSpread(atm: number, qty: number, chain: Strike[]): Strate
   ];
 }
 
+function estimateMargin(legs: StrategyLeg[], spot: number, maxLoss: number): number {
+  if (legs.length === 0 || spot <= 0) return 0;
+
+  const hasSell = legs.some(l => l.action === 'SELL');
+  if (!hasSell) {
+    return Math.abs(legs.reduce((s, l) => s + l.premium * l.qty, 0));
+  }
+
+  const spreadWidth = (() => {
+    const ceStrikes = legs.filter(l => l.type === 'CE').map(l => l.strike).sort((a, b) => a - b);
+    const peStrikes = legs.filter(l => l.type === 'PE').map(l => l.strike).sort((a, b) => a - b);
+    const ceW = ceStrikes.length >= 2 ? ceStrikes[ceStrikes.length - 1] - ceStrikes[0] : 0;
+    const peW = peStrikes.length >= 2 ? peStrikes[peStrikes.length - 1] - peStrikes[0] : 0;
+    return Math.max(ceW, peW);
+  })();
+
+  if (spreadWidth > 0 && maxLoss < 0) {
+    return Math.abs(maxLoss) * 1.15;
+  }
+
+  const sellQty = legs.filter(l => l.action === 'SELL').reduce((s, l) => s + l.qty, 0);
+  return Math.round(spot * 0.15 * sellQty);
+}
+
 function computeLocalPayoff(legs: StrategyLeg[], spotPrice: number): PayoffResult {
   const range = spotPrice * 0.12;
   const step = Math.round(range / 50 / 10) * 10 || 10;
@@ -635,8 +659,11 @@ export default function StrategyBuilder() {
   };
 
   const addLeg = () => {
+    const s = findStrike(chain, atmStrike);
+    const premium = s ? s.callLTP : 0;
+    const iv = s ? s.callIV : 0;
     setLegs(prev => [...prev, {
-      type: 'CE', strike: atmStrike, action: 'BUY', qty: lotSize, premium: 0,
+      type: 'CE', strike: s?.strike ?? atmStrike, action: 'BUY', qty: lotSize, premium, iv,
       expiry: selectedExpiry, expiryDays: dte(selectedExpiry),
     }]);
   };
@@ -644,7 +671,20 @@ export default function StrategyBuilder() {
   const removeLeg = (i: number) => setLegs(prev => prev.filter((_, idx) => idx !== i));
 
   const updateLeg = <K extends keyof StrategyLeg>(i: number, field: K, value: StrategyLeg[K]) => {
-    setLegs(prev => { const u = [...prev]; u[i] = { ...u[i], [field]: value }; return u; });
+    setLegs(prev => {
+      const u = [...prev];
+      u[i] = { ...u[i], [field]: value };
+      if ((field === 'strike' || field === 'type') && chain.length > 0) {
+        const s = findStrike(chain, u[i].strike);
+        if (s) {
+          const t = u[i].type;
+          u[i].premium = t === 'CE' ? s.callLTP : s.putLTP;
+          u[i].iv = t === 'CE' ? s.callIV : s.putIV;
+          u[i].strike = s.strike;
+        }
+      }
+      return u;
+    });
   };
 
   // ── Quick build from chain ──────────────────────────────────────────────
@@ -1004,6 +1044,7 @@ export default function StrategyBuilder() {
                       <th className="text-left py-1.5 px-1 font-semibold text-slate-500">B/S</th>
                       <th className="text-left py-1.5 px-1 font-semibold text-slate-500">Qty</th>
                       <th className="text-left py-1.5 px-1 font-semibold text-slate-500">Prem</th>
+                      <th className="text-left py-1.5 px-1 font-semibold text-slate-500">Value</th>
                       <th className="text-left py-1.5 px-1 font-semibold text-slate-500">Exp</th>
                       <th className="py-1.5 px-1"></th>
                     </tr>
@@ -1013,14 +1054,32 @@ export default function StrategyBuilder() {
                       <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50">
                         <td className="py-1.5 px-1">
                           <select value={leg.type} onChange={e => updateLeg(i, 'type', e.target.value as 'CE' | 'PE')}
-                            className="px-1.5 py-1 border border-slate-200 rounded bg-white text-[11px] focus:outline-none">
+                            className={`px-1.5 py-1 border rounded text-[11px] font-semibold focus:outline-none ${
+                              leg.type === 'CE' ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-rose-200 bg-rose-50 text-rose-700'
+                            }`}>
                             <option value="CE">CE</option>
                             <option value="PE">PE</option>
                           </select>
                         </td>
                         <td className="py-1.5 px-1">
-                          <input type="number" value={leg.strike} onChange={e => updateLeg(i, 'strike', Number(e.target.value))}
-                            className="w-[70px] px-1.5 py-1 border border-slate-200 rounded font-mono text-[11px] focus:outline-none" step={50} />
+                          {chain.length > 0 ? (
+                            <select
+                              value={leg.strike}
+                              onChange={e => updateLeg(i, 'strike', Number(e.target.value))}
+                              className="w-[80px] px-1 py-1 border border-slate-200 rounded font-mono text-[11px] focus:outline-none bg-white"
+                            >
+                              {chain
+                                .filter(s => Math.abs(s.strike - atmStrike) <= getStrikeStep(chain) * 15)
+                                .map(s => (
+                                  <option key={s.strike} value={s.strike}>
+                                    {s.strike.toLocaleString('en-IN')}{s.strike === atmStrike ? ' ●' : ''}
+                                  </option>
+                                ))}
+                            </select>
+                          ) : (
+                            <input type="number" value={leg.strike} onChange={e => updateLeg(i, 'strike', Number(e.target.value))}
+                              className="w-[70px] px-1.5 py-1 border border-slate-200 rounded font-mono text-[11px] focus:outline-none" step={50} />
+                          )}
                         </td>
                         <td className="py-1.5 px-1">
                           <select value={leg.action} onChange={e => updateLeg(i, 'action', e.target.value as 'BUY' | 'SELL')}
@@ -1039,6 +1098,9 @@ export default function StrategyBuilder() {
                           <input type="number" value={leg.premium} onChange={e => updateLeg(i, 'premium', Number(e.target.value))}
                             className="w-[65px] px-1.5 py-1 border border-slate-200 rounded font-mono text-[11px] focus:outline-none" step={0.5} />
                         </td>
+                        <td className={`py-1.5 px-1 text-[10px] font-mono font-semibold ${leg.action === 'SELL' ? 'text-emerald-600' : 'text-red-500'}`}>
+                          {leg.action === 'SELL' ? '+' : '-'}₹{formatNum(Math.round(leg.premium * leg.qty))}
+                        </td>
                         <td className="py-1.5 px-1 text-[10px] text-slate-400 font-mono">{leg.expiry ? fmtDate(leg.expiry) : '—'}</td>
                         <td className="py-1.5 px-1">
                           <button onClick={() => removeLeg(i)} className="p-0.5 text-slate-400 hover:text-red-500 transition">
@@ -1053,30 +1115,33 @@ export default function StrategyBuilder() {
             )}
 
             {/* Summary metrics */}
-            {payoff && legs.length > 0 && (
-              <div className="mt-3 grid grid-cols-3 gap-2">
-                <MetricCard label="Net Premium" value={payoff.netPremium} format="inr" color={payoff.netPremium >= 0 ? 'emerald' : 'red'} />
-                <MetricCard label="Max Profit" value={payoff.maxProfit} format="inr" color="emerald" unlimited={payoff.maxProfit >= 1e9} />
-                <MetricCard label="Max Loss" value={payoff.maxLoss} format="inr" color="red" unlimited={payoff.maxLoss <= -1e9} />
-                {payoff.breakevens?.length > 0 && (
-                  <div className="bg-slate-50 rounded-lg p-2 text-center col-span-3">
-                    <p className="text-[9px] font-semibold text-slate-400 uppercase">Breakevens</p>
-                    <p className="text-xs font-bold font-mono text-slate-700">
-                      {payoff.breakevens.map(b => b.toLocaleString('en-IN')).join(' | ')}
-                    </p>
-                  </div>
-                )}
-                {payoff.probabilityOfProfit != null && payoff.probabilityOfProfit > 0 && (
-                  <MetricCard label="Prob of Profit" value={payoff.probabilityOfProfit} format="pct" color="indigo" />
-                )}
-                {payoff.riskRewardRatio != null && payoff.riskRewardRatio > 0 && (
-                  <MetricCard label="Risk/Reward" value={payoff.riskRewardRatio} format="ratio" color="amber" />
-                )}
-                {payoff.capitalRequired != null && payoff.capitalRequired > 0 && (
-                  <MetricCard label="Capital Req." value={payoff.capitalRequired} format="inr" color="slate" />
-                )}
-              </div>
-            )}
+            {payoff && legs.length > 0 && (() => {
+              const marginRequired = payoff.capitalRequired ?? estimateMargin(legs, spotPrice, payoff.maxLoss);
+              return (
+                <div className="mt-3 grid grid-cols-3 gap-2">
+                  <MetricCard label="Net Premium" value={payoff.netPremium} format="inr" color={payoff.netPremium >= 0 ? 'emerald' : 'red'} />
+                  <MetricCard label="Max Profit" value={payoff.maxProfit} format="inr" color="emerald" unlimited={payoff.maxProfit >= 1e9} />
+                  <MetricCard label="Max Loss" value={payoff.maxLoss} format="inr" color="red" unlimited={payoff.maxLoss <= -1e9} />
+                  <MetricCard label="Margin Req." value={marginRequired} format="inr" color="purple" />
+                  {payoff.probabilityOfProfit != null && payoff.probabilityOfProfit > 0 && (
+                    <MetricCard label="Prob of Profit" value={payoff.probabilityOfProfit} format="pct" color="indigo" />
+                  )}
+                  {payoff.riskRewardRatio != null && payoff.riskRewardRatio > 0 ? (
+                    <MetricCard label="Risk/Reward" value={payoff.riskRewardRatio} format="ratio" color="amber" />
+                  ) : payoff.maxProfit > 0 && payoff.maxLoss < 0 ? (
+                    <MetricCard label="Risk/Reward" value={Math.abs(payoff.maxProfit / payoff.maxLoss)} format="ratio" color="amber" />
+                  ) : null}
+                  {payoff.breakevens?.length > 0 && (
+                    <div className="bg-slate-50 rounded-lg p-2 text-center col-span-3">
+                      <p className="text-[9px] font-semibold text-slate-400 uppercase">Breakevens</p>
+                      <p className="text-xs font-bold font-mono text-slate-700">
+                        {payoff.breakevens.map(b => b.toLocaleString('en-IN')).join(' | ')}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
 
           {/* Greeks */}
