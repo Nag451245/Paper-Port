@@ -64,16 +64,24 @@ _lot_size_cache_time = None
 _LOT_SIZE_CACHE_HOURS = 6
 
 FALLBACK_LOT_SIZES = {
-    "NIFTY": 75, "BANKNIFTY": 30, "FINNIFTY": 65, "MIDCPNIFTY": 75,
+    # Indices (as of Mar 2026)
+    "NIFTY": 65, "BANKNIFTY": 30, "FINNIFTY": 60, "MIDCPNIFTY": 120,
     "NIFTYNXT50": 25, "SENSEX": 20,
-    "RELIANCE": 250, "TCS": 175, "HDFCBANK": 550, "INFY": 400,
+    # Top stocks (as of Mar 2026, from NSE fo_mktlots.csv)
+    "RELIANCE": 500, "TCS": 175, "HDFCBANK": 550, "INFY": 400,
     "ICICIBANK": 700, "HINDUNILVR": 300, "SBIN": 750, "BHARTIARTL": 475,
-    "KOTAKBANK": 400, "ITC": 1600, "LT": 150, "AXISBANK": 625,
-    "BAJFINANCE": 125, "WIPRO": 1500, "HCLTECH": 350, "MARUTI": 100,
-    "TATAMOTORS": 575, "SUNPHARMA": 350, "TITAN": 175, "ASIANPAINT": 200,
-    "ADANIENT": 250, "TATASTEEL": 3375, "NTPC": 1350, "POWERGRID": 2700,
-    "ONGC": 3075, "JSWSTEEL": 675, "M&M": 350, "BAJAJFINSV": 500,
-    "ULTRACEMCO": 50, "NESTLEIND": 50,
+    "KOTAKBANK": 2000, "ITC": 1600, "LT": 175, "AXISBANK": 625,
+    "BAJFINANCE": 750, "WIPRO": 3000, "HCLTECH": 350, "MARUTI": 50,
+    "TMPV": 800, "SUNPHARMA": 350, "TITAN": 175, "ASIANPAINT": 250,
+    "ADANIENT": 309, "TATASTEEL": 5500, "NTPC": 1500, "POWERGRID": 1900,
+    "ONGC": 2250, "JSWSTEEL": 675, "M&M": 200, "BAJAJFINSV": 250,
+    "ULTRACEMCO": 50, "NESTLEIND": 500, "DRREDDY": 625, "CIPLA": 375,
+    "DIVISLAB": 100, "HEROMOTOCO": 150, "HINDALCO": 700, "TATACONSUM": 550,
+    "TATAPOWER": 1450, "EICHERMOT": 100, "INDIGO": 150, "DLF": 825,
+    "APOLLOHOSP": 125, "BRITANNIA": 125, "COALINDIA": 1350, "GRASIM": 250,
+    "HAL": 150, "HAVELLS": 500, "LICI": 700, "PNB": 8000,
+    "INDUSINDBK": 700, "SBILIFE": 375, "TECHM": 600, "TRENT": 100,
+    "BAJAJ-AUTO": 75, "BPCL": 1975, "ETERNAL": 2425,
 }
 
 
@@ -127,10 +135,10 @@ def get_lot_sizes(force_refresh=False):
         if age_hrs < _LOT_SIZE_CACHE_HOURS:
             return _lot_size_cache
 
-    # Try NSE archive CSV
+    # Try NSE archive CSV (nsearchives works; archives.nseindia returns PDF now)
     nse_urls = [
-        "https://archives.nseindia.com/content/fo/fo_mktlots.csv",
         "https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv",
+        "https://archives.nseindia.com/content/fo/fo_mktlots.csv",
     ]
     for url in nse_urls:
         try:
@@ -140,6 +148,9 @@ def get_lot_sizes(force_refresh=False):
             })
             resp = urllib.request.urlopen(req, timeout=15)
             raw = resp.read().decode("utf-8", errors="replace")
+            if raw.startswith("%PDF"):
+                print(f"[Breeze Bridge] Skipping {url} — returned a PDF, not CSV")
+                continue
             sizes = _parse_nse_csv(raw)
             if sizes and len(sizes) >= 10:
                 _lot_size_cache = sizes
