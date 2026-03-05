@@ -621,17 +621,102 @@ export class TradeService {
     return order;
   }
 
-  async listPositions(userId: string) {
+  async listPositions(userId: string, strategyTag?: string) {
     const portfolios = await this.prisma.portfolio.findMany({
       where: { userId },
       select: { id: true },
     });
     const portfolioIds = portfolios.map((p) => p.id);
 
+    const where: any = { portfolioId: { in: portfolioIds }, status: 'OPEN' };
+    if (strategyTag) where.strategyTag = strategyTag;
+
     return this.prisma.position.findMany({
-      where: { portfolioId: { in: portfolioIds }, status: 'OPEN' },
+      where,
       orderBy: { openedAt: 'desc' },
     });
+  }
+
+  async listActiveStrategies(userId: string) {
+    const portfolios = await this.prisma.portfolio.findMany({
+      where: { userId },
+      select: { id: true },
+    });
+    const portfolioIds = portfolios.map((p) => p.id);
+
+    const positions = await this.prisma.position.findMany({
+      where: {
+        portfolioId: { in: portfolioIds },
+        status: 'OPEN',
+        strategyTag: { not: null },
+      },
+      orderBy: { openedAt: 'desc' },
+    });
+
+    const grouped: Record<string, {
+      strategyTag: string;
+      legs: typeof positions;
+      totalPnl: number;
+      deployedAt: Date;
+    }> = {};
+
+    for (const pos of positions) {
+      const tag = pos.strategyTag!;
+      if (!grouped[tag]) {
+        grouped[tag] = { strategyTag: tag, legs: [], totalPnl: 0, deployedAt: pos.openedAt };
+      }
+      grouped[tag].legs.push(pos);
+      grouped[tag].totalPnl += Number(pos.unrealizedPnl ?? 0) + Number(pos.realizedPnl ?? 0);
+      if (pos.openedAt < grouped[tag].deployedAt) {
+        grouped[tag].deployedAt = pos.openedAt;
+      }
+    }
+
+    return Object.values(grouped);
+  }
+
+  async exitStrategyLegs(userId: string, positionIds: string[]) {
+    const results: { positionId: string; success: boolean; message: string; pnl?: number }[] = [];
+
+    for (const posId of positionIds) {
+      try {
+        const position = await this.getPosition(posId, userId);
+        if (position.status !== 'OPEN') {
+          results.push({ positionId: posId, success: false, message: 'Already closed' });
+          continue;
+        }
+
+        let exitPrice = 0;
+        try {
+          const quote = await this.marketData.getQuote(position.symbol, position.exchange);
+          exitPrice = quote.ltp;
+        } catch { /* fallback */ }
+
+        if (exitPrice <= 0) {
+          results.push({ positionId: posId, success: false, message: 'No price available' });
+          continue;
+        }
+
+        const trade = await this.closePosition(posId, userId, exitPrice);
+        results.push({
+          positionId: posId,
+          success: true,
+          message: `${position.side === 'SHORT' ? 'Covered' : 'Sold'} ${position.qty} ${position.symbol} @ ₹${exitPrice.toFixed(2)}`,
+          pnl: Number(trade.netPnl),
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        results.push({ positionId: posId, success: false, message: msg });
+      }
+    }
+
+    const totalPnl = results.filter(r => r.pnl != null).reduce((s, r) => s + (r.pnl ?? 0), 0);
+    return {
+      closed: results.filter(r => r.success).length,
+      failed: results.filter(r => !r.success).length,
+      totalPnl,
+      results,
+    };
   }
 
   async getPosition(positionId: string, userId: string) {

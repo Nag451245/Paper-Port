@@ -686,6 +686,7 @@ export default function TradingTerminal() {
                           <th className="text-right pb-2 font-medium">LTP</th>
                           <th className="text-right pb-2 font-medium">Unrealized P&L</th>
                           <th className="text-right pb-2 font-medium">Realized P&L</th>
+                          <th className="text-left pb-2 font-medium hidden md:table-cell">Strategy</th>
                           <th className="text-right pb-2 font-medium hidden sm:table-cell">Opened</th>
                           <th className="text-center pb-2 font-medium">Action</th>
                         </tr>
@@ -717,6 +718,15 @@ export default function TradingTerminal() {
                               </td>
                               <td className={`py-2.5 text-right font-mono ${rPnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                                 {rPnl >= 0 ? '+' : ''}₹{rPnl.toFixed(2)}
+                              </td>
+                              <td className="py-2.5 text-left hidden md:table-cell">
+                                {(pos.strategyTag ?? pos.strategy_tag) ? (
+                                  <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-violet-50 text-violet-600 border border-violet-100">
+                                    {(pos.strategyTag ?? pos.strategy_tag)?.replace('STRAT:', '').replace('BOT:', '')}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-300">—</span>
+                                )}
                               </td>
                               <td className="py-2.5 text-right text-slate-400 hidden sm:table-cell">{fmtTime(pos.openedAt ?? pos.opened_at)}</td>
                               <td className="py-2.5 text-center">

@@ -533,6 +533,21 @@ export default function StrategyBuilder() {
     })();
   }, []);
 
+  // Deployed strategies
+  const [deployedStrategies, setDeployedStrategies] = useState<any[]>([]);
+  const [showDeployed, setShowDeployed] = useState(true);
+  const [exitingLegs, setExitingLegs] = useState<Set<string>>(new Set());
+  const [selectedLegs, setSelectedLegs] = useState<Set<string>>(new Set());
+
+  const fetchDeployedStrategies = useCallback(async () => {
+    try {
+      const { data } = await tradingApi.listStrategies();
+      setDeployedStrategies(Array.isArray(data) ? data : []);
+    } catch { /* silent */ }
+  }, []);
+
+  useEffect(() => { fetchDeployedStrategies(); }, [fetchDeployedStrategies]);
+
   // UI toggles
   const [showChain, setShowChain] = useState(false);
   const [showTemplateDropdown, setShowTemplateDropdown] = useState(false);
@@ -1262,6 +1277,7 @@ export default function StrategyBuilder() {
                             setExecResult({ ok: false, msg: `${d.filled} filled, ${d.pending} pending, ${d.failed} failed` });
                           } else {
                             setExecResult({ ok: true, msg: `Strategy deployed: ${d.filled} filled, ${d.pending} pending` });
+                            fetchDeployedStrategies();
                           }
                         } catch (err: any) {
                           setExecResult({ ok: false, msg: err?.response?.data?.error || err?.message || 'Execution failed' });
@@ -1389,6 +1405,167 @@ export default function StrategyBuilder() {
           </div>
         </div>
       </div>
+
+      {/* ── Deployed Strategies ──────────────────────────────────────── */}
+      {deployedStrategies.length > 0 && (
+        <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm">
+          <button
+            onClick={() => setShowDeployed(!showDeployed)}
+            className="w-full flex items-center justify-between p-4 hover:bg-slate-50/50 transition rounded-2xl"
+          >
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-purple-500 flex items-center justify-center">
+                <Layers className="w-3.5 h-3.5 text-white" />
+              </div>
+              <h2 className="text-sm font-semibold text-slate-700">Deployed Strategies</h2>
+              <span className="text-[10px] font-bold bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full">{deployedStrategies.length}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              {showDeployed ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
+            </div>
+          </button>
+
+          {showDeployed && (
+            <div className="px-4 pb-4 space-y-3">
+              {deployedStrategies.map((strat: any, si: number) => {
+                const legs = strat.legs || [];
+                const stratLegsSelected = legs.filter((l: any) => selectedLegs.has(l.id));
+                const allSelected = stratLegsSelected.length === legs.length && legs.length > 0;
+                return (
+                  <div key={si} className="border border-slate-200 rounded-xl overflow-hidden">
+                    <div className="flex items-center justify-between p-3 bg-slate-50">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-slate-700">{strat.strategyTag?.replace('STRAT:', '') || 'Strategy'}</span>
+                        <span className="text-[10px] text-slate-400">{legs.length} legs</span>
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${strat.totalPnl >= 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}`}>
+                          P&L: {strat.totalPnl >= 0 ? '+' : ''}₹{Number(strat.totalPnl || 0).toFixed(0)}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {stratLegsSelected.length > 0 && (
+                          <button
+                            onClick={async () => {
+                              const ids = Array.from(selectedLegs).filter(id => legs.some((l: any) => l.id === id));
+                              if (!ids.length) return;
+                              if (!confirm(`Exit ${ids.length} selected leg(s)?`)) return;
+                              setExitingLegs(prev => { const n = new Set(prev); ids.forEach(id => n.add(id)); return n; });
+                              try {
+                                await tradingApi.exitLegs(ids);
+                                setSelectedLegs(prev => { const n = new Set(prev); ids.forEach(id => n.delete(id)); return n; });
+                                await fetchDeployedStrategies();
+                              } catch { /* */ }
+                              setExitingLegs(prev => { const n = new Set(prev); ids.forEach(id => n.delete(id)); return n; });
+                            }}
+                            className="text-[10px] font-bold px-2 py-1 bg-amber-50 text-amber-700 border border-amber-200 rounded hover:bg-amber-100 transition"
+                          >
+                            Exit {stratLegsSelected.length} Leg{stratLegsSelected.length > 1 ? 's' : ''}
+                          </button>
+                        )}
+                        <button
+                          onClick={async () => {
+                            if (!confirm(`Exit ALL ${legs.length} legs of ${strat.strategyTag?.replace('STRAT:', '') || 'strategy'}?`)) return;
+                            const ids = legs.map((l: any) => l.id);
+                            setExitingLegs(prev => { const n = new Set(prev); ids.forEach((id: string) => n.add(id)); return n; });
+                            try {
+                              await tradingApi.exitAllLegs(strat.strategyTag);
+                              await fetchDeployedStrategies();
+                            } catch { /* */ }
+                            setExitingLegs(new Set());
+                          }}
+                          className="text-[10px] font-bold px-2 py-1 bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100 transition"
+                        >
+                          Exit All
+                        </button>
+                      </div>
+                    </div>
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-slate-400 border-b border-slate-100 bg-white">
+                          <th className="text-center pb-1.5 pt-2 w-8">
+                            <input
+                              type="checkbox"
+                              checked={allSelected}
+                              onChange={() => {
+                                if (allSelected) {
+                                  setSelectedLegs(prev => { const n = new Set(prev); legs.forEach((l: any) => n.delete(l.id)); return n; });
+                                } else {
+                                  setSelectedLegs(prev => { const n = new Set(prev); legs.forEach((l: any) => n.add(l.id)); return n; });
+                                }
+                              }}
+                              className="rounded border-slate-300"
+                            />
+                          </th>
+                          <th className="text-left pb-1.5 font-medium">Symbol</th>
+                          <th className="text-center pb-1.5 font-medium">Side</th>
+                          <th className="text-right pb-1.5 font-medium">Qty</th>
+                          <th className="text-right pb-1.5 font-medium">Entry</th>
+                          <th className="text-right pb-1.5 font-medium">P&L</th>
+                          <th className="text-center pb-1.5 font-medium">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {legs.map((leg: any) => {
+                          const pnl = Number(leg.unrealizedPnl ?? 0) + Number(leg.realizedPnl ?? 0);
+                          const isExiting = exitingLegs.has(leg.id);
+                          return (
+                            <tr key={leg.id} className="border-b border-slate-50 hover:bg-slate-50/50">
+                              <td className="py-2 text-center">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedLegs.has(leg.id)}
+                                  onChange={() => setSelectedLegs(prev => {
+                                    const n = new Set(prev);
+                                    n.has(leg.id) ? n.delete(leg.id) : n.add(leg.id);
+                                    return n;
+                                  })}
+                                  className="rounded border-slate-300"
+                                />
+                              </td>
+                              <td className="py-2 text-slate-800 font-medium">{leg.symbol}</td>
+                              <td className="py-2 text-center">
+                                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${leg.side === 'LONG' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}`}>
+                                  {leg.side}
+                                </span>
+                              </td>
+                              <td className="py-2 text-right font-mono text-slate-600">{leg.qty}</td>
+                              <td className="py-2 text-right font-mono text-slate-600">₹{Number(leg.avgEntryPrice ?? leg.avg_entry_price ?? 0).toFixed(2)}</td>
+                              <td className={`py-2 text-right font-mono ${pnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                                {pnl >= 0 ? '+' : ''}₹{pnl.toFixed(0)}
+                              </td>
+                              <td className="py-2 text-center">
+                                <button
+                                  disabled={isExiting}
+                                  onClick={async () => {
+                                    if (!confirm(`Exit ${leg.symbol} (${leg.side}, ${leg.qty} qty)?`)) return;
+                                    setExitingLegs(prev => new Set(prev).add(leg.id));
+                                    try {
+                                      await tradingApi.exitLegs([leg.id]);
+                                      await fetchDeployedStrategies();
+                                    } catch { /* */ }
+                                    setExitingLegs(prev => { const n = new Set(prev); n.delete(leg.id); return n; });
+                                  }}
+                                  className={`text-[10px] font-bold px-2 py-1 rounded transition ${
+                                    isExiting ? 'bg-slate-100 text-slate-400' :
+                                    leg.side === 'SHORT'
+                                      ? 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'
+                                      : 'bg-red-50 text-red-600 hover:bg-red-100'
+                                  }`}
+                                >
+                                  {isExiting ? '...' : leg.side === 'SHORT' ? 'COVER' : 'EXIT'}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Collapsible Option Chain ──────────────────────────────────── */}
       <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm">

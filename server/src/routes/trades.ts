@@ -136,8 +136,60 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/positions', async (request, reply) => {
     const userId = getUserId(request);
-    const positions = await service.listPositions(userId);
+    const query = request.query as { strategy_tag?: string };
+    const positions = await service.listPositions(userId, query.strategy_tag);
     return reply.send(positions);
+  });
+
+  app.get('/strategies', async (request, reply) => {
+    const userId = getUserId(request);
+    const strategies = await service.listActiveStrategies(userId);
+    return reply.send(strategies);
+  });
+
+  app.post('/strategies/exit-legs', async (request, reply) => {
+    const exitSchema = z.object({
+      position_ids: z.array(z.string().uuid()).min(1).max(20),
+    });
+
+    const parsed = exitSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
+    }
+
+    try {
+      const userId = getUserId(request);
+      const result = await service.exitStrategyLegs(userId, parsed.data.position_ids);
+      return reply.send(result);
+    } catch (err) {
+      if (err instanceof TradeError) return reply.code(err.statusCode).send({ error: err.message });
+      throw err;
+    }
+  });
+
+  app.post('/strategies/exit-all', async (request, reply) => {
+    const exitAllSchema = z.object({
+      strategy_tag: z.string().min(1),
+    });
+
+    const parsed = exitAllSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
+    }
+
+    try {
+      const userId = getUserId(request);
+      const positions = await service.listPositions(userId, parsed.data.strategy_tag);
+      if (positions.length === 0) {
+        return reply.code(404).send({ error: 'No open positions for this strategy' });
+      }
+      const positionIds = positions.map(p => p.id);
+      const result = await service.exitStrategyLegs(userId, positionIds);
+      return reply.send({ ...result, strategyTag: parsed.data.strategy_tag });
+    } catch (err) {
+      if (err instanceof TradeError) return reply.code(err.statusCode).send({ error: err.message });
+      throw err;
+    }
   });
 
   app.get('/positions/:positionId', async (request, reply) => {

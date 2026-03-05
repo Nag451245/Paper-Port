@@ -123,6 +123,15 @@ export const tradingApi = {
   }) =>
     api.post('/trades/execute-strategy', data),
 
+  listStrategies: () =>
+    api.get('/trades/strategies'),
+
+  exitLegs: (positionIds: string[]) =>
+    api.post('/trades/strategies/exit-legs', { position_ids: positionIds }),
+
+  exitAllLegs: (strategyTag: string) =>
+    api.post('/trades/strategies/exit-all', { strategy_tag: strategyTag }),
+
   listTrades: (params?: { page?: number; limit?: number; from_date?: string; to_date?: string; symbol?: string }) =>
     api.get('/trades/trades', { params }),
 };
