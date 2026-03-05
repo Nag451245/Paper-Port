@@ -25,11 +25,34 @@ import urllib.request
 import csv
 import io
 
+import threading
+
 breeze_instance = None
 session_expiry = None
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_FILE = os.path.join(SCRIPT_DIR, ".breeze_session.json")
 LOT_SIZE_FILE = os.path.join(SCRIPT_DIR, ".lot_sizes.json")
+
+# In-memory response cache to avoid hammering Breeze API
+_response_cache = {}
+_response_cache_lock = threading.Lock()
+CACHE_TTL_SECONDS = 8
+
+
+def _cache_get(key):
+    with _response_cache_lock:
+        entry = _response_cache.get(key)
+        if entry and (datetime.now() - entry["at"]).total_seconds() < CACHE_TTL_SECONDS:
+            return entry["data"]
+    return None
+
+
+def _cache_set(key, data):
+    with _response_cache_lock:
+        _response_cache[key] = {"data": data, "at": datetime.now()}
+        if len(_response_cache) > 50:
+            oldest = min(_response_cache, key=lambda k: _response_cache[k]["at"])
+            del _response_cache[oldest]
 
 PI = 3.141592653589793
 RISK_FREE_RATE = 0.07
@@ -333,6 +356,12 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
     if not breeze_instance:
         return {"error": "Breeze session not initialized", "strikes": []}
 
+    cache_key = f"oc:{symbol}:{expiry}:{right_filter}"
+    cached = _cache_get(cache_key)
+    if cached:
+        print(f"[Breeze Bridge] Cache hit for {cache_key}")
+        return cached
+
     try:
         all_strikes = {}
         spot_price = 0.0
@@ -511,7 +540,7 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
         sym_upper = symbol.upper()
         lot = lot_sizes.get(sym_upper, FALLBACK_LOT_SIZES.get(sym_upper, 0))
 
-        return {
+        result = {
             "symbol": sym_upper,
             "expiry": expiry or (sorted(expiry_dates)[0] if expiry_dates else ""),
             "underlyingValue": spot_price,
@@ -525,6 +554,8 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
             "lotSize": lot,
             "source": "breeze-python",
         }
+        _cache_set(cache_key, result)
+        return result
     except Exception as e:
         print(f"[Breeze Bridge] get_option_chain error: {e}")
         return {"error": str(e), "strikes": []}
@@ -551,6 +582,11 @@ def _guess_strike(symbol):
 def get_expiries(symbol):
     if not breeze_instance:
         return {"error": "Breeze session not initialized", "expiries": []}
+
+    cache_key = f"exp:{symbol}"
+    cached = _cache_get(cache_key)
+    if cached:
+        return cached
 
     try:
         sym = symbol.upper()
@@ -584,7 +620,9 @@ def get_expiries(symbol):
                     expiry_set.add(date_str)
 
         print(f"[Breeze Bridge] Expiries {sym}: {len(expiry_set)} found")
-        return {"expiries": sorted(expiry_set)}
+        result = {"expiries": sorted(expiry_set)}
+        _cache_set(cache_key, result)
+        return result
     except Exception as e:
         print(f"[Breeze Bridge] get_expiries error for {symbol}: {e}")
         return {"expiries": [], "error": str(e)}
@@ -707,6 +745,7 @@ if __name__ == "__main__":
 
     class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
         daemon_threads = True
+        request_queue_size = 10
 
     server = ThreadedHTTPServer(("127.0.0.1", port), BreezeHandler)
     print(f"[Breeze Bridge] Ready (threaded). Session active: {breeze_instance is not None}")

@@ -541,6 +541,7 @@ export default function StrategyBuilder() {
   // Auto-refresh & meta
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const fetchingRef = useRef(false);
 
   // ATM strike
   const atmStrike = useMemo(() => findATM(chain, spotPrice), [chain, spotPrice]);
@@ -598,6 +599,8 @@ export default function StrategyBuilder() {
     if (!symbol) return;
     if (sessionError) return;
     if (!selectedExpiry) return;
+    if (fetchingRef.current) return;
+    fetchingRef.current = true;
     if (!silent) setChainLoading(true);
     try {
       const [chainRes, quoteRes] = await Promise.allSettled([
@@ -642,6 +645,7 @@ export default function StrategyBuilder() {
       }
       setLastUpdated(new Date());
     } catch { /* silent */ }
+    fetchingRef.current = false;
     if (!silent) setChainLoading(false);
   }, [symbol, selectedExpiry, spotPrice, sessionError]);
 
@@ -650,7 +654,7 @@ export default function StrategyBuilder() {
   // ── Auto-refresh ────────────────────────────────────────────────────────
   useEffect(() => {
     const schedule = () => {
-      const interval = isMarketOpen() ? 2000 : 5 * 60_000;
+      const interval = isMarketOpen() ? 15_000 : 5 * 60_000;
       timerRef.current = setTimeout(() => { fetchChain(true); schedule(); }, interval);
     };
     schedule();
