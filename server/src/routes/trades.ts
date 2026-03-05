@@ -261,7 +261,7 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
             qty: leg.qty,
             price: leg.premium && leg.premium > 0 ? leg.premium : undefined,
             instrumentToken: `${symbol}-NFO-${leg.strike}-${leg.type}`,
-            exchange: 'NSE',
+            exchange: 'NFO',
             strategyTag: tag,
           });
           results.push({ leg: i + 1, order });

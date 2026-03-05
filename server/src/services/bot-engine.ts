@@ -782,7 +782,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
             orderType: 'MARKET',
             qty,
             instrumentToken: `${symbol}-NFO-${leg.strike}-${leg.type}`,
-            exchange: 'NSE',
+            exchange: 'NFO',
             strategyTag: tag,
           }, true);
           filled++;

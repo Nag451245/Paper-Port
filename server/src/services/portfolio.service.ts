@@ -65,7 +65,11 @@ export class PortfolioService {
 
     for (const pos of openPositions) {
       const entryPrice = Number(pos.avgEntryPrice);
-      investedValue += entryPrice * pos.qty;
+      if (pos.side === 'LONG') {
+        investedValue += entryPrice * pos.qty;
+      }
+      // SHORT positions: no capital invested (premium received, margin blocked)
+      // Their value is tracked via unrealizedPnl only
 
       let ltp = 0;
       try {
@@ -311,13 +315,15 @@ export class PortfolioService {
     });
 
     let lockedCapital = 0;
+    let shortPremiumReceived = 0;
     for (const pos of openPositions) {
       const entryPrice = Number(pos.avgEntryPrice);
       if (pos.side === 'LONG') {
         lockedCapital += entryPrice * pos.qty;
       } else {
-        // SHORT margin: 25% blocked
+        // SHORT: margin blocked but premium was received
         lockedCapital += entryPrice * pos.qty * 0.25;
+        shortPremiumReceived += entryPrice * pos.qty;
       }
     }
 
@@ -326,10 +332,10 @@ export class PortfolioService {
       .filter(o => o.side === 'BUY')
       .reduce((sum, o) => sum + Number(o.totalCost), 0);
     const closedTradeCosts = allTrades.reduce((sum, t) => sum + Number(t.totalCosts), 0);
-    // Costs on open positions ≈ total BUY costs - costs already accounted in closed trades
     const openCosts = Math.max(0, openPositionBuyCosts - closedTradeCosts);
 
-    const correctCash = initialCapital + totalRealizedPnl - lockedCapital - openCosts;
+    // For SHORT: cash = initial + realized + premium received - margin blocked - costs
+    const correctCash = initialCapital + totalRealizedPnl + shortPremiumReceived - lockedCapital - openCosts;
 
     await this.prisma.portfolio.update({
       where: { id: portfolioId },

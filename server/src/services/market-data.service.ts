@@ -28,6 +28,21 @@ const FETCH_TIMEOUT_MS = 10_000;
 const BREEZE_TIMEOUT_MS = 20_000;
 const BREEZE_BRIDGE_URL = process.env.BREEZE_BRIDGE_URL || 'http://127.0.0.1:8001';
 
+// Parse F&O option symbol like NIFTY20260310248000CE → { underlying: 'NIFTY', expiry: '2026-03-10', strike: 24800, type: 'CE' }
+const FNO_SYMBOL_REGEX = /^([A-Z]+?)(\d{4})(\d{2})(\d{2})(\d+)(CE|PE)$/;
+
+function parseOptionSymbol(symbol: string): { underlying: string; expiry: string; strike: number; type: 'CE' | 'PE' } | null {
+  const match = symbol.toUpperCase().match(FNO_SYMBOL_REGEX);
+  if (!match) return null;
+  const [, underlying, year, month, day, strikeStr, type] = match;
+  return {
+    underlying,
+    expiry: `${year}-${month}-${day}`,
+    strike: parseInt(strikeStr, 10),
+    type: type as 'CE' | 'PE',
+  };
+}
+
 // Cache a live BreezeConnect instance to avoid re-exchanging session on every call
 let breezeInstance: any = null;
 let breezeInstanceExpiry = 0;
@@ -294,6 +309,17 @@ export class MarketDataService {
     if (this.cache) {
       const cached = await this.cache.get<MarketQuote>(cacheKey);
       if (cached && cached.ltp > 0) return cached;
+    }
+
+    // F&O option symbol detection (e.g. NIFTY20260310248000CE)
+    const optionInfo = parseOptionSymbol(symbol);
+    if (optionInfo || exchange === 'NFO') {
+      const fnoQuote = await this.fetchFnOQuote(symbol, optionInfo);
+      if (fnoQuote && fnoQuote.ltp > 0) {
+        if (this.cache) await this.cache.set(cacheKey, fnoQuote, CACHE_TTL_QUOTE);
+        return fnoQuote;
+      }
+      return fnoQuote ?? this.emptyQuote(symbol, exchange);
     }
 
     if (exchange === 'MCX') {
@@ -1572,6 +1598,71 @@ export class MarketDataService {
       bidQty: Math.floor(Math.random() * 500) + 50, askQty: Math.floor(Math.random() * 500) + 50,
       timestamp: new Date().toISOString(),
     };
+  }
+
+  private async fetchFnOQuote(
+    symbol: string,
+    parsed: { underlying: string; expiry: string; strike: number; type: 'CE' | 'PE' } | null,
+  ): Promise<MarketQuote | null> {
+    if (!parsed) return null;
+
+    try {
+      const bridgeActive = await this.ensureBreezeBridgeSession();
+      if (!bridgeActive) {
+        console.log(`[FnOQuote] Bridge not active for ${symbol}`);
+        return null;
+      }
+
+      const bridgeUrl = `${BREEZE_BRIDGE_URL}/option-chain/${encodeURIComponent(parsed.underlying)}?expiry=${encodeURIComponent(parsed.expiry)}`;
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 15_000);
+      const res = await fetch(bridgeUrl, { signal: ac.signal });
+      clearTimeout(timer);
+
+      if (!res.ok) return null;
+
+      const data = await res.json() as any;
+      if (!data.strikes || !Array.isArray(data.strikes)) return null;
+
+      // Bridge returns strikes with callLTP/putLTP, callOI/putOI, etc.
+      for (const s of data.strikes) {
+        if (s.strike !== parsed.strike) continue;
+
+        const isCall = parsed.type === 'CE';
+        const ltp = isCall ? s.callLTP : s.putLTP;
+        if (!ltp || ltp <= 0) continue;
+
+        const netChange = isCall ? (s.callNetChange ?? 0) : (s.putNetChange ?? 0);
+        const prevClose = ltp - netChange;
+        const changePct = prevClose > 0 ? (netChange / prevClose) * 100 : 0;
+
+        console.log(`[FnOQuote] ${symbol}: LTP=₹${ltp}, change=${netChange}`);
+
+        return {
+          symbol,
+          exchange: 'NFO',
+          ltp,
+          change: netChange,
+          changePercent: changePct,
+          open: 0,
+          high: 0,
+          low: 0,
+          close: prevClose > 0 ? prevClose : ltp,
+          volume: isCall ? (s.callVolume ?? 0) : (s.putVolume ?? 0),
+          bidPrice: isCall ? (s.callBidPrice ?? 0) : (s.putBidPrice ?? 0),
+          askPrice: isCall ? (s.callAskPrice ?? 0) : (s.putAskPrice ?? 0),
+          bidQty: 0,
+          askQty: 0,
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      console.log(`[FnOQuote] ${symbol}: strike ${parsed.strike} not found in chain (${data.strikes.length} strikes)`);
+    } catch (err) {
+      console.log(`[FnOQuote] Failed to fetch ${symbol}: ${(err as Error).message}`);
+    }
+
+    return null;
   }
 
   private emptyQuote(symbol: string, exchange: string): MarketQuote {
