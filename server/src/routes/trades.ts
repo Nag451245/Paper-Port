@@ -169,6 +169,76 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
+  // Execute a multi-leg options strategy
+  app.post('/execute-strategy', async (request, reply) => {
+    const strategySchema = z.object({
+      portfolio_id: z.string().uuid(),
+      symbol: z.string().min(1),
+      expiry: z.string().min(1),
+      strategy_name: z.string().optional(),
+      legs: z.array(z.object({
+        type: z.enum(['CE', 'PE']),
+        strike: z.number().positive(),
+        action: z.enum(['BUY', 'SELL']),
+        qty: z.number().int().positive(),
+        premium: z.number().min(0).optional(),
+      })).min(1).max(10),
+    });
+
+    const parsed = strategySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
+    }
+
+    try {
+      const userId = getUserId(request);
+      const { portfolio_id, symbol, expiry, strategy_name, legs } = parsed.data;
+      const tag = strategy_name ? `STRAT:${strategy_name}` : 'STRATEGY';
+
+      const results: { leg: number; order: any; error?: string }[] = [];
+
+      for (let i = 0; i < legs.length; i++) {
+        const leg = legs[i];
+        const optSymbol = `${symbol}${expiry.replace(/-/g, '')}${leg.strike}${leg.type}`;
+        try {
+          const order = await service.placeOrder(userId, {
+            portfolioId: portfolio_id,
+            symbol: optSymbol,
+            side: leg.action,
+            orderType: 'MARKET',
+            qty: leg.qty,
+            price: leg.premium && leg.premium > 0 ? leg.premium : undefined,
+            instrumentToken: `${symbol}-NFO-${leg.strike}-${leg.type}`,
+            exchange: 'NSE',
+            strategyTag: tag,
+          });
+          results.push({ leg: i + 1, order });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          results.push({ leg: i + 1, order: null, error: msg });
+        }
+      }
+
+      const filled = results.filter(r => r.order?.status === 'FILLED').length;
+      const pending = results.filter(r => r.order?.status === 'PENDING').length;
+      const failed = results.filter(r => r.error).length;
+
+      return reply.code(201).send({
+        strategy: strategy_name || 'Custom',
+        symbol,
+        expiry,
+        totalLegs: legs.length,
+        filled,
+        pending,
+        failed,
+        results,
+      });
+    } catch (err) {
+      if (err instanceof TradeError) return reply.code(err.statusCode).send({ error: err.message });
+      throw err;
+    }
+  });
+
   app.get('/trades', async (request, reply) => {
     const query = request.query as { page?: string; limit?: string; from_date?: string; to_date?: string; symbol?: string };
     const userId = getUserId(request);

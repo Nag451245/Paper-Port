@@ -34,7 +34,7 @@ import {
   BookOpen,
   AlertTriangle,
 } from 'lucide-react';
-import api, { marketApi, optionsApi } from '@/services/api';
+import api, { marketApi, optionsApi, tradingApi, portfolioApi } from '@/services/api';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -517,6 +517,21 @@ export default function StrategyBuilder() {
   const [payoff, setPayoff] = useState<PayoffResult | null>(null);
   const [loadingPayoff, setLoadingPayoff] = useState(false);
   const [lotSize, setLotSize] = useState(25);
+
+  // Strategy execution
+  const [executing, setExecuting] = useState(false);
+  const [execResult, setExecResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [portfolioId, setPortfolioId] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await portfolioApi.list();
+        const list = data as any;
+        if (Array.isArray(list) && list.length > 0) setPortfolioId(list[0].id);
+      } catch { /* silent */ }
+    })();
+  }, []);
 
   // UI toggles
   const [showChain, setShowChain] = useState(false);
@@ -1221,6 +1236,48 @@ export default function StrategyBuilder() {
                       <p className="text-xs font-bold font-mono text-slate-700">
                         {payoff.breakevens.map(b => b.toLocaleString('en-IN')).join(' | ')}
                       </p>
+                    </div>
+                  )}
+
+                  {/* Execute Strategy Button */}
+                  {legs.length > 0 && (
+                    <button
+                      onClick={async () => {
+                        if (executing) return;
+                        if (!confirm(`Execute ${legs.length}-leg strategy on ${symbol} (${selectedExpiry})?\n\nThis will place ${legs.length} orders in your portfolio.`)) return;
+                        setExecuting(true);
+                        setExecResult(null);
+                        try {
+                          const pId = portfolioId;
+                          if (!pId) { setExecResult({ ok: false, msg: 'No portfolio found. Go to Settings to create one.' }); setExecuting(false); return; }
+                          const { data } = await tradingApi.executeStrategy({
+                            portfolio_id: pId,
+                            symbol,
+                            expiry: selectedExpiry,
+                            strategy_name: payoff?.strategyName || undefined,
+                            legs: legs.map(l => ({ type: l.type, strike: l.strike, action: l.action, qty: l.qty, premium: l.premium })),
+                          });
+                          const d = data as any;
+                          if (d.failed > 0) {
+                            setExecResult({ ok: false, msg: `${d.filled} filled, ${d.pending} pending, ${d.failed} failed` });
+                          } else {
+                            setExecResult({ ok: true, msg: `Strategy deployed: ${d.filled} filled, ${d.pending} pending` });
+                          }
+                        } catch (err: any) {
+                          setExecResult({ ok: false, msg: err?.response?.data?.error || err?.message || 'Execution failed' });
+                        }
+                        setExecuting(false);
+                      }}
+                      disabled={executing}
+                      className="mt-2 w-full py-2.5 rounded-lg text-sm font-bold transition flex items-center justify-center gap-2 bg-gradient-to-r from-emerald-600 to-teal-600 text-white hover:from-emerald-500 hover:to-teal-500 shadow-md shadow-emerald-200 disabled:opacity-50"
+                    >
+                      {executing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                      {executing ? 'Placing Orders...' : 'Execute Strategy'}
+                    </button>
+                  )}
+                  {execResult && (
+                    <div className={`mt-2 text-xs font-medium text-center px-3 py-2 rounded-lg ${execResult.ok ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+                      {execResult.msg}
                     </div>
                   )}
                 </div>

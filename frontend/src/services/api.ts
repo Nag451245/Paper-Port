@@ -114,6 +114,15 @@ export const tradingApi = {
   closePosition: (positionId: string, exitPrice: number) =>
     api.post(`/trades/positions/${positionId}/close`, { exit_price: exitPrice }),
 
+  executeStrategy: (data: {
+    portfolio_id: string;
+    symbol: string;
+    expiry: string;
+    strategy_name?: string;
+    legs: { type: 'CE' | 'PE'; strike: number; action: 'BUY' | 'SELL'; qty: number; premium?: number }[];
+  }) =>
+    api.post('/trades/execute-strategy', data),
+
   listTrades: (params?: { page?: number; limit?: number; from_date?: string; to_date?: string; symbol?: string }) =>
     api.get('/trades/trades', { params }),
 };

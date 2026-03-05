@@ -736,6 +736,72 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     }
   }
 
+  private async executeMultiLegStrategy(
+    userId: string,
+    symbol: string,
+    strategyName: string,
+    legs: { type: string; strike: number; action: string; qty?: number }[],
+    botId?: string,
+  ): Promise<{ success: boolean; message: string }> {
+    try {
+      const portfolio = await this.prisma.portfolio.findFirst({ where: { userId } });
+      if (!portfolio) return { success: false, message: 'No portfolio found' };
+
+      const tag = `BOT:${strategyName}`;
+      let filled = 0;
+      let failed = 0;
+
+      // Get lot size for the underlying
+      const lotSize = await this.getLotSizeForSymbol(symbol);
+
+      for (const leg of legs) {
+        const qty = (leg.qty || 1) * lotSize;
+        const optSymbol = `${symbol}${leg.strike}${leg.type}`;
+        try {
+          await this.tradeService.placeOrder(userId, {
+            portfolioId: portfolio.id,
+            symbol: optSymbol,
+            side: leg.action as 'BUY' | 'SELL',
+            orderType: 'MARKET',
+            qty,
+            instrumentToken: `${symbol}-NFO-${leg.strike}-${leg.type}`,
+            exchange: 'NSE',
+            strategyTag: tag,
+          }, true);
+          filled++;
+        } catch {
+          failed++;
+        }
+      }
+
+      if (botId) {
+        await this.updateBotTradeStats(botId, 0);
+      }
+
+      if (failed === 0) {
+        return { success: true, message: `${strategyName}: ${filled} legs placed for ${symbol}` };
+      }
+      return { success: filled > 0, message: `${strategyName}: ${filled} filled, ${failed} failed` };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { success: false, message: msg };
+    }
+  }
+
+  private async getLotSizeForSymbol(symbol: string): Promise<number> {
+    try {
+      const res = await fetch(`http://127.0.0.1:8001/lot-size/${encodeURIComponent(symbol)}`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (res.ok) {
+        const data = await res.json() as any;
+        if (data.lotSize > 0) return data.lotSize;
+      }
+    } catch { /* fallback */ }
+    const defaults: Record<string, number> = { NIFTY: 65, BANKNIFTY: 30, FINNIFTY: 60, MIDCPNIFTY: 120 };
+    return defaults[symbol.toUpperCase()] || 50;
+  }
+
   private detectExchange(symbol: string): string {
     const mcxSymbols = ['GOLD', 'GOLDM', 'GOLDPETAL', 'SILVER', 'SILVERM', 'CRUDEOIL', 'NATURALGAS', 'COPPER', 'ZINC', 'LEAD', 'ALUMINIUM', 'NICKEL', 'COTTON', 'MENTHAOIL', 'CASTORSEED'];
     const cdsSymbols = ['USDINR', 'EURINR', 'GBPINR', 'JPYINR', 'AUDINR', 'CADINR', 'CHFINR', 'SGDINR', 'HKDINR', 'CNHINR'];
@@ -1154,8 +1220,13 @@ INSTRUCTIONS:
 
     if (analysis.signals && analysis.signals.length > 0) {
       for (const sig of analysis.signals.slice(0, 5)) {
-        if (sig.confidence >= 0.6 && (sig.direction === 'BUY' || sig.direction === 'SELL')) {
-          const shouldExecute = (bot.role === 'EXECUTOR' || bot.role === 'SCANNER') && sig.confidence >= 0.65;
+        if (sig.confidence < 0.6) continue;
+
+        const isSimple = sig.direction === 'BUY' || sig.direction === 'SELL';
+        const isMultiLeg = !isSimple && sig.legs && Array.isArray(sig.legs) && sig.legs.length > 0;
+        if (!isSimple && !isMultiLeg) continue;
+
+          const shouldExecute = (bot.role === 'EXECUTOR' || bot.role === 'SCANNER' || bot.role === 'FNO_STRATEGIST') && sig.confidence >= 0.65;
 
           const rationale = sig.entry
             ? `${sig.reason} | Entry: ₹${sig.entry} | SL: ₹${sig.stopLoss || 'N/A'} | Target: ₹${sig.target || 'N/A'} | R:R: ${sig.riskReward || 'N/A'}`
@@ -1172,16 +1243,19 @@ INSTRUCTIONS:
               signalType: sig.direction,
               compositeScore: sig.confidence,
               gateScores: JSON.stringify(botGateScores),
-              strategyId: bot.assignedStrategy || null,
-              rationale,
+              strategyId: sig.strategy || bot.assignedStrategy || null,
+              rationale: isMultiLeg
+                ? `${sig.strategy || sig.direction}: ${sig.legs.map((l: any) => `${l.action} ${l.type}@${l.strike}`).join(' + ')} | ${rationale}`
+                : rationale,
               status: shouldExecute ? 'EXECUTED' : 'PENDING',
               executedAt: shouldExecute ? new Date() : null,
               expiresAt: new Date(Date.now() + 4 * 60 * 60_000),
             },
           });
 
-          // Post individual signal as a bot message for visibility
-          const signalMsg = `${sig.direction} ${sig.symbol} @ ₹${sig.entry || '?'} | SL: ₹${sig.stopLoss || '?'} | TGT: ₹${sig.target || '?'} | Confidence: ${(sig.confidence * 100).toFixed(0)}% | ${sig.reason}`;
+          const signalMsg = isMultiLeg
+            ? `${sig.strategy || sig.direction} ${sig.symbol}: ${sig.legs.map((l: any) => `${l.action} ${l.qty || 1}x ${l.type}@${l.strike}`).join(' + ')} | Conf: ${(sig.confidence * 100).toFixed(0)}% | ${sig.reason}`
+            : `${sig.direction} ${sig.symbol} @ ₹${sig.entry || '?'} | SL: ₹${sig.stopLoss || '?'} | TGT: ₹${sig.target || '?'} | Confidence: ${(sig.confidence * 100).toFixed(0)}% | ${sig.reason}`;
           await this.prisma.botMessage.create({
             data: {
               fromBotId: botId,
@@ -1192,15 +1266,20 @@ INSTRUCTIONS:
           });
 
           if (shouldExecute) {
-            const result = await this.executeTrade(userId, sig.symbol, sig.direction as 'BUY' | 'SELL', rationale, botId);
+            let result: { success: boolean; message: string };
+            if (isMultiLeg) {
+              result = await this.executeMultiLegStrategy(userId, sig.symbol, sig.strategy || sig.direction, sig.legs, botId);
+            } else {
+              result = await this.executeTrade(userId, sig.symbol, sig.direction as 'BUY' | 'SELL', rationale, botId);
+            }
             await this.prisma.botMessage.create({
               data: {
                 fromBotId: botId,
                 userId,
                 messageType: result.success ? 'signal' : 'alert',
                 content: result.success
-                  ? `✅ EXECUTED ${sig.direction} ${sig.symbol}: ${result.message}`
-                  : `❌ Failed ${sig.direction} ${sig.symbol}: ${result.message}`,
+                  ? `Executed ${sig.direction} ${sig.symbol}: ${result.message}`
+                  : `Failed ${sig.direction} ${sig.symbol}: ${result.message}`,
               },
             });
           }

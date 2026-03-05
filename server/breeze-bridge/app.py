@@ -378,6 +378,7 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
         spot_price = 0.0
         expiry_dates = set()
         logged_sample = False
+        lot_sizes = get_lot_sizes()
 
         sides = [right_filter] if right_filter else ["call", "put"]
 
@@ -442,14 +443,20 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
                 existing = all_strikes.get(strike, new_strike)
 
                 ltp = _safe_float(rec.get("ltp"))
-                oi = _safe_float(rec.get("open_interest"))
-                volume = _safe_int(rec.get("total_quantity_traded"))
+                oi_raw = _safe_float(rec.get("open_interest"))
+                volume_raw = _safe_int(rec.get("total_quantity_traded"))
                 iv = _safe_float(
                     rec.get("implied_volatility") or rec.get("iv") or rec.get("volatility")
                 )
-                oi_change = _safe_float(
+                oi_change_raw = _safe_float(
                     rec.get("chnge_oi") or rec.get("change_oi") or rec.get("oi_change")
                 )
+
+                # Breeze returns raw quantity; NSE displays contracts (lots)
+                lot = lot_sizes.get(symbol.upper(), FALLBACK_LOT_SIZES.get(symbol.upper(), 1)) or 1
+                oi = int(oi_raw / lot) if lot > 1 else int(oi_raw)
+                volume = int(volume_raw / lot) if lot > 1 else int(volume_raw)
+                oi_change = round(oi_change_raw / lot, 2) if lot > 1 else oi_change_raw
                 prev_close = _safe_float(
                     rec.get("close_price") or rec.get("previous_close") or rec.get("close")
                 )
@@ -547,7 +554,6 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
         )
         print(f"[Breeze Bridge] {symbol} expiry={expiry}: {len(strikes)} total strikes, {active_count} with data, spot={spot_price}")
 
-        lot_sizes = get_lot_sizes()
         sym_upper = symbol.upper()
         lot = lot_sizes.get(sym_upper, FALLBACK_LOT_SIZES.get(sym_upper, 0))
 
