@@ -82,7 +82,7 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
         paths_p25[t] = vals[(0.25 * n as f64) as usize];
         paths_p50[t] = vals[(0.50 * n as f64) as usize];
         paths_p75[t] = vals[(0.75 * n as f64) as usize];
-        paths_p95[t] = vals[(0.95 * n as f64) as usize.min(n - 1)];
+        paths_p95[t] = vals[((0.95 * n as f64) as usize).min(n - 1)];
     }
 
     final_navs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -103,7 +103,7 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
 
     let expected = final_navs.iter().sum::<f64>() / n as f64;
     let prob_loss = final_navs.iter().filter(|&&v| v < config.initial_capital).count() as f64 / n as f64;
-    let max_dd_95 = max_drawdowns[(0.95 * n as f64) as usize.min(n - 1)];
+    let max_dd_95 = max_drawdowns[((0.95 * n as f64) as usize).min(n - 1)];
 
     let wins = returns.iter().filter(|&&r| r > 0.0).count() as f64;
     let win_rate = wins / returns.len() as f64;
