@@ -1245,7 +1245,7 @@ INSTRUCTIONS:
               gateScores: JSON.stringify(botGateScores),
               strategyId: sig.strategy || bot.assignedStrategy || null,
               rationale: isMultiLeg
-                ? `${sig.strategy || sig.direction}: ${sig.legs.map((l: any) => `${l.action} ${l.type}@${l.strike}`).join(' + ')} | ${rationale}`
+                ? `${sig.strategy || sig.direction}: ${sig.legs!.map((l: any) => `${l.action} ${l.type}@${l.strike}`).join(' + ')} | ${rationale}`
                 : rationale,
               status: shouldExecute ? 'EXECUTED' : 'PENDING',
               executedAt: shouldExecute ? new Date() : null,
@@ -1254,7 +1254,7 @@ INSTRUCTIONS:
           });
 
           const signalMsg = isMultiLeg
-            ? `${sig.strategy || sig.direction} ${sig.symbol}: ${sig.legs.map((l: any) => `${l.action} ${l.qty || 1}x ${l.type}@${l.strike}`).join(' + ')} | Conf: ${(sig.confidence * 100).toFixed(0)}% | ${sig.reason}`
+            ? `${sig.strategy || sig.direction} ${sig.symbol}: ${sig.legs!.map((l: any) => `${l.action} ${l.qty || 1}x ${l.type}@${l.strike}`).join(' + ')} | Conf: ${(sig.confidence * 100).toFixed(0)}% | ${sig.reason}`
             : `${sig.direction} ${sig.symbol} @ ₹${sig.entry || '?'} | SL: ₹${sig.stopLoss || '?'} | TGT: ₹${sig.target || '?'} | Confidence: ${(sig.confidence * 100).toFixed(0)}% | ${sig.reason}`;
           await this.prisma.botMessage.create({
             data: {
@@ -1268,7 +1268,7 @@ INSTRUCTIONS:
           if (shouldExecute) {
             let result: { success: boolean; message: string };
             if (isMultiLeg) {
-              result = await this.executeMultiLegStrategy(userId, sig.symbol, sig.strategy || sig.direction, sig.legs, botId);
+              result = await this.executeMultiLegStrategy(userId, sig.symbol, sig.strategy || sig.direction, sig.legs!, botId);
             } else {
               result = await this.executeTrade(userId, sig.symbol, sig.direction as 'BUY' | 'SELL', rationale, botId);
             }
@@ -1286,7 +1286,7 @@ INSTRUCTIONS:
         }
       }
     }
-  }
+
 
   // ---- Agent cycle with Rust risk integration ----
   private async runAgentCycle(userId: string): Promise<void> {
