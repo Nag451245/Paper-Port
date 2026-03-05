@@ -13,7 +13,6 @@ from math import log, sqrt, exp, erf
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from breeze_connect import BreezeConnect
@@ -330,19 +329,6 @@ def _safe_int(val, default=0):
         return default
 
 
-def _fetch_one_side(symbol, expiry, right):
-    """Fetch one side (call or put) from Breeze API."""
-    params = {
-        "stock_code": symbol.upper(),
-        "exchange_code": "NFO",
-        "product_type": "options",
-        "right": right,
-    }
-    if expiry:
-        params["expiry_date"] = f"{expiry}T06:00:00.000Z"
-    return breeze_instance.get_option_chain_quotes(**params)
-
-
 def get_option_chain(symbol, expiry=None, right_filter=None):
     if not breeze_instance:
         return {"error": "Breeze session not initialized", "strikes": []}
@@ -355,23 +341,18 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
 
         sides = [right_filter] if right_filter else ["call", "put"]
 
-        # Fetch call and put data in parallel
-        results_map = {}
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = {
-                executor.submit(_fetch_one_side, symbol, expiry, r): r
-                for r in sides
-            }
-            for future in as_completed(futures):
-                r = futures[future]
-                try:
-                    results_map[r] = future.result()
-                except Exception as e:
-                    print(f"[Breeze Bridge] {r} fetch error: {e}")
-                    results_map[r] = None
-
         for r in sides:
-            result = results_map.get(r)
+            params = {
+                "stock_code": symbol.upper(),
+                "exchange_code": "NFO",
+                "product_type": "options",
+                "right": r,
+                "strike_price": "",
+            }
+            if expiry:
+                params["expiry_date"] = f"{expiry}T06:00:00.000Z"
+
+            result = breeze_instance.get_option_chain_quotes(**params)
             if not result or result.get("Status") != 200 or result.get("Error"):
                 err_msg = result.get("Error") if result else "no result"
                 status = result.get("Status") if result else None
@@ -553,10 +534,9 @@ def get_expiries(symbol):
 
     try:
         sym = symbol.upper()
-        # Try without strike_price first (returns all available data)
         result = breeze_instance.get_option_chain_quotes(
             stock_code=sym, exchange_code="NFO",
-            product_type="options", right="call",
+            product_type="options", right="call", strike_price="",
         )
 
         if not result or result.get("Status") != 200:
