@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 
 vi.mock('../services/api', () => {
@@ -56,8 +56,10 @@ describe('StrategyBuilder Page', () => {
     expect(screen.getByText('Strategy Templates')).toBeDefined();
   });
 
-  it('should render Bull Call Spread template', async () => {
+  it('should render Bull Call Spread template in dropdown', async () => {
     await renderPage();
+    const templateBtn = screen.getByText('Strategy Templates');
+    fireEvent.click(templateBtn);
     expect(screen.getByText('Bull Call Spread')).toBeDefined();
   });
 
@@ -82,8 +84,8 @@ describe('StrategyBuilder Page', () => {
     expect(screen.getByText('Add Leg')).toBeDefined();
   });
 
-  it('should render the Scenario Simulator section', async () => {
+  it('should render the Scenarios section', async () => {
     await renderPage();
-    expect(screen.getByText('Scenario Simulator')).toBeDefined();
+    expect(screen.getByText('Scenarios')).toBeDefined();
   });
 });
