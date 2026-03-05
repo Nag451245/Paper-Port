@@ -941,7 +941,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
 
       console.log(`[BotEngine] Bot ${botId} (${bot.name}/${bot.role}): starting cycle for ${symbols.length} symbols, Rust: ${this.rustAvailable}`);
 
-      // --- Path A: Rust engine available → deterministic signals ---
+      // --- Step 1: Rust engine scan (fast, deterministic) ---
       if (this.rustAvailable) {
         const candleData = await this.fetchCandles(symbols, userId);
 
@@ -960,34 +960,12 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
 
           if (rustSignals.length > 0) {
             await this.handleRustSignals(rustSignals, bot, userId, botId);
-            return;
+            // Don't return — still run GPT for additional analysis
           }
         }
-
-        if (candleData.length > 0) {
-          const topSymbols = candleData.slice(0, 3).map(d => d.symbol).join(', ');
-          await this.prisma.tradingBot.update({
-            where: { id: botId },
-            data: {
-              lastAction: `Rust scan: no actionable signals for ${topSymbols}`,
-              lastActionAt: new Date(),
-            },
-          });
-
-          await this.prisma.botMessage.create({
-            data: {
-              fromBotId: botId,
-              userId,
-              messageType: 'info',
-              content: `Scanned ${candleData.length} symbols via Rust engine — no signals above threshold. Watching: ${topSymbols}`,
-            },
-          });
-          return;
-        }
-        console.log(`[BotEngine] Bot ${botId}: no candle data from Rust path, falling through to GPT`);
       }
 
-      // --- Path B: GPT/Gemini analysis (no Rust or no candle data) ---
+      // --- Step 2: GPT/Gemini analysis (always runs for market commentary + AI signals) ---
       console.log(`[BotEngine] Bot ${botId}: running GPT/Gemini analysis cycle`);
       await this.runGptBotCycle(botId, userId, bot, symbols);
     } catch (err) {
@@ -1356,13 +1334,16 @@ INSTRUCTIONS:
         where: { userId, createdAt: { gte: todayStart } },
       });
 
-      const maxDaily = config.maxDailyTrades || 5;
-      if (todaySignalCount >= maxDaily) return;
+      const maxDaily = config.maxDailyTrades || 10;
+      if (todaySignalCount >= maxDaily) {
+        console.log(`[BotEngine] Agent: daily signal limit reached (${todaySignalCount}/${maxDaily}), skipping`);
+        return;
+      }
 
       const nav = portfolios.length > 0 ? Number(portfolios[0].currentNav) : 1000000;
       const initCap = portfolios.length > 0 ? Number(portfolios[0].initialCapital) : 1000000;
 
-      // --- Rust engine path: scan + risk ---
+      // --- Step 1: Rust engine scan + risk (fast, runs first) ---
       if (this.rustAvailable) {
         const candleData = await this.fetchCandles(watchSymbols.slice(0, MAX_CANDLE_SYMBOLS), userId);
 
@@ -1373,6 +1354,7 @@ INSTRUCTIONS:
           try {
             const scanResult = await engineScan({ symbols: candleData, aggressiveness: aggressiveness as any });
             rustSignals = scanResult.signals ?? [];
+            console.log(`[BotEngine] Agent Rust scan: ${rustSignals.length} signals`);
           } catch { /* fall through */ }
 
           // Compute portfolio risk via Rust
@@ -1388,7 +1370,6 @@ INSTRUCTIONS:
             if (sig.confidence < (config.minSignalScore || 0.6)) continue;
             if (sig.direction !== 'BUY' && sig.direction !== 'SELL') continue;
 
-            // Risk gate: block trades if drawdown is too high
             if (riskData && riskData.max_drawdown_percent > 10) continue;
 
             const autoExecute = config.mode === 'AUTONOMOUS' && sig.confidence >= 0.65;
@@ -1412,12 +1393,11 @@ INSTRUCTIONS:
               await this.executeTrade(userId, sig.symbol, sig.direction, sig.symbol);
             }
           }
-
-          if (rustSignals.length > 0) return;
+          // Don't return — always continue to GPT for full market analysis
         }
       }
 
-      // --- GPT fallback for agent ---
+      // --- Step 2: GPT/Gemini analysis (always runs for market view + signals) ---
       let quotes: string;
       try {
         quotes = await this.fetchQuotes(watchSymbols);

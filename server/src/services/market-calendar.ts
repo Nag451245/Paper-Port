@@ -159,7 +159,7 @@ export class MarketCalendar {
       case 'PRE_MARKET':
         return { pingIntervalMs: 5 * 60_000, botTickMs: 5 * 60_000, scanIntervalMs: 10 * 60_000, botsActive: true, label: 'Pre-Market (8:00-9:15 IST)' };
       case 'MARKET_HOURS':
-        return { pingIntervalMs: 5 * 60_000, botTickMs: 60_000, scanIntervalMs: 5 * 60_000, botsActive: true, label: 'Market Hours (9:15-15:30 IST)' };
+        return { pingIntervalMs: 5 * 60_000, botTickMs: 3 * 60_000, scanIntervalMs: 5 * 60_000, botsActive: true, label: 'Market Hours (9:15-15:30 IST)' };
       case 'POST_MARKET':
         return { pingIntervalMs: 10 * 60_000, botTickMs: 5 * 60_000, scanIntervalMs: 10 * 60_000, botsActive: true, label: 'Post-Market (15:30-17:00 IST)' };
       case 'AFTER_HOURS':
