@@ -400,28 +400,68 @@ function buildRatioCallSpread(atm: number, qty: number, chain: Strike[]): Strate
   ];
 }
 
-function estimateMargin(legs: StrategyLeg[], spot: number, maxLoss: number): number {
+const INDEX_SET = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX']);
+
+const LOT_SIZES: Record<string, number> = {
+  NIFTY: 75, BANKNIFTY: 30, FINNIFTY: 65, MIDCPNIFTY: 75, NIFTYNXT50: 25, SENSEX: 20,
+  RELIANCE: 250, TCS: 175, HDFCBANK: 550, INFY: 400, ICICIBANK: 700,
+  HINDUNILVR: 300, SBIN: 750, BHARTIARTL: 475, KOTAKBANK: 400, ITC: 1600,
+  LT: 150, AXISBANK: 625, BAJFINANCE: 125, WIPRO: 1500, HCLTECH: 350,
+  MARUTI: 100, TATAMOTORS: 575, SUNPHARMA: 350, TITAN: 175, ASIANPAINT: 200,
+  ADANIENT: 250, TATASTEEL: 3375, NTPC: 1350, POWERGRID: 2700, ONGC: 3075,
+  JSWSTEEL: 675, 'M&M': 350, BAJAJFINSV: 500, ULTRACEMCO: 50, NESTLEIND: 50,
+};
+
+function estimateMargin(legs: StrategyLeg[], spot: number, maxLoss: number, sym = 'NIFTY'): number {
   if (legs.length === 0 || spot <= 0) return 0;
 
-  const hasSell = legs.some(l => l.action === 'SELL');
-  if (!hasSell) {
-    return Math.abs(legs.reduce((s, l) => s + l.premium * l.qty, 0));
+  const buyLegs = legs.filter(l => l.action === 'BUY');
+  const sellLegs = legs.filter(l => l.action === 'SELL');
+
+  if (sellLegs.length === 0) {
+    return Math.round(buyLegs.reduce((s, l) => s + l.premium * l.qty, 0));
   }
 
-  const spreadWidth = (() => {
-    const ceStrikes = legs.filter(l => l.type === 'CE').map(l => l.strike).sort((a, b) => a - b);
-    const peStrikes = legs.filter(l => l.type === 'PE').map(l => l.strike).sort((a, b) => a - b);
-    const ceW = ceStrikes.length >= 2 ? ceStrikes[ceStrikes.length - 1] - ceStrikes[0] : 0;
-    const peW = peStrikes.length >= 2 ? peStrikes[peStrikes.length - 1] - peStrikes[0] : 0;
-    return Math.max(ceW, peW);
-  })();
+  const isIndex = INDEX_SET.has(sym.toUpperCase());
+  const spanPct = isIndex ? 0.12 : 0.20;
+  const exposurePct = isIndex ? 0.03 : 0.05;
 
-  if (spreadWidth > 0 && maxLoss < 0) {
-    return Math.abs(maxLoss) * 1.15;
+  const ceBuys = buyLegs.filter(l => l.type === 'CE');
+  const ceSells = sellLegs.filter(l => l.type === 'CE');
+  const peBuys = buyLegs.filter(l => l.type === 'PE');
+  const peSells = sellLegs.filter(l => l.type === 'PE');
+  const isCallSpread = ceBuys.length > 0 && ceSells.length > 0;
+  const isPutSpread = peBuys.length > 0 && peSells.length > 0;
+
+  if ((isCallSpread || isPutSpread) && maxLoss < 0 && maxLoss > -1e9) {
+    const nakedCE = ceSells.length > 0 && ceBuys.length === 0;
+    const nakedPE = peSells.length > 0 && peBuys.length === 0;
+    if (!nakedCE && !nakedPE) {
+      return Math.round(Math.abs(maxLoss));
+    }
   }
 
-  const sellQty = legs.filter(l => l.action === 'SELL').reduce((s, l) => s + l.qty, 0);
-  return Math.round(spot * 0.15 * sellQty);
+  let margin = 0;
+  for (const leg of sellLegs) {
+    const notional = spot * leg.qty;
+    const otmPct = Math.abs(leg.strike - spot) / spot;
+    const otmDiscount = Math.min(otmPct * 0.3, 0.03);
+    const adjSpan = Math.max(spanPct - otmDiscount, isIndex ? 0.08 : 0.14);
+    const spanMargin = notional * adjSpan;
+    const exposureMargin = notional * exposurePct;
+    margin += spanMargin + exposureMargin;
+  }
+
+  for (const leg of buyLegs) {
+    const notional = spot * leg.qty;
+    const hedgeBenefit = notional * (spanPct * 0.6);
+    margin -= hedgeBenefit;
+  }
+
+  const buyPremium = buyLegs.reduce((s, l) => s + l.premium * l.qty, 0);
+  margin += buyPremium;
+
+  return Math.round(Math.max(margin, 0));
 }
 
 function computeLocalPayoff(legs: StrategyLeg[], spotPrice: number): PayoffResult {
@@ -486,7 +526,7 @@ export default function StrategyBuilder() {
   const [legs, setLegs] = useState<StrategyLeg[]>([]);
   const [payoff, setPayoff] = useState<PayoffResult | null>(null);
   const [loadingPayoff, setLoadingPayoff] = useState(false);
-  const [lotSize] = useState(25);
+  const [lotSize, setLotSize] = useState(25);
 
   // UI toggles
   const [showChain, setShowChain] = useState(false);
@@ -511,6 +551,10 @@ export default function StrategyBuilder() {
 
   // ATM strike
   const atmStrike = useMemo(() => findATM(chain, spotPrice), [chain, spotPrice]);
+
+  useEffect(() => {
+    setLotSize(LOT_SIZES[symbol.toUpperCase()] ?? 25);
+  }, [symbol]);
 
   // ── Fetch expiries on symbol change ─────────────────────────────────────
   useEffect(() => {
@@ -951,6 +995,15 @@ export default function StrategyBuilder() {
             </span>
           </div>
 
+          {/* Lot size */}
+          <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 rounded-lg border border-slate-200">
+            <span className="text-xs text-slate-400">Lot</span>
+            <span className="text-sm font-bold font-mono text-slate-800">{lotSize}</span>
+            <span className="text-[10px] text-slate-400">
+              (₹{spotPrice > 0 ? formatNum(Math.round(spotPrice * lotSize)) : '—'})
+            </span>
+          </div>
+
           {/* Expiry dropdown */}
           <div className="relative flex items-center gap-2">
             <Calendar className="w-4 h-4 text-slate-400 flex-shrink-0" />
@@ -1116,13 +1169,26 @@ export default function StrategyBuilder() {
 
             {/* Summary metrics */}
             {payoff && legs.length > 0 && (() => {
-              const marginRequired = payoff.capitalRequired ?? estimateMargin(legs, spotPrice, payoff.maxLoss);
+              const marginRequired = payoff.capitalRequired ?? estimateMargin(legs, spotPrice, payoff.maxLoss, symbol);
               return (
                 <div className="mt-3 grid grid-cols-3 gap-2">
                   <MetricCard label="Net Premium" value={payoff.netPremium} format="inr" color={payoff.netPremium >= 0 ? 'emerald' : 'red'} />
                   <MetricCard label="Max Profit" value={payoff.maxProfit} format="inr" color="emerald" unlimited={payoff.maxProfit >= 1e9} />
                   <MetricCard label="Max Loss" value={payoff.maxLoss} format="inr" color="red" unlimited={payoff.maxLoss <= -1e9} />
-                  <MetricCard label="Margin Req." value={marginRequired} format="inr" color="purple" />
+                  <div className="bg-purple-50 rounded-lg p-2 text-center border border-purple-100">
+                    <p className="text-[9px] font-semibold uppercase text-purple-600 opacity-70">Margin Req.</p>
+                    <p className="text-xs font-bold font-mono text-purple-700">₹{formatNum(marginRequired)}</p>
+                    {(() => {
+                      const sellLegs = legs.filter(l => l.action === 'SELL');
+                      const buyLegs = legs.filter(l => l.action === 'BUY');
+                      const hasSpread = sellLegs.length > 0 && buyLegs.length > 0;
+                      return (
+                        <p className="text-[8px] text-purple-500 mt-0.5">
+                          {sellLegs.length === 0 ? 'Premium paid' : hasSpread ? 'Spread margin' : `SPAN+Exp (${INDEX_SET.has(symbol) ? '~15%' : '~25%'})`}
+                        </p>
+                      );
+                    })()}
+                  </div>
                   {payoff.probabilityOfProfit != null && payoff.probabilityOfProfit > 0 && (
                     <MetricCard label="Prob of Profit" value={payoff.probabilityOfProfit} format="pct" color="indigo" />
                   )}
