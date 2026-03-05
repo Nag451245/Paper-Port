@@ -9,6 +9,7 @@ import json
 import sys
 import signal
 from datetime import datetime, timedelta
+from math import log, sqrt, exp, erf
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -23,6 +24,55 @@ breeze_instance = None
 session_expiry = None
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_FILE = os.path.join(SCRIPT_DIR, ".breeze_session.json")
+
+PI = 3.141592653589793
+RISK_FREE_RATE = 0.07
+
+
+def norm_cdf(x):
+    return 0.5 * (1.0 + erf(x / sqrt(2.0)))
+
+
+def norm_pdf(x):
+    return exp(-0.5 * x * x) / sqrt(2.0 * PI)
+
+
+def calc_greeks(spot, strike, tte_days, iv_pct, right="call"):
+    """Black-Scholes Greeks. iv_pct is IV in percentage (e.g. 18.5 for 18.5%)."""
+    if iv_pct <= 0 or tte_days <= 0 or spot <= 0 or strike <= 0:
+        return {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+
+    tte = tte_days / 365.0
+    sigma = iv_pct / 100.0
+    sqrt_tte = sqrt(tte)
+    r = RISK_FREE_RATE
+
+    d1 = (log(spot / strike) + (r + sigma * sigma / 2.0) * tte) / (sigma * sqrt_tte)
+    d2 = d1 - sigma * sqrt_tte
+
+    nd1 = norm_pdf(d1)
+    gamma = nd1 / (spot * sigma * sqrt_tte)
+    vega = spot * nd1 * sqrt_tte / 100.0
+
+    if right == "call":
+        delta = norm_cdf(d1)
+        theta = (
+            -spot * nd1 * sigma / (2.0 * sqrt_tte)
+            - r * strike * exp(-r * tte) * norm_cdf(d2)
+        ) / 365.0
+    else:
+        delta = norm_cdf(d1) - 1.0
+        theta = (
+            -spot * nd1 * sigma / (2.0 * sqrt_tte)
+            + r * strike * exp(-r * tte) * norm_cdf(-d2)
+        ) / 365.0
+
+    return {
+        "delta": round(delta, 4),
+        "gamma": round(gamma, 6),
+        "theta": round(theta, 4),
+        "vega": round(vega, 4),
+    }
 
 
 def save_session_to_disk(api_key, api_secret, user_id, session_key):
@@ -113,21 +163,40 @@ def init_breeze(api_key, api_secret, session_token):
         return {"success": False, "error": str(e)}
 
 
-def get_option_chain(symbol, expiry=None, right=None):
+def _safe_float(val, default=0.0):
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_int(val, default=0):
+    if val is None:
+        return default
+    try:
+        return int(float(val))
+    except (ValueError, TypeError):
+        return default
+
+
+def get_option_chain(symbol, expiry=None, right_filter=None):
     if not breeze_instance:
         return {"error": "Breeze session not initialized", "strikes": []}
 
     try:
         all_strikes = {}
-        spot_price = 0
+        spot_price = 0.0
         expiry_dates = set()
+        logged_sample = False
 
         for r in ["call", "put"]:
             params = {
                 "stock_code": symbol.upper(),
                 "exchange_code": "NFO",
                 "product_type": "options",
-                "right": right or r,
+                "right": right_filter or r,
             }
             if expiry:
                 params["expiry_date"] = f"{expiry}T06:00:00.000Z"
@@ -135,19 +204,27 @@ def get_option_chain(symbol, expiry=None, right=None):
             result = breeze_instance.get_option_chain_quotes(**params)
 
             if not result or result.get("Status") != 200 or result.get("Error"):
+                print(f"[Breeze Bridge] {r} API error: Status={result.get('Status') if result else None}, Error={result.get('Error') if result else 'no result'}")
                 continue
 
             records = result.get("Success", [])
             if not isinstance(records, list):
                 continue
 
+            if records and not logged_sample:
+                sample = records[0]
+                print(f"[Breeze Bridge] Sample keys: {sorted(sample.keys())}")
+                non_zero = {k: v for k, v in sample.items() if v and v != "0" and v != 0}
+                print(f"[Breeze Bridge] Sample non-zero: {non_zero}")
+                logged_sample = True
+
             for rec in records:
-                strike = float(rec.get("strike_price", 0))
+                strike = _safe_float(rec.get("strike_price"))
                 if strike <= 0:
                     continue
 
-                if not spot_price and rec.get("spot_price"):
-                    spot_price = float(rec["spot_price"])
+                if not spot_price:
+                    spot_price = _safe_float(rec.get("spot_price"))
 
                 exp_date = rec.get("expiry_date", "")
                 if exp_date:
@@ -157,41 +234,86 @@ def get_option_chain(symbol, expiry=None, right=None):
                     except ValueError:
                         expiry_dates.add(exp_date.split("T")[0])
 
-                existing = all_strikes.get(strike, {
+                new_strike = {
                     "strike": strike,
                     "callOI": 0, "callOIChange": 0, "callVolume": 0,
-                    "callIV": 0, "callLTP": 0,
+                    "callIV": 0.0, "callLTP": 0.0, "callNetChange": 0.0,
+                    "callBidPrice": 0.0, "callAskPrice": 0.0,
+                    "callDelta": 0.0, "callGamma": 0.0, "callTheta": 0.0, "callVega": 0.0,
                     "putOI": 0, "putOIChange": 0, "putVolume": 0,
-                    "putIV": 0, "putLTP": 0,
-                })
+                    "putIV": 0.0, "putLTP": 0.0, "putNetChange": 0.0,
+                    "putBidPrice": 0.0, "putAskPrice": 0.0,
+                    "putDelta": 0.0, "putGamma": 0.0, "putTheta": 0.0, "putVega": 0.0,
+                }
+                existing = all_strikes.get(strike, new_strike)
 
-                ltp = float(rec.get("ltp", 0))
-                oi = float(rec.get("open_interest", 0))
-                volume = int(rec.get("total_quantity_traded", 0) or 0)
-                iv = float(rec.get("implied_volatility", 0) or 0)
-                oi_change = float(rec.get("chnge_oi", 0) or rec.get("change_oi", 0) or 0)
+                ltp = _safe_float(rec.get("ltp"))
+                oi = _safe_float(rec.get("open_interest"))
+                volume = _safe_int(rec.get("total_quantity_traded"))
+                iv = _safe_float(rec.get("implied_volatility"))
+                oi_change = _safe_float(
+                    rec.get("chnge_oi") or rec.get("change_oi") or rec.get("oi_change")
+                )
+                prev_close = _safe_float(
+                    rec.get("close_price") or rec.get("previous_close") or rec.get("close")
+                )
+                net_change = round(ltp - prev_close, 2) if ltp > 0 and prev_close > 0 else 0.0
+                bid = _safe_float(rec.get("best_bid_price") or rec.get("bid_price"))
+                ask = _safe_float(rec.get("best_offer_price") or rec.get("ask_price"))
 
-                side = rec.get("right", r).lower()
+                side = (rec.get("right") or rec.get("option_type") or r).lower()
                 if side == "call":
                     existing["callOI"] = oi
                     existing["callOIChange"] = oi_change
                     existing["callVolume"] = volume
                     existing["callIV"] = iv
                     existing["callLTP"] = ltp
+                    existing["callNetChange"] = net_change
+                    existing["callBidPrice"] = bid
+                    existing["callAskPrice"] = ask
                 else:
                     existing["putOI"] = oi
                     existing["putOIChange"] = oi_change
                     existing["putVolume"] = volume
                     existing["putIV"] = iv
                     existing["putLTP"] = ltp
+                    existing["putNetChange"] = net_change
+                    existing["putBidPrice"] = bid
+                    existing["putAskPrice"] = ask
 
                 all_strikes[strike] = existing
 
-            if right:
+            if right_filter:
                 break
 
         if not all_strikes:
             return {"symbol": symbol, "strikes": [], "expiry": expiry or "", "expiries": sorted(expiry_dates)}
+
+        # Calculate Greeks using Black-Scholes
+        tte_days = 7
+        if expiry:
+            try:
+                exp_dt = datetime.strptime(expiry, "%Y-%m-%d")
+                now = datetime.now().replace(hour=15, minute=30)
+                tte_days = max(0.5, (exp_dt - now).total_seconds() / 86400.0)
+            except ValueError:
+                pass
+
+        if spot_price > 0:
+            for sd in all_strikes.values():
+                s = sd["strike"]
+                if sd["callIV"] > 0:
+                    cg = calc_greeks(spot_price, s, tte_days, sd["callIV"], "call")
+                    sd["callDelta"] = cg["delta"]
+                    sd["callGamma"] = cg["gamma"]
+                    sd["callTheta"] = cg["theta"]
+                    sd["callVega"] = cg["vega"]
+                if sd["putIV"] > 0:
+                    pg = calc_greeks(spot_price, s, tte_days, sd["putIV"], "put")
+                    sd["putDelta"] = pg["delta"]
+                    sd["putGamma"] = pg["gamma"]
+                    sd["putTheta"] = pg["theta"]
+                    sd["putVega"] = pg["vega"]
 
         strikes = sorted(all_strikes.values(), key=lambda s: s["strike"])
         total_call_oi = sum(s["callOI"] for s in strikes)
@@ -211,6 +333,11 @@ def get_option_chain(symbol, expiry=None, right=None):
                 min_pain = pain
                 max_pain_strike = st["strike"]
 
+        active_count = sum(
+            1 for s in strikes if s["callOI"] > 0 or s["putOI"] > 0 or s["callLTP"] > 0 or s["putLTP"] > 0
+        )
+        print(f"[Breeze Bridge] {symbol} expiry={expiry}: {len(strikes)} total strikes, {active_count} with data, spot={spot_price}")
+
         return {
             "symbol": symbol.upper(),
             "expiry": expiry or (sorted(expiry_dates)[0] if expiry_dates else ""),
@@ -225,6 +352,7 @@ def get_option_chain(symbol, expiry=None, right=None):
             "source": "breeze-python",
         }
     except Exception as e:
+        print(f"[Breeze Bridge] get_option_chain error: {e}")
         return {"error": str(e), "strikes": []}
 
 
@@ -357,7 +485,6 @@ class BreezeHandler(BaseHTTPRequestHandler):
                 pass
 
 
-# Ignore SIGPIPE to prevent crashes on broken connections
 if hasattr(signal, "SIGPIPE"):
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
