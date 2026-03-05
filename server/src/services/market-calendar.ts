@@ -68,7 +68,10 @@ export class MarketCalendar {
   }
 
   private getIST(): Date {
-    return new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    // Manual UTC+5:30 offset — reliable on all Node.js builds regardless of ICU data
+    const now = new Date();
+    const utcMs = now.getTime() + now.getTimezoneOffset() * 60_000;
+    return new Date(utcMs + 5.5 * 3600_000);
   }
 
   private toDateKey(d: Date): string {

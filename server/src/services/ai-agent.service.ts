@@ -436,17 +436,20 @@ Respond in JSON format:
     return unique;
   }
 
-  private isMarketHours(): boolean {
+  private getIST(): Date {
     const now = new Date();
-    const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-    const h = ist.getHours();
-    const m = ist.getMinutes();
-    const time = h * 60 + m;
+    const utcMs = now.getTime() + now.getTimezoneOffset() * 60_000;
+    return new Date(utcMs + 5.5 * 3600_000);
+  }
+
+  private isMarketHours(): boolean {
+    const ist = this.getIST();
+    const time = ist.getHours() * 60 + ist.getMinutes();
     return time >= 555 && time <= 930; // 9:15 AM to 3:30 PM IST
   }
 
   private fallbackBriefing() {
-    const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const ist = this.getIST();
     const h = ist.getHours();
     const isPreMarket = h >= 7 && h < 9;
     const isDuringMarket = h >= 9 && h < 16;

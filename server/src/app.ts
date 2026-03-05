@@ -463,12 +463,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   // Match pending orders every minute during market hours
+  // IST 9:00-16:00 = UTC 3:30-10:30 → cron 3-10 UTC (covers pre-open + buffer)
+  // matchPendingOrders() has its own isMarketOpen() guard for precise timing
   app.addHook('onReady', async () => {
     const prisma = getPrisma();
     const { TradeService } = await import('./services/trade.service.js');
     const tradeService = new TradeService(prisma);
 
-    orchestrator.scheduleMarketDay('* 9-15 * * 1-5', async () => {
+    orchestrator.scheduleMarketDay('* 3-10 * * 1-5', async () => {
       try {
         const result = await tradeService.matchPendingOrders();
         if (result.matched > 0 || result.failed > 0) {
