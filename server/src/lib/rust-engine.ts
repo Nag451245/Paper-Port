@@ -293,6 +293,8 @@ export interface ScanSignal {
   votes: Record<string, number>;
 }
 
+export type Aggressiveness = 'high' | 'medium' | 'low';
+
 export interface ScanResult {
   signals: ScanSignal[];
 }

@@ -489,7 +489,7 @@ export class BotEngine {
           const scanInput = candleData.map(d => ({ symbol: d.symbol, candles: d.candles }));
           let rustSignals: ScanSignal[] = [];
           try {
-            const result = await engineScan({ symbols: scanInput, aggressiveness: 'medium' });
+            const result = await engineScan({ symbols: scanInput, aggressiveness: 'high' });
             rustSignals = result.signals ?? [];
           } catch { /* scan failed */ }
 
@@ -946,7 +946,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         const candleData = await this.fetchCandles(symbols, userId);
 
         if (candleData.length > 0) {
-          const aggressiveness = bot.role === 'EXECUTOR' ? 'high' : 'medium';
+          const aggressiveness = 'high';
           let rustSignals: ScanSignal[] = [];
 
           try {
@@ -994,9 +994,8 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     for (const sig of rustSignals.slice(0, 3)) {
       const gptApproved = await this.gptValidateSignal(sig, bot, userId);
 
-      // GPT rejection only reduces confidence by 20% (was 40%), so solid signals still execute
       const finalConfidence = gptApproved ? sig.confidence : sig.confidence * 0.8;
-      const execute = shouldAutoExecute && finalConfidence >= 0.65;
+      const execute = shouldAutoExecute && finalConfidence >= 0.45;
 
       const gateScores = this.deriveGateScores(finalConfidence, sig.indicators, sig.votes, { source: 'rust-engine', gptApproved });
 
@@ -1061,6 +1060,7 @@ Confidence: ${(sig.confidence * 100).toFixed(0)}%
 EMA9: ${sig.indicators.ema_9}, EMA21: ${sig.indicators.ema_21}
 RSI: ${sig.indicators.rsi_14}, MACD Hist: ${sig.indicators.macd_histogram}
 Supertrend: ${sig.indicators.supertrend}, VWAP: ${sig.indicators.vwap}
+Momentum: ${sig.indicators.momentum_score ?? 'N/A'}, Volume Ratio: ${sig.indicators.volume_ratio ?? 'N/A'}
 Stop Loss: ₹${sig.stop_loss}, Target: ₹${sig.target}
 Approve or reject?` },
         ],
@@ -1348,7 +1348,7 @@ INSTRUCTIONS:
         const candleData = await this.fetchCandles(watchSymbols.slice(0, MAX_CANDLE_SYMBOLS), userId);
 
         if (candleData.length > 0) {
-          const aggressiveness = config.mode === 'AUTONOMOUS' ? 'high' : 'medium';
+          const aggressiveness = 'high';
           let rustSignals: ScanSignal[] = [];
 
           try {
@@ -1367,12 +1367,12 @@ INSTRUCTIONS:
           }
 
           for (const sig of rustSignals.slice(0, 3)) {
-            if (sig.confidence < (config.minSignalScore || 0.6)) continue;
+            if (sig.confidence < (config.minSignalScore || 0.35)) continue;
             if (sig.direction !== 'BUY' && sig.direction !== 'SELL') continue;
 
             if (riskData && riskData.max_drawdown_percent > 10) continue;
 
-            const autoExecute = config.mode === 'AUTONOMOUS' && sig.confidence >= 0.65;
+            const autoExecute = config.mode === 'AUTONOMOUS' && sig.confidence >= 0.45;
 
             const agentRustGates = this.deriveGateScores(sig.confidence, sig.indicators, sig.votes, { source: 'rust-engine' });
             await this.prisma.aITradeSignal.create({
