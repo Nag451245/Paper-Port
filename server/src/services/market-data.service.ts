@@ -1586,6 +1586,34 @@ export class MarketDataService {
   private fallbackMovers(_count: number): { gainers: MarketMover[]; losers: MarketMover[] } {
     return { gainers: [], losers: [] };
   }
+
+  async getLotSizes(): Promise<{ lotSizes: Record<string, number>; source: string }> {
+    const cacheKey = 'lot-sizes:all';
+    if (this.cache) {
+      const cached = await this.cache.get<{ lotSizes: Record<string, number>; source: string }>(cacheKey);
+      if (cached) return cached;
+    }
+
+    try {
+      const url = `${BREEZE_BRIDGE_URL}/lot-sizes`;
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 20_000);
+      const res = await fetch(url, { signal: ac.signal });
+      clearTimeout(timer);
+      if (res.ok) {
+        const data = await res.json() as any;
+        if (data.lotSizes && Object.keys(data.lotSizes).length > 0) {
+          const result = { lotSizes: data.lotSizes, source: data.source || 'bridge' };
+          if (this.cache) await this.cache.set(cacheKey, result, 3600);
+          return result;
+        }
+      }
+    } catch (err) {
+      console.log(`[LotSizes] Bridge fetch error: ${err}`);
+    }
+
+    return { lotSizes: {}, source: 'none' };
+  }
 }
 
 export interface MarketMover {

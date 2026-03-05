@@ -402,16 +402,6 @@ function buildRatioCallSpread(atm: number, qty: number, chain: Strike[]): Strate
 
 const INDEX_SET = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX']);
 
-const LOT_SIZES: Record<string, number> = {
-  NIFTY: 75, BANKNIFTY: 30, FINNIFTY: 65, MIDCPNIFTY: 75, NIFTYNXT50: 25, SENSEX: 20,
-  RELIANCE: 250, TCS: 175, HDFCBANK: 550, INFY: 400, ICICIBANK: 700,
-  HINDUNILVR: 300, SBIN: 750, BHARTIARTL: 475, KOTAKBANK: 400, ITC: 1600,
-  LT: 150, AXISBANK: 625, BAJFINANCE: 125, WIPRO: 1500, HCLTECH: 350,
-  MARUTI: 100, TATAMOTORS: 575, SUNPHARMA: 350, TITAN: 175, ASIANPAINT: 200,
-  ADANIENT: 250, TATASTEEL: 3375, NTPC: 1350, POWERGRID: 2700, ONGC: 3075,
-  JSWSTEEL: 675, 'M&M': 350, BAJAJFINSV: 500, ULTRACEMCO: 50, NESTLEIND: 50,
-};
-
 function estimateMargin(legs: StrategyLeg[], spot: number, maxLoss: number, sym = 'NIFTY'): number {
   if (legs.length === 0 || spot <= 0) return 0;
 
@@ -545,6 +535,9 @@ export default function StrategyBuilder() {
   const [loadingOptimize, setLoadingOptimize] = useState(false);
   const [optimizerView, setOptimizerView] = useState<string>('');
 
+  // Dynamic lot sizes
+  const [lotSizeMap, setLotSizeMap] = useState<Record<string, number>>({});
+
   // Auto-refresh & meta
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -552,9 +545,25 @@ export default function StrategyBuilder() {
   // ATM strike
   const atmStrike = useMemo(() => findATM(chain, spotPrice), [chain, spotPrice]);
 
+  // Fetch lot sizes from API on mount
   useEffect(() => {
-    setLotSize(LOT_SIZES[symbol.toUpperCase()] ?? 25);
-  }, [symbol]);
+    (async () => {
+      try {
+        const { data } = await marketApi.lotSizes();
+        if (data?.lotSizes && Object.keys(data.lotSizes).length > 0) {
+          setLotSizeMap(data.lotSizes);
+        }
+      } catch { /* silent — will use option chain lotSize or default */ }
+    })();
+  }, []);
+
+  // Update lot size when symbol or lotSizeMap changes
+  useEffect(() => {
+    const sym = symbol.toUpperCase();
+    const lot = lotSizeMap[sym];
+    if (lot && lot > 0) setLotSize(lot);
+    else setLotSize(25);
+  }, [symbol, lotSizeMap]);
 
   // ── Fetch expiries on symbol change ─────────────────────────────────────
   useEffect(() => {
@@ -620,6 +629,11 @@ export default function StrategyBuilder() {
         setChain(strikes);
         const sp = Number(d?.spotPrice ?? d?.underlyingValue) || 0;
         if (sp > 0) setSpotPrice(sp);
+        const apiLot = Number(d?.lotSize);
+        if (apiLot > 0) {
+          setLotSize(apiLot);
+          setLotSizeMap(prev => ({ ...prev, [symbol.toUpperCase()]: apiLot }));
+        }
       }
       if (quoteRes.status === 'fulfilled') {
         const q = quoteRes.value.data as any;

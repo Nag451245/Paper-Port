@@ -103,6 +103,15 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ symbol: sym.data, bids: [], asks: [] });
   });
 
+  app.get('/lot-sizes', async (_request, reply) => {
+    try {
+      const result = await service.getLotSizes();
+      return reply.send(result);
+    } catch (err: any) {
+      return reply.send({ lotSizes: {}, source: 'error', error: err.message });
+    }
+  });
+
   app.get('/breeze-diag', async (_request, reply) => {
     try {
       const result = await service.diagnoseBreezeConnection();

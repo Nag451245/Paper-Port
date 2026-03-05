@@ -20,13 +20,125 @@ except ImportError:
     print("ERROR: breeze-connect not installed. Run: pip install breeze-connect")
     sys.exit(1)
 
+import urllib.request
+import csv
+import io
+
 breeze_instance = None
 session_expiry = None
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_FILE = os.path.join(SCRIPT_DIR, ".breeze_session.json")
+LOT_SIZE_FILE = os.path.join(SCRIPT_DIR, ".lot_sizes.json")
 
 PI = 3.141592653589793
 RISK_FREE_RATE = 0.07
+
+# ── Lot-size management ────────────────────────────────────────────────────
+
+_lot_size_cache = {}
+_lot_size_cache_time = None
+_LOT_SIZE_CACHE_HOURS = 6
+
+FALLBACK_LOT_SIZES = {
+    "NIFTY": 75, "BANKNIFTY": 30, "FINNIFTY": 65, "MIDCPNIFTY": 75,
+    "NIFTYNXT50": 25, "SENSEX": 20,
+    "RELIANCE": 250, "TCS": 175, "HDFCBANK": 550, "INFY": 400,
+    "ICICIBANK": 700, "HINDUNILVR": 300, "SBIN": 750, "BHARTIARTL": 475,
+    "KOTAKBANK": 400, "ITC": 1600, "LT": 150, "AXISBANK": 625,
+    "BAJFINANCE": 125, "WIPRO": 1500, "HCLTECH": 350, "MARUTI": 100,
+    "TATAMOTORS": 575, "SUNPHARMA": 350, "TITAN": 175, "ASIANPAINT": 200,
+    "ADANIENT": 250, "TATASTEEL": 3375, "NTPC": 1350, "POWERGRID": 2700,
+    "ONGC": 3075, "JSWSTEEL": 675, "M&M": 350, "BAJAJFINSV": 500,
+    "ULTRACEMCO": 50, "NESTLEIND": 50,
+}
+
+
+def _parse_nse_csv(raw):
+    """Parse NSE fo_mktlots.csv — tolerant of header variations."""
+    lot_sizes = {}
+    reader = csv.reader(io.StringIO(raw))
+    for row in reader:
+        if len(row) < 3:
+            continue
+        sym = row[1].strip().upper() if len(row) > 1 else ""
+        if not sym or sym in ("SYMBOL", ""):
+            continue
+        if any(c.isalpha() for c in sym) and not sym.startswith("LOT"):
+            for cell in row[2:]:
+                cell = cell.strip().replace(",", "")
+                if cell.isdigit() and int(cell) > 0:
+                    lot_sizes[sym] = int(cell)
+                    break
+    return lot_sizes
+
+
+def _save_lot_sizes_to_disk(sizes):
+    try:
+        with open(LOT_SIZE_FILE, "w") as f:
+            json.dump({"sizes": sizes, "saved_at": datetime.now().isoformat()}, f)
+    except Exception as e:
+        print(f"[Breeze Bridge] Failed to save lot sizes to disk: {e}")
+
+
+def _load_lot_sizes_from_disk():
+    if not os.path.exists(LOT_SIZE_FILE):
+        return None
+    try:
+        with open(LOT_SIZE_FILE, "r") as f:
+            data = json.load(f)
+        saved_at = datetime.fromisoformat(data["saved_at"])
+        if (datetime.now() - saved_at).total_seconds() > 86400:
+            return None
+        return data.get("sizes", {})
+    except Exception:
+        return None
+
+
+def get_lot_sizes(force_refresh=False):
+    """Fetch lot sizes: NSE CSV → disk cache → fallback defaults."""
+    global _lot_size_cache, _lot_size_cache_time
+
+    if not force_refresh and _lot_size_cache and _lot_size_cache_time:
+        age_hrs = (datetime.now() - _lot_size_cache_time).total_seconds() / 3600
+        if age_hrs < _LOT_SIZE_CACHE_HOURS:
+            return _lot_size_cache
+
+    # Try NSE archive CSV
+    nse_urls = [
+        "https://archives.nseindia.com/content/fo/fo_mktlots.csv",
+        "https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv",
+    ]
+    for url in nse_urls:
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/csv,text/plain,*/*",
+            })
+            resp = urllib.request.urlopen(req, timeout=15)
+            raw = resp.read().decode("utf-8", errors="replace")
+            sizes = _parse_nse_csv(raw)
+            if sizes and len(sizes) >= 10:
+                _lot_size_cache = sizes
+                _lot_size_cache_time = datetime.now()
+                _save_lot_sizes_to_disk(sizes)
+                print(f"[Breeze Bridge] Fetched {len(sizes)} lot sizes from NSE ({url})")
+                return sizes
+        except Exception as e:
+            print(f"[Breeze Bridge] NSE lot size fetch failed ({url}): {e}")
+
+    # Try disk cache
+    disk = _load_lot_sizes_from_disk()
+    if disk and len(disk) >= 10:
+        _lot_size_cache = disk
+        _lot_size_cache_time = datetime.now()
+        print(f"[Breeze Bridge] Loaded {len(disk)} lot sizes from disk cache")
+        return disk
+
+    # Fallback defaults
+    _lot_size_cache = dict(FALLBACK_LOT_SIZES)
+    _lot_size_cache_time = datetime.now()
+    print("[Breeze Bridge] Using fallback lot sizes")
+    return _lot_size_cache
 
 
 def norm_cdf(x):
@@ -338,8 +450,12 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
         )
         print(f"[Breeze Bridge] {symbol} expiry={expiry}: {len(strikes)} total strikes, {active_count} with data, spot={spot_price}")
 
+        lot_sizes = get_lot_sizes()
+        sym_upper = symbol.upper()
+        lot = lot_sizes.get(sym_upper, FALLBACK_LOT_SIZES.get(sym_upper, 0))
+
         return {
-            "symbol": symbol.upper(),
+            "symbol": sym_upper,
             "expiry": expiry or (sorted(expiry_dates)[0] if expiry_dates else ""),
             "underlyingValue": spot_price,
             "spotPrice": spot_price,
@@ -349,6 +465,7 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
             "totalCallOI": total_call_oi,
             "totalPutOI": total_put_oi,
             "expiries": sorted(expiry_dates),
+            "lotSize": lot,
             "source": "breeze-python",
         }
     except Exception as e:
@@ -443,6 +560,22 @@ class BreezeHandler(BaseHTTPRequestHandler):
                 data = get_expiries(symbol)
                 self.send_json(data)
 
+            elif path == "/lot-sizes":
+                force = params.get("force", ["0"])[0] == "1"
+                sizes = get_lot_sizes(force_refresh=force)
+                self.send_json({
+                    "lotSizes": sizes,
+                    "count": len(sizes),
+                    "source": "nse" if _lot_size_cache_time and (datetime.now() - _lot_size_cache_time).total_seconds() < 86400 else "fallback",
+                    "cachedAt": _lot_size_cache_time.isoformat() if _lot_size_cache_time else None,
+                })
+
+            elif path.startswith("/lot-size/"):
+                sym = path.split("/")[-1].upper()
+                sizes = get_lot_sizes()
+                lot = sizes.get(sym, FALLBACK_LOT_SIZES.get(sym, 0))
+                self.send_json({"symbol": sym, "lotSize": lot, "source": "nse" if lot else "unknown"})
+
             else:
                 self.send_json({"error": "Not found"}, 404)
         except BrokenPipeError:
@@ -494,6 +627,9 @@ if __name__ == "__main__":
 
     print(f"[Breeze Bridge] Starting on http://127.0.0.1:{port}")
     restore_session_from_disk()
+
+    lot_sizes = get_lot_sizes()
+    print(f"[Breeze Bridge] Lot sizes loaded: {len(lot_sizes)} symbols")
 
     server = HTTPServer(("127.0.0.1", port), BreezeHandler)
     print(f"[Breeze Bridge] Ready. Session active: {breeze_instance is not None}")

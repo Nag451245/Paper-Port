@@ -157,6 +157,9 @@ export const marketApi = {
 
   search: (query: string, exchange?: string) =>
     api.get<{ symbol: string; name: string; exchange: string; segment?: string }[]>('/market/search', { params: { q: query, exchange } }),
+
+  lotSizes: () =>
+    api.get<{ lotSizes: Record<string, number>; source: string }>('/market/lot-sizes'),
 };
 
 // ─── Options Strategy ─────────────────────────────────────────────
