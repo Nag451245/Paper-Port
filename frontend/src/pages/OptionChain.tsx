@@ -95,7 +95,7 @@ function isMarketOpen(): boolean {
   return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
 }
 
-const REFRESH_MARKET = 1_000;
+const REFRESH_MARKET = 3_000;
 const REFRESH_OFF = 30_000;
 const STRIKES_AROUND_ATM = 20;
 
@@ -224,8 +224,16 @@ export default function OptionChain() {
     setShowSymbolDropdown(false);
   };
 
-  const strikeDivisor = spotPrice > 40000 ? 100 : 50;
-  const atmStrike = useMemo(() => Math.round(spotPrice / strikeDivisor) * strikeDivisor, [spotPrice, strikeDivisor]);
+  const atmStrike = useMemo(() => {
+    if (strikes.length === 0 || spotPrice <= 0) return 0;
+    let closest = strikes[0].strike;
+    let minDiff = Math.abs(spotPrice - closest);
+    for (const s of strikes) {
+      const diff = Math.abs(spotPrice - s.strike);
+      if (diff < minDiff) { minDiff = diff; closest = s.strike; }
+    }
+    return closest;
+  }, [strikes, spotPrice]);
 
   const visibleStrikes = useMemo(() => {
     if (showAllStrikes || strikes.length === 0 || atmStrike === 0) return strikes;

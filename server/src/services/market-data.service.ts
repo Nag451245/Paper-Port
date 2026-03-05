@@ -714,7 +714,7 @@ export class MarketDataService {
         const bridgeResult = await this.fetchFromBreezeBridge(symbol, expiry);
         if (bridgeResult && bridgeResult.strikes && bridgeResult.strikes.length > 0) {
           console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze Python Bridge (${bridgeResult.strikes.length} strikes)`);
-          if (this.cache) await this.cache.set(cacheKey, bridgeResult, 3);
+          if (this.cache) await this.cache.set(cacheKey, bridgeResult, 5);
           return bridgeResult;
         }
         console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Bridge returned 0 strikes`);

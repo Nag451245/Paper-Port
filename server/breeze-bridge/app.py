@@ -11,7 +11,9 @@ import signal
 from datetime import datetime, timedelta
 from math import log, sqrt, exp, erf
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from breeze_connect import BreezeConnect
@@ -187,6 +189,41 @@ def calc_greeks(spot, strike, tte_days, iv_pct, right="call"):
     }
 
 
+def implied_vol_bs(spot, strike, tte_days, price, right="call"):
+    """Estimate IV (as percentage) from option price using Newton-Raphson."""
+    if price <= 0 or spot <= 0 or strike <= 0 or tte_days <= 0:
+        return 0.0
+    tte = tte_days / 365.0
+    r = RISK_FREE_RATE
+    intrinsic = max(spot - strike, 0.0) if right == "call" else max(strike - spot, 0.0)
+    if price <= intrinsic + 0.01:
+        return 0.0
+    sigma = 0.3
+    for _ in range(50):
+        try:
+            sqrt_tte = sqrt(tte)
+            d1 = (log(spot / strike) + (r + sigma * sigma / 2.0) * tte) / (sigma * sqrt_tte)
+            d2 = d1 - sigma * sqrt_tte
+            if right == "call":
+                model = spot * norm_cdf(d1) - strike * exp(-r * tte) * norm_cdf(d2)
+            else:
+                model = strike * exp(-r * tte) * norm_cdf(-d2) - spot * norm_cdf(-d1)
+            diff = model - price
+            if abs(diff) < 0.01:
+                return round(sigma * 100.0, 2)
+            vega_val = spot * norm_pdf(d1) * sqrt_tte
+            if vega_val < 1e-10:
+                break
+            sigma -= diff / vega_val
+            if sigma <= 0.001:
+                sigma = 0.001
+            if sigma > 5.0:
+                break
+        except (ValueError, ZeroDivisionError):
+            break
+    return round(sigma * 100.0, 2) if 0.001 < sigma < 5.0 else 0.0
+
+
 def save_session_to_disk(api_key, api_secret, user_id, session_key):
     try:
         with open(SESSION_FILE, "w") as f:
@@ -293,6 +330,19 @@ def _safe_int(val, default=0):
         return default
 
 
+def _fetch_one_side(symbol, expiry, right):
+    """Fetch one side (call or put) from Breeze API."""
+    params = {
+        "stock_code": symbol.upper(),
+        "exchange_code": "NFO",
+        "product_type": "options",
+        "right": right,
+    }
+    if expiry:
+        params["expiry_date"] = f"{expiry}T06:00:00.000Z"
+    return breeze_instance.get_option_chain_quotes(**params)
+
+
 def get_option_chain(symbol, expiry=None, right_filter=None):
     if not breeze_instance:
         return {"error": "Breeze session not initialized", "strikes": []}
@@ -303,20 +353,29 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
         expiry_dates = set()
         logged_sample = False
 
-        for r in ["call", "put"]:
-            params = {
-                "stock_code": symbol.upper(),
-                "exchange_code": "NFO",
-                "product_type": "options",
-                "right": right_filter or r,
+        sides = [right_filter] if right_filter else ["call", "put"]
+
+        # Fetch call and put data in parallel
+        results_map = {}
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {
+                executor.submit(_fetch_one_side, symbol, expiry, r): r
+                for r in sides
             }
-            if expiry:
-                params["expiry_date"] = f"{expiry}T06:00:00.000Z"
+            for future in as_completed(futures):
+                r = futures[future]
+                try:
+                    results_map[r] = future.result()
+                except Exception as e:
+                    print(f"[Breeze Bridge] {r} fetch error: {e}")
+                    results_map[r] = None
 
-            result = breeze_instance.get_option_chain_quotes(**params)
-
+        for r in sides:
+            result = results_map.get(r)
             if not result or result.get("Status") != 200 or result.get("Error"):
-                print(f"[Breeze Bridge] {r} API error: Status={result.get('Status') if result else None}, Error={result.get('Error') if result else 'no result'}")
+                err_msg = result.get("Error") if result else "no result"
+                status = result.get("Status") if result else None
+                print(f"[Breeze Bridge] {r} API error: Status={status}, Error={err_msg}")
                 continue
 
             records = result.get("Success", [])
@@ -362,7 +421,9 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
                 ltp = _safe_float(rec.get("ltp"))
                 oi = _safe_float(rec.get("open_interest"))
                 volume = _safe_int(rec.get("total_quantity_traded"))
-                iv = _safe_float(rec.get("implied_volatility"))
+                iv = _safe_float(
+                    rec.get("implied_volatility") or rec.get("iv") or rec.get("volatility")
+                )
                 oi_change = _safe_float(
                     rec.get("chnge_oi") or rec.get("change_oi") or rec.get("oi_change")
                 )
@@ -395,13 +456,10 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
 
                 all_strikes[strike] = existing
 
-            if right_filter:
-                break
-
         if not all_strikes:
             return {"symbol": symbol, "strikes": [], "expiry": expiry or "", "expiries": sorted(expiry_dates)}
 
-        # Calculate Greeks using Black-Scholes
+        # Calculate time to expiry
         tte_days = 7
         if expiry:
             try:
@@ -411,21 +469,37 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
             except ValueError:
                 pass
 
+        # Calculate IV from price when API doesn't provide it, then compute Greeks
         if spot_price > 0:
+            iv_calculated = 0
             for sd in all_strikes.values():
                 s = sd["strike"]
+                # Call side: compute IV if missing, then Greeks
+                if sd["callIV"] <= 0 and sd["callLTP"] > 0:
+                    sd["callIV"] = implied_vol_bs(spot_price, s, tte_days, sd["callLTP"], "call")
+                    if sd["callIV"] > 0:
+                        iv_calculated += 1
                 if sd["callIV"] > 0:
                     cg = calc_greeks(spot_price, s, tte_days, sd["callIV"], "call")
                     sd["callDelta"] = cg["delta"]
                     sd["callGamma"] = cg["gamma"]
                     sd["callTheta"] = cg["theta"]
                     sd["callVega"] = cg["vega"]
+
+                # Put side: compute IV if missing, then Greeks
+                if sd["putIV"] <= 0 and sd["putLTP"] > 0:
+                    sd["putIV"] = implied_vol_bs(spot_price, s, tte_days, sd["putLTP"], "put")
+                    if sd["putIV"] > 0:
+                        iv_calculated += 1
                 if sd["putIV"] > 0:
                     pg = calc_greeks(spot_price, s, tte_days, sd["putIV"], "put")
                     sd["putDelta"] = pg["delta"]
                     sd["putGamma"] = pg["gamma"]
                     sd["putTheta"] = pg["theta"]
                     sd["putVega"] = pg["vega"]
+
+            if iv_calculated > 0:
+                print(f"[Breeze Bridge] Calculated IV for {iv_calculated} legs (API didn't provide)")
 
         strikes = sorted(all_strikes.values(), key=lambda s: s["strike"])
         total_call_oi = sum(s["callOI"] for s in strikes)
@@ -478,18 +552,15 @@ def get_expiries(symbol):
         return {"error": "Breeze session not initialized", "expiries": []}
 
     try:
-        default_strikes = {
-            "NIFTY": "24000", "BANKNIFTY": "50000",
-            "FINNIFTY": "23000", "MIDCPNIFTY": "12000",
-        }
-        strike = default_strikes.get(symbol.upper(), "20000")
-
+        sym = symbol.upper()
+        # Try without strike_price first (returns all available data)
         result = breeze_instance.get_option_chain_quotes(
-            stock_code=symbol.upper(), exchange_code="NFO",
-            product_type="options", right="call", strike_price=strike,
+            stock_code=sym, exchange_code="NFO",
+            product_type="options", right="call",
         )
 
         if not result or result.get("Status") != 200:
+            print(f"[Breeze Bridge] Expiries {sym}: status={result.get('Status') if result else None}")
             return {"expiries": [], "error": f"API status {result.get('Status') if result else 'None'}"}
 
         records = result.get("Success", [])
@@ -511,8 +582,10 @@ def get_expiries(symbol):
                 if date_str:
                     expiry_set.add(date_str)
 
+        print(f"[Breeze Bridge] Expiries {sym}: {len(expiry_set)} found")
         return {"expiries": sorted(expiry_set)}
     except Exception as e:
+        print(f"[Breeze Bridge] get_expiries error for {symbol}: {e}")
         return {"expiries": [], "error": str(e)}
 
 
@@ -631,8 +704,11 @@ if __name__ == "__main__":
     lot_sizes = get_lot_sizes()
     print(f"[Breeze Bridge] Lot sizes loaded: {len(lot_sizes)} symbols")
 
-    server = HTTPServer(("127.0.0.1", port), BreezeHandler)
-    print(f"[Breeze Bridge] Ready. Session active: {breeze_instance is not None}")
+    class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+
+    server = ThreadedHTTPServer(("127.0.0.1", port), BreezeHandler)
+    print(f"[Breeze Bridge] Ready (threaded). Session active: {breeze_instance is not None}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
