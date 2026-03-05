@@ -685,13 +685,19 @@ export class TradeService {
       data: { status: 'CLOSED', realizedPnl: netPnl, closedAt: new Date() },
     });
 
-    // Add sale proceeds back to available cash
     const portfolio = await this.prisma.portfolio.findUnique({ where: { id: position.portfolioId } });
     if (portfolio) {
-      const saleProceeds = exitPrice * position.qty - costs.totalCost;
+      let cashChange: number;
+      if (position.side === 'LONG') {
+        cashChange = exitPrice * position.qty - costs.totalCost;
+      } else {
+        // SHORT close: release blocked margin + settle P&L
+        const marginReleased = this.shortMarginRequired(entryPrice, position.qty, position.exchange);
+        cashChange = marginReleased + netPnl;
+      }
       await this.prisma.portfolio.update({
         where: { id: position.portfolioId },
-        data: { currentNav: Number(portfolio.currentNav) + saleProceeds },
+        data: { currentNav: Number(portfolio.currentNav) + cashChange },
       });
     }
 

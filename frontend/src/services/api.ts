@@ -111,6 +111,9 @@ export const tradingApi = {
   positions: () =>
     api.get('/trades/positions'),
 
+  closePosition: (positionId: string, exitPrice: number) =>
+    api.post(`/trades/positions/${positionId}/close`, { exit_price: exitPrice }),
+
   listTrades: (params?: { page?: number; limit?: number; from_date?: string; to_date?: string; symbol?: string }) =>
     api.get('/trades/trades', { params }),
 };

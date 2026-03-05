@@ -236,21 +236,43 @@ Respond in JSON:
         strategyTag: signal.strategyId || 'AI-SIGNAL',
       });
     } else if (direction === 'SELL') {
-      const position = await this.prisma.position.findFirst({
+      const longPosition = await this.prisma.position.findFirst({
         where: { portfolioId: portfolio.id, symbol: signal.symbol, side: 'LONG', status: 'OPEN' },
       });
 
-      if (!position) throw new AIAgentError(`No open position in ${signal.symbol} to sell`, 400);
+      if (longPosition) {
+        let exitPrice = 0;
+        try {
+          const quote = await marketData.getQuote(signal.symbol, signal.exchange);
+          exitPrice = quote.ltp;
+        } catch { /* fallback */ }
 
-      let exitPrice = 0;
-      try {
-        const quote = await marketData.getQuote(signal.symbol, signal.exchange);
-        exitPrice = quote.ltp;
-      } catch { /* fallback */ }
+        if (exitPrice <= 0) throw new AIAgentError(`Cannot sell ${signal.symbol}: no price available`, 400);
 
-      if (exitPrice <= 0) throw new AIAgentError(`Cannot sell ${signal.symbol}: no price available`, 400);
+        await tradeService.closePosition(longPosition.id, userId, exitPrice);
+      } else {
+        // No LONG position — open a SHORT (sell without holdings)
+        let ltp = 0;
+        try {
+          const quote = await marketData.getQuote(signal.symbol, signal.exchange);
+          ltp = quote.ltp;
+        } catch { /* TradeService will fetch */ }
 
-      await tradeService.closePosition(position.id, userId, exitPrice);
+        const nav = Number(portfolio.currentNav);
+        const maxPerTrade = nav * 0.05;
+        const qty = ltp > 0 ? Math.max(1, Math.floor(maxPerTrade / ltp)) : 1;
+
+        await tradeService.placeOrder(userId, {
+          portfolioId: portfolio.id,
+          symbol: signal.symbol,
+          side: 'SELL',
+          orderType: 'MARKET',
+          qty,
+          instrumentToken: signal.symbol,
+          exchange: signal.exchange,
+          strategyTag: signal.strategyId || 'AI-SIGNAL',
+        }, true);
+      }
     }
 
     return this.prisma.aITradeSignal.update({

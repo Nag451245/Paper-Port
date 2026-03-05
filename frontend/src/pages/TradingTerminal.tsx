@@ -687,6 +687,7 @@ export default function TradingTerminal() {
                           <th className="text-right pb-2 font-medium">Unrealized P&L</th>
                           <th className="text-right pb-2 font-medium">Realized P&L</th>
                           <th className="text-right pb-2 font-medium hidden sm:table-cell">Opened</th>
+                          <th className="text-center pb-2 font-medium">Action</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -718,6 +719,27 @@ export default function TradingTerminal() {
                                 {rPnl >= 0 ? '+' : ''}₹{rPnl.toFixed(2)}
                               </td>
                               <td className="py-2.5 text-right text-slate-400 hidden sm:table-cell">{fmtTime(pos.openedAt ?? pos.opened_at)}</td>
+                              <td className="py-2.5 text-center">
+                                <button
+                                  onClick={async () => {
+                                    if (!liveLtp || liveLtp <= 0) { setError('No live price available to close position'); return; }
+                                    try {
+                                      await tradingApi.closePosition(pos.id, liveLtp);
+                                      setSuccess(`${pos.side === 'SHORT' ? 'Covered' : 'Sold'} ${qty} ${pos.symbol} @ ₹${liveLtp.toFixed(2)}`);
+                                      await fetchAll();
+                                    } catch (err: any) {
+                                      setError(err?.response?.data?.error || 'Failed to close position');
+                                    }
+                                  }}
+                                  className={`text-[10px] font-bold px-2 py-1 rounded transition ${
+                                    pos.side === 'SHORT'
+                                      ? 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'
+                                      : 'bg-red-50 text-red-600 hover:bg-red-100'
+                                  }`}
+                                >
+                                  {pos.side === 'SHORT' ? 'COVER' : 'EXIT'}
+                                </button>
+                              </td>
                             </tr>
                           );
                         })}
