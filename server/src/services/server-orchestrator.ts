@@ -100,20 +100,17 @@ export class ServerOrchestrator {
 
     const config = this.calendar.getPhaseConfig(to);
 
-    if (to === 'MARKET_HOURS' && !config.botsActive === false) {
-      await this.autoStartBots();
-    }
-
-    if (from === 'MARKET_HOURS' && to !== 'MARKET_HOURS') {
-      await this.autoStopBots();
-    }
-
     if (to === 'MARKET_HOURS') {
-      this.botEngine.setTickInterval(config.botTickMs);
-      this.botEngine.setMarketScanInterval(config.scanIntervalMs);
+      // Market just opened — start bots and set fast intervals
+      await this.autoStartBots();
+      this.botEngine.setTickInterval(config.botTickMs || 60_000);
+      this.botEngine.setMarketScanInterval(config.scanIntervalMs || 5 * 60_000);
+    } else {
+      // Outside market hours — slow down but don't stop
+      this.botEngine.setTickInterval(10 * 60_000);
+      this.botEngine.setMarketScanInterval(30 * 60_000);
     }
 
-    if (to === 'AFTER_HOURS' && from === 'AFTER_HOURS') return;
     const nextOpen = this.calendar.getNextMarketOpen();
     if (to === 'WEEKEND' || to === 'HOLIDAY' || to === 'AFTER_HOURS') {
       console.log(`[Orchestrator] Next market open: ${nextOpen.date} (${nextOpen.label})`);

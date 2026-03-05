@@ -226,11 +226,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       if (ok) {
         const daemonOk = startDaemon();
         console.log(`[startup] Rust engine: ACTIVE (daemon: ${daemonOk ? 'persistent' : 'single-shot'})`);
+        botEngine.refreshRustAvailability();
       } else {
-        console.log(`[startup] Rust engine: JS fallbacks`);
+        console.log(`[startup] Rust engine: NOT AVAILABLE — bots will use Gemini AI analysis only`);
       }
     } catch (err: any) {
-      console.error('[startup] Rust engine check failed:', err.message);
+      console.error('[startup] Rust engine check failed:', err.message, '— bots will use Gemini AI only');
     }
   });
 
@@ -327,7 +328,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
           app.log.info(`[Bootstrap] Activated AI agent for user ${user.id}`);
         }
       }
-      // Clear ALL error-state bots (stale OpenAI errors, failed cycles, etc.)
+      // Clear error-state bots but keep them RUNNING so they resume
       const staleCount = await prisma.tradingBot.updateMany({
         where: {
           OR: [
@@ -337,25 +338,32 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         },
         data: {
           lastAction: 'Ready — awaiting next cycle',
-          status: 'IDLE',
+          status: 'RUNNING',
         },
       });
       if (staleCount.count > 0) {
-        app.log.info(`[Bootstrap] Cleared ${staleCount.count} stale error messages from bots`);
+        app.log.info(`[Bootstrap] Reset ${staleCount.count} error-state bots to RUNNING`);
       }
     } catch (err) {
       app.log.error({ err }, 'Failed to bootstrap default bots/agents');
     }
   });
 
-  // Auto-resume bots/agents — only during market phases where bots should be active
+  // Auto-resume bots/agents — always start regardless of phase
+  // Bots run at reduced frequency outside market hours but stay alive
   app.addHook('onReady', async () => {
     const phase = orchestrator.calendar.getMarketPhase();
     const phaseConfig = orchestrator.calendar.getPhaseConfig(phase);
+    const isMarketActive = phaseConfig.botsActive;
 
-    if (!phaseConfig.botsActive) {
-      app.log.info(`[Bot Resume] Skipping — current phase: ${phase} (${phaseConfig.label})`);
-      return;
+    app.log.info(`[Bot Resume] Phase: ${phase} (${phaseConfig.label}), botsActive: ${isMarketActive}`);
+
+    // Set appropriate tick intervals based on phase
+    if (isMarketActive) {
+      botEngine.setTickInterval(phaseConfig.botTickMs || 60_000);
+    } else {
+      // Outside market hours: run every 10 minutes to keep bots alive and visible
+      botEngine.setTickInterval(10 * 60_000);
     }
 
     const prisma = getPrisma();
@@ -383,7 +391,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       for (let i = 0; i < runningBots.length; i++) {
         const bot = runningBots[i];
         setTimeout(() => {
-          botEngine.startBot(bot.id, bot.userId).catch(() => {});
+          botEngine.startBot(bot.id, bot.userId).catch(err => {
+            app.log.error(`Failed to start bot ${bot.name}: ${(err as Error).message}`);
+          });
           app.log.info(`Auto-resumed bot: ${bot.name} (${bot.role})`);
         }, i * 10_000);
       }
@@ -395,14 +405,20 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       });
       for (const agent of activeAgents) {
         setTimeout(() => {
-          botEngine.startAgent(agent.userId).catch(() => {});
-          botEngine.startMarketScan(agent.userId).catch(() => {});
+          botEngine.startAgent(agent.userId).catch(err => {
+            app.log.error(`Failed to start agent: ${(err as Error).message}`);
+          });
+          botEngine.startMarketScan(agent.userId).catch(err => {
+            app.log.error(`Failed to start market scan: ${(err as Error).message}`);
+          });
           app.log.info(`Auto-resumed AI agent + market scanner for user ${agent.userId}`);
         }, 40_000);
       }
 
       if (runningBots.length > 0 || activeAgents.length > 0) {
         app.log.info(`Will resume ${runningBots.length} bots, ${activeAgents.length} agents (staggered, phase: ${phase})`);
+      } else {
+        app.log.info(`[Bot Resume] No RUNNING bots or active agents found in DB`);
       }
     } catch (err) {
       app.log.error({ err }, 'Failed to auto-resume bots/agents');

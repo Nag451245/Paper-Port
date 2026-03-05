@@ -157,17 +157,17 @@ export class MarketCalendar {
   } {
     switch (phase) {
       case 'PRE_MARKET':
-        return { pingIntervalMs: 5 * 60_000, botTickMs: 0, scanIntervalMs: 0, botsActive: false, label: 'Pre-Market (8:00-9:15 IST)' };
+        return { pingIntervalMs: 5 * 60_000, botTickMs: 5 * 60_000, scanIntervalMs: 10 * 60_000, botsActive: true, label: 'Pre-Market (8:00-9:15 IST)' };
       case 'MARKET_HOURS':
         return { pingIntervalMs: 5 * 60_000, botTickMs: 60_000, scanIntervalMs: 5 * 60_000, botsActive: true, label: 'Market Hours (9:15-15:30 IST)' };
       case 'POST_MARKET':
-        return { pingIntervalMs: 10 * 60_000, botTickMs: 0, scanIntervalMs: 0, botsActive: false, label: 'Post-Market (15:30-17:00 IST)' };
+        return { pingIntervalMs: 10 * 60_000, botTickMs: 5 * 60_000, scanIntervalMs: 10 * 60_000, botsActive: true, label: 'Post-Market (15:30-17:00 IST)' };
       case 'AFTER_HOURS':
-        return { pingIntervalMs: 14 * 60_000, botTickMs: 0, scanIntervalMs: 0, botsActive: false, label: 'After-Hours' };
+        return { pingIntervalMs: 14 * 60_000, botTickMs: 10 * 60_000, scanIntervalMs: 30 * 60_000, botsActive: true, label: 'After-Hours' };
       case 'WEEKEND':
-        return { pingIntervalMs: 30 * 60_000, botTickMs: 0, scanIntervalMs: 0, botsActive: false, label: 'Weekend' };
+        return { pingIntervalMs: 30 * 60_000, botTickMs: 30 * 60_000, scanIntervalMs: 0, botsActive: true, label: 'Weekend' };
       case 'HOLIDAY':
-        return { pingIntervalMs: 30 * 60_000, botTickMs: 0, scanIntervalMs: 0, botsActive: false, label: `Holiday: ${this.getHolidayName() ?? 'Market Closed'}` };
+        return { pingIntervalMs: 30 * 60_000, botTickMs: 30 * 60_000, scanIntervalMs: 0, botsActive: true, label: `Holiday: ${this.getHolidayName() ?? 'Market Closed'}` };
     }
   }
 

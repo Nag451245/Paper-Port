@@ -150,6 +150,12 @@ export class BotEngine {
   constructor(private prisma: PrismaClient) {
     this.tradeService = new TradeService(prisma);
     this.rustAvailable = isEngineAvailable();
+    console.log(`[BotEngine] Initialized — Rust engine: ${this.rustAvailable ? 'AVAILABLE' : 'NOT FOUND (using Gemini AI only)'}`);
+  }
+
+  refreshRustAvailability(): void {
+    this.rustAvailable = isEngineAvailable();
+    console.log(`[BotEngine] Rust engine availability refreshed: ${this.rustAvailable}`);
   }
 
   /**
@@ -298,13 +304,19 @@ export class BotEngine {
     const botIndex = this.runningBots.size;
     const staggerMs = botIndex * 30_000 + 10_000;
 
+    console.log(`[BotEngine] Starting bot ${botId} (stagger: ${staggerMs}ms, tick: ${this.tickInterval}ms)`);
+
     setTimeout(() => {
-      this.runBotCycle(botId, userId).catch(() => {});
+      this.runBotCycle(botId, userId).catch(err => {
+        console.error(`[BotEngine] Initial cycle failed for bot ${botId}:`, (err as Error).message);
+      });
     }, staggerMs);
 
     const timer = setInterval(() => {
       if (!this.cycleInProgress.has(botId)) {
-        this.runBotCycle(botId, userId).catch(() => {});
+        this.runBotCycle(botId, userId).catch(err => {
+          console.error(`[BotEngine] Cycle failed for bot ${botId}:`, (err as Error).message);
+        });
       }
     }, this.tickInterval);
 
@@ -323,13 +335,18 @@ export class BotEngine {
   async startAgent(userId: string): Promise<void> {
     if (this.runningAgents.has(userId)) return;
 
-    // Delay first agent cycle by 20s to let server finish booting
+    console.log(`[BotEngine] Starting agent for user ${userId} (interval: ${this.signalInterval}ms)`);
+
     setTimeout(() => {
-      this.runAgentCycle(userId).catch(() => {});
+      this.runAgentCycle(userId).catch(err => {
+        console.error(`[BotEngine] Initial agent cycle failed:`, (err as Error).message);
+      });
     }, 20_000);
 
     const timer = setInterval(() => {
-      this.runAgentCycle(userId).catch(() => {});
+      this.runAgentCycle(userId).catch(err => {
+        console.error(`[BotEngine] Agent cycle failed:`, (err as Error).message);
+      });
     }, this.signalInterval);
 
     this.runningAgents.set(userId, { userId, timer });
@@ -890,8 +907,12 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
               volume: b.volume,
             })),
           });
+        } else {
+          console.log(`[BotEngine] fetchCandles: ${sym} returned only ${bars.length} bars (need 26+)`);
         }
-      } catch { /* skip symbol */ }
+      } catch (err) {
+        console.log(`[BotEngine] fetchCandles: ${sym} failed — ${(err as Error).message}`);
+      }
     }
 
     return results;
@@ -904,17 +925,21 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     try {
       const aiStatus = getOpenAIStatus();
       if (aiStatus.circuitOpen && !this.rustAvailable) {
+        console.log(`[BotEngine] Bot ${botId}: skipping cycle — AI circuit open and no Rust engine (cooldown: ${aiStatus.cooldownRemainingMs}ms)`);
         return;
       }
 
       const bot = await this.prisma.tradingBot.findUnique({ where: { id: botId } });
       if (!bot || bot.status !== 'RUNNING') {
+        console.log(`[BotEngine] Bot ${botId}: not found or not RUNNING, stopping`);
         this.stopBot(botId);
         return;
       }
 
       const symbols = (bot.assignedSymbols || 'RELIANCE,TCS,INFY,HDFCBANK,ITC')
         .split(',').map(s => s.trim()).filter(Boolean);
+
+      console.log(`[BotEngine] Bot ${botId} (${bot.name}/${bot.role}): starting cycle for ${symbols.length} symbols, Rust: ${this.rustAvailable}`);
 
       // --- Path A: Rust engine available → deterministic signals ---
       if (this.rustAvailable) {
@@ -927,7 +952,9 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           try {
             const scanResult = await engineScan({ symbols: candleData, aggressiveness: aggressiveness as any });
             rustSignals = scanResult.signals ?? [];
-          } catch {
+            console.log(`[BotEngine] Bot ${botId}: Rust scan returned ${rustSignals.length} signals`);
+          } catch (err) {
+            console.error(`[BotEngine] Bot ${botId}: Rust scan error:`, (err as Error).message);
             rustSignals = [];
           }
 
@@ -937,7 +964,6 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           }
         }
 
-        // No Rust signals and we have candle data — log quiet cycle
         if (candleData.length > 0) {
           const topSymbols = candleData.slice(0, 3).map(d => d.symbol).join(', ');
           await this.prisma.tradingBot.update({
@@ -958,10 +984,11 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           });
           return;
         }
-        // Fall through to GPT if candle data not available
+        console.log(`[BotEngine] Bot ${botId}: no candle data from Rust path, falling through to GPT`);
       }
 
-      // --- Path B: GPT fallback (no Rust or no candle data) ---
+      // --- Path B: GPT/Gemini analysis (no Rust or no candle data) ---
+      console.log(`[BotEngine] Bot ${botId}: running GPT/Gemini analysis cycle`);
       await this.runGptBotCycle(botId, userId, bot, symbols);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -1141,12 +1168,15 @@ Approve or reject?` },
     return parts.length > 1 ? parts.join('\n') : '';
   }
 
-  // ---- Original GPT-only cycle (fallback) ----
+  // ---- GPT/Gemini analysis cycle ----
   private async runGptBotCycle(botId: string, userId: string, bot: any, symbols: string[]): Promise<void> {
+    console.log(`[BotEngine] GPT cycle for bot ${botId} (${bot.name}): fetching quotes for ${symbols.join(', ')}`);
     let quotes: string;
     try {
       quotes = await this.fetchQuotes(symbols);
-    } catch {
+      console.log(`[BotEngine] GPT cycle: quotes fetched (${quotes.length} chars)`);
+    } catch (err) {
+      console.error(`[BotEngine] GPT cycle: quote fetch failed:`, (err as Error).message);
       quotes = symbols.map(s => `${s}: price data temporarily unavailable`).join('\n');
     }
     const positions = await this.getPortfolioPositions(userId);
@@ -1293,8 +1323,10 @@ INSTRUCTIONS:
     try {
       const aiStatus = getOpenAIStatus();
       if (aiStatus.circuitOpen && !this.rustAvailable) {
+        console.log(`[BotEngine] Agent: skipping cycle — AI circuit open and no Rust engine (cooldown: ${aiStatus.cooldownRemainingMs}ms)`);
         return;
       }
+      console.log(`[BotEngine] Agent cycle starting for user ${userId}, Rust: ${this.rustAvailable}`);
 
       const config = await this.prisma.aIAgentConfig.findUnique({ where: { userId } });
       if (!config || !config.isActive) {
@@ -1479,9 +1511,10 @@ Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted
             }
           }
         }
+        console.log(`[BotEngine] Agent cycle completed — ${result.signals?.length ?? 0} signals, view: ${result.marketView?.substring(0, 80) ?? 'N/A'}`);
       }
-    } catch {
-      /* will retry next cycle */
+    } catch (err) {
+      console.error(`[BotEngine] Agent cycle error:`, (err as Error).message);
     }
   }
 
