@@ -61,7 +61,7 @@ Examples:
           },
           { role: 'user', content: message },
         ],
-        maxTokens: 500,
+        maxTokens: 2048,
         temperature: 0.2,
       });
     } catch {

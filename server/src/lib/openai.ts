@@ -174,7 +174,7 @@ export async function chatCompletion(options: ChatCompletionOptions): Promise<st
     throw new Error(`Gemini circuit breaker open — cooling down for ${remaining}s. Quota/rate limit was exceeded.`);
   }
 
-  const { messages, model = DEFAULT_MODEL, temperature = 0.7, maxTokens = 4096, responseFormat } = options;
+  const { messages, model = DEFAULT_MODEL, temperature = 0.7, maxTokens = 8192, responseFormat } = options;
 
   const apiKey = getApiKey();
   if (!apiKey) {

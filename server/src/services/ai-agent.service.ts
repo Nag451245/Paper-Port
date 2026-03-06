@@ -93,7 +93,7 @@ Respond in JSON:
           { role: 'user', content: `Analyze ${symbol} options now.` },
         ],
         temperature: 0.3,
-        maxTokens: 512,
+        maxTokens: 2048,
       });
 
       return {

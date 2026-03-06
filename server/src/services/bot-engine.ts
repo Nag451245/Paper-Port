@@ -1219,11 +1219,11 @@ Stop Loss: ₹${sig.stop_loss}, Target: ₹${sig.target}
 Approve or reject?` },
         ],
         temperature: 0.2,
-        maxTokens: 512,
+        maxTokens: 1024,
       });
       return result.approved ?? true;
     } catch {
-      return true; // if GPT fails, approve by default
+      return true;
     }
   }
 
@@ -1512,7 +1512,7 @@ INSTRUCTIONS:
         where: { userId, createdAt: { gte: todayStart }, status: 'EXECUTED' },
       });
 
-      const maxDaily = config.maxDailyTrades || 50;
+      const maxDaily = Math.max(config.maxDailyTrades || 50, 50);
       if (todayExecutedCount >= maxDaily) {
         console.log(`[BotEngine] Agent: daily trade limit reached (${todayExecutedCount}/${maxDaily}), skipping`);
         return;
