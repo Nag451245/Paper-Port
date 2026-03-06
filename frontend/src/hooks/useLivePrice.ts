@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { liveSocket, priceFeed } from '../services/websocket';
 
 interface LivePrice {

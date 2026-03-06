@@ -105,15 +105,35 @@ export const useMarketDataStore = create<MarketDataState>((set) => ({
   },
 
   subscribeSymbol: (symbol) => {
-    priceFeed.subscribe(symbol, (quote) => {
-      set((state) => ({
-        quotes: { ...state.quotes, [quote.symbol]: quote },
-      }));
+    const unsub = priceFeed.subscribe(symbol, (quote) => {
+      set((state) => {
+        const existing = state.quotes[quote.symbol] ?? {} as MarketQuote;
+        return {
+          quotes: {
+            ...state.quotes,
+            [quote.symbol]: {
+              ...existing,
+              symbol: quote.symbol,
+              ltp: quote.ltp,
+              change: quote.change,
+              changePercent: quote.changePercent,
+              volume: quote.volume,
+              timestamp: quote.timestamp,
+            },
+          },
+        };
+      });
     });
+    (priceFeed as any).__unsubs = (priceFeed as any).__unsubs ?? new Map();
+    (priceFeed as any).__unsubs.set(symbol, unsub);
   },
 
   unsubscribeSymbol: (symbol) => {
-    priceFeed.unsubscribe(symbol);
+    const unsubs = (priceFeed as any).__unsubs as Map<string, () => void> | undefined;
+    if (unsubs?.has(symbol)) {
+      unsubs.get(symbol)!();
+      unsubs.delete(symbol);
+    }
   },
 
   checkMarketStatus: () => {
