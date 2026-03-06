@@ -181,7 +181,11 @@ export default function OptionChain() {
         setSource(data.source ?? '');
         setLastUpdated(new Date());
       } else {
-        if (!silent) setError('No option chain data available for this symbol.');
+        setStrikes([]);
+        setSpotPrice(0);
+        if (!silent) setError(data?.sessionError
+          ? 'Breeze API session not active. Please enter your session key in Settings.'
+          : 'No option chain data available for this symbol.');
       }
     } catch {
       if (!silent) setError('Failed to fetch option chain data. Please try again.');
