@@ -15,13 +15,13 @@ struct PairData {
     prices_b: Vec<f64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct CorrelationResult {
     pairs: Vec<PairAnalysis>,
     best_pairs: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct PairAnalysis {
     symbol_a: String,
     symbol_b: String,

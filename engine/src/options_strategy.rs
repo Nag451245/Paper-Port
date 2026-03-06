@@ -19,7 +19,7 @@ struct Leg {
     iv: Option<f64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct StrategyResult {
     strategy_name: String,
     payoff_diagram: Vec<PayoffPoint>,
@@ -31,14 +31,14 @@ struct StrategyResult {
     probability_of_profit: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct PayoffPoint {
     price: f64,
     payoff: f64,
     pnl: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct GreeksSummary {
     net_delta: f64,
     net_gamma: f64,
@@ -46,7 +46,7 @@ struct GreeksSummary {
     net_vega: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct RiskMetrics {
     risk_reward_ratio: f64,
     capital_required: f64,

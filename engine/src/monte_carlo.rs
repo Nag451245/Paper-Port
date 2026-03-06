@@ -9,7 +9,7 @@ struct Config {
     confidence_levels: Option<Vec<f64>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct SimResult {
     percentile_5: Vec<f64>,
     percentile_25: Vec<f64>,
