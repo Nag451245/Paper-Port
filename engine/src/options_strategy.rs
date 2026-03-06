@@ -277,7 +277,7 @@ mod tests {
     fn test_long_put_basic() {
         let r = run(json!([{"option_type":"put","strike":100.0,"premium":4.0,"quantity":1}]), 100.0);
         assert_eq!(r.strategy_name, "Long PUT");
-        assert!(r.risk_metrics.net_premium < 0.0);
+        assert!(r.risk_metrics.net_premium > 0.0, "long put is debit: net_premium should be positive");
     }
 
     #[test]
@@ -399,8 +399,8 @@ mod tests {
             {"option_type":"put","strike":95.0,"premium":3.0,"quantity":-1},
             {"option_type":"put","strike":90.0,"premium":1.0,"quantity":1}
         ]), 100.0);
-        assert!(r.risk_metrics.net_premium > 0.0,
-            "credit spread net premium should be positive, got {}", r.risk_metrics.net_premium);
+        assert!(r.risk_metrics.net_premium < 0.0,
+            "credit spread net premium should be negative (received), got {}", r.risk_metrics.net_premium);
     }
 
     #[test]
@@ -409,8 +409,8 @@ mod tests {
             {"option_type":"call","strike":100.0,"premium":10.0,"quantity":1},
             {"option_type":"call","strike":110.0,"premium":5.0,"quantity":-1}
         ]), 100.0);
-        assert!(r.risk_metrics.net_premium < 0.0,
-            "debit spread net premium should be negative, got {}", r.risk_metrics.net_premium);
+        assert!(r.risk_metrics.net_premium > 0.0,
+            "debit spread net premium should be positive (paid), got {}", r.risk_metrics.net_premium);
     }
 
     #[test]
@@ -442,11 +442,13 @@ mod tests {
     fn test_nifty_iron_condor_realistic_margin() {
         let lot = 75;
         let r = run(json!([
-            {"option_type":"put","strike":24450.0,"premium":152.4,"quantity":lot},
-            {"option_type":"put","strike":24550.0,"premium":188.5,"quantity":-lot},
-            {"option_type":"call","strike":24650.0,"premium":187.3,"quantity":-lot},
-            {"option_type":"call","strike":24750.0,"premium":139.35,"quantity":lot}
+            {"option_type":"put","strike":24450.0,"premium":8.0,"quantity":lot},
+            {"option_type":"put","strike":24550.0,"premium":18.0,"quantity":-lot},
+            {"option_type":"call","strike":24650.0,"premium":18.0,"quantity":-lot},
+            {"option_type":"call","strike":24750.0,"premium":8.0,"quantity":lot}
         ]), 24600.0);
+        // net credit = (18+18-8-8)*75 = 20*75 = 1500
+        // max loss per side = (100 - 20)*75 = 6000
         assert!(r.risk_metrics.capital_required > 5000.0,
             "NIFTY condor margin should be >> 5K, got {}", r.risk_metrics.capital_required);
     }
