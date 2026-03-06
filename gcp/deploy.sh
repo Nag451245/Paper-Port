@@ -73,7 +73,7 @@ if [ ! -f .env ]; then
   sed -i "s|^JWT_SECRET=.*|JWT_SECRET=\"$JWT_SECRET\"|" .env
   sed -i "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=\"$ENCRYPTION_KEY\"|" .env
   sed -i "s|^NODE_ENV=.*|NODE_ENV=\"production\"|" .env
-  sed -i "s|^CORS_ORIGINS=.*|CORS_ORIGINS=\"http://$(curl -s ifconfig.me)\"|" .env
+  sed -i "s|^CORS_ORIGINS=.*|CORS_ORIGINS=\"https://papertrade.duckdns.org\"|" .env
 
   echo "  .env created with local DB credentials."
   echo "  >>> IMPORTANT: Edit .env to add your API keys <<<"
@@ -96,8 +96,8 @@ npm ci
 
 VITE_ENV="$APP_DIR/frontend/.env.production"
 if [ ! -f "$VITE_ENV" ]; then
-  echo "VITE_API_URL=http://$(curl -s ifconfig.me)/api" > "$VITE_ENV"
-  echo "VITE_WS_URL=ws://$(curl -s ifconfig.me)/ws" >> "$VITE_ENV"
+  echo "VITE_API_BASE_URL=https://papertrade.duckdns.org/api" > "$VITE_ENV"
+  echo "VITE_WS_URL=wss://papertrade.duckdns.org/ws" >> "$VITE_ENV"
 fi
 
 echo "  Building frontend..."
@@ -110,7 +110,7 @@ EXTERNAL_IP=$(curl -s ifconfig.me)
 sudo tee /etc/nginx/sites-available/capital-guard > /dev/null <<NGINX
 server {
     listen 80;
-    server_name $EXTERNAL_IP _;
+    server_name papertrade.duckdns.org $EXTERNAL_IP _;
 
     root $APP_DIR/frontend/dist;
     index index.html;
