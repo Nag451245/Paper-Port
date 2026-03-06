@@ -158,7 +158,14 @@ export class AuthService {
     private prisma: PrismaClient,
     private jwtSecret: string,
   ) {
-    this.encKey = env.ENCRYPTION_KEY || jwtSecret;
+    if (env.ENCRYPTION_KEY) {
+      this.encKey = env.ENCRYPTION_KEY;
+    } else {
+      this.encKey = jwtSecret;
+      console.warn('[SECURITY] ENCRYPTION_KEY not set — falling back to JWT_SECRET. ' +
+        'Set a separate ENCRYPTION_KEY environment variable for production. ' +
+        'Compromising JWT_SECRET would also expose stored broker credentials.');
+    }
   }
 
   async register(input: RegisterInput): Promise<{ user: UserProfile; userId: string }> {
@@ -190,9 +197,42 @@ export class AuthService {
     return { user: toProfile(user), userId: user.id };
   }
 
+  private loginAttempts = new Map<string, { count: number; lockedUntil: number }>();
+  private readonly MAX_LOGIN_ATTEMPTS = 5;
+  private readonly LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+
+  private checkLockout(email: string): void {
+    const record = this.loginAttempts.get(email);
+    if (record && record.lockedUntil > Date.now()) {
+      const remainingMs = record.lockedUntil - Date.now();
+      const remainingMin = Math.ceil(remainingMs / 60_000);
+      throw new AuthError(`Account temporarily locked. Try again in ${remainingMin} minute(s).`, 429);
+    }
+    if (record && record.lockedUntil <= Date.now()) {
+      this.loginAttempts.delete(email);
+    }
+  }
+
+  private recordFailedAttempt(email: string): void {
+    const record = this.loginAttempts.get(email) || { count: 0, lockedUntil: 0 };
+    record.count += 1;
+    if (record.count >= this.MAX_LOGIN_ATTEMPTS) {
+      record.lockedUntil = Date.now() + this.LOCKOUT_DURATION_MS;
+      console.warn(`[SECURITY] Account locked for ${email} after ${record.count} failed attempts`);
+    }
+    this.loginAttempts.set(email, record);
+  }
+
+  private clearFailedAttempts(email: string): void {
+    this.loginAttempts.delete(email);
+  }
+
   async login(input: LoginInput): Promise<{ user: UserProfile; userId: string }> {
+    this.checkLockout(input.email);
+
     const user = await this.prisma.user.findUnique({ where: { email: input.email } });
     if (!user) {
+      this.recordFailedAttempt(input.email);
       throw new AuthError('Invalid email or password', 401);
     }
 
@@ -202,8 +242,11 @@ export class AuthService {
 
     const valid = await bcrypt.compare(input.password, user.passwordHash);
     if (!valid) {
+      this.recordFailedAttempt(input.email);
       throw new AuthError('Invalid email or password', 401);
     }
+
+    this.clearFailedAttempts(input.email);
 
     return { user: toProfile(user), userId: user.id };
   }

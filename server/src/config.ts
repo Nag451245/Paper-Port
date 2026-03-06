@@ -20,7 +20,7 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(1),
   JWT_ALGORITHM: z.string().default('HS256'),
   JWT_EXPIRES_IN: z.string().default('24h'),
-  ENCRYPTION_KEY: z.string().min(1).default(''),
+  ENCRYPTION_KEY: z.string().min(16, 'ENCRYPTION_KEY must be at least 16 characters').optional(),
   CORS_ORIGINS: z.string().default('http://localhost:5173'),
   HOST: z.string().default('0.0.0.0'),
   PORT: z.coerce.number().default(8000),

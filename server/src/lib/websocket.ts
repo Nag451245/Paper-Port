@@ -151,15 +151,33 @@ export async function registerWebSocket(app: FastifyInstance): Promise<void> {
   await app.register(websocket);
 
   app.get('/ws', { websocket: true }, (socket, req) => {
-    let userId = 'anonymous';
+    let userId: string | null = null;
+
     try {
-      const url = new URL(req.url ?? '', `http://${req.headers.host}`);
-      const token = url.searchParams.get('token');
+      // Prefer token from Authorization header (Sec-WebSocket-Protocol or query param)
+      const authHeader = req.headers['authorization'];
+      let token: string | null = null;
+
+      if (authHeader?.startsWith('Bearer ')) {
+        token = authHeader.slice(7);
+      } else {
+        const url = new URL(req.url ?? '', `http://${req.headers.host}`);
+        token = url.searchParams.get('token');
+      }
+
       if (token) {
         const decoded = app.jwt.verify<{ sub: string }>(token);
         userId = decoded.sub;
       }
-    } catch { /* unauthenticated connection — allowed with limited features */ }
+    } catch {
+      // Invalid token
+    }
+
+    if (!userId) {
+      socket.send(JSON.stringify({ type: 'error', message: 'Authentication required' }));
+      socket.close(4401, 'Unauthorized');
+      return;
+    }
 
     wsHub.register(socket, userId);
   });

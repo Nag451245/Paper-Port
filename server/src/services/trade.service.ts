@@ -479,11 +479,19 @@ export class TradeService {
     fillPrice: number,
     costs: CostBreakdown,
   ) {
-    if (input.side === 'BUY') {
-      await this.handleBuyFill(orderId, input, fillPrice, costs);
-    } else {
-      await this.handleSellFill(orderId, input, fillPrice, costs);
-    }
+    await this.prisma.$transaction(async (tx) => {
+      const origPrisma = this.prisma;
+      (this as any).prisma = tx;
+      try {
+        if (input.side === 'BUY') {
+          await this.handleBuyFill(orderId, input, fillPrice, costs);
+        } else {
+          await this.handleSellFill(orderId, input, fillPrice, costs);
+        }
+      } finally {
+        (this as any).prisma = origPrisma;
+      }
+    });
   }
 
   private async handleBuyFill(

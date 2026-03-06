@@ -224,6 +224,17 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
+  const escapeHtml = (s: string): string =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+  const getAllowedOrigin = (): string => {
+    const origins = env.CORS_ORIGINS.split(',').map(o => o.trim());
+    return origins[0] || 'null';
+  };
+
+  const TOKEN_PATTERN = /^[a-zA-Z0-9_\-]{8,256}$/;
+
   const handleBreezeCallback = async (request: any, reply: any) => {
     const queryParams = breezeCallbackQuerySchema.safeParse(request.query);
     const bodyParams = breezeCallbackQuerySchema.safeParse(request.body ?? {});
@@ -243,6 +254,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).type('text/html').send('<html><body><h3>Missing session token</h3></body></html>');
     }
 
+    if (!TOKEN_PATTERN.test(token)) {
+      return reply.code(400).type('text/html').send('<html><body><h3>Invalid session token format</h3></body></html>');
+    }
+
+    const origin = getAllowedOrigin();
     const state = params.state;
 
     if (state) {
@@ -250,8 +266,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         const payload = app.jwt.verify<{ sub: string; type?: string }>(state);
         if (payload?.sub && payload.type === 'breeze_session_state') {
           await authService.saveSessionToken(payload.sub, token);
+          const safeOrigin = escapeHtml(origin);
           return reply.type('text/html').send(
-            '<html><body><script>window.opener&&window.opener.postMessage({type:"breeze_session_saved"},"*");window.close();</script><h3>Session saved! You can close this tab.</h3></body></html>',
+            `<html><body><script>window.opener&&window.opener.postMessage({type:"breeze_session_saved"},"${safeOrigin}");window.close();</script><h3>Session saved! You can close this tab.</h3></body></html>`,
           );
         }
       } catch {
@@ -259,19 +276,25 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       }
     }
 
-    // No state or invalid state — show a page that saves via postMessage to the app
+    const safeOrigin = escapeHtml(origin);
+    const safeTokenPreview = escapeHtml(token.substring(0, 4));
+    const safeTokenJson = JSON.stringify(token);
+
     return reply.type('text/html').send(
       `<html><body>
-<h3>Session token received: ${token.substring(0, 4)}****</h3>
+<h3>Session token received: ${safeTokenPreview}****</h3>
 <p>Saving to your account...</p>
 <script>
+(function() {
+  var t = ${safeTokenJson};
   if (window.opener) {
-    window.opener.postMessage({ type: 'breeze_session_saved', token: '${token}' }, '*');
+    window.opener.postMessage({ type: 'breeze_session_saved', token: t }, "${safeOrigin}");
     document.querySelector('p').textContent = 'Saved! You can close this tab.';
-    setTimeout(() => window.close(), 1500);
+    setTimeout(function() { window.close(); }, 1500);
   } else {
-    document.querySelector('p').textContent = 'Copy this token and paste it in Settings > Session Token: ${token}';
+    document.querySelector('p').textContent = 'Copy this token and paste it in Settings > Session Token: ' + t;
   }
+})();
 </script>
 </body></html>`,
     );

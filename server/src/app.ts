@@ -36,7 +36,6 @@ import { PriceFeedService } from './services/price-feed.service.js';
 import { IntradayManager } from './services/intraday-manager.service.js';
 import { OptionsPositionService } from './services/options-position.service.js';
 import { registerWebSocket, wsHub } from './lib/websocket.js';
-import { getOpenAIStatus } from './lib/openai.js';
 
 export interface BuildAppOptions {
   logger?: boolean;
@@ -62,7 +61,20 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(sensible);
 
   await app.register(helmet, {
-    contentSecurityPolicy: false, // disabled for dev; enable in production
+    contentSecurityPolicy: env.NODE_ENV === 'production' ? {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:', 'https:'],
+        connectSrc: ["'self'", ...env.CORS_ORIGINS.split(',').map(o => o.trim()), 'wss:'],
+        fontSrc: ["'self'", 'https:', 'data:'],
+        objectSrc: ["'none'"],
+        frameSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+      },
+    } : false,
   });
 
   await app.register(rateLimit, {
@@ -103,66 +115,18 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const checks: Record<string, string> = {};
 
     try {
-      await getPrisma().$queryRawUnsafe('SELECT 1');
+      await getPrisma().$queryRaw`SELECT 1`;
       checks.database = 'ok';
     } catch {
       checks.database = 'error';
     }
 
-    try {
-      const { getRedis } = await import('./lib/redis.js');
-      const redis = getRedis();
-      if (redis) {
-        await redis.ping();
-        checks.redis = 'ok';
-      } else {
-        checks.redis = 'not_configured';
-      }
-    } catch {
-      checks.redis = 'error';
-    }
-
-    try {
-      const { isEngineAvailable } = await import('./lib/rust-engine.js');
-      checks.rustEngine = isEngineAvailable() ? 'ok' : 'not_found';
-    } catch {
-      checks.rustEngine = 'error';
-    }
-
-    checks.wsConnections = String(wsHub.getConnectedCount());
-
-    const overall = Object.values(checks).every(v =>
-      v === 'ok' || v === 'not_configured' || v === 'not_found' || !isNaN(Number(v))
-    ) ? 'ok' : 'degraded';
-
-    const orchStatus = orchestrator.getStatus();
+    const overall = checks.database === 'ok' ? 'ok' : 'degraded';
 
     return {
       status: overall,
       timestamp: new Date().toISOString(),
       uptime: Math.round(process.uptime()),
-      memory: {
-        heapMB: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-        rssMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
-      },
-      checks,
-      market: {
-        phase: orchStatus.market.phase,
-        phaseLabel: orchStatus.market.phaseLabel,
-        isOpen: orchStatus.market.isOpen,
-        isHoliday: orchStatus.market.isHoliday,
-        holidayName: orchStatus.market.holidayName,
-        nextOpen: orchStatus.market.nextOpen,
-      },
-      bots: {
-        activeBots: orchStatus.botEngine.activeBots,
-        activeAgents: orchStatus.botEngine.activeAgents,
-      },
-      orchestrator: {
-        pingsSentToday: orchStatus.orchestrator.pingsSentToday,
-        lastPingAt: orchStatus.orchestrator.lastPingAt,
-      },
-      ai: getOpenAIStatus(),
     };
   });
 
@@ -206,8 +170,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       if (result.attempted > 0) {
         console.log(`[Breeze Cron Retry] ${result.refreshed}/${result.attempted} refreshed`);
       }
-    } catch {
-      // silent retry
+    } catch (err) {
+      app.log.warn(`[Breeze Cron Retry] Auto-renew retry failed: ${(err as Error).message}`);
     }
   });
 
@@ -221,7 +185,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       const db = getPrisma();
       const users = await db.user.findMany({ where: { isActive: true }, select: { id: true } });
       for (const user of users) {
-        try { await targetTracker.updateProgress(user.id); } catch { /* skip */ }
+        try { await targetTracker.updateProgress(user.id); } catch (e) { app.log.warn(`[TargetTracker] Failed for user ${user.id}: ${(e as Error).message}`); }
       }
     } catch (err) { console.error('[TargetTracker Cron] Error:', (err as Error).message); }
   });
@@ -239,7 +203,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       const db = getPrisma();
       const users = await db.user.findMany({ where: { isActive: true }, select: { id: true } });
       for (const user of users) {
-        try { await targetTracker.recordDailyPnl(user.id); } catch { /* skip */ }
+        try { await targetTracker.recordDailyPnl(user.id); } catch (e) { app.log.warn(`[DailyPnl] Failed for user ${user.id}: ${(e as Error).message}`); }
       }
       console.log(`[DailyPnl Cron] Recorded P&L for ${users.length} users`);
     } catch (err) { console.error('[DailyPnl Cron] Error:', (err as Error).message); }
@@ -257,7 +221,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       const db = getPrisma();
       const users = await db.user.findMany({ where: { isActive: true }, select: { id: true } });
       for (const user of users) {
-        try { await targetTracker.resetDailyTarget(user.id); } catch { /* skip */ }
+        try { await targetTracker.resetDailyTarget(user.id); } catch (e) { app.log.warn(`[MorningReset] Failed for user ${user.id}: ${(e as Error).message}`); }
       }
       console.log(`[Morning Reset] Reset daily targets for ${users.length} users`);
     } catch (err) { console.error('[Morning Reset] Error:', (err as Error).message); }
@@ -275,7 +239,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   orchestrator.scheduleMarketDay('*/30 3-10 * * 1-5', async () => {
     try {
       await globalMarketService.runDailyIntelligenceScan();
-    } catch { /* silent refresh */ }
+    } catch (err) { app.log.warn(`[GlobalMarket] Intraday refresh failed: ${(err as Error).message}`); }
   });
 
   // Morning boot — only on market days
@@ -539,7 +503,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
           if (Math.abs(result.drift) > 1) {
             app.log.info(`[Reconcile] Portfolio ${p.id}: corrected ₹${result.drift.toFixed(2)} drift (${result.before} → ${result.after})`);
           }
-        } catch { /* skip individual portfolio errors */ }
+        } catch (e) { app.log.warn(`[Reconcile] Failed for portfolio ${p.id}: ${(e as Error).message}`); }
       }
     } catch (err) {
       app.log.error({ err }, 'Failed to reconcile portfolios');
@@ -654,7 +618,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
                   exchange: s.exchange as any,
                 },
               });
-            } catch { /* skip duplicates */ }
+            } catch { /* skip duplicate watchlist items */ }
             if (added.size >= 10) break;
           }
 
