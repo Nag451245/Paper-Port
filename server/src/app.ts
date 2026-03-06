@@ -20,6 +20,7 @@ import { analyticsRoutes } from './routes/analytics.js';
 import { optionsRoutes } from './routes/options.js';
 import { learningRoutes } from './routes/learning.js';
 import { edgeRoutes } from './routes/edge.js';
+import { riskRoutes } from './routes/risk.js';
 import commandCenterRoutes from './routes/command-center.js';
 import { disconnectPrisma, getPrisma } from './lib/prisma.js';
 import { AuthService } from './services/auth.service.js';
@@ -30,6 +31,10 @@ import { ServerOrchestrator } from './services/server-orchestrator.js';
 import { TargetTracker } from './services/target-tracker.service.js';
 import { EODReviewService } from './services/eod-review.service.js';
 import { GlobalMarketService } from './services/global-market.service.js';
+import { StopLossMonitor } from './services/stop-loss-monitor.service.js';
+import { PriceFeedService } from './services/price-feed.service.js';
+import { IntradayManager } from './services/intraday-manager.service.js';
+import { OptionsPositionService } from './services/options-position.service.js';
 import { registerWebSocket, wsHub } from './lib/websocket.js';
 import { getOpenAIStatus } from './lib/openai.js';
 
@@ -176,6 +181,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(optionsRoutes, { prefix: '/api/options' });
   await app.register(learningRoutes, { prefix: '/api/learning' });
   await app.register(edgeRoutes, { prefix: '/api/edge' });
+  await app.register(riskRoutes, { prefix: '/api/risk' });
   await app.register(commandCenterRoutes, { prefix: '/api/command' });
 
   await registerWebSocket(app);
@@ -278,8 +284,36 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     console.log(`[Morning Boot] Processed ${result.usersProcessed} users, activated ${result.strategiesActivated} strategies`);
   });
 
+  // ── Stop-Loss Monitor, Price Feed & Intraday Manager ──
+  const stopLossMonitor = new StopLossMonitor(getPrisma());
+  const priceFeedService = new PriceFeedService(getPrisma());
+  const intradayManager = new IntradayManager(getPrisma());
+  const optionsPositionService = new OptionsPositionService(getPrisma());
+  app.decorate('stopLossMonitor', stopLossMonitor);
+  app.decorate('priceFeedService', priceFeedService);
+  app.decorate('intradayManager', intradayManager);
+  app.decorate('optionsPositionService', optionsPositionService);
+
+  // Start SL monitor, price feed, and intraday manager at market open
+  orchestrator.scheduleMarketDay('45 3 * * 1-5', async () => {
+    console.log('[MarketOpen] Starting stop-loss monitor, price feed, and intraday manager');
+    await stopLossMonitor.start();
+    priceFeedService.start();
+    intradayManager.startAutoSquareOff();
+  });
+
+  // Stop all at market close
+  orchestrator.scheduleMarketDay('0 10 * * 1-5', async () => {
+    console.log('[MarketClose] Stopping stop-loss monitor, price feed, and intraday manager');
+    stopLossMonitor.stop();
+    priceFeedService.stop();
+    intradayManager.stopAutoSquareOff();
+  });
+
   app.addHook('onClose', async () => {
     botEngine.stopAll();
+    stopLossMonitor.stop();
+    priceFeedService.stop();
     orchestrator.stop();
     await disconnectPrisma();
   });

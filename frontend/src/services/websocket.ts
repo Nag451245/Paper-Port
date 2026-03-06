@@ -106,24 +106,40 @@ class LiveSocket {
 
 export const liveSocket = new LiveSocket();
 
-type QuoteHandler = (quote: any) => void;
+type QuoteHandler = (quote: { symbol: string; ltp: number; change: number; changePercent: number; volume: number; timestamp: string }) => void;
 
 class PriceFeed {
-  private symbolHandlers = new Map<string, QuoteHandler>();
+  private symbolHandlers = new Map<string, Set<QuoteHandler>>();
+  private unsubFns = new Map<string, () => void>();
 
-  subscribe(symbol: string, handler: QuoteHandler): void {
-    this.symbolHandlers.set(symbol, handler);
-    liveSocket.subscribePrices([symbol]);
-    liveSocket.on('price_update', (msg: any) => {
-      if (msg.symbol === symbol) {
-        handler(msg);
+  subscribe(symbol: string, handler: QuoteHandler): () => void {
+    if (!this.symbolHandlers.has(symbol)) {
+      this.symbolHandlers.set(symbol, new Set());
+      liveSocket.subscribePrices([symbol]);
+
+      const unsub = liveSocket.on('price', (msg: any) => {
+        if (msg.symbol === symbol) {
+          const handlers = this.symbolHandlers.get(symbol);
+          if (handlers) for (const h of handlers) h(msg);
+        }
+      });
+      this.unsubFns.set(symbol, unsub);
+    }
+
+    this.symbolHandlers.get(symbol)!.add(handler);
+
+    return () => {
+      const handlers = this.symbolHandlers.get(symbol);
+      if (handlers) {
+        handlers.delete(handler);
+        if (handlers.size === 0) {
+          this.symbolHandlers.delete(symbol);
+          this.unsubFns.get(symbol)?.();
+          this.unsubFns.delete(symbol);
+          liveSocket.unsubscribePrices([symbol]);
+        }
       }
-    });
-  }
-
-  unsubscribe(symbol: string): void {
-    this.symbolHandlers.delete(symbol);
-    liveSocket.unsubscribePrices([symbol]);
+    };
   }
 }
 

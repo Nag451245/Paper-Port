@@ -124,4 +124,72 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
       throw err;
     }
   });
+
+  app.post('/:portfolioId/set-default', async (request, reply) => {
+    try {
+      const { portfolioId } = request.params as { portfolioId: string };
+      const userId = getUserId(request);
+      const prisma = getPrisma();
+
+      const portfolio = await prisma.portfolio.findUnique({ where: { id: portfolioId } });
+      if (!portfolio || portfolio.userId !== userId) {
+        return reply.code(404).send({ error: 'Portfolio not found' });
+      }
+
+      await prisma.portfolio.updateMany({
+        where: { userId, isDefault: true },
+        data: { isDefault: false },
+      });
+      await prisma.portfolio.update({
+        where: { id: portfolioId },
+        data: { isDefault: true },
+      });
+
+      return reply.send({ message: 'Default portfolio updated', portfolioId });
+    } catch (err) {
+      if (err instanceof PortfolioError) return reply.code(err.statusCode).send({ error: err.message });
+      throw err;
+    }
+  });
+
+  app.get('/consolidated/summary', async (request, reply) => {
+    const userId = getUserId(request);
+    const prisma = getPrisma();
+
+    const portfolios = await prisma.portfolio.findMany({
+      where: { userId },
+      include: {
+        positions: { where: { status: 'OPEN' }, select: { symbol: true, qty: true, avgEntryPrice: true, side: true } },
+        _count: { select: { trades: true } },
+      },
+    });
+
+    let totalCapital = 0, totalNav = 0, totalOpenPositions = 0, totalTrades = 0;
+    for (const p of portfolios) {
+      totalCapital += Number(p.initialCapital);
+      totalNav += Number(p.currentNav);
+      totalOpenPositions += p.positions.length;
+      totalTrades += p._count.trades;
+    }
+
+    return reply.send({
+      portfolioCount: portfolios.length,
+      totalCapital: Number(totalCapital.toFixed(2)),
+      totalNav: Number(totalNav.toFixed(2)),
+      totalPnl: Number((totalNav - totalCapital).toFixed(2)),
+      totalPnlPct: totalCapital > 0 ? Number((((totalNav - totalCapital) / totalCapital) * 100).toFixed(2)) : 0,
+      totalOpenPositions,
+      totalTrades,
+      portfolios: portfolios.map(p => ({
+        id: p.id,
+        name: p.name,
+        isDefault: p.isDefault,
+        capital: Number(p.initialCapital),
+        nav: Number(p.currentNav),
+        pnl: Number((Number(p.currentNav) - Number(p.initialCapital)).toFixed(2)),
+        openPositions: p.positions.length,
+        trades: p._count.trades,
+      })),
+    });
+  });
 }

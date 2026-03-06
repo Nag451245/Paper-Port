@@ -783,6 +783,96 @@ class BreezeHandler(BaseHTTPRequestHandler):
                 lot = sizes.get(sym, FALLBACK_LOT_SIZES.get(sym, 0))
                 self.send_json({"symbol": sym, "lotSize": lot, "source": "nse" if lot else "unknown"})
 
+            elif path.startswith("/order/status/"):
+                order_id = path.split("/")[-1]
+                if breeze_instance is None:
+                    self.send_json({"error": "Breeze session not active"}, 503)
+                    return
+                try:
+                    result = breeze_instance.get_order_detail(
+                        exchange_code="NSE",
+                        order_id=order_id,
+                    )
+                    orders = result.get("Success", []) if isinstance(result, dict) else []
+                    if orders and len(orders) > 0:
+                        o = orders[0] if isinstance(orders, list) else orders
+                        status_map = {"Executed": "FILLED", "Cancelled": "CANCELLED", "Rejected": "REJECTED"}
+                        raw_status = o.get("order_status", o.get("status", "UNKNOWN"))
+                        self.send_json({
+                            "status": status_map.get(raw_status, raw_status),
+                            "filled_qty": int(o.get("filled_quantity", o.get("quantity", 0))),
+                            "avg_price": float(o.get("average_price", o.get("price", 0))),
+                        })
+                    else:
+                        self.send_json({"status": "UNKNOWN", "filled_qty": 0, "avg_price": 0})
+                except Exception as e:
+                    self.send_json({"error": str(e)}, 500)
+
+            elif path == "/positions":
+                if breeze_instance is None:
+                    self.send_json({"error": "Breeze session not active"}, 503)
+                    return
+                try:
+                    result = breeze_instance.get_portfolio_positions()
+                    positions = result.get("Success", []) if isinstance(result, dict) else []
+                    formatted = []
+                    if isinstance(positions, list):
+                        for p in positions:
+                            formatted.append({
+                                "stock_code": p.get("stock_code", ""),
+                                "quantity": p.get("quantity", 0),
+                                "average_price": p.get("average_price", 0),
+                                "ltp": p.get("ltp", 0),
+                                "pnl": p.get("pnl", 0),
+                                "product": p.get("product", "cash"),
+                            })
+                    self.send_json({"positions": formatted})
+                except Exception as e:
+                    self.send_json({"error": str(e), "positions": []}, 500)
+
+            elif path == "/margin":
+                if breeze_instance is None:
+                    self.send_json({"error": "Breeze session not active"}, 503)
+                    return
+                try:
+                    result = breeze_instance.get_margin(exchange_code="NSE")
+                    margin_data = result.get("Success", {}) if isinstance(result, dict) else {}
+                    if isinstance(margin_data, list) and len(margin_data) > 0:
+                        margin_data = margin_data[0]
+                    available = float(margin_data.get("cash_available", margin_data.get("available_margin", 0)))
+                    used = float(margin_data.get("margin_used", 0))
+                    self.send_json({"available": available, "used": used, "total": available + used})
+                except Exception as e:
+                    self.send_json({"error": str(e), "available": 0, "used": 0, "total": 0}, 500)
+
+            elif path.startswith("/quote/"):
+                symbol = path.split("/")[-1]
+                exchange = params.get("exchange", ["NSE"])[0]
+                if breeze_instance is None:
+                    self.send_json({"error": "Breeze session not active"}, 503)
+                    return
+                try:
+                    result = breeze_instance.get_quotes(
+                        stock_code=symbol,
+                        exchange_code=exchange,
+                        product_type="cash",
+                    )
+                    quotes = result.get("Success", []) if isinstance(result, dict) else []
+                    if quotes and isinstance(quotes, list) and len(quotes) > 0:
+                        q = quotes[0]
+                        self.send_json({
+                            "symbol": symbol,
+                            "ltp": float(q.get("ltp", 0)),
+                            "change": float(q.get("ltp_change", q.get("change", 0))),
+                            "changePercent": float(q.get("ltp_percent_change", q.get("percent_change", 0))),
+                            "volume": int(q.get("total_quantity_traded", q.get("volume", 0))),
+                            "timestamp": datetime.now().isoformat(),
+                        })
+                    else:
+                        self.send_json({"symbol": symbol, "ltp": 0, "change": 0, "changePercent": 0, "volume": 0, "timestamp": datetime.now().isoformat()})
+                except Exception as e:
+                    self.send_json({"error": str(e)}, 500)
+
             else:
                 self.send_json({"error": "Not found"}, 404)
         except BrokenPipeError:
@@ -813,6 +903,63 @@ class BreezeHandler(BaseHTTPRequestHandler):
 
                 result = init_breeze(api_key, api_secret, session_token)
                 self.send_json(result, 200 if result.get("success") else 500)
+
+            elif path == "/order/place":
+                if breeze_instance is None:
+                    self.send_json({"error": "Breeze session not active"}, 503)
+                    return
+                try:
+                    result = breeze_instance.place_order(
+                        stock_code=body.get("stock_code", ""),
+                        exchange_code=body.get("exchange_code", "NSE"),
+                        product=body.get("product", "cash"),
+                        action=body.get("action", "buy"),
+                        order_type=body.get("order_type", "market"),
+                        quantity=str(body.get("quantity", 1)),
+                        price=str(body.get("price", 0)),
+                        stoploss=str(body.get("stoploss", 0)),
+                        validity=body.get("validity", "day"),
+                    )
+                    order_id = ""
+                    if isinstance(result, dict):
+                        success = result.get("Success")
+                        if isinstance(success, dict):
+                            order_id = success.get("order_id", "")
+                        elif isinstance(success, str):
+                            order_id = success
+                    self.send_json({"order_id": order_id, "raw": result})
+                except Exception as e:
+                    self.send_json({"error": str(e)}, 500)
+
+            elif path == "/order/modify":
+                if breeze_instance is None:
+                    self.send_json({"error": "Breeze session not active"}, 503)
+                    return
+                try:
+                    result = breeze_instance.modify_order(
+                        order_id=body.get("order_id", ""),
+                        exchange_code=body.get("exchange_code", "NSE"),
+                        quantity=str(body.get("qty", 0)) if body.get("qty") else None,
+                        price=str(body.get("price", 0)) if body.get("price") else None,
+                        stoploss=str(body.get("triggerPrice", 0)) if body.get("triggerPrice") else None,
+                    )
+                    self.send_json({"message": "Order modified", "raw": result})
+                except Exception as e:
+                    self.send_json({"error": str(e)}, 500)
+
+            elif path == "/order/cancel":
+                if breeze_instance is None:
+                    self.send_json({"error": "Breeze session not active"}, 503)
+                    return
+                try:
+                    result = breeze_instance.cancel_order(
+                        order_id=body.get("order_id", ""),
+                        exchange_code=body.get("exchange_code", "NSE"),
+                    )
+                    self.send_json({"message": "Order cancelled", "raw": result})
+                except Exception as e:
+                    self.send_json({"error": str(e)}, 500)
+
             else:
                 self.send_json({"error": "Not found"}, 404)
         except BrokenPipeError:

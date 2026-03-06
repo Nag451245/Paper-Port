@@ -12,6 +12,7 @@ mod portfolio_opt;
 mod options_strategy;
 mod correlation;
 mod feature_store;
+mod multi_timeframe;
 
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Read};
@@ -105,6 +106,7 @@ fn handle_request(req: Request) -> Response {
         "options_strategy" => options_strategy::compute(req.data),
         "correlation" => correlation::compute(req.data),
         "feature_store" => feature_store::compute(req.data),
+        "multi_timeframe_scan" => multi_timeframe::compute(req.data),
         _ => Err(format!("Unknown command: {}", req.command)),
     };
     match result {

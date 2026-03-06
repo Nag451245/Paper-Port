@@ -433,4 +433,36 @@ export const commandApi = {
     api.get<any[]>('/command/messages', { params: { limit } }),
 };
 
+// ─── Risk & Position Management ────────────────────────────────────
+export const riskApi = {
+  comprehensive: () => api.get('/risk/comprehensive'),
+  dailySummary: () => api.get('/risk/daily-summary'),
+  var: (confidence = 0.95, days = 1) => api.get('/risk/var', { params: { confidence, days } }),
+  sectors: () => api.get('/risk/sectors'),
+  margin: () => api.get('/risk/margin'),
+  optionsGreeks: (spotPrice?: number) => api.get('/risk/options/greeks', { params: { spotPrice } }),
+  expiringPositions: (days = 3) => api.get('/risk/options/expiring', { params: { days } }),
+  rollOption: (positionId: string, newStrike: number, newExpiry: string) =>
+    api.post('/risk/options/roll', { positionId, newStrike, newExpiry }),
+  squareOffAll: () => api.post('/risk/intraday/square-off-all'),
+  squareOffPosition: (positionId: string) => api.post(`/risk/intraday/square-off/${positionId}`),
+  partialExit: (positionId: string, qty: number) =>
+    api.post('/risk/intraday/partial-exit', { positionId, qty }),
+  scaleIn: (positionId: string, qty: number, price: number) =>
+    api.post('/risk/intraday/scale-in', { positionId, qty, price }),
+  convertToDelivery: (positionId: string) =>
+    api.post('/risk/intraday/convert-delivery', { positionId }),
+  decisions: (params?: Record<string, unknown>) => api.get('/risk/decisions', { params }),
+  decisionAnalytics: (days = 30) => api.get('/risk/decisions/analytics', { params: { days } }),
+  stopLossStatus: () => api.get('/risk/stop-loss/status'),
+  updateStopLoss: (positionId: string, newStopPrice: number) =>
+    api.post('/risk/stop-loss/update', { positionId, newStopPrice }),
+};
+
+// ─── Portfolio Consolidated ────────────────────────────────────────
+export const portfolioConsolidatedApi = {
+  summary: () => api.get('/portfolios/consolidated/summary'),
+  setDefault: (portfolioId: string) => api.post(`/portfolios/${portfolioId}/set-default`),
+};
+
 export default api;

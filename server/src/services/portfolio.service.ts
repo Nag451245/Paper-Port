@@ -219,14 +219,45 @@ export class PortfolioService {
     const maxDrawdownPercent = peak > 0 ? (maxDrawdown / peak) * 100 : 0;
     const calmarRatio = maxDrawdownPercent > 0 ? (meanReturn * 252) / maxDrawdown : 0;
 
+    // Beta & Alpha vs Nifty 50 benchmark
+    let beta = 0;
+    let alpha = 0;
+    try {
+      const niftyReturns = await this.fetchNiftyDailyReturns(trades.length);
+      if (niftyReturns.length >= 5 && pnls.length >= 5) {
+        const portfolioReturns = pnls.map(p => p / initialCapital);
+        const n = Math.min(portfolioReturns.length, niftyReturns.length);
+        const pr = portfolioReturns.slice(0, n);
+        const nr = niftyReturns.slice(0, n);
+
+        const prMean = pr.reduce((s, v) => s + v, 0) / n;
+        const nrMean = nr.reduce((s, v) => s + v, 0) / n;
+
+        let covariance = 0;
+        let nrVariance = 0;
+        for (let i = 0; i < n; i++) {
+          covariance += (pr[i] - prMean) * (nr[i] - nrMean);
+          nrVariance += (nr[i] - nrMean) ** 2;
+        }
+        covariance /= n;
+        nrVariance /= n;
+
+        beta = nrVariance > 0 ? covariance / nrVariance : 0;
+        const annualizedPortfolioReturn = prMean * 252;
+        const annualizedBenchmarkReturn = nrMean * 252;
+        const riskFreeRate = 0.065; // 6.5% RBI repo rate
+        alpha = annualizedPortfolioReturn - (riskFreeRate + beta * (annualizedBenchmarkReturn - riskFreeRate));
+      }
+    } catch { /* Beta/Alpha calculation failed — fall through */ }
+
     return {
       sharpeRatio: Number(sharpeRatio.toFixed(2)),
       maxDrawdown: Number(maxDrawdown.toFixed(2)),
       maxDrawdownPercent: Number(maxDrawdownPercent.toFixed(2)),
       winRate: Number(winRate.toFixed(2)),
       profitFactor: Number(profitFactor === Infinity ? 999 : profitFactor.toFixed(2)),
-      beta: 0,
-      alpha: 0,
+      beta: Number(beta.toFixed(3)),
+      alpha: Number((alpha * 100).toFixed(2)),
       sortinoRatio: Number(sortinoRatio.toFixed(2)),
       calmarRatio: Number(calmarRatio.toFixed(4)),
       avgWin: Number(avgWin.toFixed(2)),
@@ -348,6 +379,30 @@ export class PortfolioService {
       after: Number(correctCash.toFixed(2)),
       drift: Number(drift.toFixed(2)),
     };
+  }
+
+  private async fetchNiftyDailyReturns(days: number): Promise<number[]> {
+    const period1 = Math.floor(Date.now() / 1000) - Math.max(days, 60) * 86400;
+    const period2 = Math.floor(Date.now() / 1000);
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI?period1=${period1}&period2=${period2}&interval=1d`;
+
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!res.ok) return [];
+
+    const data: any = await res.json();
+    const closes: number[] = data?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [];
+
+    const returns: number[] = [];
+    for (let i = 1; i < closes.length; i++) {
+      if (closes[i] && closes[i - 1] && closes[i - 1] > 0) {
+        returns.push((closes[i] - closes[i - 1]) / closes[i - 1]);
+      }
+    }
+    return returns;
   }
 }
 

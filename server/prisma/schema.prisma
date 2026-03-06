@@ -596,3 +596,30 @@ model CommandMessage {
   @@index([userId, createdAt])
   @@map("command_messages")
 }
+
+model DecisionAudit {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  botId           String?  @map("bot_id")
+  symbol          String
+  decisionType    String   @map("decision_type")
+  direction       String?
+  confidence      Float    @default(0)
+  signalSource    String   @map("signal_source")
+  marketDataSnapshot String @map("market_data_snapshot")
+  riskChecks      String   @default("{}") @map("risk_checks")
+  reasoning       String
+  outcome         String?
+  entryPrice      Float?   @map("entry_price")
+  exitPrice       Float?   @map("exit_price")
+  pnl             Float?
+  predictionAccuracy Float? @map("prediction_accuracy")
+  createdAt       DateTime @default(now()) @map("created_at")
+  resolvedAt      DateTime? @map("resolved_at")
+
+  @@index([userId, createdAt])
+  @@index([symbol, createdAt])
+  @@index([botId, createdAt])
+  @@index([decisionType])
+  @@map("decision_audits")
+}

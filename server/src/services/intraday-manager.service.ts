@@ -1,0 +1,393 @@
+import { PrismaClient } from '@prisma/client';
+import { MarketDataService } from './market-data.service.js';
+import { wsHub } from '../lib/websocket.js';
+
+interface SquareOffResult {
+  symbol: string;
+  positionId: string;
+  exitPrice: number;
+  pnl: number;
+  reason: string;
+}
+
+const CIRCUIT_BREAKER_CHECK_INTERVAL = 10_000;
+
+export class IntradayManager {
+  private marketData: MarketDataService;
+  private squareOffTime = '15:15';
+  private squareOffHandle: ReturnType<typeof setInterval> | null = null;
+  private circuitBreakerHandle: ReturnType<typeof setInterval> | null = null;
+  private circuitBreakerTriggered = false;
+  private maxDrawdownPct = 3.0; // 3% of capital = circuit breaker
+
+  constructor(private prisma: PrismaClient) {
+    this.marketData = new MarketDataService();
+  }
+
+  setSquareOffTime(time: string): void {
+    this.squareOffTime = time;
+  }
+
+  setMaxDrawdown(pct: number): void {
+    this.maxDrawdownPct = pct;
+  }
+
+  isCircuitBreakerActive(): boolean {
+    return this.circuitBreakerTriggered;
+  }
+
+  startAutoSquareOff(): void {
+    if (this.squareOffHandle) return;
+    this.circuitBreakerTriggered = false;
+    console.log(`[IntradayManager] Auto square-off armed for ${this.squareOffTime} IST | Circuit breaker at ${this.maxDrawdownPct}% drawdown`);
+
+    this.squareOffHandle = setInterval(async () => {
+      const now = new Date();
+      const istHours = (now.getUTCHours() + 5) % 24 + (now.getUTCMinutes() + 30 >= 60 ? 1 : 0);
+      const istMinutes = (now.getUTCMinutes() + 30) % 60;
+      const currentTime = `${istHours.toString().padStart(2, '0')}:${istMinutes.toString().padStart(2, '0')}`;
+
+      if (currentTime === this.squareOffTime) {
+        await this.squareOffAllIntraday();
+      }
+    }, 30_000);
+
+    // Start intraday drawdown circuit breaker monitor
+    this.circuitBreakerHandle = setInterval(async () => {
+      if (this.circuitBreakerTriggered) return;
+
+      try {
+        await this.checkIntradayDrawdown();
+      } catch (err) {
+        console.error('[IntradayManager] Circuit breaker check error:', (err as Error).message);
+      }
+    }, CIRCUIT_BREAKER_CHECK_INTERVAL);
+  }
+
+  stopAutoSquareOff(): void {
+    if (this.squareOffHandle) {
+      clearInterval(this.squareOffHandle);
+      this.squareOffHandle = null;
+    }
+    if (this.circuitBreakerHandle) {
+      clearInterval(this.circuitBreakerHandle);
+      this.circuitBreakerHandle = null;
+    }
+    this.circuitBreakerTriggered = false;
+  }
+
+  private async checkIntradayDrawdown(): Promise<void> {
+    const portfolios = await this.prisma.portfolio.findMany({
+      select: { id: true, userId: true, initialCapital: true },
+    });
+
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    for (const pf of portfolios) {
+      const capital = Number(pf.initialCapital);
+      if (capital <= 0) continue;
+
+      // Realized losses today
+      const todayTrades = await this.prisma.trade.findMany({
+        where: { portfolioId: pf.id, exitTime: { gte: todayStart } },
+        select: { netPnl: true },
+      });
+      const realizedPnl = todayTrades.reduce((s, t) => s + Number(t.netPnl), 0);
+
+      // Unrealized losses from open positions
+      const openPositions = await this.prisma.position.findMany({
+        where: { portfolioId: pf.id, status: 'OPEN' },
+        select: { id: true, symbol: true, exchange: true, side: true, qty: true, avgEntryPrice: true, unrealizedPnl: true },
+      });
+
+      const unrealizedPnl = openPositions.reduce((s, p) => s + Number(p.unrealizedPnl ?? 0), 0);
+      const totalDayPnl = realizedPnl + unrealizedPnl;
+      const drawdownPct = capital > 0 ? Math.abs(Math.min(totalDayPnl, 0)) / capital * 100 : 0;
+
+      if (totalDayPnl < 0 && drawdownPct >= this.maxDrawdownPct) {
+        console.warn(`[IntradayManager] CIRCUIT BREAKER TRIGGERED for user ${pf.userId}: ` +
+          `Drawdown ${drawdownPct.toFixed(2)}% (₹${totalDayPnl.toFixed(0)}) exceeds ${this.maxDrawdownPct}% limit`);
+
+        this.circuitBreakerTriggered = true;
+
+        // Square off ALL open positions
+        for (const pos of openPositions) {
+          try {
+            await this.squareOffPosition(pos.id, `CIRCUIT BREAKER: ${drawdownPct.toFixed(1)}% drawdown`);
+          } catch (err) {
+            console.error(`[IntradayManager] Circuit breaker square-off failed for ${pos.symbol}:`, (err as Error).message);
+          }
+        }
+
+        // Log risk event
+        await this.prisma.riskEvent.create({
+          data: {
+            userId: pf.userId,
+            ruleType: 'CIRCUIT_BREAKER',
+            severity: 'critical',
+            symbol: 'PORTFOLIO',
+            details: JSON.stringify({
+              drawdownPct,
+              totalDayPnl,
+              realizedPnl,
+              unrealizedPnl,
+              positionsClosed: openPositions.length,
+            }),
+          },
+        }).catch(() => {});
+
+        // Notify user
+        wsHub.broadcastToUser(pf.userId, {
+          type: 'circuit_breaker',
+          drawdownPct: drawdownPct.toFixed(2),
+          totalLoss: totalDayPnl.toFixed(0),
+          message: `CIRCUIT BREAKER: Drawdown ${drawdownPct.toFixed(1)}% hit. All positions squared off. Trading halted for the day.`,
+        });
+
+        wsHub.broadcastNotification(pf.userId, {
+          title: 'Circuit Breaker Triggered',
+          message: `Daily loss of ₹${Math.abs(totalDayPnl).toFixed(0)} (${drawdownPct.toFixed(1)}%) exceeded ${this.maxDrawdownPct}% limit. All positions closed.`,
+          notificationType: 'error',
+        });
+
+        break; // Only trigger once per check
+      }
+    }
+  }
+
+  async squareOffAllIntraday(): Promise<SquareOffResult[]> {
+    const intradayPositions = await this.prisma.position.findMany({
+      where: {
+        status: 'OPEN',
+        strategyTag: { contains: 'INTRADAY' },
+      },
+      include: { portfolio: { select: { userId: true } } },
+    });
+
+    if (intradayPositions.length === 0) return [];
+
+    console.log(`[IntradayManager] Squaring off ${intradayPositions.length} intraday positions`);
+    const results: SquareOffResult[] = [];
+
+    for (const pos of intradayPositions) {
+      try {
+        const result = await this.squareOffPosition(pos.id, 'Auto square-off at EOD');
+        if (result) results.push(result);
+      } catch (err) {
+        console.error(`[IntradayManager] Failed to square off ${pos.symbol}:`, (err as Error).message);
+      }
+    }
+
+    return results;
+  }
+
+  async squareOffPosition(positionId: string, reason = 'Manual square-off'): Promise<SquareOffResult | null> {
+    const position = await this.prisma.position.findUnique({
+      where: { id: positionId },
+      include: { portfolio: { select: { userId: true } } },
+    });
+
+    if (!position || position.status !== 'OPEN') return null;
+
+    const entryPrice = Number(position.avgEntryPrice);
+    let exitPrice = entryPrice;
+
+    try {
+      const quote = await this.marketData.getQuote(position.symbol, position.exchange);
+      if (quote.ltp > 0) exitPrice = quote.ltp;
+    } catch {}
+
+    const grossPnl = position.side === 'LONG'
+      ? (exitPrice - entryPrice) * position.qty
+      : (entryPrice - exitPrice) * position.qty;
+
+    const turnover = exitPrice * position.qty;
+    const totalCost = Math.min(turnover * 0.0003, 20) + turnover * 0.001;
+    const netPnl = grossPnl - totalCost;
+
+    await this.prisma.trade.create({
+      data: {
+        portfolioId: position.portfolioId,
+        positionId: position.id,
+        symbol: position.symbol,
+        exchange: position.exchange,
+        side: position.side === 'LONG' ? 'SELL' : 'BUY',
+        entryPrice,
+        exitPrice,
+        qty: position.qty,
+        grossPnl,
+        totalCosts: totalCost,
+        netPnl,
+        entryTime: position.openedAt,
+        exitTime: new Date(),
+        strategyTag: `SQOFF:${reason}`,
+      },
+    });
+
+    await this.prisma.position.update({
+      where: { id: positionId },
+      data: { status: 'CLOSED', realizedPnl: netPnl, closedAt: new Date() },
+    });
+
+    const portfolio = await this.prisma.portfolio.findUnique({ where: { id: position.portfolioId } });
+    if (portfolio) {
+      const cashChange = position.side === 'LONG'
+        ? exitPrice * position.qty - totalCost
+        : entryPrice * position.qty * 0.25 + netPnl;
+      await this.prisma.portfolio.update({
+        where: { id: position.portfolioId },
+        data: { currentNav: Number(portfolio.currentNav) + cashChange },
+      });
+    }
+
+    wsHub.broadcastToUser(position.portfolio.userId, {
+      type: 'position_squared_off',
+      symbol: position.symbol,
+      side: position.side,
+      exitPrice,
+      pnl: netPnl,
+      reason,
+    });
+
+    return {
+      symbol: position.symbol,
+      positionId,
+      exitPrice,
+      pnl: Number(netPnl.toFixed(2)),
+      reason,
+    };
+  }
+
+  async partialExit(positionId: string, exitQty: number, userId: string): Promise<{
+    exitedQty: number;
+    remainingQty: number;
+    pnl: number;
+  }> {
+    const position = await this.prisma.position.findUnique({
+      where: { id: positionId },
+      include: { portfolio: true },
+    });
+
+    if (!position || position.portfolio.userId !== userId || position.status !== 'OPEN') {
+      throw new Error('Position not found or unauthorized');
+    }
+
+    if (exitQty >= position.qty) {
+      const result = await this.squareOffPosition(positionId, 'Full exit via partial API');
+      return { exitedQty: position.qty, remainingQty: 0, pnl: result?.pnl ?? 0 };
+    }
+
+    const entryPrice = Number(position.avgEntryPrice);
+    let exitPrice = entryPrice;
+    try {
+      const quote = await this.marketData.getQuote(position.symbol, position.exchange);
+      if (quote.ltp > 0) exitPrice = quote.ltp;
+    } catch {}
+
+    const grossPnl = position.side === 'LONG'
+      ? (exitPrice - entryPrice) * exitQty
+      : (entryPrice - exitPrice) * exitQty;
+
+    const turnover = exitPrice * exitQty;
+    const totalCost = Math.min(turnover * 0.0003, 20) + turnover * 0.001;
+    const netPnl = grossPnl - totalCost;
+
+    await this.prisma.trade.create({
+      data: {
+        portfolioId: position.portfolioId,
+        positionId: position.id,
+        symbol: position.symbol,
+        exchange: position.exchange,
+        side: position.side === 'LONG' ? 'SELL' : 'BUY',
+        entryPrice,
+        exitPrice,
+        qty: exitQty,
+        grossPnl,
+        totalCosts: totalCost,
+        netPnl,
+        entryTime: position.openedAt,
+        exitTime: new Date(),
+        strategyTag: `PARTIAL_EXIT`,
+      },
+    });
+
+    const remainingQty = position.qty - exitQty;
+    await this.prisma.position.update({
+      where: { id: positionId },
+      data: { qty: remainingQty },
+    });
+
+    const portfolio = await this.prisma.portfolio.findUnique({ where: { id: position.portfolioId } });
+    if (portfolio) {
+      await this.prisma.portfolio.update({
+        where: { id: position.portfolioId },
+        data: { currentNav: Number(portfolio.currentNav) + (exitPrice * exitQty - totalCost) },
+      });
+    }
+
+    return {
+      exitedQty: exitQty,
+      remainingQty,
+      pnl: Number(netPnl.toFixed(2)),
+    };
+  }
+
+  async scaleIn(positionId: string, additionalQty: number, price: number, userId: string): Promise<{
+    newQty: number;
+    newAvgPrice: number;
+  }> {
+    const position = await this.prisma.position.findUnique({
+      where: { id: positionId },
+      include: { portfolio: true },
+    });
+
+    if (!position || position.portfolio.userId !== userId || position.status !== 'OPEN') {
+      throw new Error('Position not found or unauthorized');
+    }
+
+    const oldAvg = Number(position.avgEntryPrice);
+    const totalCost = oldAvg * position.qty + price * additionalQty;
+    const newQty = position.qty + additionalQty;
+    const newAvg = totalCost / newQty;
+
+    await this.prisma.position.update({
+      where: { id: positionId },
+      data: { qty: newQty, avgEntryPrice: newAvg },
+    });
+
+    const portfolio = await this.prisma.portfolio.findUnique({ where: { id: position.portfolioId } });
+    if (portfolio && position.side === 'LONG') {
+      await this.prisma.portfolio.update({
+        where: { id: position.portfolioId },
+        data: { currentNav: Number(portfolio.currentNav) - price * additionalQty },
+      });
+    }
+
+    return {
+      newQty,
+      newAvgPrice: Number(newAvg.toFixed(2)),
+    };
+  }
+
+  async convertToDelivery(positionId: string, userId: string): Promise<{ converted: boolean }> {
+    const position = await this.prisma.position.findUnique({
+      where: { id: positionId },
+      include: { portfolio: true },
+    });
+
+    if (!position || position.portfolio.userId !== userId || position.status !== 'OPEN') {
+      throw new Error('Position not found or unauthorized');
+    }
+
+    const currentTag = position.strategyTag ?? '';
+    const newTag = currentTag.replace('INTRADAY', 'DELIVERY');
+
+    await this.prisma.position.update({
+      where: { id: positionId },
+      data: { strategyTag: newTag || 'DELIVERY' },
+    });
+
+    return { converted: true };
+  }
+}

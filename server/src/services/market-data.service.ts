@@ -323,13 +323,13 @@ export class MarketDataService {
     }
 
     if (exchange === 'MCX') {
-      const quote = this.getMCXQuote(symbol);
+      const quote = await this.getMCXQuote(symbol);
       if (this.cache) await this.cache.set(cacheKey, quote, CACHE_TTL_QUOTE);
       return quote;
     }
 
     if (exchange === 'CDS') {
-      const quote = this.getCDSQuote(symbol);
+      const quote = await this.getCDSQuote(symbol);
       if (this.cache) await this.cache.set(cacheKey, quote, CACHE_TTL_QUOTE);
       return quote;
     }
@@ -378,6 +378,107 @@ export class MarketDataService {
     } catch { /* Breeze fallback failed */ }
 
     return nseQuote ?? this.emptyQuote(symbol, exchange);
+  }
+
+  async getMarketDepth(symbol: string, exchange = 'NSE'): Promise<{
+    symbol: string;
+    bids: Array<{ price: number; qty: number; orders: number }>;
+    asks: Array<{ price: number; qty: number; orders: number }>;
+    totalBidQty: number;
+    totalAskQty: number;
+    imbalanceRatio: number;
+  }> {
+    const cacheKey = `depth:${exchange}:${symbol}`;
+    if (this.cache) {
+      const cached = await this.cache.get(cacheKey);
+      if (cached) return cached as any;
+    }
+
+    let bids: Array<{ price: number; qty: number; orders: number }> = [];
+    let asks: Array<{ price: number; qty: number; orders: number }> = [];
+
+    // Try NSE trade info API for market depth
+    try {
+      const nseUrl = `https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(symbol)}&section=trade_info`;
+      const cookies = await this.ensureNseCookies();
+      const res = await fetch(nseUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'application/json',
+          'Cookie': cookies,
+        },
+        signal: AbortSignal.timeout(8000),
+      });
+
+      if (res.ok) {
+        const data = await res.json() as any;
+        const marketDeptOrderBook = data?.marketDeptOrderBook;
+
+        if (marketDeptOrderBook) {
+          const bidData = marketDeptOrderBook.bid ?? [];
+          const askData = marketDeptOrderBook.ask ?? [];
+
+          bids = bidData.map((b: any) => ({
+            price: Number(b.price ?? 0),
+            qty: Number(b.quantity ?? 0),
+            orders: Number(b.noOrders ?? b.orders ?? 0),
+          })).filter((b: any) => b.price > 0);
+
+          asks = askData.map((a: any) => ({
+            price: Number(a.price ?? 0),
+            qty: Number(a.quantity ?? 0),
+            orders: Number(a.noOrders ?? a.orders ?? 0),
+          })).filter((a: any) => a.price > 0);
+        }
+      }
+    } catch { /* fallback below */ }
+
+    // Fallback: Try Breeze bridge
+    if (bids.length === 0 && asks.length === 0) {
+      try {
+        const bridgeUrl = process.env.BREEZE_BRIDGE_URL || 'http://127.0.0.1:8001';
+        const res = await fetch(`${bridgeUrl}/quote/${encodeURIComponent(symbol)}?exchange=${exchange}`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        if (res.ok) {
+          const data = await res.json() as any;
+          if (data.ltp > 0) {
+            const ltp = data.ltp;
+            const tickSize = ltp > 1000 ? 0.05 : 0.05;
+            for (let i = 0; i < 5; i++) {
+              bids.push({ price: Number((ltp - tickSize * (i + 1)).toFixed(2)), qty: 0, orders: 0 });
+              asks.push({ price: Number((ltp + tickSize * (i + 1)).toFixed(2)), qty: 0, orders: 0 });
+            }
+          }
+        }
+      } catch {}
+    }
+
+    const totalBidQty = bids.reduce((s, b) => s + b.qty, 0);
+    const totalAskQty = asks.reduce((s, a) => s + a.qty, 0);
+    const imbalanceRatio = totalAskQty > 0 ? Number((totalBidQty / totalAskQty).toFixed(3)) : 0;
+
+    const result = { symbol, bids, asks, totalBidQty, totalAskQty, imbalanceRatio };
+
+    if (this.cache) await this.cache.set(cacheKey, result, 5);
+    return result;
+  }
+
+  private async ensureNseCookies(): Promise<string> {
+    const cacheKey = 'nse_cookies';
+    if (this.cache) {
+      const cached = await this.cache.get<string>(cacheKey);
+      if (cached) return cached;
+    }
+    try {
+      const res = await fetch('https://www.nseindia.com', {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+        signal: AbortSignal.timeout(5000),
+      });
+      const cookies = res.headers.get('set-cookie') ?? '';
+      if (this.cache && cookies) await this.cache.set(cacheKey, cookies, 300);
+      return cookies;
+    } catch { return ''; }
   }
 
   async getHistory(
@@ -1606,40 +1707,113 @@ export class MarketDataService {
     };
   }
 
-  private getMCXQuote(symbol: string): MarketQuote {
+  private async getMCXQuote(symbol: string): Promise<MarketQuote> {
+    const YAHOO_MCX_MAP: Record<string, string> = {
+      GOLD: 'GC=F', GOLDM: 'GC=F', GOLDPETAL: 'GC=F',
+      SILVER: 'SI=F', SILVERM: 'SI=F',
+      CRUDEOIL: 'CL=F', NATURALGAS: 'NG=F',
+      COPPER: 'HG=F', ZINC: 'ZN=F', LEAD: 'PB=F',
+      ALUMINIUM: 'ALI=F', NICKEL: 'NI=F',
+    };
+
     const entry = POPULAR_MCX_COMMODITIES.find(([code]) => code === symbol.toUpperCase());
-    const basePrice = entry?.[2] ?? 1000;
-    const variation = (Math.random() - 0.48) * basePrice * 0.02;
-    const ltp = Number((basePrice + variation).toFixed(2));
-    const change = Number(variation.toFixed(2));
-    const changePercent = Number(((variation / basePrice) * 100).toFixed(2));
+    const fallbackPrice = entry?.[2] ?? 1000;
+    const yahooTicker = YAHOO_MCX_MAP[symbol.toUpperCase()];
+
+    if (yahooTicker) {
+      try {
+        const cacheKey = `mcx_yahoo_${yahooTicker}`;
+        if (this.cache) {
+          const cached = await this.cache.get<MarketQuote>(cacheKey);
+          if (cached) return cached;
+        }
+
+        const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooTicker}?interval=1d&range=2d`;
+        const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(8000) });
+        if (res.ok) {
+          const json = await res.json() as any;
+          const result = json?.chart?.result?.[0];
+          const meta = result?.meta;
+          if (meta?.regularMarketPrice) {
+            const ltp = Number(meta.regularMarketPrice.toFixed(2));
+            const prevClose = Number(meta.previousClose?.toFixed(2) ?? ltp);
+            const change = Number((ltp - prevClose).toFixed(2));
+            const changePercent = prevClose > 0 ? Number(((change / prevClose) * 100).toFixed(2)) : 0;
+            const quote: MarketQuote = {
+              symbol, exchange: 'MCX', ltp, change, changePercent,
+              open: Number((meta.regularMarketOpen ?? ltp).toFixed(2)),
+              high: Number((meta.regularMarketDayHigh ?? ltp).toFixed(2)),
+              low: Number((meta.regularMarketDayLow ?? ltp).toFixed(2)),
+              close: prevClose, volume: meta.regularMarketVolume ?? 0,
+              bidPrice: Number((ltp - 0.5).toFixed(2)), askPrice: Number((ltp + 0.5).toFixed(2)),
+              bidQty: 0, askQty: 0, timestamp: new Date().toISOString(),
+            };
+            this.cache?.set(cacheKey, quote, 30);
+            return quote;
+          }
+        }
+      } catch {}
+    }
+
     return {
-      symbol, exchange: 'MCX', ltp, change, changePercent,
-      open: Number((basePrice + (Math.random() - 0.5) * basePrice * 0.01).toFixed(2)),
-      high: Number((ltp * 1.008).toFixed(2)),
-      low: Number((ltp * 0.992).toFixed(2)),
-      close: basePrice, volume: Math.floor(Math.random() * 50000) + 5000,
-      bidPrice: Number((ltp - 0.5).toFixed(2)), askPrice: Number((ltp + 0.5).toFixed(2)),
-      bidQty: Math.floor(Math.random() * 100) + 10, askQty: Math.floor(Math.random() * 100) + 10,
+      symbol, exchange: 'MCX', ltp: fallbackPrice, change: 0, changePercent: 0,
+      open: fallbackPrice, high: fallbackPrice, low: fallbackPrice, close: fallbackPrice,
+      volume: 0, bidPrice: fallbackPrice, askPrice: fallbackPrice, bidQty: 0, askQty: 0,
       timestamp: new Date().toISOString(),
     };
   }
 
-  private getCDSQuote(symbol: string): MarketQuote {
+  private async getCDSQuote(symbol: string): Promise<MarketQuote> {
+    const YAHOO_CDS_MAP: Record<string, string> = {
+      USDINR: 'USDINR=X', EURINR: 'EURINR=X', GBPINR: 'GBPINR=X',
+      JPYINR: 'JPYINR=X', AUDINR: 'AUDINR=X', CADINR: 'CADINR=X',
+      CHFINR: 'CHFINR=X', SGDINR: 'SGDINR=X', HKDINR: 'HKDINR=X',
+      CNHINR: 'CNHINR=X',
+    };
+
     const entry = POPULAR_CDS_CURRENCIES.find(([code]) => code === symbol.toUpperCase());
-    const basePrice = entry?.[2] ?? 83;
-    const variation = (Math.random() - 0.48) * basePrice * 0.005;
-    const ltp = Number((basePrice + variation).toFixed(4));
-    const change = Number(variation.toFixed(4));
-    const changePercent = Number(((variation / basePrice) * 100).toFixed(2));
+    const fallbackPrice = entry?.[2] ?? 83;
+    const yahooTicker = YAHOO_CDS_MAP[symbol.toUpperCase()];
+
+    if (yahooTicker) {
+      try {
+        const cacheKey = `cds_yahoo_${yahooTicker}`;
+        if (this.cache) {
+          const cached = await this.cache.get<MarketQuote>(cacheKey);
+          if (cached) return cached;
+        }
+
+        const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooTicker}?interval=1d&range=2d`;
+        const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(8000) });
+        if (res.ok) {
+          const json = await res.json() as any;
+          const result = json?.chart?.result?.[0];
+          const meta = result?.meta;
+          if (meta?.regularMarketPrice) {
+            const ltp = Number(meta.regularMarketPrice.toFixed(4));
+            const prevClose = Number(meta.previousClose?.toFixed(4) ?? ltp);
+            const change = Number((ltp - prevClose).toFixed(4));
+            const changePercent = prevClose > 0 ? Number(((change / prevClose) * 100).toFixed(2)) : 0;
+            const quote: MarketQuote = {
+              symbol, exchange: 'CDS', ltp, change, changePercent,
+              open: Number((meta.regularMarketOpen ?? ltp).toFixed(4)),
+              high: Number((meta.regularMarketDayHigh ?? ltp).toFixed(4)),
+              low: Number((meta.regularMarketDayLow ?? ltp).toFixed(4)),
+              close: prevClose, volume: meta.regularMarketVolume ?? 0,
+              bidPrice: Number((ltp - 0.0025).toFixed(4)), askPrice: Number((ltp + 0.0025).toFixed(4)),
+              bidQty: 0, askQty: 0, timestamp: new Date().toISOString(),
+            };
+            this.cache?.set(cacheKey, quote, 30);
+            return quote;
+          }
+        }
+      } catch {}
+    }
+
     return {
-      symbol, exchange: 'CDS', ltp, change, changePercent,
-      open: Number((basePrice + (Math.random() - 0.5) * basePrice * 0.003).toFixed(4)),
-      high: Number((ltp * 1.003).toFixed(4)),
-      low: Number((ltp * 0.997).toFixed(4)),
-      close: basePrice, volume: Math.floor(Math.random() * 200000) + 50000,
-      bidPrice: Number((ltp - 0.0025).toFixed(4)), askPrice: Number((ltp + 0.0025).toFixed(4)),
-      bidQty: Math.floor(Math.random() * 500) + 50, askQty: Math.floor(Math.random() * 500) + 50,
+      symbol, exchange: 'CDS', ltp: fallbackPrice, change: 0, changePercent: 0,
+      open: fallbackPrice, high: fallbackPrice, low: fallbackPrice, close: fallbackPrice,
+      volume: 0, bidPrice: fallbackPrice, askPrice: fallbackPrice, bidQty: 0, askQty: 0,
       timestamp: new Date().toISOString(),
     };
   }

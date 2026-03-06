@@ -368,11 +368,77 @@ export class IntelligenceService {
   }
 
   async getSectorRRG() {
-    return this.cached('intel:sectors:rrg', () => []);
+    return this.cached('intel:sectors:rrg', async () => {
+      const sectorIndices: Array<{ name: string; symbol: string; sector: string }> = [
+        { name: 'Nifty Bank', symbol: '^NSEBANK', sector: 'Banking' },
+        { name: 'Nifty IT', symbol: '^CNXIT', sector: 'IT' },
+        { name: 'Nifty Pharma', symbol: '^CNXPHARMA', sector: 'Pharma' },
+        { name: 'Nifty Auto', symbol: '^CNXAUTO', sector: 'Auto' },
+        { name: 'Nifty Metal', symbol: '^CNXMETAL', sector: 'Metals' },
+        { name: 'Nifty FMCG', symbol: '^CNXFMCG', sector: 'FMCG' },
+        { name: 'Nifty Energy', symbol: '^CNXENERGY', sector: 'Energy' },
+        { name: 'Nifty Realty', symbol: '^CNXREALTY', sector: 'Realty' },
+        { name: 'Nifty Media', symbol: '^CNXMEDIA', sector: 'Media' },
+        { name: 'Nifty PSU Bank', symbol: '^CNXPSUBANK', sector: 'PSU Banking' },
+      ];
+
+      const results: Array<{
+        sector: string; rsRatio: number; rsMomentum: number;
+        quadrant: 'Leading' | 'Weakening' | 'Lagging' | 'Improving';
+      }> = [];
+
+      for (const si of sectorIndices) {
+        try {
+          const url = `https://query1.finance.yahoo.com/v8/finance/chart/${si.symbol}?interval=1wk&range=3mo`;
+          const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(5000) });
+          if (!res.ok) continue;
+          const json = await res.json() as any;
+          const closes = json?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [];
+          const validCloses = closes.filter((c: any) => c !== null && c > 0);
+
+          if (validCloses.length < 4) continue;
+
+          const n = validCloses.length;
+          const current = validCloses[n - 1];
+          const prev1 = validCloses[n - 2];
+          const prev4 = validCloses[Math.max(0, n - 4)];
+
+          const rsRatio = Number(((current / prev4) * 100).toFixed(2));
+          const rsMomentum = Number(((current / prev1 - 1) * 100).toFixed(2));
+
+          let quadrant: 'Leading' | 'Weakening' | 'Lagging' | 'Improving';
+          if (rsRatio > 100 && rsMomentum > 0) quadrant = 'Leading';
+          else if (rsRatio > 100 && rsMomentum <= 0) quadrant = 'Weakening';
+          else if (rsRatio <= 100 && rsMomentum <= 0) quadrant = 'Lagging';
+          else quadrant = 'Improving';
+
+          results.push({ sector: si.sector, rsRatio, rsMomentum, quadrant });
+        } catch { /* skip sector */ }
+      }
+
+      return results;
+    });
   }
 
   async getSectorRotationAlerts() {
-    return this.cached('intel:sectors:rotation', () => []);
+    return this.cached('intel:sectors:rotation', async () => {
+      const rrg = await this.getSectorRRG();
+      const alerts: Array<{ sector: string; alert: string; severity: string }> = [];
+
+      for (const item of rrg) {
+        if (item.quadrant === 'Leading' && item.rsMomentum > 1.5) {
+          alerts.push({ sector: item.sector, alert: `${item.sector} showing strong leadership momentum`, severity: 'positive' });
+        } else if (item.quadrant === 'Weakening' && item.rsMomentum < -1) {
+          alerts.push({ sector: item.sector, alert: `${item.sector} losing momentum — consider reducing exposure`, severity: 'warning' });
+        } else if (item.quadrant === 'Improving' && item.rsMomentum > 1) {
+          alerts.push({ sector: item.sector, alert: `${item.sector} entering improving phase — potential opportunity`, severity: 'info' });
+        } else if (item.quadrant === 'Lagging' && item.rsMomentum < -2) {
+          alerts.push({ sector: item.sector, alert: `${item.sector} deeply lagging — avoid`, severity: 'danger' });
+        }
+      }
+
+      return alerts;
+    });
   }
 
   // ── Global Markets (Yahoo Finance v8 Chart API) ──
@@ -564,7 +630,44 @@ export class IntelligenceService {
   }
 
   async getEventImpact() {
-    return this.cached('intel:event-impact', () => []);
+    return this.cached('intel:event-impact', async () => {
+      const events: Array<{
+        event: string; date: string; expectedImpact: string;
+        affectedSectors: string[]; historicalMoveAvg: number;
+      }> = [];
+
+      try {
+        const data = await nseFetch('https://www.nseindia.com/api/event-calendar');
+        if (Array.isArray(data)) {
+          for (const e of data.slice(0, 15)) {
+            const desc = (e.bm_desc ?? e.purpose ?? '').toLowerCase();
+            let expectedImpact = 'low';
+            let affectedSectors: string[] = [];
+            let historicalMoveAvg = 0.5;
+
+            if (desc.includes('rbi') || desc.includes('policy') || desc.includes('rate')) {
+              expectedImpact = 'high'; affectedSectors = ['Banking', 'Finance', 'Realty']; historicalMoveAvg = 1.5;
+            } else if (desc.includes('budget') || desc.includes('fiscal')) {
+              expectedImpact = 'very_high'; affectedSectors = ['All']; historicalMoveAvg = 2.5;
+            } else if (desc.includes('result') || desc.includes('earnings') || desc.includes('dividend')) {
+              expectedImpact = 'medium'; affectedSectors = [e.symbol ?? 'Company-specific']; historicalMoveAvg = 1.0;
+            } else if (desc.includes('agm') || desc.includes('meeting')) {
+              expectedImpact = 'low'; affectedSectors = [e.symbol ?? 'Company-specific']; historicalMoveAvg = 0.3;
+            }
+
+            events.push({
+              event: e.bm_desc ?? e.purpose ?? 'Unknown event',
+              date: e.bm_date ?? e.date ?? '',
+              expectedImpact,
+              affectedSectors,
+              historicalMoveAvg,
+            });
+          }
+        }
+      } catch { /* fallback to empty */ }
+
+      return events;
+    });
   }
 
   // ── Block Deals / Insider ──
@@ -589,21 +692,113 @@ export class IntelligenceService {
   }
 
   async getSmartMoney() {
-    return this.cached('intel:smart-money', () => []);
+    return this.cached('intel:smart-money', async () => {
+      const blockDeals = await this.getBlockDeals();
+      if (!Array.isArray(blockDeals) || blockDeals.length === 0) return [];
+
+      // Aggregate block deal data to identify smart money flow
+      const symbolAgg = new Map<string, { totalBuyValue: number; totalSellValue: number; buyers: string[]; sellers: string[] }>();
+
+      for (const deal of blockDeals) {
+        if (!deal.symbol) continue;
+        const entry = symbolAgg.get(deal.symbol) ?? { totalBuyValue: 0, totalSellValue: 0, buyers: [], sellers: [] };
+
+        const value = (deal.qty ?? 0) * (deal.price ?? 0);
+        if (deal.buyOrSell === 'Buy' || deal.buyOrSell === 'B') {
+          entry.totalBuyValue += value;
+          if (deal.clientName) entry.buyers.push(deal.clientName);
+        } else {
+          entry.totalSellValue += value;
+          if (deal.clientName) entry.sellers.push(deal.clientName);
+        }
+        symbolAgg.set(deal.symbol, entry);
+      }
+
+      return [...symbolAgg.entries()]
+        .map(([symbol, data]) => ({
+          symbol,
+          netFlow: Number((data.totalBuyValue - data.totalSellValue).toFixed(0)),
+          direction: data.totalBuyValue > data.totalSellValue ? 'ACCUMULATION' : 'DISTRIBUTION',
+          buyValue: Number(data.totalBuyValue.toFixed(0)),
+          sellValue: Number(data.totalSellValue.toFixed(0)),
+          topBuyers: data.buyers.slice(0, 3),
+          topSellers: data.sellers.slice(0, 3),
+        }))
+        .sort((a, b) => Math.abs(b.netFlow) - Math.abs(a.netFlow))
+        .slice(0, 20);
+    });
   }
 
   async getInsiderTransactions() {
-    return this.cached('intel:insider-txns', () => []);
+    return this.cached('intel:insider-txns', async () => {
+      try {
+        const data = await nseFetch('https://www.nseindia.com/api/corporates-pit');
+        if (data?.data && Array.isArray(data.data)) {
+          return data.data.slice(0, 30).map((t: any) => ({
+            symbol: t.symbol ?? '',
+            personName: t.acqName ?? t.personName ?? '',
+            category: t.personCategory ?? t.category ?? '',
+            transactionType: t.tdpTransactionType ?? t.transactionType ?? '',
+            qty: Number(t.securitiesValue ?? t.noOfSecurities ?? 0),
+            value: Number(t.securitiesValue ?? 0),
+            date: t.acquisitionFromDate ?? t.date ?? '',
+            mode: t.acquisitionMode ?? '',
+          }));
+        }
+      } catch { /* fallback */ }
+      return [];
+    });
   }
 
   async getClusterBuys() {
-    return this.cached('intel:cluster-buys', () => []);
+    return this.cached('intel:cluster-buys', async () => {
+      const insiderTxns = await this.getInsiderTransactions();
+      if (!Array.isArray(insiderTxns) || insiderTxns.length === 0) return [];
+
+      // Group by symbol and find cluster patterns (multiple insiders buying)
+      const symbolBuys = new Map<string, { count: number; totalValue: number; persons: string[] }>();
+
+      for (const txn of insiderTxns) {
+        if (txn.transactionType?.toLowerCase().includes('buy') || txn.transactionType === 'Acquisition') {
+          const entry = symbolBuys.get(txn.symbol) ?? { count: 0, totalValue: 0, persons: [] };
+          entry.count++;
+          entry.totalValue += txn.value;
+          if (txn.personName && !entry.persons.includes(txn.personName)) {
+            entry.persons.push(txn.personName);
+          }
+          symbolBuys.set(txn.symbol, entry);
+        }
+      }
+
+      return [...symbolBuys.entries()]
+        .filter(([, data]) => data.count >= 2)
+        .map(([symbol, data]) => ({
+          symbol,
+          insiderBuyCount: data.count,
+          totalValue: Number(data.totalValue.toFixed(0)),
+          insiders: data.persons.slice(0, 5),
+          signal: data.count >= 3 ? 'STRONG_CLUSTER' : 'CLUSTER',
+        }))
+        .sort((a, b) => b.insiderBuyCount - a.insiderBuyCount)
+        .slice(0, 15);
+    });
   }
 
   async getInsiderSelling(symbol: string) {
-    return this.cached(`intel:insider-selling:${symbol}`, () => ({
-      symbol, transactions: [], hasRecentSelling: false,
-    }));
+    return this.cached(`intel:insider-selling:${symbol}`, async () => {
+      const allTxns = await this.getInsiderTransactions();
+      const symbolTxns = Array.isArray(allTxns) ? allTxns.filter((t: any) => t.symbol === symbol) : [];
+      const sellingTxns = symbolTxns.filter((t: any) =>
+        t.transactionType?.toLowerCase().includes('sell') || t.transactionType === 'Disposal'
+      );
+
+      return {
+        symbol,
+        transactions: sellingTxns.slice(0, 10),
+        hasRecentSelling: sellingTxns.length > 0,
+        totalSellValue: sellingTxns.reduce((s: number, t: any) => s + (t.value ?? 0), 0),
+      };
+    });
   }
 
   // ── Options Chain ──

@@ -101,7 +101,16 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
   app.get('/market-depth/:symbol', async (request, reply) => {
     const sym = symbolParam.safeParse((request.params as any).symbol);
     if (!sym.success) return reply.code(400).send({ error: 'Invalid symbol' });
-    return reply.send({ symbol: sym.data, bids: [], asks: [] });
+
+    const symbol = sym.data;
+    const exchange = ((request.query as any).exchange ?? 'NSE') as string;
+
+    try {
+      const depth = await service.getMarketDepth(symbol, exchange);
+      return reply.send(depth);
+    } catch {
+      return reply.send({ symbol, bids: [], asks: [], totalBidQty: 0, totalAskQty: 0 });
+    }
   });
 
   app.get('/lot-sizes', async (_request, reply) => {

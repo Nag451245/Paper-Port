@@ -1,3 +1,6 @@
+const BREEZE_BRIDGE_URL = process.env.BREEZE_BRIDGE_URL || 'http://127.0.0.1:8001';
+const FETCH_TIMEOUT = 15_000;
+
 export interface BrokerQuote {
   symbol: string;
   ltp: number;
@@ -24,12 +27,15 @@ export interface BrokerOrderInput {
   qty: number;
   price?: number;
   triggerPrice?: number;
+  product?: 'INTRADAY' | 'DELIVERY' | 'MARGIN';
+  validity?: 'DAY' | 'IOC';
 }
 
 export interface BrokerOrderResult {
   orderId: string;
   status: string;
   message: string;
+  brokerOrderId?: string;
 }
 
 export interface BrokerAdapter {
@@ -43,6 +49,7 @@ export interface BrokerAdapter {
   search(query: string): Promise<Array<{ symbol: string; name: string; exchange: string }>>;
 
   placeOrder(input: BrokerOrderInput): Promise<BrokerOrderResult>;
+  modifyOrder(orderId: string, changes: Partial<Pick<BrokerOrderInput, 'price' | 'qty' | 'triggerPrice'>>): Promise<BrokerOrderResult>;
   cancelOrder(orderId: string): Promise<BrokerOrderResult>;
   getOrderStatus(orderId: string): Promise<{ status: string; filledQty: number; avgPrice: number }>;
 
@@ -52,10 +59,13 @@ export interface BrokerAdapter {
     avgPrice: number;
     ltp: number;
     pnl: number;
+    product: string;
   }>>;
+
+  getMarginAvailable(): Promise<{ available: number; used: number; total: number }>;
 }
 
-// Registry for available broker adapters
+// Registry
 const adapters = new Map<string, () => BrokerAdapter>();
 
 export function registerBrokerAdapter(name: string, factory: () => BrokerAdapter): void {
@@ -71,46 +81,200 @@ export function getAvailableBrokers(): string[] {
   return [...adapters.keys()];
 }
 
-// Register ICICI Breeze as the default adapter
-registerBrokerAdapter('breeze', () => ({
-  name: 'ICICI Breeze',
-  isConnected: () => true,
-  connect: async () => {},
-  disconnect: async () => {},
-  getQuote: async () => ({ symbol: '', ltp: 0, change: 0, changePercent: 0, volume: 0, timestamp: '' }),
-  getHistory: async () => [],
-  search: async () => [],
-  placeOrder: async () => ({ orderId: '', status: 'PENDING', message: '' }),
-  cancelOrder: async () => ({ orderId: '', status: 'CANCELLED', message: '' }),
-  getOrderStatus: async () => ({ status: 'PENDING', filledQty: 0, avgPrice: 0 }),
-  getPositions: async () => [],
-}));
+// ── ICICI Breeze Live Adapter ──
+class BreezeAdapter implements BrokerAdapter {
+  name = 'ICICI Breeze';
+  private connected = false;
+  private credentials: Record<string, string> = {};
 
-// Placeholder for future brokers
-registerBrokerAdapter('zerodha', () => ({
-  name: 'Zerodha Kite',
-  isConnected: () => false,
-  connect: async () => { throw new Error('Zerodha Kite integration coming soon'); },
-  disconnect: async () => {},
-  getQuote: async () => { throw new Error('Not connected'); },
-  getHistory: async () => { throw new Error('Not connected'); },
-  search: async () => { throw new Error('Not connected'); },
-  placeOrder: async () => { throw new Error('Not connected'); },
-  cancelOrder: async () => { throw new Error('Not connected'); },
-  getOrderStatus: async () => { throw new Error('Not connected'); },
-  getPositions: async () => { throw new Error('Not connected'); },
-}));
+  isConnected(): boolean { return this.connected; }
 
-registerBrokerAdapter('angelone', () => ({
-  name: 'Angel One',
-  isConnected: () => false,
-  connect: async () => { throw new Error('Angel One integration coming soon'); },
-  disconnect: async () => {},
-  getQuote: async () => { throw new Error('Not connected'); },
-  getHistory: async () => { throw new Error('Not connected'); },
-  search: async () => { throw new Error('Not connected'); },
-  placeOrder: async () => { throw new Error('Not connected'); },
-  cancelOrder: async () => { throw new Error('Not connected'); },
-  getOrderStatus: async () => { throw new Error('Not connected'); },
-  getPositions: async () => { throw new Error('Not connected'); },
-}));
+  async connect(credentials: Record<string, string>): Promise<void> {
+    this.credentials = credentials;
+    try {
+      const res = await fetch(`${BREEZE_BRIDGE_URL}/health`, { signal: AbortSignal.timeout(5000) });
+      if (res.ok) {
+        const data = await res.json() as any;
+        this.connected = data.session_active === true;
+        if (!this.connected) throw new Error('Breeze session not active');
+      }
+    } catch (err) {
+      this.connected = false;
+      throw new Error(`Breeze connection failed: ${(err as Error).message}`);
+    }
+  }
+
+  async disconnect(): Promise<void> { this.connected = false; }
+
+  async getQuote(symbol: string, exchange = 'NSE'): Promise<BrokerQuote> {
+    const res = await this.bridgeFetch(`/quote/${encodeURIComponent(symbol)}?exchange=${exchange}`);
+    return res as BrokerQuote;
+  }
+
+  async getHistory(symbol: string, interval: string, from: string, to: string): Promise<BrokerHistoricalBar[]> {
+    const res = await this.bridgeFetch(`/history/${encodeURIComponent(symbol)}?interval=${interval}&from=${from}&to=${to}`);
+    return (res as any).bars ?? [];
+  }
+
+  async search(query: string): Promise<Array<{ symbol: string; name: string; exchange: string }>> {
+    const res = await this.bridgeFetch(`/search?q=${encodeURIComponent(query)}`);
+    return (res as any).results ?? [];
+  }
+
+  async placeOrder(input: BrokerOrderInput): Promise<BrokerOrderResult> {
+    const orderTypeMap: Record<string, string> = {
+      'MARKET': 'market', 'LIMIT': 'limit', 'SL_M': 'stop_loss_market', 'SL_LIMIT': 'stop_loss_limit',
+    };
+    const payload = {
+      stock_code: input.symbol,
+      exchange_code: input.exchange === 'NSE' ? 'NSE' : input.exchange,
+      product: input.product === 'INTRADAY' ? 'intraday' : 'cash',
+      action: input.side.toLowerCase(),
+      order_type: orderTypeMap[input.orderType] || 'market',
+      quantity: input.qty,
+      price: input.price ?? 0,
+      stoploss: input.triggerPrice ?? 0,
+      validity: input.validity ?? 'day',
+    };
+
+    try {
+      const res = await this.bridgePost('/order/place', payload);
+      const orderId = res?.order_id ?? res?.Success?.order_id ?? '';
+      return {
+        orderId: String(orderId),
+        brokerOrderId: String(orderId),
+        status: orderId ? 'PLACED' : 'FAILED',
+        message: orderId ? `Order placed: ${orderId}` : (res?.Error ?? res?.message ?? 'Order placement failed'),
+      };
+    } catch (err) {
+      return { orderId: '', status: 'FAILED', message: (err as Error).message };
+    }
+  }
+
+  async modifyOrder(orderId: string, changes: Partial<Pick<BrokerOrderInput, 'price' | 'qty' | 'triggerPrice'>>): Promise<BrokerOrderResult> {
+    try {
+      const res = await this.bridgePost('/order/modify', { order_id: orderId, ...changes });
+      return {
+        orderId, status: 'MODIFIED',
+        message: res?.message ?? 'Order modified',
+      };
+    } catch (err) {
+      return { orderId, status: 'FAILED', message: (err as Error).message };
+    }
+  }
+
+  async cancelOrder(orderId: string): Promise<BrokerOrderResult> {
+    try {
+      const res = await this.bridgePost('/order/cancel', { order_id: orderId });
+      return { orderId, status: 'CANCELLED', message: res?.message ?? 'Order cancelled' };
+    } catch (err) {
+      return { orderId, status: 'FAILED', message: (err as Error).message };
+    }
+  }
+
+  async getOrderStatus(orderId: string): Promise<{ status: string; filledQty: number; avgPrice: number }> {
+    try {
+      const res = await this.bridgeFetch(`/order/status/${orderId}`);
+      return {
+        status: (res as any).status ?? 'UNKNOWN',
+        filledQty: Number((res as any).filled_qty ?? 0),
+        avgPrice: Number((res as any).avg_price ?? 0),
+      };
+    } catch {
+      return { status: 'UNKNOWN', filledQty: 0, avgPrice: 0 };
+    }
+  }
+
+  async getPositions(): Promise<Array<{ symbol: string; qty: number; avgPrice: number; ltp: number; pnl: number; product: string }>> {
+    try {
+      const res = await this.bridgeFetch('/positions');
+      return ((res as any).positions ?? []).map((p: any) => ({
+        symbol: p.stock_code ?? p.symbol ?? '',
+        qty: Number(p.quantity ?? 0),
+        avgPrice: Number(p.average_price ?? p.avg_price ?? 0),
+        ltp: Number(p.ltp ?? 0),
+        pnl: Number(p.pnl ?? 0),
+        product: p.product ?? 'cash',
+      }));
+    } catch { return []; }
+  }
+
+  async getMarginAvailable(): Promise<{ available: number; used: number; total: number }> {
+    try {
+      const res = await this.bridgeFetch('/margin');
+      return {
+        available: Number((res as any).available ?? 0),
+        used: Number((res as any).used ?? 0),
+        total: Number((res as any).total ?? 0),
+      };
+    } catch {
+      return { available: 0, used: 0, total: 0 };
+    }
+  }
+
+  private async bridgeFetch(path: string): Promise<unknown> {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT);
+    try {
+      const res = await fetch(`${BREEZE_BRIDGE_URL}${path}`, { signal: ac.signal });
+      clearTimeout(timer);
+      if (!res.ok) throw new Error(`Bridge returned ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      clearTimeout(timer);
+      throw err;
+    }
+  }
+
+  private async bridgePost(path: string, body: unknown): Promise<any> {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT);
+    try {
+      const res = await fetch(`${BREEZE_BRIDGE_URL}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: ac.signal,
+      });
+      clearTimeout(timer);
+      if (!res.ok) throw new Error(`Bridge returned ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      clearTimeout(timer);
+      throw err;
+    }
+  }
+}
+
+registerBrokerAdapter('breeze', () => new BreezeAdapter());
+
+// ── Paper Trading Adapter (default) ──
+class PaperAdapter implements BrokerAdapter {
+  name = 'Paper Trading';
+  isConnected(): boolean { return true; }
+  async connect(): Promise<void> {}
+  async disconnect(): Promise<void> {}
+  async getQuote(): Promise<BrokerQuote> { return { symbol: '', ltp: 0, change: 0, changePercent: 0, volume: 0, timestamp: '' }; }
+  async getHistory(): Promise<BrokerHistoricalBar[]> { return []; }
+  async search(): Promise<Array<{ symbol: string; name: string; exchange: string }>> { return []; }
+  async placeOrder(input: BrokerOrderInput): Promise<BrokerOrderResult> {
+    return { orderId: `PAPER-${Date.now()}`, status: 'SIMULATED', message: 'Paper trade executed' };
+  }
+  async modifyOrder(orderId: string): Promise<BrokerOrderResult> {
+    return { orderId, status: 'MODIFIED', message: 'Paper order modified' };
+  }
+  async cancelOrder(orderId: string): Promise<BrokerOrderResult> {
+    return { orderId, status: 'CANCELLED', message: 'Paper order cancelled' };
+  }
+  async getOrderStatus(): Promise<{ status: string; filledQty: number; avgPrice: number }> {
+    return { status: 'FILLED', filledQty: 0, avgPrice: 0 };
+  }
+  async getPositions(): Promise<Array<{ symbol: string; qty: number; avgPrice: number; ltp: number; pnl: number; product: string }>> {
+    return [];
+  }
+  async getMarginAvailable(): Promise<{ available: number; used: number; total: number }> {
+    return { available: 0, used: 0, total: 0 };
+  }
+}
+
+registerBrokerAdapter('paper', () => new PaperAdapter());

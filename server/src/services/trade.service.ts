@@ -2,9 +2,13 @@ import { PrismaClient } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
 import { MarketCalendar } from './market-calendar.js';
 import { RiskService } from './risk.service.js';
+import { getBrokerAdapter, type BrokerAdapter, type BrokerOrderInput as BrokerInput } from '../lib/broker-adapter.js';
+import { wsHub } from '../lib/websocket.js';
 type OrderSide = string;
 type OrderType = string;
 type Exchange = string;
+
+const TRADING_MODE: 'PAPER' | 'LIVE' = (process.env.TRADING_MODE ?? 'PAPER').toUpperCase() as any;
 
 export interface PlaceOrderInput {
   portfolioId: string;
@@ -153,11 +157,126 @@ export class TradeService {
   private marketData: MarketDataService;
   private calendar: MarketCalendar;
   private riskService: RiskService;
+  private broker: BrokerAdapter | null = null;
 
   constructor(private prisma: PrismaClient) {
     this.marketData = new MarketDataService();
     this.calendar = new MarketCalendar();
     this.riskService = new RiskService(prisma);
+
+    if (TRADING_MODE === 'LIVE') {
+      this.broker = getBrokerAdapter('breeze');
+      if (this.broker) {
+        this.broker.connect({}).catch(err => console.error('[TradeService] Broker connection failed:', err.message));
+      }
+    }
+  }
+
+  isLiveMode(): boolean { return TRADING_MODE === 'LIVE' && !!this.broker; }
+
+  async executeLiveOrder(input: PlaceOrderInput): Promise<{ orderId: string; status: string; brokerOrderId?: string }> {
+    if (!this.broker) throw new TradeError('Live broker not configured', 500);
+
+    const brokerInput: BrokerInput = {
+      symbol: input.symbol,
+      exchange: input.exchange ?? 'NSE',
+      side: input.side as 'BUY' | 'SELL',
+      orderType: input.orderType as any,
+      qty: input.qty,
+      price: input.price,
+      triggerPrice: input.triggerPrice,
+      product: input.exchange === 'NFO' ? 'INTRADAY' : 'DELIVERY',
+    };
+
+    const result = await this.broker.placeOrder(brokerInput);
+    if (result.status === 'FAILED') {
+      throw new TradeError(`Broker rejected order: ${result.message}`, 400);
+    }
+    return { orderId: result.orderId, status: result.status, brokerOrderId: result.brokerOrderId };
+  }
+
+  async getBrokerPositions() {
+    if (!this.broker) return [];
+    return this.broker.getPositions();
+  }
+
+  async getBrokerMargin() {
+    if (!this.broker) return { available: 0, used: 0, total: 0 };
+    return this.broker.getMarginAvailable();
+  }
+
+  async getTotalInvestedValue(portfolioId: string): Promise<number> {
+    const openPositions = await this.prisma.position.findMany({
+      where: { portfolioId, status: 'OPEN' },
+      select: { avgEntryPrice: true, qty: true, side: true, exchange: true },
+    });
+
+    let total = 0;
+    for (const pos of openPositions) {
+      const entryPrice = Number(pos.avgEntryPrice);
+      if (pos.side === 'LONG') {
+        total += entryPrice * pos.qty;
+      } else {
+        const rate = pos.exchange === 'MCX' ? 0.10 : pos.exchange === 'CDS' ? 0.05 : 0.25;
+        total += entryPrice * pos.qty * rate;
+      }
+    }
+    return total;
+  }
+
+  async recoverCapital(portfolioId: string, userId: string, amountNeeded: number): Promise<{
+    recovered: number;
+    closedPositions: string[];
+  }> {
+    const positions = await this.prisma.position.findMany({
+      where: { portfolioId, status: 'OPEN' },
+      include: { portfolio: true },
+    });
+
+    if (positions.length === 0) return { recovered: 0, closedPositions: [] };
+
+    const positionsWithPnl: Array<{ id: string; symbol: string; unrealizedPnl: number; value: number }> = [];
+
+    for (const pos of positions) {
+      const entryPrice = Number(pos.avgEntryPrice);
+      let ltp = entryPrice;
+      try {
+        const quote = await this.marketData.getQuote(pos.symbol, pos.exchange);
+        if (quote.ltp > 0) ltp = quote.ltp;
+      } catch {}
+
+      const unrealizedPnl = pos.side === 'LONG'
+        ? (ltp - entryPrice) * pos.qty
+        : (entryPrice - ltp) * pos.qty;
+
+      positionsWithPnl.push({
+        id: pos.id,
+        symbol: pos.symbol,
+        unrealizedPnl,
+        value: entryPrice * pos.qty,
+      });
+    }
+
+    // Close worst performers first (most negative P&L), then near-SL trades
+    positionsWithPnl.sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
+
+    let recovered = 0;
+    const closedPositions: string[] = [];
+
+    for (const pos of positionsWithPnl) {
+      if (recovered >= amountNeeded) break;
+
+      try {
+        const quote = await this.marketData.getQuote(pos.symbol, 'NSE');
+        await this.closePosition(pos.id, userId, quote.ltp);
+        recovered += pos.value;
+        closedPositions.push(pos.symbol);
+      } catch (err) {
+        console.error(`[TradeService] Capital recovery: failed to close ${pos.symbol}:`, (err as Error).message);
+      }
+    }
+
+    return { recovered, closedPositions };
   }
 
   async placeOrder(userId: string, input: PlaceOrderInput, skipMarketCheck = false) {
@@ -170,7 +289,29 @@ export class TradeService {
     }
 
     const exchange = input.exchange ?? 'NSE';
-    const marketOpen = skipMarketCheck || this.calendar.isMarketOpen(exchange);
+    const marketOpen = this.calendar.isMarketOpen(exchange);
+
+    // STRICT RULE: No orders outside market hours — not even queued
+    if (!marketOpen && !skipMarketCheck) {
+      throw new TradeError(
+        `Market is closed. Orders cannot be placed or queued outside market hours. ` +
+        `${exchange} trading hours: ${exchange === 'MCX' ? '9:00-23:30' : exchange === 'CDS' ? '9:00-17:00' : '9:15-15:30'} IST.`,
+        400,
+      );
+    }
+
+    // Even with skipMarketCheck (manual AMO), bots must NEVER trade after hours
+    if (!marketOpen && (input.strategyTag?.startsWith('AI-BOT') || input.strategyTag?.startsWith('BOT:'))) {
+      throw new TradeError(
+        'STRICT: Bot/Agent orders are blocked outside market hours. No exceptions.',
+        400,
+      );
+    }
+
+    // STRICT CAPITAL ENFORCEMENT: Never exceed declared initial capital
+    const declaredCapital = Number(portfolio.initialCapital);
+    const currentNav = Number(portfolio.currentNav);
+    const totalInvested = await this.getTotalInvestedValue(input.portfolioId);
 
     // Risk gate: enforce target-aware and position limits before any order
     try {
@@ -195,58 +336,6 @@ export class TradeService {
 
     let fillPrice = input.price ?? 0;
 
-    // If market is closed, queue ALL orders as PENDING (like a real broker's AMO)
-    if (!marketOpen) {
-      // Get indicative price for validation
-      let indicativePrice = fillPrice;
-      if (indicativePrice <= 0) {
-        try {
-          const quote = await this.marketData.getQuote(input.symbol, exchange);
-          indicativePrice = quote.ltp;
-        } catch { /* use 0, will validate on fill */ }
-      }
-
-      // Basic capital validation even for pending orders
-      if (indicativePrice > 0) {
-        const estCosts = calculateCosts(input.qty, indicativePrice, input.side, exchange);
-        const estValue = indicativePrice * input.qty + estCosts.totalCost;
-        const availableCash = Number(portfolio.currentNav);
-
-        if (input.side === 'BUY') {
-          const existingShort = await this.prisma.position.findFirst({
-            where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'SHORT', status: 'OPEN' },
-          });
-          if (!existingShort && estValue > availableCash) {
-            throw new TradeError(
-              `Insufficient capital. Need ₹${estValue.toFixed(0)} but only ₹${availableCash.toFixed(0)} available.`,
-              400,
-            );
-          }
-        }
-      }
-
-      const order = await this.prisma.order.create({
-        data: {
-          portfolioId: input.portfolioId,
-          instrumentToken: input.instrumentToken,
-          symbol: input.symbol,
-          exchange,
-          orderType: input.orderType === 'MARKET' ? 'MARKET' : 'LIMIT',
-          side: input.side,
-          qty: input.qty,
-          price: indicativePrice > 0 ? indicativePrice : (input.price ?? null),
-          triggerPrice: input.triggerPrice,
-          status: 'PENDING',
-          filledQty: 0,
-          avgFillPrice: null,
-          brokerage: 0, stt: 0, exchangeCharges: 0, gst: 0, sebiCharges: 0, stampDuty: 0, totalCost: 0,
-          filledAt: null,
-        },
-      });
-
-      return { ...order, _pendingReason: 'Market is closed. Order will be executed when market opens and price matches.' };
-    }
-
     // Market is open -- execute normally
     if (input.orderType === 'MARKET' && fillPrice <= 0) {
       const quote = await this.marketData.getQuote(input.symbol, exchange);
@@ -260,24 +349,51 @@ export class TradeService {
       }
     }
 
-    const execSim = simulateExecution(fillPrice, input.qty, input.side as 'BUY' | 'SELL', exchange, input.orderType);
-    fillPrice = execSim.fillPrice;
-    const effectiveQty = execSim.filledQty;
+    let brokerOrderId: string | undefined;
+    let effectiveQty = input.qty;
+
+    if (this.isLiveMode()) {
+      try {
+        const liveResult = await this.executeLiveOrder(input);
+        brokerOrderId = liveResult.brokerOrderId;
+        if (this.broker) {
+          const status = await this.broker.getOrderStatus(liveResult.orderId);
+          if (status.avgPrice > 0) fillPrice = status.avgPrice;
+          if (status.filledQty > 0) effectiveQty = status.filledQty;
+        }
+      } catch (err) {
+        console.error('[TradeService] Live order failed, falling back to paper:', (err as Error).message);
+      }
+    } else {
+      const execSim = simulateExecution(fillPrice, input.qty, input.side as 'BUY' | 'SELL', exchange, input.orderType);
+      fillPrice = execSim.fillPrice;
+      effectiveQty = execSim.filledQty;
+    }
 
     const costs = calculateCosts(effectiveQty, fillPrice, input.side, exchange);
 
     const totalValue = fillPrice * input.qty + costs.totalCost;
     const availableCash = Number(portfolio.currentNav);
 
+    // STRICT: Total invested + new order must never exceed declared capital
     if (input.side === 'BUY') {
       const existingShort = await this.prisma.position.findFirst({
         where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'SHORT', status: 'OPEN' },
       });
-      if (!existingShort && totalValue > availableCash) {
-        throw new TradeError(
-          `Insufficient capital. Need ₹${totalValue.toFixed(0)} but only ₹${availableCash.toFixed(0)} available.`,
-          400,
-        );
+      if (!existingShort) {
+        if (totalValue > availableCash) {
+          throw new TradeError(
+            `Insufficient capital. Need ₹${totalValue.toFixed(0)} but only ₹${availableCash.toFixed(0)} available.`,
+            400,
+          );
+        }
+        if (totalInvested + totalValue > declaredCapital * 1.0) {
+          throw new TradeError(
+            `STRICT: This order (₹${totalValue.toFixed(0)}) would push total invested (₹${totalInvested.toFixed(0)}) ` +
+            `beyond declared capital of ₹${declaredCapital.toFixed(0)}. Not a single rupee more.`,
+            400,
+          );
+        }
       }
     } else {
       const existingLong = await this.prisma.position.findFirst({
@@ -288,6 +404,13 @@ export class TradeService {
         if (marginRequired > availableCash) {
           throw new TradeError(
             `Insufficient margin for short. Need ₹${marginRequired.toFixed(0)} but only ₹${availableCash.toFixed(0)} available.`,
+            400,
+          );
+        }
+        if (totalInvested + marginRequired > declaredCapital * 1.0) {
+          throw new TradeError(
+            `STRICT: Short margin (₹${marginRequired.toFixed(0)}) would push total utilization (₹${totalInvested.toFixed(0)}) ` +
+            `beyond declared capital of ₹${declaredCapital.toFixed(0)}. Not a single rupee more.`,
             400,
           );
         }
@@ -315,9 +438,16 @@ export class TradeService {
 
     if (input.orderType === 'MARKET' && fillPrice > 0) {
       await this.handleFill(order.id, input, fillPrice, costs);
+
+      wsHub.broadcastTradeExecution(userId, {
+        symbol: input.symbol,
+        side: input.side,
+        qty: effectiveQty,
+        price: fillPrice,
+      });
     }
 
-    return order;
+    return { ...order, brokerOrderId, tradingMode: TRADING_MODE };
   }
 
   private shortMarginRequired(price: number, qty: number, exchange: string): number {

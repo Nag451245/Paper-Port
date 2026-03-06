@@ -6,12 +6,14 @@ import { engineScan, engineRisk, engineSignals, isEngineAvailable, type ScanSign
 import { calculateMaxPain, calculateIVPercentile, calculateGreeks } from './options.service.js';
 import { TargetTracker, type TargetProgress } from './target-tracker.service.js';
 import { GlobalMarketService } from './global-market.service.js';
+import { DecisionAuditService, type DecisionRecord } from './decision-audit.service.js';
+import { MarketCalendar } from './market-calendar.js';
 
 const DEFAULT_TICK_INTERVAL = 3 * 60_000;
 const DEFAULT_SIGNAL_INTERVAL = 5 * 60_000;
 const DEFAULT_MARKET_SCAN_INTERVAL = 10 * 60_000;
-const MAX_CONCURRENT_BOTS = 3;
-const MAX_CANDLE_SYMBOLS = 8;
+const MAX_CONCURRENT_BOTS = 10;
+const MAX_CANDLE_SYMBOLS = 30;
 
 interface RunningBot {
   botId: string;
@@ -151,11 +153,15 @@ export class BotEngine {
 
   private targetTracker: TargetTracker;
   private globalMarket: GlobalMarketService;
+  private decisionAudit: DecisionAuditService;
+  private calendar: MarketCalendar;
 
   constructor(private prisma: PrismaClient) {
     this.tradeService = new TradeService(prisma);
     this.targetTracker = new TargetTracker(prisma);
     this.globalMarket = new GlobalMarketService();
+    this.decisionAudit = new DecisionAuditService(prisma);
+    this.calendar = new MarketCalendar();
     this.rustAvailable = isEngineAvailable();
     console.log(`[BotEngine] Initialized — Rust engine: ${this.rustAvailable ? 'AVAILABLE' : 'NOT FOUND (using Gemini AI only)'}`);
   }
@@ -441,6 +447,10 @@ export class BotEngine {
 
   private async runMarketScan(userId: string): Promise<void> {
     if (this.scanInProgress) return;
+
+    // STRICT: No scanning outside market hours
+    if (!this.calendar.isMarketOpen()) return;
+
     this.scanInProgress = true;
 
     const start = Date.now();
@@ -644,14 +654,40 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     direction: 'BUY' | 'SELL',
     rationale: string,
     botId?: string,
+    signalMeta?: { confidence?: number; indicators?: string; ltp?: number; signalSource?: string },
   ): Promise<{ success: boolean; message: string }> {
     try {
+      // STRICT: Bots must never trade after market hours
+      const exchange = this.detectExchange(symbol);
+      if (!this.calendar.isMarketOpen(exchange)) {
+        console.log(`[BotEngine] BLOCKED: ${direction} ${symbol} — market closed`);
+        return { success: false, message: `Market is closed. Bot orders blocked outside trading hours.` };
+      }
+
       const portfolio = await this.prisma.portfolio.findFirst({ where: { userId } });
       if (!portfolio) return { success: false, message: 'No portfolio found' };
 
       const nav = Number(portfolio.currentNav);
 
-      const exchange = this.detectExchange(symbol);
+      // Record the decision in audit trail
+      let auditId: string | undefined;
+      try {
+        auditId = await this.decisionAudit.recordDecision({
+          userId,
+          botId,
+          symbol,
+          decisionType: 'ENTRY_SIGNAL',
+          direction: direction === 'BUY' ? 'LONG' : 'SHORT',
+          confidence: signalMeta?.confidence ?? 0.5,
+          signalSource: signalMeta?.signalSource ?? (this.rustAvailable ? 'RUST+AI' : 'AI'),
+          marketDataSnapshot: {
+            ltp: signalMeta?.ltp,
+            indicators: signalMeta?.indicators,
+            nav,
+          },
+          reasoning: rationale,
+        });
+      } catch { /* audit best-effort */ }
 
       if (direction === 'BUY') {
         let ltp = 0;
@@ -673,7 +709,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           instrumentToken: symbol,
           exchange,
           strategyTag: 'AI-BOT',
-        }, true);
+        });
 
         if (botId) {
           await this.updateBotTradeStats(botId, 0);
@@ -723,6 +759,18 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
             await this.checkAutoPause(userId, strategyTag, botId);
           }
 
+          // Resolve the decision audit with outcome
+          if (auditId) {
+            try {
+              await this.decisionAudit.resolveDecision(auditId, {
+                exitPrice,
+                pnl,
+                predictionAccuracy: outcome === 'WIN' ? 1 : outcome === 'LOSS' ? 0 : 0.5,
+                outcomeNotes: `${outcome}: P&L ₹${pnl.toFixed(2)} | ${rationale}`,
+              });
+            } catch { /* audit best-effort */ }
+          }
+
           return { success: true, message: `Sold ${longPosition.qty} ${symbol} @ ₹${exitPrice.toFixed(2)} | P&L: ₹${pnl.toFixed(2)}` };
         }
 
@@ -746,7 +794,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           instrumentToken: symbol,
           exchange,
           strategyTag: 'AI-BOT',
-        }, true);
+        });
 
         if (botId) {
           await this.updateBotTradeStats(botId, 0);
@@ -756,6 +804,24 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+
+      // Record blocked decisions in audit trail
+      if (msg.includes('Risk') || msg.includes('capital') || msg.includes('Market is closed') || msg.includes('STRICT')) {
+        try {
+          await this.decisionAudit.recordDecision({
+            userId,
+            botId,
+            symbol,
+            decisionType: 'RISK_BLOCK',
+            direction: direction === 'BUY' ? 'LONG' : 'SHORT',
+            confidence: signalMeta?.confidence ?? 0,
+            signalSource: signalMeta?.signalSource ?? 'BOT',
+            marketDataSnapshot: { ltp: signalMeta?.ltp },
+            reasoning: `BLOCKED: ${msg}`,
+          });
+        } catch { /* audit best-effort */ }
+      }
+
       return { success: false, message: msg };
     }
   }
@@ -791,7 +857,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
             instrumentToken: `${symbol}-NFO-${leg.strike}-${leg.type}`,
             exchange: 'NFO',
             strategyTag: tag,
-          }, true);
+          });
           filled++;
         } catch {
           failed++;
@@ -930,6 +996,12 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     if (this.cycleInProgress.has(botId)) return;
     this.cycleInProgress.add(botId);
     try {
+      // STRICT: No bot cycles outside market hours
+      if (!this.calendar.isMarketOpen()) {
+        console.log(`[BotEngine] Bot ${botId}: skipping cycle — market is closed`);
+        return;
+      }
+
       const aiStatus = getOpenAIStatus();
       if (aiStatus.circuitOpen && !this.rustAvailable) {
         console.log(`[BotEngine] Bot ${botId}: skipping cycle — AI circuit open and no Rust engine (cooldown: ${aiStatus.cooldownRemainingMs}ms)`);
@@ -943,7 +1015,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         return;
       }
 
-      const symbols = (bot.assignedSymbols || 'RELIANCE,TCS,INFY,HDFCBANK,ITC')
+      const symbols = (bot.assignedSymbols || 'RELIANCE,TCS,INFY,HDFCBANK,ITC,SBIN,BHARTIARTL,ICICIBANK,KOTAKBANK,AXISBANK,LT,BAJFINANCE,TATAMOTORS,SUNPHARMA,TITAN,WIPRO,HCLTECH,MARUTI,NTPC,POWERGRID,ADANIENT,JSWSTEEL,TATASTEEL,HINDALCO,ONGC,NIFTY,BANKNIFTY')
         .split(',').map(s => s.trim()).filter(Boolean);
 
       // Target-aware: check if trading is allowed
@@ -1038,7 +1110,12 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
       });
 
       if (execute) {
-        const result = await this.executeTrade(userId, sig.symbol, sig.direction, sig.symbol, botId);
+        const result = await this.executeTrade(userId, sig.symbol, sig.direction, sig.symbol, botId, {
+          confidence: sig.confidence,
+          indicators: JSON.stringify(sig.indicators),
+          ltp: sig.entry,
+          signalSource: 'RUST_ENGINE',
+        });
         await this.prisma.botMessage.create({
           data: {
             fromBotId: botId,
@@ -1301,7 +1378,11 @@ INSTRUCTIONS:
             if (isMultiLeg) {
               result = await this.executeMultiLegStrategy(userId, sig.symbol, sig.strategy || sig.direction, sig.legs!, botId);
             } else {
-              result = await this.executeTrade(userId, sig.symbol, sig.direction as 'BUY' | 'SELL', rationale, botId);
+              result = await this.executeTrade(userId, sig.symbol, sig.direction as 'BUY' | 'SELL', rationale, botId, {
+                confidence: sig.confidence,
+                ltp: sig.entry,
+                signalSource: 'AI_AGENT',
+              });
             }
             await this.prisma.botMessage.create({
               data: {
@@ -1424,7 +1505,11 @@ INSTRUCTIONS:
             });
 
             if (autoExecute) {
-              await this.executeTrade(userId, sig.symbol, sig.direction, sig.symbol);
+              await this.executeTrade(userId, sig.symbol, sig.direction, sig.symbol, undefined, {
+                confidence: sig.confidence,
+                ltp: sig.entry,
+                signalSource: 'RUST_ENGINE',
+              });
             }
           }
           // Don't return — always continue to GPT for full market analysis
@@ -1521,7 +1606,11 @@ Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted
             });
 
             if (autoExecute) {
-              await this.executeTrade(userId, sig.symbol, sig.direction, sig.rationale);
+              await this.executeTrade(userId, sig.symbol, sig.direction, sig.rationale, undefined, {
+                confidence: sig.score,
+                ltp: sig.entry,
+                signalSource: 'AI_AGENT',
+              });
             }
           }
         }
