@@ -9,9 +9,9 @@ import { GlobalMarketService } from './global-market.service.js';
 import { DecisionAuditService, type DecisionRecord } from './decision-audit.service.js';
 import { MarketCalendar } from './market-calendar.js';
 
-const DEFAULT_TICK_INTERVAL = 3 * 60_000;
-const DEFAULT_SIGNAL_INTERVAL = 5 * 60_000;
-const DEFAULT_MARKET_SCAN_INTERVAL = 10 * 60_000;
+const DEFAULT_TICK_INTERVAL = 30_000;         // 30 seconds — Rust scan is fast, skip if still running
+const DEFAULT_SIGNAL_INTERVAL = 2 * 60_000;   // 2 minutes
+const DEFAULT_MARKET_SCAN_INTERVAL = 3 * 60_000; // 3 minutes
 const MAX_CONCURRENT_BOTS = 10;
 const MAX_CANDLE_SYMBOLS = 30;
 

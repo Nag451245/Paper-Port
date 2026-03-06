@@ -502,19 +502,20 @@ export class MarketDataService {
       return bars;
     }
 
-    // Primary: Yahoo Finance
+    // Primary: Breeze API (direct broker data, most reliable when session is active)
+    const bars = await this.fetchFromBreeze(symbol, interval, fromDate, toDate, userId, exchange);
+    if (bars.length > 0) {
+      if (this.cache) await this.cache.set(cacheKey, bars, CACHE_TTL_HISTORY);
+      return bars;
+    }
+
+    // Fallback: Yahoo Finance
     const yahooBars = await this.fetchHistoryFromYahoo(symbol, interval, fromDate, toDate, exchange);
     if (yahooBars.length > 0) {
       if (this.cache) await this.cache.set(cacheKey, yahooBars, CACHE_TTL_HISTORY);
       return yahooBars;
     }
-
-    // Fallback: Breeze API
-    const bars = await this.fetchFromBreeze(symbol, interval, fromDate, toDate, userId, exchange);
-    if (bars.length > 0 && this.cache) {
-      await this.cache.set(cacheKey, bars, CACHE_TTL_HISTORY);
-    }
-    return bars;
+    return [];
   }
 
   async getTopMovers(count = 20): Promise<{ gainers: MarketMover[]; losers: MarketMover[] }> {
