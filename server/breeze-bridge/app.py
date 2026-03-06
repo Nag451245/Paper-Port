@@ -743,6 +743,74 @@ def get_expiries(symbol):
         return {"expiries": [], "error": str(e)}
 
 
+def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None, exchange="NSE"):
+    """Fetch historical candle data via Breeze API."""
+    if not breeze_instance:
+        return {"error": "Breeze session not initialized", "bars": []}
+
+    cache_key = f"hist:{symbol}:{interval}:{from_date}:{to_date}"
+    cached = _cache_get(cache_key)
+    if cached:
+        return cached
+
+    if not from_date:
+        from_date = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+    if not to_date:
+        to_date = datetime.now().strftime("%Y-%m-%d")
+
+    interval_map = {
+        "1minute": "1minute", "1m": "1minute",
+        "5minute": "5minute", "5m": "5minute",
+        "15minute": "15minute", "15m": "15minute",
+        "30minute": "30minute", "30m": "30minute",
+        "1hour": "1hour", "1h": "1hour",
+        "1day": "1day", "1d": "1day",
+    }
+    breeze_interval = interval_map.get(interval, "5minute")
+
+    exchange_code = "MCX" if exchange == "MCX" else "NSE"
+    product_type = "futures" if exchange == "MCX" else "cash"
+
+    try:
+        result = breeze_instance.get_historical_data_v2(
+            interval=breeze_interval,
+            from_date=f"{from_date}T07:00:00.000Z",
+            to_date=f"{to_date}T07:00:00.000Z",
+            stock_code=symbol,
+            exchange_code=exchange_code,
+            product_type=product_type,
+        )
+
+        if not result or result.get("Status") != 200:
+            err = result.get("Error", "Unknown") if result else "No response"
+            print(f"[Breeze Bridge] Historical {symbol} {interval}: Status={result.get('Status') if result else None}, Error={err}")
+            return {"symbol": symbol, "bars": [], "error": str(err)}
+
+        records = result.get("Success", [])
+        if not isinstance(records, list):
+            return {"symbol": symbol, "bars": []}
+
+        bars = []
+        for rec in records:
+            o = _safe_float(rec.get("open"))
+            h = _safe_float(rec.get("high"))
+            l = _safe_float(rec.get("low"))
+            c = _safe_float(rec.get("close"))
+            v = _safe_int(rec.get("volume", rec.get("total_quantity_traded", 0)))
+            ts = rec.get("datetime", rec.get("date", rec.get("timestamp", "")))
+            if o > 0:
+                bars.append({"timestamp": str(ts)[:19], "open": o, "high": h, "low": l, "close": c, "volume": v})
+
+        print(f"[Breeze Bridge] Historical {symbol} {interval} {from_date}→{to_date}: {len(bars)} bars")
+        result_data = {"symbol": symbol, "bars": bars, "count": len(bars)}
+        if len(bars) > 0:
+            _cache_set(cache_key, result_data)
+        return result_data
+    except Exception as e:
+        print(f"[Breeze Bridge] Historical {symbol} error: {e}")
+        return {"symbol": symbol, "bars": [], "error": str(e)}
+
+
 class BreezeHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"[Breeze Bridge] {args[0]}")
@@ -892,6 +960,18 @@ class BreezeHandler(BaseHTTPRequestHandler):
                         self.send_json({"symbol": symbol, "ltp": 0, "change": 0, "changePercent": 0, "volume": 0, "timestamp": datetime.now().isoformat()})
                 except Exception as e:
                     self.send_json({"error": str(e)}, 500)
+
+            elif path.startswith("/historical/"):
+                symbol = path.split("/")[-1].upper()
+                interval = params.get("interval", ["5minute"])[0]
+                from_date = params.get("from", [None])[0]
+                to_date = params.get("to", [None])[0]
+                exchange = params.get("exchange", ["NSE"])[0]
+                if breeze_instance is None:
+                    self.send_json({"error": "Breeze session not active", "bars": []}, 503)
+                    return
+                data = get_historical_data(symbol, interval, from_date, to_date, exchange)
+                self.send_json(data)
 
             else:
                 self.send_json({"error": "Not found"}, 404)

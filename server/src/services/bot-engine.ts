@@ -1380,16 +1380,24 @@ INSTRUCTIONS:
       },
     });
 
+    if (!analysis.signals || analysis.signals.length === 0) {
+      console.log(`[BotEngine] Bot ${botId} GPT: no signals returned (message: ${analysis.message?.substring(0, 80)})`);
+    }
+
     if (analysis.signals && analysis.signals.length > 0) {
       console.log(`[BotEngine] Bot ${botId} GPT signals: ${analysis.signals.map(s => `${s.direction} ${s.symbol} @${s.confidence?.toFixed(2)}`).join(', ')}`);
       for (const sig of analysis.signals.slice(0, 5)) {
-        if (sig.confidence < 0.6) continue;
+        if (sig.confidence < 0.5) {
+          console.log(`[BotEngine] Bot ${botId}: skipping ${sig.direction} ${sig.symbol} — confidence ${(sig.confidence * 100).toFixed(0)}% < 50%`);
+          continue;
+        }
 
         const isSimple = sig.direction === 'BUY' || sig.direction === 'SELL';
         const isMultiLeg = !isSimple && sig.legs && Array.isArray(sig.legs) && sig.legs.length > 0;
         if (!isSimple && !isMultiLeg) continue;
 
-          const shouldExecute = (bot.role === 'EXECUTOR' || bot.role === 'SCANNER' || bot.role === 'FNO_STRATEGIST') && sig.confidence >= 0.65;
+          const execThreshold = bot.role === 'EXECUTOR' ? 0.55 : 0.65;
+          const shouldExecute = (bot.role === 'EXECUTOR' || bot.role === 'SCANNER' || bot.role === 'FNO_STRATEGIST') && sig.confidence >= execThreshold;
 
           const rationale = sig.entry
             ? `${sig.reason} | Entry: ₹${sig.entry} | SL: ₹${sig.stopLoss || 'N/A'} | Target: ₹${sig.target || 'N/A'} | R:R: ${sig.riskReward || 'N/A'}`
@@ -1500,15 +1508,18 @@ INSTRUCTIONS:
 
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
+      const todayExecutedCount = await this.prisma.aITradeSignal.count({
+        where: { userId, createdAt: { gte: todayStart }, status: 'EXECUTED' },
+      });
+
+      const maxDaily = config.maxDailyTrades || 50;
+      if (todayExecutedCount >= maxDaily) {
+        console.log(`[BotEngine] Agent: daily trade limit reached (${todayExecutedCount}/${maxDaily}), skipping`);
+        return;
+      }
       const todaySignalCount = await this.prisma.aITradeSignal.count({
         where: { userId, createdAt: { gte: todayStart } },
       });
-
-      const maxDaily = config.maxDailyTrades || 10;
-      if (todaySignalCount >= maxDaily) {
-        console.log(`[BotEngine] Agent: daily signal limit reached (${todaySignalCount}/${maxDaily}), skipping`);
-        return;
-      }
 
       const nav = portfolios.length > 0 ? Number(portfolios[0].currentNav) : 1000000;
       const initCap = portfolios.length > 0 ? Number(portfolios[0].initialCapital) : 1000000;

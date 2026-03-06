@@ -1229,42 +1229,26 @@ export class MarketDataService {
     interval: string,
     fromDate: string,
     toDate: string,
-    userId?: string,
+    _userId?: string,
     exchange: string = 'NSE',
   ): Promise<HistoricalBar[]> {
-    const creds = await this.getAnyBreezeCredentials(userId);
-    if (!creds) return [];
-
     const breezeInterval = this.mapInterval(interval);
-    const from = `${fromDate}T07:00:00.000Z`;
-    const to = `${toDate}T07:00:00.000Z`;
-
-    const breezeExchange = exchange === 'MCX' ? 'MCX' : exchange === 'CDS' ? 'NSE' : 'NSE';
-    const productType = exchange === 'MCX' ? 'Futures' : exchange === 'CDS' ? 'Currency' : 'Cash';
+    const bridgeActive = await this.ensureBreezeBridgeSession();
+    if (!bridgeActive) return [];
 
     try {
-      const breeze = await this.getBreezeSDK();
-      if (!breeze) return [];
+      const url = `${BREEZE_BRIDGE_URL}/historical/${encodeURIComponent(symbol)}?interval=${encodeURIComponent(breezeInterval)}&from=${encodeURIComponent(fromDate)}&to=${encodeURIComponent(toDate)}&exchange=${encodeURIComponent(exchange)}`;
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 15_000);
+      const res = await fetch(url, { signal: ac.signal });
+      clearTimeout(timer);
+      if (!res.ok) return [];
 
-      const body: Record<string, string> = {
-        interval: breezeInterval,
-        from_date: from,
-        to_date: to,
-        stock_code: symbol,
-        exchange_code: breezeExchange,
-        product_type: productType,
-      };
-      const headers = breeze.generateHeaders(body);
-      const response = await breeze.makeRequest('GET', 'historicalcharts', body, headers);
-      const data = response?.data;
+      const data = await res.json() as any;
+      if (data.error || !data.bars) return [];
 
-      if (data?.Error) return [];
-
-      const records = data?.Success ?? data?.data ?? data;
-      if (!Array.isArray(records)) return [];
-
-      return records.map((bar: any) => ({
-        timestamp: (bar.datetime ?? bar.date ?? bar.timestamp ?? '').slice(0, 10),
+      return (data.bars as any[]).map((bar: any) => ({
+        timestamp: (bar.timestamp ?? '').slice(0, 19),
         open: Number(bar.open) || 0,
         high: Number(bar.high) || 0,
         low: Number(bar.low) || 0,
