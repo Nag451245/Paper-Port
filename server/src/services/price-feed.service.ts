@@ -153,35 +153,9 @@ export class PriceFeedService {
         } catch {}
       }
 
-      if (updatedCount > 0) {
-        // Also update portfolio NAV with current position values
-        const portfolios = await this.prisma.portfolio.findMany({
-          select: { id: true, initialCapital: true },
-        });
-
-        for (const pf of portfolios) {
-          const positions = await this.prisma.position.findMany({
-            where: { portfolioId: pf.id, status: 'OPEN' },
-            select: { unrealizedPnl: true, avgEntryPrice: true, qty: true, side: true },
-          });
-
-          const realizedTrades = await this.prisma.trade.findMany({
-            where: { portfolioId: pf.id },
-            select: { netPnl: true },
-          });
-
-          const totalRealized = realizedTrades.reduce((s, t) => s + Number(t.netPnl), 0);
-          const totalUnrealized = positions.reduce((s, p) => s + Number(p.unrealizedPnl ?? 0), 0);
-          const totalInvested = positions.reduce((s, p) => s + Number(p.avgEntryPrice) * p.qty, 0);
-          const nav = Number(pf.initialCapital) + totalRealized + totalUnrealized - totalInvested
-            + positions.reduce((s, p) => s + Number(p.avgEntryPrice) * p.qty, 0);
-
-          await this.prisma.portfolio.update({
-            where: { id: pf.id },
-            data: { currentNav: Number(pf.initialCapital) + totalRealized + totalUnrealized },
-          }).catch(() => {});
-        }
-      }
+      // NOTE: Do NOT touch portfolio.currentNav here.
+      // currentNav represents available CASH and is only modified by handleFill (buy/sell).
+      // The frontend computes display NAV as: currentNav + sum(position market values).
     } catch (err) {
       console.error('[PriceFeed] persistUnrealizedPnl failed:', (err as Error).message);
     }
