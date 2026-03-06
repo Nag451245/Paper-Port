@@ -86,7 +86,9 @@ fn extract_features(config: Config) -> Result<serde_json::Value, String> {
     let volumes: Vec<f64> = candles.iter().map(|c| c.volume).collect();
     let opens: Vec<f64> = candles.iter().map(|c| c.open).collect();
 
-    let returns: Vec<f64> = (1..n).map(|i| (closes[i] / closes[i-1]).ln()).collect();
+    let returns: Vec<f64> = (1..n).map(|i| {
+        if closes[i] > 0.0 && closes[i-1] > 0.0 { (closes[i] / closes[i-1]).ln() } else { 0.0 }
+    }).collect();
 
     let columns = vec![
         "return".into(), "log_return_5d".into(), "log_return_10d".into(),
@@ -163,7 +165,9 @@ fn detect_regime(config: Config) -> Result<serde_json::Value, String> {
     if n < 50 { return Err("Need at least 50 candles for regime detection".into()); }
 
     let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
-    let returns: Vec<f64> = (1..n).map(|i| (closes[i] / closes[i-1]).ln()).collect();
+    let returns: Vec<f64> = (1..n).map(|i| {
+        if closes[i] > 0.0 && closes[i-1] > 0.0 { (closes[i] / closes[i-1]).ln() } else { 0.0 }
+    }).collect();
     let lookback = config.lookback.unwrap_or(20);
 
     let mut regime_history: Vec<RegimePoint> = Vec::new();
@@ -252,7 +256,9 @@ fn detect_anomalies(config: Config) -> Result<serde_json::Value, String> {
 
     let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
     let volumes: Vec<f64> = candles.iter().map(|c| c.volume).collect();
-    let returns: Vec<f64> = (1..n).map(|i| (closes[i] / closes[i-1]).ln()).collect();
+    let returns: Vec<f64> = (1..n).map(|i| {
+        if closes[i] > 0.0 && closes[i-1] > 0.0 { (closes[i] / closes[i-1]).ln() } else { 0.0 }
+    }).collect();
 
     let lookback = config.lookback.unwrap_or(20);
     let mut anomalies: Vec<AnomalyPoint> = Vec::new();
@@ -294,7 +300,7 @@ fn detect_anomalies(config: Config) -> Result<serde_json::Value, String> {
             }
         }
 
-        if idx >= 2 {
+        if idx >= 2 && candles[idx - 1].close > 0.0 {
             let gap_pct = (candles[idx].open - candles[idx - 1].close).abs() / candles[idx - 1].close;
             if gap_pct > 0.03 {
                 anomalies.push(AnomalyPoint {
@@ -373,3 +379,167 @@ fn calc_atr(highs: &[f64], lows: &[f64], closes: &[f64], period: usize) -> f64 {
 
 fn r2(v: f64) -> f64 { (v * 100.0).round() / 100.0 }
 fn r4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_candles(n: usize, base: f64, trend: f64) -> Vec<serde_json::Value> {
+        (0..n).map(|i| {
+            let close = base + trend * i as f64;
+            json!({
+                "timestamp": format!("2024-01-{:02}", (i % 28) + 1),
+                "open": close - 0.5,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+                "volume": 10000.0 + (i as f64 * 100.0)
+            })
+        }).collect()
+    }
+
+    #[test]
+    fn test_extract_features_basic() {
+        let candles = make_candles(35, 100.0, 0.5);
+        let input = json!({ "command": "extract_features", "candles": candles });
+        let result = compute(input).expect("should succeed");
+
+        let features = result.get("features").expect("missing features");
+        let columns = features.get("columns").expect("missing columns").as_array().unwrap();
+        assert_eq!(columns.len(), 16);
+
+        let data = features.get("data").expect("missing data").as_array().unwrap();
+        assert!(!data.is_empty());
+        for row in data {
+            assert_eq!(row.as_array().unwrap().len(), 16);
+        }
+    }
+
+    #[test]
+    fn test_extract_features_too_few() {
+        let candles = make_candles(20, 100.0, 0.5);
+        let input = json!({ "command": "extract_features", "candles": candles });
+        let result = compute(input);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("30"));
+    }
+
+    #[test]
+    fn test_detect_regime_basic() {
+        let candles = make_candles(60, 100.0, 1.0);
+        let input = json!({ "command": "detect_regime", "candles": candles });
+        let result = compute(input).expect("should succeed");
+
+        let regime = result.get("regime").expect("missing regime");
+        let current = regime.get("current_regime").expect("missing current_regime").as_str().unwrap();
+        let valid_regimes = ["BULL_LOW_VOL", "BULL_HIGH_VOL", "BEAR_LOW_VOL", "BEAR_HIGH_VOL", "SIDEWAYS"];
+        assert!(valid_regimes.contains(&current), "unexpected regime: {}", current);
+
+        let history = regime.get("regime_history").expect("missing regime_history").as_array().unwrap();
+        assert!(!history.is_empty());
+
+        let stats = regime.get("regime_stats").expect("missing regime_stats").as_array().unwrap();
+        assert_eq!(stats.len(), 5);
+    }
+
+    #[test]
+    fn test_detect_regime_too_few() {
+        let candles = make_candles(40, 100.0, 1.0);
+        let input = json!({ "command": "detect_regime", "candles": candles });
+        let result = compute(input);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("50"));
+    }
+
+    #[test]
+    fn test_detect_anomalies_basic() {
+        let candles = make_candles(35, 100.0, 0.2);
+        let input = json!({ "command": "detect_anomalies", "candles": candles });
+        let result = compute(input).expect("should succeed");
+
+        let anomalies = result.get("anomalies").expect("missing anomalies").as_array().unwrap();
+        for a in anomalies {
+            let atype = a.get("anomaly_type").unwrap().as_str().unwrap();
+            let valid = ["PRICE_SPIKE_UP", "PRICE_SPIKE_DOWN", "VOLUME_SPIKE", "GAP_UP", "GAP_DOWN"];
+            assert!(valid.contains(&atype), "unexpected anomaly type: {}", atype);
+            assert!(a.get("score").unwrap().as_f64().unwrap() > 0.0);
+        }
+    }
+
+    #[test]
+    fn test_detect_anomalies_too_few() {
+        let candles = make_candles(20, 100.0, 0.5);
+        let input = json!({ "command": "detect_anomalies", "candles": candles });
+        let result = compute(input);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("30"));
+    }
+
+    #[test]
+    fn test_unknown_command_error() {
+        let candles = make_candles(5, 100.0, 1.0);
+        let input = json!({ "command": "bad_command", "candles": candles });
+        let result = compute(input);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown"));
+    }
+
+    #[test]
+    fn test_zero_close_no_panic() {
+        let mut candles = make_candles(35, 100.0, 0.5);
+        candles[10] = json!({
+            "timestamp": "2024-01-11",
+            "open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0, "volume": 10000.0
+        });
+        candles[11] = json!({
+            "timestamp": "2024-01-12",
+            "open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0, "volume": 10000.0
+        });
+
+        let input = json!({ "command": "extract_features", "candles": candles });
+        let result = compute(input);
+        assert!(result.is_ok(), "should not panic on zero close: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_zero_volume_no_panic() {
+        let mut candles = make_candles(35, 100.0, 0.5);
+        for i in 5..10 {
+            candles[i] = json!({
+                "timestamp": format!("2024-01-{:02}", i + 1),
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5,
+                "volume": 0.0
+            });
+        }
+
+        let input = json!({ "command": "detect_anomalies", "candles": candles });
+        let result = compute(input);
+        assert!(result.is_ok(), "should not panic on zero volume: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_anomaly_detects_spike() {
+        let mut candles = make_candles(35, 100.0, 0.1);
+        let spike_idx = 30;
+        let spike_close = 100.0 + 0.1 * spike_idx as f64;
+        candles[spike_idx] = json!({
+            "timestamp": format!("2024-01-{:02}", (spike_idx % 28) + 1),
+            "open": spike_close,
+            "high": spike_close * 1.12,
+            "low": spike_close,
+            "close": spike_close * 1.10,
+            "volume": 10000.0 + (spike_idx as f64 * 100.0)
+        });
+
+        let input = json!({ "command": "detect_anomalies", "candles": candles });
+        let result = compute(input).expect("should succeed");
+        let anomalies = result.get("anomalies").unwrap().as_array().unwrap();
+
+        let has_spike = anomalies.iter().any(|a| {
+            let t = a.get("anomaly_type").unwrap().as_str().unwrap();
+            t == "PRICE_SPIKE_UP" || t == "GAP_UP"
+        });
+        assert!(has_spike, "expected a spike anomaly, got: {:?}", anomalies);
+    }
+}

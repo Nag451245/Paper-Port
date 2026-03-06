@@ -392,3 +392,65 @@ fn compute_market_profile(candles: &[Candle]) -> MarketProfileResult {
 }
 
 fn round2(v: f64) -> f64 { (v * 100.0).round() / 100.0 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sample_candles(n: usize) -> Vec<serde_json::Value> {
+        (0..n).map(|i| json!({
+            "timestamp": format!("2024-01-{:02}T10:00:00", (i % 28) + 1),
+            "open": 100.0 + i as f64,
+            "high": 102.0 + i as f64,
+            "low": 99.0 + i as f64,
+            "close": 101.0 + i as f64,
+            "volume": 10000.0 + (i as f64 * 100.0)
+        })).collect()
+    }
+
+    #[test]
+    fn test_empty_candles_error() {
+        let data = json!({ "candles": [], "compute": ["vwap"] });
+        let result = compute(serde_json::from_value(data).unwrap());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No candles"));
+    }
+
+    #[test]
+    fn test_vwap_basic() {
+        let data = json!({ "candles": sample_candles(20), "compute": ["vwap"] });
+        let result = compute(serde_json::from_value(data).unwrap()).unwrap();
+        let vwap_val = result.get("vwap").and_then(|v| v.get("vwap")).and_then(|v| v.as_f64());
+        assert!(vwap_val.is_some(), "vwap field missing");
+        let vwap = vwap_val.unwrap();
+        assert!(vwap > 90.0 && vwap < 130.0, "vwap {} out of reasonable range", vwap);
+    }
+
+    #[test]
+    fn test_volume_profile_basic() {
+        let data = json!({ "candles": sample_candles(20), "compute": ["volume_profile"] });
+        let result = compute(serde_json::from_value(data).unwrap()).unwrap();
+        let poc = result.get("volume_profile").and_then(|v| v.get("poc")).and_then(|v| v.as_f64());
+        assert!(poc.is_some(), "poc field missing from volume_profile");
+    }
+
+    #[test]
+    fn test_order_flow_basic() {
+        let data = json!({ "candles": sample_candles(20), "compute": ["order_flow"] });
+        let result = compute(serde_json::from_value(data).unwrap()).unwrap();
+        let of = result.get("order_flow").unwrap();
+        let buy_vol = of.get("buy_volume").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let sell_vol = of.get("sell_volume").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        assert!(buy_vol + sell_vol > 0.0, "buy + sell volume should be positive");
+    }
+
+    #[test]
+    fn test_market_profile_basic() {
+        let data = json!({ "candles": sample_candles(20), "compute": ["market_profile"] });
+        let result = compute(serde_json::from_value(data).unwrap()).unwrap();
+        let mp = result.get("market_profile").unwrap();
+        let profile_type = mp.get("profile_type").and_then(|v| v.as_str());
+        assert!(profile_type.is_some(), "profile_type field missing from market_profile");
+    }
+}

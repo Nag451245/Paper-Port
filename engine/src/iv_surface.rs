@@ -295,3 +295,161 @@ fn erf(x: f64) -> f64 {
 }
 
 fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_empty_strikes_error() {
+        let input = json!({ "spot": 100.0, "strikes": [] });
+        let result = compute(input);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "No strike data provided");
+    }
+
+    #[test]
+    fn test_single_strike_with_iv() {
+        let input = json!({
+            "spot": 100.0,
+            "strikes": [{
+                "strike": 100.0,
+                "expiry_days": 30,
+                "call_iv": 0.25,
+                "put_iv": 0.28
+            }]
+        });
+        let result = compute(input).unwrap();
+        let surface = result.get("surface").unwrap().as_array().unwrap();
+        assert_eq!(surface.len(), 1);
+        let pt = &surface[0];
+        assert!((pt.get("call_iv").unwrap().as_f64().unwrap() - 0.25).abs() < 1e-4);
+        assert!((pt.get("put_iv").unwrap().as_f64().unwrap() - 0.28).abs() < 1e-4);
+        let avg = pt.get("avg_iv").unwrap().as_f64().unwrap();
+        assert!((avg - 0.265).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_atm_moneyness() {
+        let input = json!({
+            "spot": 100.0,
+            "strikes": [{
+                "strike": 100.0,
+                "expiry_days": 30,
+                "call_iv": 0.20,
+                "put_iv": 0.20
+            }]
+        });
+        let result = compute(input).unwrap();
+        let surface = result.get("surface").unwrap().as_array().unwrap();
+        let moneyness = surface[0].get("moneyness").unwrap().as_f64().unwrap();
+        assert!((moneyness - 1.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn test_otm_moneyness() {
+        let input = json!({
+            "spot": 100.0,
+            "strikes": [
+                { "strike": 80.0, "expiry_days": 30, "call_iv": 0.25, "put_iv": 0.30 },
+                { "strike": 120.0, "expiry_days": 30, "call_iv": 0.22, "put_iv": 0.18 }
+            ]
+        });
+        let result = compute(input).unwrap();
+        let surface = result.get("surface").unwrap().as_array().unwrap();
+        let m0 = surface[0].get("moneyness").unwrap().as_f64().unwrap();
+        let m1 = surface[1].get("moneyness").unwrap().as_f64().unwrap();
+        assert!((m0 - 0.8).abs() < 1e-4);
+        assert!((m1 - 1.2).abs() < 1e-4);
+        assert!((m0 - 1.0).abs() > 0.05);
+        assert!((m1 - 1.0).abs() > 0.05);
+    }
+
+    #[test]
+    fn test_implied_vol_from_price() {
+        let known_iv = 0.20;
+        let price = bs_price(100.0, 100.0, 0.065, 0.25, known_iv, true);
+        let recovered_iv = implied_vol(price, 100.0, 100.0, 0.065, 0.25, true);
+        assert!((recovered_iv - known_iv).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_bs_price_put_call_parity() {
+        let call = bs_price(100.0, 100.0, 0.065, 0.25, 0.2, true);
+        let put = bs_price(100.0, 100.0, 0.065, 0.25, 0.2, false);
+        let parity = call - put - (100.0 - 100.0 * (-0.065 * 0.25_f64).exp());
+        assert!(parity.abs() < 0.01);
+    }
+
+    #[test]
+    fn test_skew_put_heavy() {
+        let input = json!({
+            "spot": 100.0,
+            "strikes": [
+                { "strike": 85.0, "expiry_days": 30, "call_iv": 0.10, "put_iv": 0.35 },
+                { "strike": 100.0, "expiry_days": 30, "call_iv": 0.20, "put_iv": 0.20 },
+                { "strike": 115.0, "expiry_days": 30, "call_iv": 0.10, "put_iv": 0.10 }
+            ]
+        });
+        let result = compute(input).unwrap();
+        let skew = result.get("skew_analysis").unwrap();
+        let direction = skew.get("skew_direction").unwrap().as_str().unwrap();
+        assert_eq!(direction, "PUT_HEAVY");
+        let current_skew = skew.get("current_skew").unwrap().as_f64().unwrap();
+        assert!(current_skew > 0.03);
+    }
+
+    #[test]
+    fn test_anomaly_iv_spike() {
+        let input = json!({
+            "spot": 100.0,
+            "strikes": [
+                { "strike": 80.0, "expiry_days": 30, "call_iv": 0.20, "put_iv": 0.20 },
+                { "strike": 100.0, "expiry_days": 30, "call_iv": 0.50, "put_iv": 0.50 },
+                { "strike": 120.0, "expiry_days": 30, "call_iv": 0.20, "put_iv": 0.20 }
+            ]
+        });
+        let result = compute(input).unwrap();
+        let anomalies = result.get("anomalies").unwrap().as_array().unwrap();
+        assert!(!anomalies.is_empty());
+        let has_spike = anomalies.iter().any(|a| {
+            a.get("anomaly_type").unwrap().as_str().unwrap() == "IV_SPIKE"
+        });
+        assert!(has_spike);
+    }
+
+    #[test]
+    fn test_term_structure_contango() {
+        let input = json!({
+            "spot": 100.0,
+            "strikes": [
+                { "strike": 100.0, "expiry_days": 30, "call_iv": 0.15, "put_iv": 0.15 },
+                { "strike": 100.0, "expiry_days": 90, "call_iv": 0.30, "put_iv": 0.30 }
+            ]
+        });
+        let result = compute(input).unwrap();
+        let shape = result.get("summary").unwrap()
+            .get("term_structure_shape").unwrap().as_str().unwrap();
+        assert_eq!(shape, "CONTANGO");
+    }
+
+    #[test]
+    fn test_zero_expiry_returns_zero_iv() {
+        let input = json!({
+            "spot": 100.0,
+            "strikes": [{
+                "strike": 100.0,
+                "expiry_days": 0,
+                "call_price": 5.0,
+                "put_price": 3.0
+            }]
+        });
+        let result = compute(input).unwrap();
+        let surface = result.get("surface").unwrap().as_array().unwrap();
+        let call_iv = surface[0].get("call_iv").unwrap().as_f64().unwrap();
+        let put_iv = surface[0].get("put_iv").unwrap().as_f64().unwrap();
+        assert!((call_iv - 0.0).abs() < 1e-9);
+        assert!((put_iv - 0.0).abs() < 1e-9);
+    }
+}

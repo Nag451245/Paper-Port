@@ -181,3 +181,69 @@ fn portfolio_vol(w: &[f64], cov: &[Vec<f64>]) -> f64 {
 }
 
 fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn two_asset_data() -> serde_json::Value {
+        let returns_a: Vec<f64> = (0..20).map(|i| 0.01 * (i as f64 * 0.1).sin()).collect();
+        let returns_b: Vec<f64> = (0..20).map(|i| -0.005 + 0.02 * (i as f64 * 0.2).cos()).collect();
+        json!({
+            "assets": [
+                { "symbol": "A", "returns": returns_a },
+                { "symbol": "B", "returns": returns_b }
+            ],
+            "risk_free_rate": 0.05,
+            "num_portfolios": 500
+        })
+    }
+
+    #[test]
+    fn test_single_asset_error() {
+        let data = json!({
+            "assets": [{ "symbol": "A", "returns": vec![0.01; 20] }],
+            "risk_free_rate": 0.05
+        });
+        let result = compute(serde_json::from_value(data).unwrap());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("at least 2"));
+    }
+
+    #[test]
+    fn test_two_assets_basic() {
+        let result = compute(serde_json::from_value(two_asset_data()).unwrap()).unwrap();
+        assert!(result.get("min_variance").is_some());
+        assert!(result.get("max_sharpe").is_some());
+    }
+
+    #[test]
+    fn test_weights_sum_to_one() {
+        let result = compute(serde_json::from_value(two_asset_data()).unwrap()).unwrap();
+        let weights = result.get("min_variance")
+            .and_then(|mv| mv.get("weights"))
+            .and_then(|w| w.as_array())
+            .unwrap();
+        let sum: f64 = weights.iter().map(|w| w.as_f64().unwrap()).sum();
+        assert!((sum - 1.0).abs() < 0.01, "weights sum {} should be ~1.0", sum);
+    }
+
+    #[test]
+    fn test_efficient_frontier_exists() {
+        let result = compute(serde_json::from_value(two_asset_data()).unwrap()).unwrap();
+        let frontier = result.get("efficient_frontier").and_then(|f| f.as_array());
+        assert!(frontier.is_some());
+        assert!(frontier.unwrap().len() > 0, "efficient frontier should have points");
+    }
+
+    #[test]
+    fn test_correlation_matrix_diagonal() {
+        let result = compute(serde_json::from_value(two_asset_data()).unwrap()).unwrap();
+        let corr = result.get("correlation_matrix").and_then(|c| c.as_array()).unwrap();
+        for (i, row) in corr.iter().enumerate() {
+            let diag = row.as_array().unwrap()[i].as_f64().unwrap();
+            assert!((diag - 1.0).abs() < 0.01, "diagonal element [{}][{}] = {} should be ~1.0", i, i, diag);
+        }
+    }
+}

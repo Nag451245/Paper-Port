@@ -346,7 +346,7 @@ pub fn compute(data: Value) -> Result<Value, String> {
         });
     }
 
-    out_signals.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+    out_signals.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
 
     let output = ScanOutput { signals: out_signals };
     serde_json::to_value(output).map_err(|e| format!("Serialization error: {}", e))
@@ -469,3 +469,206 @@ fn calc_atr_last(candles: &[Candle], period: usize) -> f64 {
 fn round2(v: f64) -> f64 { (v * 100.0).round() / 100.0 }
 fn round3(v: f64) -> f64 { (v * 1000.0).round() / 1000.0 }
 fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_candles(closes: &[f64]) -> Vec<Candle> {
+        closes.iter().map(|&c| Candle {
+            close: c,
+            high: c * 1.01,
+            low: c * 0.99,
+            volume: 1000.0,
+        }).collect()
+    }
+
+    fn make_candles_with_volume(data: &[(f64, f64)]) -> Vec<Candle> {
+        data.iter().map(|&(c, v)| Candle {
+            close: c,
+            high: c * 1.01,
+            low: c * 0.99,
+            volume: v,
+        }).collect()
+    }
+
+    fn run_scan(symbols_json: serde_json::Value) -> serde_json::Value {
+        compute(symbols_json).expect("scan compute failed")
+    }
+
+    #[test]
+    fn test_empty_symbols() {
+        let input = json!({ "symbols": [], "aggressiveness": "medium" });
+        let result = run_scan(input);
+        let signals = result.get("signals").unwrap().as_array().unwrap();
+        assert!(signals.is_empty(), "empty symbols should produce empty signals");
+    }
+
+    #[test]
+    fn test_insufficient_candles_skipped() {
+        let candles = make_candles(&(1..=20).map(|i| 100.0 + i as f64).collect::<Vec<_>>());
+        let candles_json = serde_json::to_value(&candles).unwrap();
+        let input = json!({
+            "symbols": [{ "symbol": "SHORT", "candles": candles_json }],
+            "aggressiveness": "medium"
+        });
+        let result = run_scan(input);
+        let signals = result.get("signals").unwrap().as_array().unwrap();
+        assert!(signals.is_empty(), "< 26 candles should be skipped");
+    }
+
+    #[test]
+    fn test_rising_prices_produce_buy() {
+        let closes: Vec<f64> = (0..30).map(|i| 100.0 + i as f64 * 2.0).collect();
+        let data: Vec<(f64, f64)> = closes.iter().enumerate()
+            .map(|(i, &c)| (c, 1000.0 + i as f64 * 200.0))
+            .collect();
+        let candles = make_candles_with_volume(&data);
+        let candles_json = serde_json::to_value(&candles).unwrap();
+        let input = json!({
+            "symbols": [{ "symbol": "RISING", "candles": candles_json }],
+            "aggressiveness": "medium"
+        });
+        let result = run_scan(input);
+        let signals = result.get("signals").unwrap().as_array().unwrap();
+        assert!(!signals.is_empty(), "rising prices should produce a signal");
+        let dir = signals[0].get("direction").unwrap().as_str().unwrap();
+        assert_eq!(dir, "BUY", "steadily rising prices should produce BUY");
+    }
+
+    #[test]
+    fn test_falling_prices_produce_sell() {
+        let closes: Vec<f64> = (0..30).map(|i| 200.0 - i as f64 * 2.0).collect();
+        let data: Vec<(f64, f64)> = closes.iter().enumerate()
+            .map(|(i, &c)| (c, 1000.0 + i as f64 * 200.0))
+            .collect();
+        let candles = make_candles_with_volume(&data);
+        let candles_json = serde_json::to_value(&candles).unwrap();
+        let input = json!({
+            "symbols": [{ "symbol": "FALLING", "candles": candles_json }],
+            "aggressiveness": "medium"
+        });
+        let result = run_scan(input);
+        let signals = result.get("signals").unwrap().as_array().unwrap();
+        assert!(!signals.is_empty(), "falling prices should produce a signal");
+        let dir = signals[0].get("direction").unwrap().as_str().unwrap();
+        assert_eq!(dir, "SELL", "steadily falling prices should produce SELL");
+    }
+
+    #[test]
+    fn test_flat_prices_low_confidence() {
+        let candles = make_candles(&vec![100.0; 30]);
+        let candles_json = serde_json::to_value(&candles).unwrap();
+        let input = json!({
+            "symbols": [{ "symbol": "FLAT", "candles": candles_json }],
+            "aggressiveness": "medium"
+        });
+        let result = run_scan(input);
+        let signals = result.get("signals").unwrap().as_array().unwrap();
+        if !signals.is_empty() {
+            let conf = signals[0].get("confidence").unwrap().as_f64().unwrap();
+            assert!(conf < 0.5, "flat prices should not have high confidence, got {}", conf);
+        }
+    }
+
+    #[test]
+    fn test_high_aggressiveness_allows_more() {
+        let thresholds = get_thresholds("high");
+        assert!(
+            thresholds.min_confidence < 0.40,
+            "high aggressiveness should lower the min_confidence threshold"
+        );
+        assert!(
+            thresholds.rsi_oversold > 30.0,
+            "high aggressiveness should widen RSI oversold (higher value = more lenient)"
+        );
+    }
+
+    #[test]
+    fn test_low_aggressiveness_stricter() {
+        let thresholds = get_thresholds("low");
+        assert!(
+            thresholds.min_confidence > 0.50,
+            "low aggressiveness should raise the min_confidence threshold"
+        );
+        assert!(
+            thresholds.rsi_oversold < 30.0,
+            "low aggressiveness should tighten RSI oversold"
+        );
+    }
+
+    #[test]
+    fn test_momentum_positive_on_rising() {
+        let candles = make_candles(&(0..10).map(|i| 100.0 + i as f64 * 3.0).collect::<Vec<_>>());
+        let m = calc_momentum(&candles, 5);
+        assert!(m > 0.0, "momentum should be positive for rising candles, got {}", m);
+    }
+
+    #[test]
+    fn test_momentum_negative_on_falling() {
+        let candles = make_candles(&(0..10).map(|i| 100.0 - i as f64 * 3.0).collect::<Vec<_>>());
+        let m = calc_momentum(&candles, 5);
+        assert!(m < 0.0, "momentum should be negative for falling candles, got {}", m);
+    }
+
+    #[test]
+    fn test_volume_ratio_spike() {
+        let mut data: Vec<(f64, f64)> = (0..9).map(|_| (100.0, 1000.0)).collect();
+        data.push((100.0, 5000.0));
+        let candles = make_candles_with_volume(&data);
+        let ratio = calc_volume_ratio(&candles, 5);
+        assert!(ratio > 4.0, "volume spike should produce high ratio, got {}", ratio);
+    }
+
+    #[test]
+    fn test_volume_ratio_zero_avg() {
+        let mut data: Vec<(f64, f64)> = (0..9).map(|_| (100.0, 0.0)).collect();
+        data.push((100.0, 500.0));
+        let candles = make_candles_with_volume(&data);
+        let ratio = calc_volume_ratio(&candles, 5);
+        assert_eq!(ratio, 1.0, "zero average volume should return 1.0");
+    }
+
+    #[test]
+    fn test_breakout_above_highs() {
+        let mut closes: Vec<f64> = vec![100.0; 15];
+        closes.push(115.0);
+        let candles = make_candles(&closes);
+        let b = calc_breakout(&candles, 10);
+        assert!(b > 0.0, "new high should produce positive breakout, got {}", b);
+    }
+
+    #[test]
+    fn test_breakout_below_lows() {
+        let mut closes: Vec<f64> = vec![100.0; 15];
+        closes.push(85.0);
+        let candles = make_candles(&closes);
+        let b = calc_breakout(&candles, 10);
+        assert!(b < 0.0, "new low should produce negative breakout, got {}", b);
+    }
+
+    #[test]
+    fn test_atr_basic() {
+        let candles: Vec<Candle> = (0..20).map(|i| Candle {
+            close: 100.0 + (i % 3) as f64,
+            high: 103.0,
+            low: 98.0,
+            volume: 1000.0,
+        }).collect();
+        let atr = calc_atr_last(&candles, 14);
+        assert!(atr > 0.0, "ATR should be positive");
+        assert!(atr < 10.0, "ATR should be reasonable for this data, got {}", atr);
+    }
+
+    #[test]
+    fn test_zero_close_no_panic() {
+        let candles = make_candles(&vec![0.0; 30]);
+        let candles_json = serde_json::to_value(&candles).unwrap();
+        let input = json!({
+            "symbols": [{ "symbol": "ZERO", "candles": candles_json }],
+            "aggressiveness": "medium"
+        });
+        let _result = compute(input);
+    }
+}
