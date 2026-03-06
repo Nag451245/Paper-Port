@@ -379,7 +379,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
                 avatarEmoji: bot.avatarEmoji,
                 assignedSymbols: bot.assignedSymbols,
                 description: bot.description,
-                status: 'RUNNING',
+                status: 'IDLE',
                 isActive: true,
               },
             });
@@ -399,7 +399,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
                 avatarEmoji: '⚡',
                 assignedSymbols: 'RELIANCE,TCS,INFY,HDFCBANK,ITC,SBIN,BHARTIARTL,KOTAKBANK',
                 description: 'Executes trades automatically on high-confidence signals',
-                status: 'RUNNING',
+                status: 'IDLE',
                 isActive: true,
               },
             });
@@ -428,7 +428,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
           app.log.info(`[Bootstrap] Activated AI agent for user ${user.id}`);
         }
       }
-      // Clear error-state bots but keep them RUNNING so they resume
+      // Reset error-state bots to IDLE (user must manually start them)
       const staleCount = await prisma.tradingBot.updateMany({
         where: {
           OR: [
@@ -438,11 +438,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         },
         data: {
           lastAction: 'Ready — awaiting next cycle',
-          status: 'RUNNING',
+          status: 'IDLE',
         },
       });
       if (staleCount.count > 0) {
-        app.log.info(`[Bootstrap] Reset ${staleCount.count} error-state bots to RUNNING`);
+        app.log.info(`[Bootstrap] Reset ${staleCount.count} error-state bots to IDLE`);
       }
     } catch (err) {
       app.log.error({ err }, 'Failed to bootstrap default bots/agents');

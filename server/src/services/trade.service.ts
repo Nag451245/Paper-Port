@@ -712,13 +712,11 @@ export class TradeService {
       await this.prisma.order.update({ where: { id: orderId }, data: { positionId: position.id } });
     }
 
-    // SHORT: receive premium, block margin, pay costs
+    // SHORT: only block margin as collateral — no premium added to cash in paper trading
     const portfolio = await this.prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
     if (portfolio) {
-      const premiumReceived = fillPrice * qty;
       const marginBlocked = this.shortMarginRequired(fillPrice, qty, input.exchange ?? 'NSE');
-      // Net: +premium -margin -costs
-      const cashChange = premiumReceived - marginBlocked - costs.totalCost;
+      const cashChange = -(marginBlocked + costs.totalCost);
       await this.prisma.portfolio.update({
         where: { id: input.portfolioId },
         data: { currentNav: Number(portfolio.currentNav) + cashChange },

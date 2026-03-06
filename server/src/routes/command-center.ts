@@ -4,6 +4,7 @@ import { EODReviewService } from '../services/eod-review.service.js';
 import { RiskService } from '../services/risk.service.js';
 import { chatCompletionJSON } from '../lib/openai.js';
 import { getPrisma } from '../lib/prisma.js';
+import { authenticate, getUserId } from '../middleware/auth.js';
 
 interface ChatIntent {
   intent: string;
@@ -17,9 +18,11 @@ export default async function commandCenterRoutes(app: FastifyInstance) {
   const eodReview = new EODReviewService(prisma);
   const riskService = new RiskService(prisma);
 
+  app.addHook('preHandler', authenticate);
+
   // ── Chat endpoint ──
   app.post('/chat', async (request, reply) => {
-    const userId = (request as any).userId;
+    const userId = getUserId(request);
     const { message } = request.body as { message: string };
     if (!message?.trim()) return reply.code(400).send({ error: 'Message required' });
 
@@ -185,14 +188,14 @@ Examples:
 
   // ── Get current target + progress ──
   app.get('/target', async (request) => {
-    const userId = (request as any).userId;
+    const userId = getUserId(request);
     const progress = await targetTracker.updateProgress(userId);
     return { target: progress };
   });
 
   // ── Dashboard aggregate ──
   app.get('/dashboard', async (request) => {
-    const userId = (request as any).userId;
+    const userId = getUserId(request);
     const [progress, risk, bots, recentPnl] = await Promise.all([
       targetTracker.updateProgress(userId),
       riskService.getDailyRiskSummary(userId),
@@ -217,13 +220,13 @@ Examples:
 
   // ── EOD Reports ──
   app.get('/reports', async (request) => {
-    const userId = (request as any).userId;
+    const userId = getUserId(request);
     const limit = Number((request.query as any).limit) || 30;
     return eodReview.getReports(userId, limit);
   });
 
   app.get('/reports/:date', async (request) => {
-    const userId = (request as any).userId;
+    const userId = getUserId(request);
     const dateStr = (request.params as any).date;
     const date = new Date(dateStr);
     const report = await eodReview.getReport(userId, date);
@@ -233,7 +236,7 @@ Examples:
 
   // ── Chat history ──
   app.get('/messages', async (request) => {
-    const userId = (request as any).userId;
+    const userId = getUserId(request);
     const limit = Number((request.query as any).limit) || 50;
     return prisma.commandMessage.findMany({
       where: { userId },

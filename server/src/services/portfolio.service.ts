@@ -67,9 +67,11 @@ export class PortfolioService {
       const entryPrice = Number(pos.avgEntryPrice);
       if (pos.side === 'LONG') {
         investedValue += entryPrice * pos.qty;
+      } else {
+        // SHORT: margin is blocked as collateral
+        const rate = (pos.exchange ?? 'NSE') === 'MCX' ? 0.10 : (pos.exchange ?? 'NSE') === 'CDS' ? 0.05 : 0.25;
+        investedValue += entryPrice * pos.qty * rate;
       }
-      // SHORT positions: no capital invested (premium received, margin blocked)
-      // Their value is tracked via unrealizedPnl only
 
       let ltp = 0;
       try {
@@ -346,27 +348,19 @@ export class PortfolioService {
     });
 
     let lockedCapital = 0;
-    let shortPremiumReceived = 0;
     for (const pos of openPositions) {
       const entryPrice = Number(pos.avgEntryPrice);
       if (pos.side === 'LONG') {
         lockedCapital += entryPrice * pos.qty;
       } else {
-        // SHORT: margin blocked but premium was received
-        lockedCapital += entryPrice * pos.qty * 0.25;
-        shortPremiumReceived += entryPrice * pos.qty;
+        // SHORT: only margin is blocked, no premium added to cash
+        const rate = pos.exchange === 'MCX' ? 0.10 : pos.exchange === 'CDS' ? 0.05 : 0.25;
+        lockedCapital += entryPrice * pos.qty * rate;
       }
     }
 
-    // Transaction costs on BUY orders for open positions (approximation from order totalCost)
-    const openPositionBuyCosts = allOrders
-      .filter(o => o.side === 'BUY')
-      .reduce((sum, o) => sum + Number(o.totalCost), 0);
-    const closedTradeCosts = allTrades.reduce((sum, t) => sum + Number(t.totalCosts), 0);
-    const openCosts = Math.max(0, openPositionBuyCosts - closedTradeCosts);
-
-    // For SHORT: cash = initial + realized + premium received - margin blocked - costs
-    const correctCash = initialCapital + totalRealizedPnl + shortPremiumReceived - lockedCapital - openCosts;
+    // correctCash = initial capital + realized P&L - capital locked in open positions
+    const correctCash = initialCapital + totalRealizedPnl - lockedCapital;
 
     await this.prisma.portfolio.update({
       where: { id: portfolioId },
