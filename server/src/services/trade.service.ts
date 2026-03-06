@@ -457,9 +457,20 @@ export class TradeService {
   }
 
   private shortMarginRequired(price: number, qty: number, exchange: string): number {
-    // Paper trading margin rates (realistic approximations)
     const rate = exchange === 'MCX' ? 0.10 : exchange === 'CDS' ? 0.05 : 0.25;
     return price * qty * rate;
+  }
+
+  private async safeUpdateNav(portfolioId: string, currentNav: number, delta: number): Promise<void> {
+    const newNav = currentNav + delta;
+    if (!isFinite(newNav) || isNaN(newNav)) {
+      console.error(`[TradeService] CRITICAL: NAV update would produce invalid value. current=${currentNav}, delta=${delta}, result=${newNav}`);
+      throw new TradeError(`P&L calculation produced invalid NAV. Trade aborted.`, 500);
+    }
+    await this.prisma.portfolio.update({
+      where: { id: portfolioId },
+      data: { currentNav: newNav },
+    });
   }
 
   private async handleFill(
@@ -512,15 +523,17 @@ export class TradeService {
       });
 
       const remainingQty = existingShort.qty - coverQty;
+      const prevRealized = Number(existingShort.realizedPnl ?? 0);
+      const cumulativeRealized = prevRealized + netPnl;
       if (remainingQty <= 0) {
         await this.prisma.position.update({
           where: { id: existingShort.id },
-          data: { status: 'CLOSED', realizedPnl: netPnl, closedAt: new Date() },
+          data: { status: 'CLOSED', realizedPnl: cumulativeRealized, closedAt: new Date() },
         });
       } else {
         await this.prisma.position.update({
           where: { id: existingShort.id },
-          data: { qty: remainingQty },
+          data: { qty: remainingQty, realizedPnl: cumulativeRealized },
         });
       }
 
@@ -534,10 +547,7 @@ export class TradeService {
         // = marginReleased - coverCost + (entryPrice * coverQty)
         // Simplified: entryPrice*qty was received when shorting; now we pay back fillPrice*qty
         const cashChange = marginReleased + netPnl;
-        await this.prisma.portfolio.update({
-          where: { id: input.portfolioId },
-          data: { currentNav: Number(portfolio.currentNav) + cashChange },
-        });
+        await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), cashChange);
       }
 
       await this.prisma.order.update({ where: { id: orderId }, data: { positionId: existingShort.id } });
@@ -595,10 +605,7 @@ export class TradeService {
     const portfolio = await this.prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
     if (portfolio) {
       const purchaseCost = fillPrice * qty + costs.totalCost;
-      await this.prisma.portfolio.update({
-        where: { id: input.portfolioId },
-        data: { currentNav: Number(portfolio.currentNav) - purchaseCost },
-      });
+      await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), -purchaseCost);
     }
   }
 
@@ -639,24 +646,24 @@ export class TradeService {
       });
 
       const remainingQty = existingLong.qty - closeQty;
+      const prevRealized = Number(existingLong.realizedPnl ?? 0);
+      const cumulativeRealized = prevRealized + netPnl;
       if (remainingQty <= 0) {
         await this.prisma.position.update({
           where: { id: existingLong.id },
-          data: { status: 'CLOSED', realizedPnl: netPnl, closedAt: new Date() },
+          data: { status: 'CLOSED', realizedPnl: cumulativeRealized, closedAt: new Date() },
         });
       } else {
         await this.prisma.position.update({
           where: { id: existingLong.id },
-          data: { qty: remainingQty },
+          data: { qty: remainingQty, realizedPnl: cumulativeRealized },
         });
       }
 
       const portfolio = await this.prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
       if (portfolio) {
         const saleProceeds = fillPrice * closeQty - costs.totalCost;
-        await this.prisma.portfolio.update({
-          where: { id: input.portfolioId },
-          data: { currentNav: Number(portfolio.currentNav) + saleProceeds },
+        await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), saleProceeds);
         });
       }
 
@@ -717,10 +724,7 @@ export class TradeService {
     if (portfolio) {
       const marginBlocked = this.shortMarginRequired(fillPrice, qty, input.exchange ?? 'NSE');
       const cashChange = -(marginBlocked + costs.totalCost);
-      await this.prisma.portfolio.update({
-        where: { id: input.portfolioId },
-        data: { currentNav: Number(portfolio.currentNav) + cashChange },
-      });
+      await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), cashChange);
     }
   }
 
@@ -926,9 +930,12 @@ export class TradeService {
       },
     });
 
+    const prevRealized = Number(position.realizedPnl ?? 0);
+    const cumulativeRealized = prevRealized + netPnl;
+
     await this.prisma.position.update({
       where: { id: positionId },
-      data: { status: 'CLOSED', realizedPnl: netPnl, closedAt: new Date() },
+      data: { status: 'CLOSED', realizedPnl: cumulativeRealized, closedAt: new Date() },
     });
 
     const portfolio = await this.prisma.portfolio.findUnique({ where: { id: position.portfolioId } });
@@ -937,13 +944,18 @@ export class TradeService {
       if (position.side === 'LONG') {
         cashChange = exitPrice * position.qty - costs.totalCost;
       } else {
-        // SHORT close: release blocked margin + settle P&L
         const marginReleased = this.shortMarginRequired(entryPrice, position.qty, position.exchange);
         cashChange = marginReleased + netPnl;
       }
+
+      const newNav = Number(portfolio.currentNav) + cashChange;
+      if (!isFinite(newNav)) {
+        throw new TradeError(`P&L calculation produced invalid NAV (${newNav}). Trade aborted.`, 500);
+      }
+
       await this.prisma.portfolio.update({
         where: { id: position.portfolioId },
-        data: { currentNav: Number(portfolio.currentNav) + cashChange },
+        data: { currentNav: newNav },
       });
     }
 

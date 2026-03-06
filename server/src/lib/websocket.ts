@@ -156,8 +156,8 @@ export async function registerWebSocket(app: FastifyInstance): Promise<void> {
       const url = new URL(req.url ?? '', `http://${req.headers.host}`);
       const token = url.searchParams.get('token');
       if (token) {
-        const decoded = app.jwt.verify<{ id: string }>(token);
-        userId = decoded.id;
+        const decoded = app.jwt.verify<{ sub: string }>(token);
+        userId = decoded.sub;
       }
     } catch { /* unauthenticated connection — allowed with limited features */ }
 

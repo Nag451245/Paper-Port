@@ -99,3 +99,93 @@ pub fn compute(data: Value) -> Result<Value, String> {
 
 fn round2(v: f64) -> f64 { (v * 100.0).round() / 100.0 }
 fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn compute_risk(returns: Vec<f64>, capital: f64) -> RiskOutput {
+        let result = compute(json!({
+            "returns": returns,
+            "initial_capital": capital,
+        })).unwrap();
+        serde_json::from_value(result).unwrap()
+    }
+
+    #[test]
+    fn test_empty_returns() {
+        let r = compute_risk(vec![], 100000.0);
+        assert_eq!(r.sharpe_ratio, 0.0);
+        assert_eq!(r.max_drawdown, 0.0);
+        assert_eq!(r.var_95, 0.0);
+    }
+
+    #[test]
+    fn test_all_positive_returns_no_drawdown() {
+        let returns = vec![0.01, 0.02, 0.015, 0.005, 0.01];
+        let r = compute_risk(returns, 100000.0);
+        assert_eq!(r.max_drawdown, 0.0, "no drawdown when all returns positive");
+        assert_eq!(r.max_drawdown_percent, 0.0);
+        assert!(r.sharpe_ratio > 0.0, "sharpe should be positive for all-positive returns");
+        assert!(r.annualized_return > 0.0);
+    }
+
+    #[test]
+    fn test_drawdown_calculation() {
+        // Up 10%, then down 20% => peak at 1.1, trough at 1.1*0.8=0.88 => dd = (1.1-0.88)/1.1 = 0.2
+        let returns = vec![0.10, -0.20];
+        let r = compute_risk(returns, 100000.0);
+        assert!((r.max_drawdown_percent - 20.0).abs() < 1.0,
+            "max drawdown should be ~20%, got {}", r.max_drawdown_percent);
+    }
+
+    #[test]
+    fn test_sharpe_sign_matches_return_sign() {
+        let positive = compute_risk(vec![0.01; 20], 100000.0);
+        assert!(positive.sharpe_ratio > 0.0, "positive returns → positive sharpe");
+
+        let negative = compute_risk(vec![-0.01; 20], 100000.0);
+        assert!(negative.sharpe_ratio < 0.0, "negative returns → negative sharpe");
+    }
+
+    #[test]
+    fn test_sortino_ignores_upside() {
+        let returns = vec![0.05, 0.03, 0.04, 0.02, 0.06];
+        let r = compute_risk(returns, 100000.0);
+        assert_eq!(r.sortino_ratio, 0.0, "no downside returns → sortino 0 (divide by zero guard)");
+    }
+
+    #[test]
+    fn test_var_with_known_distribution() {
+        let mut returns: Vec<f64> = (0..100).map(|i| (i as f64 - 50.0) / 1000.0).collect();
+        returns.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let r = compute_risk(returns, 100000.0);
+        assert!(r.var_95 > 0.0, "VaR 95 should be positive for mixed returns");
+        assert!(r.var_99 >= r.var_95, "VaR 99 should be >= VaR 95");
+        assert!(r.cvar_95 >= r.var_95, "CVaR 95 should be >= VaR 95");
+    }
+
+    #[test]
+    fn test_volatility_is_annualized() {
+        let returns = vec![0.01, -0.01, 0.01, -0.01, 0.01];
+        let r = compute_risk(returns, 100000.0);
+        assert!(r.volatility > 1.0, "annualized vol should be > daily vol (expressed as %)");
+    }
+
+    #[test]
+    fn test_calmar_ratio() {
+        let returns = vec![0.01, -0.05, 0.02, 0.01, -0.02, 0.03];
+        let r = compute_risk(returns, 100000.0);
+        if r.max_drawdown_percent > 0.0 {
+            assert!(r.calmar_ratio.is_finite(), "calmar should be finite when drawdown > 0");
+        }
+    }
+
+    #[test]
+    fn test_constant_returns_zero_volatility() {
+        let returns = vec![0.01; 10];
+        let r = compute_risk(returns, 100000.0);
+        assert_eq!(r.volatility, 0.0, "constant returns → zero volatility");
+    }
+}

@@ -1,21 +1,16 @@
 import type { FastifyInstance } from 'fastify';
 import { getPrisma } from '../lib/prisma.js';
 import { LearningEngine } from '../services/learning-engine.js';
+import { authenticate, getUserId } from '../middleware/auth.js';
 
 export async function learningRoutes(app: FastifyInstance): Promise<void> {
   const prisma = getPrisma();
   const learningEngine = new LearningEngine(prisma);
 
-  app.addHook('onRequest', async (request) => {
-    try {
-      await request.jwtVerify();
-    } catch {
-      throw app.httpErrors.unauthorized('Invalid or missing token');
-    }
-  });
+  app.addHook('onRequest', authenticate);
 
   app.get('/insights', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
     const query = request.query as { limit?: string };
     const limit = Math.min(parseInt(query.limit || '30', 10), 90);
 
@@ -29,7 +24,7 @@ export async function learningRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/insights/latest', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
 
     const insight = await prisma.learningInsight.findFirst({
       where: { userId },
@@ -40,7 +35,7 @@ export async function learningRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/ledger', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
     const query = request.query as { days?: string; strategy?: string };
     const days = Math.min(parseInt(query.days || '30', 10), 90);
     const since = new Date();
@@ -58,7 +53,7 @@ export async function learningRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/ledger/heatmap', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
     const query = request.query as { days?: string };
     const days = Math.min(parseInt(query.days || '60', 10), 180);
     const since = new Date();
@@ -84,7 +79,7 @@ export async function learningRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/params', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
     const query = request.query as { strategy?: string };
 
     const where: any = { userId };
@@ -100,7 +95,7 @@ export async function learningRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/params/active', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
 
     const params = await prisma.strategyParam.findMany({
       where: { userId, isActive: true },
@@ -110,7 +105,7 @@ export async function learningRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/regime-timeline', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
     const query = request.query as { days?: string };
     const days = Math.min(parseInt(query.days || '30', 10), 90);
     const since = new Date();
@@ -131,7 +126,7 @@ export async function learningRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/calibration', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
 
     const signals = await prisma.aITradeSignal.findMany({
       where: { userId, outcomeTag: { not: null } },
@@ -161,7 +156,7 @@ export async function learningRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/trigger-nightly', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw app.httpErrors.notFound('User not found');
 

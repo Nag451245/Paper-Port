@@ -174,3 +174,110 @@ fn calc_atr(highs: &[f64], lows: &[f64], closes: &[f64], period: usize) -> Vec<f
     }
     atr
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_candles(closes: &[f64]) -> Vec<serde_json::Value> {
+        closes.iter().map(|&c| json!({
+            "close": c, "high": c * 1.01, "low": c * 0.99, "volume": 10000.0
+        })).collect()
+    }
+
+    fn compute_signals(closes: &[f64]) -> SignalOutput {
+        let candles = make_candles(closes);
+        let result = compute(json!({ "candles": candles })).unwrap();
+        serde_json::from_value(result).unwrap()
+    }
+
+    #[test]
+    fn test_ema_convergence_to_constant() {
+        let data = vec![100.0; 30];
+        let ema9 = calc_ema(&data, 9);
+        assert!((ema9[29] - 100.0).abs() < 0.01, "EMA of constant series should equal the constant");
+    }
+
+    #[test]
+    fn test_ema_weights_recent_more() {
+        let mut data = vec![100.0; 20];
+        data.push(110.0);
+        let ema9 = calc_ema(&data, 9);
+        let ema21 = calc_ema(&data, 21);
+        assert!(ema9[20] > ema21[20], "shorter EMA should react faster to price jump");
+    }
+
+    #[test]
+    fn test_rsi_overbought_on_rising() {
+        let data: Vec<f64> = (0..30).map(|i| 100.0 + i as f64 * 2.0).collect();
+        let rsi = calc_rsi(&data, 14);
+        assert!(rsi[29] > 90.0, "RSI should be overbought (>90) on steadily rising prices, got {}", rsi[29]);
+    }
+
+    #[test]
+    fn test_rsi_oversold_on_falling() {
+        let data: Vec<f64> = (0..30).map(|i| 200.0 - i as f64 * 2.0).collect();
+        let rsi = calc_rsi(&data, 14);
+        assert!(rsi[29] < 10.0, "RSI should be oversold (<10) on steadily falling prices, got {}", rsi[29]);
+    }
+
+    #[test]
+    fn test_rsi_midpoint_on_flat() {
+        let data = vec![100.0; 30];
+        let rsi = calc_rsi(&data, 14);
+        assert!((rsi[29] - 50.0).abs() < 1.0 || rsi[29] == 100.0,
+            "RSI of flat series should be ~50 or 100 (no losses), got {}", rsi[29]);
+    }
+
+    #[test]
+    fn test_macd_zero_on_flat() {
+        let data = vec![100.0; 40];
+        let (macd, signal, hist) = calc_macd(&data);
+        assert!((macd[39]).abs() < 0.01, "MACD should be ~0 on flat series");
+        assert!((signal[39]).abs() < 0.01, "MACD signal should be ~0 on flat series");
+        assert!((hist[39]).abs() < 0.01, "MACD histogram should be ~0 on flat series");
+    }
+
+    #[test]
+    fn test_bollinger_contains_data() {
+        let data: Vec<f64> = (0..30).map(|i| 100.0 + (i as f64 * 0.1).sin() * 5.0).collect();
+        let (upper, lower, middle) = calc_bollinger(&data, 20);
+        for i in 19..30 {
+            assert!(upper[i] > middle[i], "upper band should be above middle at {}", i);
+            assert!(lower[i] < middle[i], "lower band should be below middle at {}", i);
+            assert!(upper[i] > lower[i], "upper should be above lower at {}", i);
+        }
+    }
+
+    #[test]
+    fn test_vwap_equals_close_with_equal_volume() {
+        let closes = vec![100.0, 102.0, 101.0, 103.0, 104.0];
+        let volumes = vec![1000.0; 5];
+        let vwap = calc_vwap(&closes, &volumes);
+        let expected_last = (100.0 + 102.0 + 101.0 + 103.0 + 104.0) / 5.0;
+        assert!((vwap[4] - expected_last).abs() < 0.01, "VWAP with equal volume = SMA");
+    }
+
+    #[test]
+    fn test_output_lengths_match_input() {
+        let closes: Vec<f64> = (0..50).map(|i| 100.0 + i as f64).collect();
+        let s = compute_signals(&closes);
+        assert_eq!(s.ema_9.len(), 50);
+        assert_eq!(s.ema_21.len(), 50);
+        assert_eq!(s.rsi_14.len(), 50);
+        assert_eq!(s.macd.len(), 50);
+        assert_eq!(s.bollinger_upper.len(), 50);
+        assert_eq!(s.vwap.len(), 50);
+        assert_eq!(s.supertrend.len(), 50);
+    }
+
+    #[test]
+    fn test_insufficient_data_returns_zeros() {
+        let data = vec![100.0; 5];
+        let ema = calc_ema(&data, 9);
+        assert_eq!(ema.len(), 5);
+        assert!(ema.iter().all(|&v| v == 0.0 || (v - 100.0).abs() < 0.01),
+            "EMA with insufficient data should be zero-padded");
+    }
+}

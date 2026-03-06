@@ -362,3 +362,138 @@ fn calc_rsi(closes: &[f64], period: usize) -> Vec<f64> {
 fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn trending_up_candles(n: usize, start: f64, step: f64) -> Vec<serde_json::Value> {
+        (0..n).map(|i| {
+            let close = start + i as f64 * step;
+            json!({
+                "timestamp": format!("2025-01-{:02}", (i % 28) + 1),
+                "open": close - step * 0.3,
+                "high": close + step * 0.2,
+                "low": close - step * 0.5,
+                "close": close,
+                "volume": 10000.0,
+            })
+        }).collect()
+    }
+
+    fn flat_candles(n: usize, price: f64) -> Vec<serde_json::Value> {
+        (0..n).map(|i| json!({
+            "timestamp": format!("2025-01-{:02}", (i % 28) + 1),
+            "open": price, "high": price + 0.5, "low": price - 0.5,
+            "close": price, "volume": 10000.0,
+        })).collect()
+    }
+
+    fn run_backtest(strategy: &str, candles: Vec<serde_json::Value>, capital: f64) -> BacktestResult {
+        let result = run(json!({
+            "strategy": strategy,
+            "symbol": "TEST",
+            "initial_capital": capital,
+            "candles": candles,
+        })).unwrap();
+        serde_json::from_value(result).unwrap()
+    }
+
+    #[test]
+    fn test_empty_candles() {
+        let r = run_backtest("ema-crossover", vec![], 100000.0);
+        assert_eq!(r.total_trades, 0);
+        assert_eq!(r.cagr, 0.0);
+        assert_eq!(r.max_drawdown, 0.0);
+    }
+
+    #[test]
+    fn test_flat_market_few_trades() {
+        let candles = flat_candles(60, 100.0);
+        let r = run_backtest("ema-crossover", candles, 100000.0);
+        assert!(r.total_trades <= 2, "flat market should produce very few EMA crossover trades");
+    }
+
+    #[test]
+    fn test_equity_curve_length_matches_candles() {
+        let candles = trending_up_candles(50, 100.0, 1.0);
+        let r = run_backtest("ema-crossover", candles, 100000.0);
+        assert_eq!(r.equity_curve.len(), 50, "equity curve should have one point per candle");
+    }
+
+    #[test]
+    fn test_equity_curve_starts_at_initial_capital() {
+        let candles = trending_up_candles(30, 100.0, 1.0);
+        let r = run_backtest("ema-crossover", candles, 500000.0);
+        assert_eq!(r.equity_curve[0].nav, 500000.0, "equity curve should start at initial capital");
+    }
+
+    #[test]
+    fn test_win_rate_bounded() {
+        let candles = trending_up_candles(100, 100.0, 0.5);
+        let r = run_backtest("ema-crossover", candles, 100000.0);
+        assert!(r.win_rate >= 0.0 && r.win_rate <= 100.0,
+            "win rate should be 0-100%, got {}", r.win_rate);
+    }
+
+    #[test]
+    fn test_trade_log_consistency() {
+        let candles = trending_up_candles(80, 100.0, 0.5);
+        let r = run_backtest("sma_crossover", candles, 100000.0);
+        for trade in &r.trade_log {
+            assert!(trade.qty > 0, "trade qty should be positive");
+            assert!(trade.entry_price > 0.0, "entry price should be positive");
+            assert!(trade.exit_price > 0.0, "exit price should be positive");
+            assert_eq!(trade.symbol, "TEST");
+        }
+    }
+
+    #[test]
+    fn test_max_drawdown_bounded() {
+        let candles = trending_up_candles(60, 100.0, 1.0);
+        let r = run_backtest("ema-crossover", candles, 100000.0);
+        assert!(r.max_drawdown >= 0.0 && r.max_drawdown <= 100.0,
+            "max drawdown should be 0-100%, got {}", r.max_drawdown);
+    }
+
+    #[test]
+    fn test_rsi_reversal_strategy_runs() {
+        let mut candles = trending_up_candles(30, 100.0, -1.0);
+        candles.extend(trending_up_candles(30, 70.0, 1.5));
+        let r = run_backtest("rsi_reversal", candles, 100000.0);
+        assert!(r.equity_curve.len() == 60);
+    }
+
+    #[test]
+    fn test_mean_reversion_strategy_runs() {
+        let mut candles: Vec<serde_json::Value> = Vec::new();
+        for i in 0..80 {
+            let price = 100.0 + (i as f64 * 0.3).sin() * 15.0;
+            candles.push(json!({
+                "timestamp": format!("2025-01-{:02}", (i % 28) + 1),
+                "open": price - 0.5, "high": price + 1.0, "low": price - 1.0,
+                "close": price, "volume": 10000.0,
+            }));
+        }
+        let r = run_backtest("mean_reversion", candles, 100000.0);
+        assert_eq!(r.equity_curve.len(), 80);
+    }
+
+    #[test]
+    fn test_pnl_sums_to_nav_change() {
+        let candles = trending_up_candles(80, 100.0, 0.5);
+        let r = run_backtest("ema-crossover", candles, 100000.0);
+        let total_pnl: f64 = r.trade_log.iter().map(|t| t.pnl).sum();
+        let nav_change = r.equity_curve.last().unwrap().nav - 100000.0;
+        assert!((total_pnl - nav_change).abs() < 1.0,
+            "sum of trade P&Ls ({:.2}) should equal NAV change ({:.2})", total_pnl, nav_change);
+    }
+
+    #[test]
+    fn test_unknown_strategy_defaults_to_ema() {
+        let candles = trending_up_candles(50, 100.0, 1.0);
+        let r = run_backtest("nonexistent_strategy", candles, 100000.0);
+        assert_eq!(r.equity_curve.len(), 50);
+    }
+}

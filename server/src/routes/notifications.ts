@@ -2,42 +2,37 @@ import type { FastifyInstance } from 'fastify';
 import { getPrisma } from '../lib/prisma.js';
 import { NotificationService } from '../services/notification.service.js';
 import { TelegramService } from '../services/telegram.service.js';
+import { authenticate, getUserId } from '../middleware/auth.js';
 
 export async function notificationRoutes(app: FastifyInstance): Promise<void> {
   const prisma = getPrisma();
   const notifService = new NotificationService(prisma);
   const telegram = new TelegramService(prisma);
 
-  app.addHook('onRequest', async (request) => {
-    try {
-      await request.jwtVerify();
-    } catch {
-      throw app.httpErrors.unauthorized('Invalid or missing token');
-    }
-  });
+  app.addHook('onRequest', authenticate);
 
   app.get('/', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
     const notifications = await notifService.getAll(userId);
     return { data: notifications };
   });
 
   app.get('/unread', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
     const notifications = await notifService.getUnread(userId);
     const count = await notifService.getUnreadCount(userId);
     return { data: notifications, count };
   });
 
   app.post('/:id/read', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
     const { id } = request.params as { id: string };
     await notifService.markRead(userId, id);
     return { success: true };
   });
 
   app.post('/read-all', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
     await notifService.markAllRead(userId);
     return { success: true };
   });
@@ -45,7 +40,7 @@ export async function notificationRoutes(app: FastifyInstance): Promise<void> {
   // ── Telegram Integration ──
 
   app.get('/telegram/status', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
     const user = await prisma.user.findUnique({
       where: { id: userId },
       select: { telegramChatId: true, notifyTelegram: true, phoneNumber: true },
@@ -64,7 +59,7 @@ export async function notificationRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/telegram/connect', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
     const { chatId } = request.body as { chatId: string };
 
     if (!chatId) {
@@ -85,7 +80,7 @@ export async function notificationRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/telegram/disconnect', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
 
     await prisma.user.update({
       where: { id: userId },
@@ -96,7 +91,7 @@ export async function notificationRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.put('/telegram/preferences', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
     const body = request.body as {
       notifyTelegram?: boolean;
       notifyEmail?: boolean;
@@ -117,7 +112,7 @@ export async function notificationRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/telegram/test', async (request) => {
-    const userId = (request.user as any).id;
+    const userId = getUserId(request);
     const sent = await telegram.notifyUser(userId, '🔔 Test Notification', 'This is a test notification from PaperPort. If you see this, your Telegram integration is working correctly!');
     return { success: sent, message: sent ? 'Test message sent!' : 'Failed to send. Check your Telegram connection.' };
   });

@@ -1,136 +1,142 @@
-# ZeroLoss AI
+# Capital Guard
 
-AI-powered paper trading platform for the Indian stock market. Practice trading with virtual capital, get AI-driven insights from Claude, and connect to ICICI Direct via the Breeze API — all without risking real money.
+AI-powered multi-market paper trading platform for Indian financial markets. Practice trading across equities (NSE/BSE), commodities (MCX), currency derivatives (CDS), and F&O (NFO/BFO) using virtual capital — with AI-driven signals, autonomous bot teams, and institutional-grade analytics.
 
 ## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
-| **Backend** | Python 3.11+, FastAPI, SQLAlchemy (async), APScheduler |
-| **Frontend** | React 18, TypeScript, Vite, Tailwind CSS |
-| **Database** | PostgreSQL (Supabase) via PgBouncer |
-| **Cache** | Upstash Redis |
-| **AI** | Anthropic Claude API |
-| **Broker** | ICICI Breeze API (market data + paper trading) |
-| **Auth** | JWT (python-jose) + bcrypt (passlib) |
+| **Backend** | Node.js 20+, Fastify 5, TypeScript, Prisma ORM |
+| **Frontend** | React 19, TypeScript, Vite, Tailwind CSS 4, Zustand |
+| **Database** | PostgreSQL 16 (Supabase prod / local Docker dev) |
+| **Cache/Queue** | Redis 7 (ioredis, BullMQ) |
+| **Compute Engine** | Rust (backtesting, signals, Greeks, risk, Monte Carlo, portfolio optimization) |
+| **Broker Bridge** | Python 3.11+ (ICICI Breeze API adapter) |
+| **AI** | Google Gemini (primary), OpenAI (fallback) |
+| **Broker** | ICICI Breeze API (market data, options chain) |
+| **Auth** | JWT (@fastify/jwt) + bcrypt |
 
 ## Getting Started
 
 ### Prerequisites
 
-- Python 3.11+
-- Node.js 18+
-- A [Supabase](https://supabase.com) project (free tier works)
-- An [Upstash](https://upstash.com) Redis instance (free tier works)
+- Node.js 20+
+- PostgreSQL 16 (or Docker)
+- Redis 7 (optional, for caching)
+- Rust toolchain (for the compute engine)
+- Python 3.11+ (for the Breeze bridge)
 
-### Backend
-
-```bash
-cd backend
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-
-cp .env.example .env            # fill in your keys
-uvicorn app.main:app --reload
-```
-
-The API will be available at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
-
-### Frontend
+### Quick Start (Docker)
 
 ```bash
+# Start infrastructure
+docker-compose up -d postgres redis
+
+# Backend
+cd server
+npm install
+cp .env.example .env          # fill in your keys
+npx prisma migrate deploy
+npm run dev                    # http://localhost:8000
+
+# Frontend
 cd frontend
 npm install
-
-cp .env.example .env.local      # fill in your values
-npm run dev
+cp .env.example .env.local     # set VITE_API_BASE_URL
+npm run dev                    # http://localhost:5173
 ```
 
-The dev server will start at `http://localhost:5173`.
+### Full Stack (Docker Compose)
+
+```bash
+docker-compose up --build
+# Frontend: http://localhost:80
+# Backend:  http://localhost:8000
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Frontend (React 19 + Vite)                                     │
+│  Port 5173 (dev) / 80 (prod via Nginx)                          │
+│  axios → /api, WebSocket → /ws                                  │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Backend API (Fastify 5, port 8000)                              │
+│  150+ REST endpoints, WebSocket hub, cron orchestrator           │
+│  JWT auth, rate limiting, Helmet security headers                │
+└───────┬───────────────┬───────────────┬─────────────────────────┘
+        │               │               │
+        ▼               ▼               ▼
+   PostgreSQL      Redis 7         Rust Engine
+   (port 5432)     (port 6379)     (stdin/stdout JSON-RPC)
+                                        │
+                                   Breeze Bridge
+                                   (Python, port 8001)
+```
 
 ## Environment Variables
 
-### Backend (`backend/.env`)
+### Backend (`server/.env`)
 
-| Variable | Description |
-|----------|-------------|
-| `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_KEY` | Supabase anonymous/public key |
-| `SUPABASE_DB_URL` | PostgreSQL connection string (PgBouncer port 6543) |
-| `UPSTASH_REDIS_URL` | Upstash Redis REST URL |
-| `UPSTASH_REDIS_TOKEN` | Upstash Redis REST token |
-| `BREEZE_API_KEY` | ICICI Breeze API key |
-| `BREEZE_SECRET_KEY` | ICICI Breeze secret key |
-| `ANTHROPIC_API_KEY` | Anthropic Claude API key |
-| `NEWS_API_KEY` | NewsAPI.org key |
-| `GNEWS_API_KEY` | GNews API key |
-| `JWT_SECRET_KEY` | Secret for signing JWTs (generate with `openssl rand -hex 32`) |
-| `JWT_ALGORITHM` | JWT signing algorithm (default: `HS256`) |
-| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | Token TTL in minutes (default: `1440`) |
-| `CORS_ORIGINS` | Comma-separated allowed origins |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `JWT_SECRET` | Yes | Secret for signing JWTs |
+| `ENCRYPTION_KEY` | Yes | AES-256 key for stored credentials |
+| `REDIS_URL` | No | Redis connection (caching, queues) |
+| `GEMINI_API_KEY` | No | Google Gemini API key (primary AI) |
+| `OPENAI_API_KEY` | No | OpenAI API key (fallback AI) |
+| `BREEZE_API_KEY` | No | ICICI Breeze API key |
+| `BREEZE_SECRET_KEY` | No | ICICI Breeze secret |
+| `CORS_ORIGINS` | No | Allowed origins (default: `http://localhost:5173`) |
 
 ### Frontend (`frontend/.env.local`)
 
 | Variable | Description |
 |----------|-------------|
-| `VITE_API_URL` | Backend API base URL |
-| `VITE_WS_URL` | WebSocket base URL |
-| `VITE_SUPABASE_URL` | Supabase project URL |
-| `VITE_SUPABASE_ANON_KEY` | Supabase anonymous key |
+| `VITE_API_BASE_URL` | Backend API URL (default: `http://localhost:8000/api`) |
+| `VITE_WS_URL` | WebSocket URL (auto-derived if not set) |
 
 ## Project Structure
 
 ```
-Capital Guard/
-├── backend/
-│   ├── app/
-│   │   ├── config.py              # Pydantic settings
-│   │   ├── database.py            # Async SQLAlchemy engine
-│   │   ├── main.py                # FastAPI app, lifespan, WebSocket
-│   │   ├── models/                # SQLAlchemy ORM models
-│   │   │   ├── user.py            # User, BreezeCredential
-│   │   │   ├── portfolio.py       # Portfolio, Holding
-│   │   │   ├── trade.py           # Order, Trade
-│   │   │   ├── strategy.py        # AIAgentConfig
-│   │   │   └── watchlist.py       # Watchlist, WatchlistItem
-│   │   ├── schemas/               # Pydantic request/response schemas
-│   │   ├── routers/               # FastAPI route handlers
-│   │   │   ├── auth.py            # Register, login, profile, Breeze creds
-│   │   │   ├── portfolio.py       # Portfolio CRUD
-│   │   │   ├── trades.py          # Order placement + history
-│   │   │   ├── market_data.py     # Quotes, charts, screener
-│   │   │   ├── watchlist.py       # Watchlist management
-│   │   │   └── ai_agent.py        # AI insights + recommendations
-│   │   ├── services/              # Business logic layer
-│   │   │   ├── auth_service.py    # Auth, JWT, password hashing
-│   │   │   ├── breeze_client.py   # Rate-limited ICICI Breeze wrapper
-│   │   │   ├── trading_engine.py  # Paper trading engine
-│   │   │   ├── portfolio_service.py
-│   │   │   ├── market_data_service.py
-│   │   │   ├── news_service.py
-│   │   │   └── ai_agent_service.py
-│   │   ├── tasks/                 # APScheduler jobs
-│   │   ├── utils/                 # Cache, rate limiter, timezone
-│   │   └── ws/                    # WebSocket handlers
-│   ├── requirements.txt
-│   └── .env.example
-├── frontend/
+├── server/                 # Node.js/Fastify backend
 │   ├── src/
-│   ├── package.json
-│   └── .env.example
-├── .gitignore
-└── README.md
+│   │   ├── routes/         # 16 route groups (auth, trades, ai, etc.)
+│   │   ├── services/       # 33 service modules
+│   │   ├── middleware/      # JWT auth middleware
+│   │   └── lib/            # Redis, Prisma, WebSocket, Rust bridge
+│   ├── prisma/
+│   │   ├── schema.prisma   # 28 database models
+│   │   └── migrations/     # SQL migration history
+│   └── breeze-bridge/      # Python ICICI Breeze adapter
+├── frontend/               # React 19 SPA
+│   ├── src/
+│   │   ├── pages/          # 18 pages (Dashboard, Terminal, AI, etc.)
+│   │   ├── components/     # UI components
+│   │   ├── services/       # API client, WebSocket
+│   │   ├── stores/         # Zustand state stores
+│   │   └── hooks/          # Custom React hooks
+│   └── e2e/                # Playwright E2E tests
+├── engine/                 # Rust compute engine
+│   └── src/                # 16 modules (backtest, signals, greeks, etc.)
+└── docker-compose.yml      # PostgreSQL + Redis + Server + Frontend
 ```
 
-## Development Workflow
+## Key Features
 
-1. **Fork & clone** the repository.
-2. Create a feature branch: `git checkout -b feat/your-feature`.
-3. Copy `.env.example` files and fill in your credentials.
-4. Start the backend (`uvicorn`) and frontend (`npm run dev`) in separate terminals.
-5. Make changes, write tests, and ensure linting passes.
-6. Open a pull request against `main`.
+- **Multi-market paper trading** — NSE, BSE, MCX, CDS with realistic cost structures
+- **AI Agent** — 9-gate scoring system (Autonomous / Signal / Advisory modes)
+- **Bot Team** — 6 specialized bots (Scanner, Analyst, Executor, Risk Manager, Strategist, Monitor)
+- **Rust Engine** — Backtesting, technical signals, Black-Scholes Greeks, IV surface, Monte Carlo, portfolio optimization, walk-forward validation
+- **Intelligence Hub** — FII/DII flow, options flow, sector rotation, global macro, earnings calendar
+- **Strategy Builder** — Multi-leg options strategies with payoff diagrams and Greeks
+- **Command Center** — Natural language trading interface
+- **Self-improving Learning** — Nightly strategy review with regime detection
 
 ## License
 
