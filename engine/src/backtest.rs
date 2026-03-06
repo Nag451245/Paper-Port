@@ -20,7 +20,7 @@ struct Candle {
     volume: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct BacktestResult {
     cagr: f64,
     max_drawdown: f64,
@@ -35,13 +35,13 @@ struct BacktestResult {
     trade_log: Vec<TradeEntry>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct EquityPoint {
     date: String,
     nav: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct TradeEntry {
     symbol: String,
     side: String,

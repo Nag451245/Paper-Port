@@ -8,7 +8,7 @@ struct RiskInput {
     risk_free_rate: Option<f64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct RiskOutput {
     sharpe_ratio: f64,
     sortino_ratio: f64,

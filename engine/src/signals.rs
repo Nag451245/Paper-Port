@@ -14,7 +14,7 @@ struct Candle {
     volume: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct SignalOutput {
     ema_9: Vec<f64>,
     ema_21: Vec<f64>,

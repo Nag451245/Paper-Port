@@ -12,7 +12,7 @@ struct GreeksInput {
     option_type: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct GreeksOutput {
     price: f64,
     delta: f64,
