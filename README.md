@@ -54,6 +54,25 @@ docker-compose up --build
 # Backend:  http://localhost:8000
 ```
 
+### GCP VM Deployment
+
+```bash
+# On the VM:
+cd ~/capital-guard && git pull
+
+# Rebuild Rust engine
+cd engine && cargo build --release && cp target/release/capital-guard-engine ../server/bin/ && cd ..
+
+# Rebuild frontend
+cd frontend && npm run build && cd ..
+
+# Restart services
+pm2 restart capital-guard-api
+sudo systemctl restart nginx
+```
+
+Production URL: `https://papertrade.duckdns.org` (DuckDNS + Let's Encrypt SSL)
+
 ## Architecture
 
 ```
@@ -69,13 +88,10 @@ docker-compose up --build
 │  150+ REST endpoints, WebSocket hub, cron orchestrator           │
 │  JWT auth, rate limiting, Helmet security headers                │
 └───────┬───────────────┬───────────────┬─────────────────────────┘
-        │               │               │
-        ▼               ▼               ▼
-   PostgreSQL      Redis 7         Rust Engine
-   (port 5432)     (port 6379)     (stdin/stdout JSON-RPC)
-                                        │
-                                   Breeze Bridge
-                                   (Python, port 8001)
+        │               │               │               │
+        ▼               ▼               ▼               ▼
+   PostgreSQL      Redis 7         Rust Engine     Breeze Bridge
+   (port 5432)     (port 6379)     (stdin/stdout)  (Python, port 8001)
 ```
 
 ## Environment Variables

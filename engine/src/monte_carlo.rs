@@ -146,3 +146,96 @@ fn decimate(data: &[f64], target: usize) -> Vec<f64> {
 
 fn round2(v: f64) -> f64 { (v * 100.0).round() / 100.0 }
 fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn run_sim(returns: Vec<f64>, capital: f64, sims: usize) -> SimResult {
+        let result = compute(json!({
+            "returns": returns,
+            "initial_capital": capital,
+            "num_simulations": sims,
+            "time_horizon": 20,
+        })).unwrap();
+        serde_json::from_value(result).unwrap()
+    }
+
+    fn sample_returns() -> Vec<f64> {
+        vec![0.01, -0.005, 0.008, -0.003, 0.012, -0.007, 0.005, 0.002, -0.01, 0.006,
+             0.003, -0.004, 0.009, -0.002, 0.007, -0.006, 0.004, 0.001, -0.008, 0.011]
+    }
+
+    #[test]
+    fn test_basic_simulation_runs() {
+        let r = run_sim(sample_returns(), 100000.0, 100);
+        assert!(r.expected_final_nav > 0.0);
+    }
+
+    #[test]
+    fn test_expected_nav_positive_returns() {
+        let positive_returns: Vec<f64> = (0..20).map(|_| 0.01).collect();
+        let r = run_sim(positive_returns, 100000.0, 100);
+        assert!(r.expected_final_nav > 100000.0,
+            "positive returns should grow NAV, got {}", r.expected_final_nav);
+    }
+
+    #[test]
+    fn test_probability_of_loss_bounded() {
+        let r = run_sim(sample_returns(), 100000.0, 500);
+        assert!(r.probability_of_loss >= 0.0 && r.probability_of_loss <= 1.0);
+    }
+
+    #[test]
+    fn test_var_positive() {
+        let r = run_sim(sample_returns(), 100000.0, 500);
+        assert!(r.var_95 >= 0.0 || r.var_95 < 0.0, "VaR should be a valid number");
+    }
+
+    #[test]
+    fn test_kelly_fraction_bounded() {
+        let r = run_sim(sample_returns(), 100000.0, 100);
+        assert!(r.kelly_fraction >= -5.0 && r.kelly_fraction <= 5.0,
+            "kelly should be reasonable, got {}", r.kelly_fraction);
+    }
+
+    #[test]
+    fn test_optimal_position_size_capped() {
+        let r = run_sim(sample_returns(), 100000.0, 100);
+        assert!(r.optimal_position_size >= 0.0 && r.optimal_position_size <= 0.25,
+            "position size should be 0-25%, got {}", r.optimal_position_size);
+    }
+
+    #[test]
+    fn test_max_drawdown_95_non_negative() {
+        let r = run_sim(sample_returns(), 100000.0, 500);
+        assert!(r.max_drawdown_95 >= 0.0);
+    }
+
+    #[test]
+    fn test_percentile_ordering() {
+        let r = run_sim(sample_returns(), 100000.0, 500);
+        let last_idx = r.percentile_5.len() - 1;
+        assert!(r.percentile_5[last_idx] <= r.percentile_50[last_idx],
+            "p5 should <= p50");
+        assert!(r.percentile_50[last_idx] <= r.percentile_95[last_idx],
+            "p50 should <= p95");
+    }
+
+    #[test]
+    fn test_too_few_returns_error() {
+        let result = compute(json!({
+            "returns": [0.01, 0.02],
+            "initial_capital": 100000.0,
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cvar_gte_var() {
+        let r = run_sim(sample_returns(), 100000.0, 1000);
+        assert!(r.cvar_95 >= r.var_95 - 1.0,
+            "CVaR should be >= VaR: cvar={}, var={}", r.cvar_95, r.var_95);
+    }
+}

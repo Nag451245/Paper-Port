@@ -255,3 +255,206 @@ fn erf(x: f64) -> f64 {
 
 fn round2(v: f64) -> f64 { (v * 100.0).round() / 100.0 }
 fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn run(legs: serde_json::Value, spot: f64) -> StrategyResult {
+        let result = compute(json!({ "legs": legs, "spot": spot })).unwrap();
+        serde_json::from_value(result).unwrap()
+    }
+
+    #[test]
+    fn test_long_call_basic() {
+        let r = run(json!([{"option_type":"call","strike":100.0,"premium":5.0,"quantity":1}]), 100.0);
+        assert_eq!(r.strategy_name, "Long CALL");
+        assert!(r.risk_metrics.capital_required > 0.0);
+        assert_eq!(r.risk_metrics.margin_required, 0.0);
+    }
+
+    #[test]
+    fn test_long_put_basic() {
+        let r = run(json!([{"option_type":"put","strike":100.0,"premium":4.0,"quantity":1}]), 100.0);
+        assert_eq!(r.strategy_name, "Long PUT");
+        assert!(r.risk_metrics.net_premium < 0.0);
+    }
+
+    #[test]
+    fn test_short_call_basic() {
+        let r = run(json!([{"option_type":"call","strike":100.0,"premium":5.0,"quantity":-1}]), 100.0);
+        assert_eq!(r.strategy_name, "Short CALL");
+        assert!(r.risk_metrics.capital_required > 0.0);
+        assert!(r.risk_metrics.margin_required > 0.0);
+    }
+
+    #[test]
+    fn test_buy_only_capital_is_premium() {
+        let r = run(json!([
+            {"option_type":"call","strike":100.0,"premium":10.0,"quantity":2}
+        ]), 100.0);
+        assert_eq!(r.risk_metrics.capital_required, 20.0);
+        assert_eq!(r.risk_metrics.margin_required, 0.0);
+    }
+
+    #[test]
+    fn test_naked_short_margin_uses_span() {
+        let r = run(json!([
+            {"option_type":"call","strike":100.0,"premium":5.0,"quantity":-10}
+        ]), 100.0);
+        let expected_span = 100.0 * 10.0 * 0.15;
+        assert!((r.risk_metrics.margin_required - expected_span).abs() < 1.0,
+            "naked margin should be ~{}, got {}", expected_span, r.risk_metrics.margin_required);
+    }
+
+    #[test]
+    fn test_bull_call_spread_margin_is_max_loss() {
+        let r = run(json!([
+            {"option_type":"call","strike":100.0,"premium":10.0,"quantity":1},
+            {"option_type":"call","strike":110.0,"premium":5.0,"quantity":-1}
+        ]), 105.0);
+        assert!(r.risk_metrics.capital_required > 0.0);
+        assert!(r.risk_metrics.capital_required < 100.0,
+            "spread margin should be bounded, got {}", r.risk_metrics.capital_required);
+    }
+
+    #[test]
+    fn test_iron_condor_detection() {
+        let r = run(json!([
+            {"option_type":"put","strike":90.0,"premium":1.0,"quantity":1},
+            {"option_type":"put","strike":95.0,"premium":3.0,"quantity":-1},
+            {"option_type":"call","strike":105.0,"premium":3.0,"quantity":-1},
+            {"option_type":"call","strike":110.0,"premium":1.0,"quantity":1}
+        ]), 100.0);
+        assert_eq!(r.strategy_name, "Iron Condor / Iron Butterfly");
+    }
+
+    #[test]
+    fn test_iron_condor_margin_is_max_loss() {
+        let r = run(json!([
+            {"option_type":"put","strike":90.0,"premium":1.0,"quantity":1},
+            {"option_type":"put","strike":95.0,"premium":3.0,"quantity":-1},
+            {"option_type":"call","strike":105.0,"premium":3.0,"quantity":-1},
+            {"option_type":"call","strike":110.0,"premium":1.0,"quantity":1}
+        ]), 100.0);
+        assert!(r.max_loss.is_finite() && r.max_loss < 0.0);
+        assert!((r.risk_metrics.capital_required - r.max_loss.abs()).abs() < 0.5,
+            "condor margin should equal |maxLoss|={}, got capital={}",
+            r.max_loss.abs(), r.risk_metrics.capital_required);
+    }
+
+    #[test]
+    fn test_iron_condor_limited_profit_and_loss() {
+        let r = run(json!([
+            {"option_type":"put","strike":90.0,"premium":1.0,"quantity":1},
+            {"option_type":"put","strike":95.0,"premium":3.0,"quantity":-1},
+            {"option_type":"call","strike":105.0,"premium":3.0,"quantity":-1},
+            {"option_type":"call","strike":110.0,"premium":1.0,"quantity":1}
+        ]), 100.0);
+        assert!(r.max_profit.is_finite(), "iron condor max profit should be finite");
+        assert!(r.max_loss.is_finite(), "iron condor max loss should be finite");
+        assert!(r.max_profit > 0.0);
+        assert!(r.max_loss < 0.0);
+    }
+
+    #[test]
+    fn test_breakeven_points_exist_for_spread() {
+        let r = run(json!([
+            {"option_type":"call","strike":100.0,"premium":10.0,"quantity":1},
+            {"option_type":"call","strike":110.0,"premium":5.0,"quantity":-1}
+        ]), 105.0);
+        assert!(!r.breakeven_points.is_empty(), "spread should have breakeven(s)");
+    }
+
+    #[test]
+    fn test_straddle_detection() {
+        let r = run(json!([
+            {"option_type":"call","strike":100.0,"premium":5.0,"quantity":1},
+            {"option_type":"put","strike":100.0,"premium":5.0,"quantity":1}
+        ]), 100.0);
+        assert_eq!(r.strategy_name, "Long Straddle");
+    }
+
+    #[test]
+    fn test_short_straddle_detection() {
+        let r = run(json!([
+            {"option_type":"call","strike":100.0,"premium":5.0,"quantity":-1},
+            {"option_type":"put","strike":100.0,"premium":5.0,"quantity":-1}
+        ]), 100.0);
+        assert_eq!(r.strategy_name, "Short Straddle");
+    }
+
+    #[test]
+    fn test_long_strangle_detection() {
+        let r = run(json!([
+            {"option_type":"call","strike":110.0,"premium":3.0,"quantity":1},
+            {"option_type":"put","strike":90.0,"premium":3.0,"quantity":1}
+        ]), 100.0);
+        assert_eq!(r.strategy_name, "Long Strangle");
+    }
+
+    #[test]
+    fn test_net_premium_credit_strategy() {
+        let r = run(json!([
+            {"option_type":"put","strike":95.0,"premium":3.0,"quantity":-1},
+            {"option_type":"put","strike":90.0,"premium":1.0,"quantity":1}
+        ]), 100.0);
+        assert!(r.risk_metrics.net_premium > 0.0,
+            "credit spread net premium should be positive, got {}", r.risk_metrics.net_premium);
+    }
+
+    #[test]
+    fn test_net_premium_debit_strategy() {
+        let r = run(json!([
+            {"option_type":"call","strike":100.0,"premium":10.0,"quantity":1},
+            {"option_type":"call","strike":110.0,"premium":5.0,"quantity":-1}
+        ]), 100.0);
+        assert!(r.risk_metrics.net_premium < 0.0,
+            "debit spread net premium should be negative, got {}", r.risk_metrics.net_premium);
+    }
+
+    #[test]
+    fn test_probability_of_profit_in_range() {
+        let r = run(json!([
+            {"option_type":"call","strike":100.0,"premium":5.0,"quantity":1}
+        ]), 100.0);
+        assert!(r.probability_of_profit >= 0.0 && r.probability_of_profit <= 1.0);
+    }
+
+    #[test]
+    fn test_payoff_diagram_has_points() {
+        let r = run(json!([
+            {"option_type":"call","strike":100.0,"premium":5.0,"quantity":1}
+        ]), 100.0);
+        assert!(r.payoff_diagram.len() > 50, "should have many payoff points");
+    }
+
+    #[test]
+    fn test_greeks_computed() {
+        let r = run(json!([
+            {"option_type":"call","strike":100.0,"premium":5.0,"quantity":1,"expiry_days":30.0,"iv":0.2}
+        ]), 100.0);
+        assert!(r.greeks_summary.net_delta != 0.0, "delta should be non-zero");
+        assert!(r.greeks_summary.net_gamma != 0.0, "gamma should be non-zero");
+    }
+
+    #[test]
+    fn test_nifty_iron_condor_realistic_margin() {
+        let lot = 75;
+        let r = run(json!([
+            {"option_type":"put","strike":24450.0,"premium":152.4,"quantity":lot},
+            {"option_type":"put","strike":24550.0,"premium":188.5,"quantity":-lot},
+            {"option_type":"call","strike":24650.0,"premium":187.3,"quantity":-lot},
+            {"option_type":"call","strike":24750.0,"premium":139.35,"quantity":lot}
+        ]), 24600.0);
+        assert!(r.risk_metrics.capital_required > 5000.0,
+            "NIFTY condor margin should be >> 5K, got {}", r.risk_metrics.capital_required);
+    }
+
+    #[test]
+    fn test_empty_legs_error() {
+        let result = compute(json!({ "legs": [], "spot": 100.0 }));
+        assert!(result.is_err());
+    }
+}

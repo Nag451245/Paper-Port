@@ -70,7 +70,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     timeWindow: '1 minute',
     keyGenerator: (req) => {
       const user = (req as any).user;
-      return user?.id || req.ip;
+      return user?.sub || req.ip;
     },
   });
 

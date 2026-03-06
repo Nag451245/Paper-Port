@@ -286,11 +286,29 @@ export class PortfolioService {
       dayMap[day] = (dayMap[day] || 0) + Number(t.netPnl);
     }
 
-    // Include today's unrealized P&L from open positions
+    // Include today's unrealized P&L (realized is already in dayMap from trades above)
     try {
-      const summary = await this.getSummary(portfolioId, userId);
-      const today = new Date().toISOString().split('T')[0];
-      dayMap[today] = (dayMap[today] || 0) + summary.dayPnl;
+      const portfolio = await this.getById(portfolioId, userId);
+      const openPositions = await this.prisma.position.findMany({
+        where: { portfolioId, status: 'OPEN' },
+        select: { side: true, qty: true, avgEntryPrice: true, symbol: true, exchange: true },
+      });
+      let unrealizedPnl = 0;
+      for (const pos of openPositions) {
+        const entryPrice = Number(pos.avgEntryPrice);
+        try {
+          const quote = await this.marketData.getQuote(pos.symbol, pos.exchange ?? 'NSE');
+          if (quote.ltp > 0) {
+            unrealizedPnl += pos.side === 'LONG'
+              ? (quote.ltp - entryPrice) * pos.qty
+              : (entryPrice - quote.ltp) * pos.qty;
+          }
+        } catch { /* skip */ }
+      }
+      if (unrealizedPnl !== 0) {
+        const today = new Date().toISOString().split('T')[0];
+        dayMap[today] = (dayMap[today] || 0) + unrealizedPnl;
+      }
     } catch { /* skip */ }
 
     return Object.entries(dayMap)

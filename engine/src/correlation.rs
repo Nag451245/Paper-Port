@@ -215,3 +215,101 @@ fn adf_score(spread: &[f64]) -> f64 {
 
 fn round2(v: f64) -> f64 { (v * 100.0).round() / 100.0 }
 fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn linear_prices(start: f64, step: f64, n: usize) -> Vec<f64> {
+        (0..n).map(|i| start + step * i as f64).collect()
+    }
+
+    #[test]
+    fn test_perfect_positive_correlation() {
+        let a: Vec<f64> = (1..=50).map(|i| i as f64).collect();
+        let b: Vec<f64> = (1..=50).map(|i| i as f64 * 2.0).collect();
+        let corr = pearson_correlation(&a, &b);
+        assert!((corr - 1.0).abs() < 0.001, "perfectly correlated should be ~1.0, got {}", corr);
+    }
+
+    #[test]
+    fn test_perfect_negative_correlation() {
+        let a: Vec<f64> = (1..=50).map(|i| i as f64).collect();
+        let b: Vec<f64> = (1..=50).map(|i| 100.0 - i as f64).collect();
+        let corr = pearson_correlation(&a, &b);
+        assert!((corr - (-1.0)).abs() < 0.001, "inversely correlated should be ~-1.0, got {}", corr);
+    }
+
+    #[test]
+    fn test_correlation_in_range() {
+        let a = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0,
+                     11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0];
+        let b = vec![2.0, 1.0, 4.0, 3.0, 6.0, 5.0, 8.0, 7.0, 10.0, 9.0,
+                     12.0, 11.0, 14.0, 13.0, 16.0, 15.0, 18.0, 17.0, 20.0, 19.0];
+        let corr = pearson_correlation(&a, &b);
+        assert!(corr >= -1.0 && corr <= 1.0);
+    }
+
+    #[test]
+    fn test_ols_slope_known() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![2.0, 4.0, 6.0, 8.0, 10.0];
+        let slope = ols_slope(&x, &y);
+        assert!((slope - 2.0).abs() < 0.01, "slope should be ~2.0, got {}", slope);
+    }
+
+    #[test]
+    fn test_half_life_mean_reverting() {
+        let mut spread = Vec::new();
+        let mut val = 0.0;
+        for i in 0..100 {
+            val = val * 0.9 + if i % 2 == 0 { 0.5 } else { -0.5 };
+            spread.push(val);
+        }
+        let hl = compute_half_life(&spread);
+        assert!(hl > 0.0 && hl < 100.0, "mean-reverting spread should have finite half-life, got {}", hl);
+    }
+
+    #[test]
+    fn test_hurst_exponent_range() {
+        let data: Vec<f64> = (0..100).map(|i| (i as f64 * 0.1).sin()).collect();
+        let h = compute_hurst(&data);
+        assert!(h > 0.0 && h < 1.5, "Hurst should be in (0, 1.5), got {}", h);
+    }
+
+    #[test]
+    fn test_full_pair_analysis() {
+        let n = 60;
+        let a = linear_prices(100.0, 0.5, n);
+        let b = linear_prices(200.0, 1.0, n);
+        let result = compute(json!({
+            "pairs": [{"symbol_a": "A", "symbol_b": "B", "prices_a": a, "prices_b": b}]
+        })).unwrap();
+        let out: CorrelationResult = serde_json::from_value(result).unwrap();
+        assert_eq!(out.pairs.len(), 1);
+        assert!(out.pairs[0].correlation > 0.9, "trending pair should be highly correlated");
+    }
+
+    #[test]
+    fn test_adf_score_returns_number() {
+        let spread: Vec<f64> = (0..50).map(|i| (i as f64 * 0.2).sin()).collect();
+        let score = adf_score(&spread);
+        assert!(score.is_finite());
+    }
+
+    #[test]
+    fn test_empty_pairs_error() {
+        let result = compute(json!({ "pairs": [] }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_too_few_prices_skipped() {
+        let result = compute(json!({
+            "pairs": [{"symbol_a":"A","symbol_b":"B","prices_a":[1.0,2.0],"prices_b":[3.0,4.0]}]
+        })).unwrap();
+        let out: CorrelationResult = serde_json::from_value(result).unwrap();
+        assert_eq!(out.pairs.len(), 0, "pairs with <20 prices should be skipped");
+    }
+}

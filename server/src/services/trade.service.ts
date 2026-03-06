@@ -664,7 +664,6 @@ export class TradeService {
       if (portfolio) {
         const saleProceeds = fillPrice * closeQty - costs.totalCost;
         await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), saleProceeds);
-        });
       }
 
       await this.prisma.order.update({ where: { id: orderId }, data: { positionId: existingLong.id } });

@@ -30,12 +30,12 @@ export async function edgeRoutes(app: FastifyInstance) {
 
   // ── Strategy Composition ──
   app.get('/composition', async (req) => {
-    const userId = (req as any).user?.id;
+    const userId = (req as any).user?.sub;
     return composer.composePortfolio(userId);
   });
 
   app.get('/composition/kelly/:strategy', async (req) => {
-    const userId = (req as any).user?.id;
+    const userId = (req as any).user?.sub;
     const { strategy } = req.params as { strategy: string };
 
     const ledgers = await prisma.strategyLedger.findMany({
@@ -122,7 +122,7 @@ export async function edgeRoutes(app: FastifyInstance) {
 
   // ── Track Record / Performance ──
   app.get('/track-record', async (req) => {
-    const userId = (req as any).user?.id;
+    const userId = (req as any).user?.sub;
     const trades = await prisma.trade.findMany({
       where: { portfolio: { userId } },
       orderBy: { exitTime: 'asc' },
@@ -147,8 +147,23 @@ export async function edgeRoutes(app: FastifyInstance) {
 
     const portfolio = await prisma.portfolio.findFirst({ where: { userId } });
     const initialCapital = portfolio ? Number(portfolio.initialCapital) : 1000000;
-    const currentNav = portfolio ? Number(portfolio.currentNav) : initialCapital;
-    const totalReturn = ((currentNav - initialCapital) / initialCapital) * 100;
+    const cashNav = portfolio ? Number(portfolio.currentNav) : initialCapital;
+
+    let investedValue = 0;
+    let unrealizedPnl = 0;
+    if (portfolio) {
+      const openPositions = await prisma.position.findMany({
+        where: { portfolioId: portfolio.id, status: 'OPEN' },
+        select: { side: true, qty: true, avgEntryPrice: true, unrealizedPnl: true },
+      });
+      for (const pos of openPositions) {
+        const entry = Number(pos.avgEntryPrice);
+        investedValue += pos.side === 'LONG' ? entry * pos.qty : entry * pos.qty * 0.25;
+        unrealizedPnl += Number(pos.unrealizedPnl ?? 0);
+      }
+    }
+    const totalNav = cashNav + investedValue + unrealizedPnl;
+    const totalReturn = ((totalNav - initialCapital) / initialCapital) * 100;
 
     const wins = trades.filter((t: any) => Number(t.netPnl) > 0);
     const losses = trades.filter((t: any) => Number(t.netPnl) < 0);
@@ -186,7 +201,7 @@ export async function edgeRoutes(app: FastifyInstance) {
         avgWin: Number(avgWin.toFixed(2)),
         avgLoss: Number(avgLoss.toFixed(2)),
         initialCapital,
-        currentNav: Number(currentNav.toFixed(2)),
+        currentNav: Number(totalNav.toFixed(2)),
       },
       byStrategy: Object.fromEntries(
         [...byStrategy.entries()].map(([k, v]) => [k, { ...v, pnl: Number(v.pnl.toFixed(2)), winRate: v.trades > 0 ? Number(((v.wins / v.trades) * 100).toFixed(1)) : 0 }]),
