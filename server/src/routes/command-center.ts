@@ -3,6 +3,7 @@ import { TargetTracker } from '../services/target-tracker.service.js';
 import { EODReviewService } from '../services/eod-review.service.js';
 import { RiskService } from '../services/risk.service.js';
 import { chatCompletionJSON } from '../lib/openai.js';
+import { getPrisma } from '../lib/prisma.js';
 
 interface ChatIntent {
   intent: string;
@@ -11,7 +12,7 @@ interface ChatIntent {
 }
 
 export default async function commandCenterRoutes(app: FastifyInstance) {
-  const prisma = (app as any).prisma;
+  const prisma = getPrisma();
   const targetTracker = new TargetTracker(prisma);
   const eodReview = new EODReviewService(prisma);
   const riskService = new RiskService(prisma);
