@@ -158,6 +158,7 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
         probabilityOfProfit: result.probability_of_profit ?? 0,
         riskRewardRatio: result.risk_metrics?.risk_reward_ratio ?? 0,
         capitalRequired: result.risk_metrics?.capital_required ?? 0,
+        marginRequired: result.risk_metrics?.margin_required ?? 0,
         netPremium: result.risk_metrics?.net_premium ?? 0,
         strategyName: result.strategy_name ?? 'Custom',
       };
@@ -178,6 +179,25 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
     const daysToExpiry = legs[0]?.expiryDays ?? 7;
     const greeks = calculateStrategyGreeks(jsLegs, spotPrice, daysToExpiry / 365, avgIV || 0.2, riskFreeRate ?? 0.065);
 
+    const hasSells = legs.some(l => l.action === 'SELL');
+    const hasBuys = legs.some(l => l.action === 'BUY');
+    const buyPremium = legs.filter(l => l.action === 'BUY').reduce((s, l) => s + l.premium * l.qty, 0);
+
+    let capitalRequired: number;
+    let marginRequired = 0;
+    if (!hasSells) {
+      capitalRequired = buyPremium;
+    } else if (hasBuys && greeks.maxLoss !== 0 && isFinite(greeks.maxLoss)) {
+      capitalRequired = Math.abs(greeks.maxLoss);
+      marginRequired = capitalRequired;
+    } else {
+      const spanMargin = legs
+        .filter(l => l.action === 'SELL')
+        .reduce((s, l) => s + spotPrice * l.qty * 0.15, 0);
+      marginRequired = spanMargin;
+      capitalRequired = spanMargin + buyPremium;
+    }
+
     return {
       source: 'js',
       payoffCurve: payoffCurve.map(p => ({ spot: p.spotPrice, pnl: p.pnl })),
@@ -192,7 +212,8 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
       breakevens: greeks.breakevens,
       probabilityOfProfit: 0,
       riskRewardRatio: greeks.maxLoss !== 0 ? Math.abs(greeks.maxProfit / greeks.maxLoss) : 0,
-      capitalRequired: Math.abs(greeks.netPremium),
+      capitalRequired,
+      marginRequired,
       netPremium: greeks.netPremium,
       strategyName: 'Custom',
     };

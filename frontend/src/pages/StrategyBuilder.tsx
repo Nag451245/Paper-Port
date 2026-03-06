@@ -1217,7 +1217,9 @@ export default function StrategyBuilder() {
 
             {/* Summary metrics */}
             {payoff && legs.length > 0 && (() => {
-              const marginRequired = payoff.capitalRequired ?? estimateMargin(legs, spotPrice, payoff.maxLoss, symbol);
+              const backendMargin = payoff.capitalRequired || 0;
+              const localMargin = estimateMargin(legs, spotPrice, payoff.maxLoss, symbol);
+              const marginRequired = backendMargin > 0 ? backendMargin : localMargin;
               return (
                 <div className="mt-3 grid grid-cols-3 gap-2">
                   <MetricCard label="Net Premium" value={payoff.netPremium} format="inr" color={payoff.netPremium >= 0 ? 'emerald' : 'red'} />

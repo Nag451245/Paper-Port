@@ -128,14 +128,35 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
         }
     }
 
-    let capital_required: f64 = config.legs.iter()
+    let buy_premium: f64 = config.legs.iter()
         .filter(|l| l.quantity > 0)
         .map(|l| l.premium * l.quantity as f64)
         .sum();
-    let margin_required: f64 = config.legs.iter()
-        .filter(|l| l.quantity < 0)
-        .map(|l| l.strike * l.quantity.unsigned_abs() as f64 * 0.2)
-        .sum();
+
+    let has_sells = config.legs.iter().any(|l| l.quantity < 0);
+    let has_buys = config.legs.iter().any(|l| l.quantity > 0);
+
+    let (capital_required, margin_required) = if !has_sells {
+        // Buy-only: just the premium paid
+        (buy_premium, 0.0)
+    } else if has_buys && max_loss.is_finite() && max_loss < 0.0 {
+        // Hedged strategy (spreads, condors): SEBI spread benefit applies
+        // Margin ≈ max loss of the strategy
+        let spread_margin = max_loss.abs();
+        (spread_margin, spread_margin)
+    } else {
+        // Naked short or unbounded risk: SPAN + exposure margin
+        // Index: ~15% of notional, Stock: ~20% (use 15% as default)
+        let span_margin: f64 = config.legs.iter()
+            .filter(|l| l.quantity < 0)
+            .map(|l| {
+                let notional = config.spot * l.quantity.unsigned_abs() as f64;
+                notional * 0.15
+            })
+            .sum();
+        let total = span_margin + buy_premium;
+        (total, span_margin)
+    };
 
     let rr = if max_loss.abs() > 0.01 && max_loss.is_finite() {
         (max_profit / max_loss.abs()).min(99.0)
