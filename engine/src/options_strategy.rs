@@ -88,8 +88,7 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
             };
             payoff += intrinsic * leg.quantity as f64;
         }
-        let pnl = payoff - net_premium.abs() * net_premium.signum();
-        let adj_pnl = payoff + net_premium;
+        let adj_pnl = payoff - net_premium;
 
         if adj_pnl > max_profit { max_profit = adj_pnl; }
         if adj_pnl < max_loss { max_loss = adj_pnl; }

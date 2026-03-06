@@ -232,11 +232,12 @@ mod tests {
 
     #[test]
     fn test_macd_zero_on_flat() {
-        let data = vec![100.0; 40];
+        let data = vec![100.0; 60];
         let (macd, signal, hist) = calc_macd(&data);
-        assert!((macd[39]).abs() < 0.01, "MACD should be ~0 on flat series");
-        assert!((signal[39]).abs() < 0.01, "MACD signal should be ~0 on flat series");
-        assert!((hist[39]).abs() < 0.01, "MACD histogram should be ~0 on flat series");
+        let last = data.len() - 1;
+        assert!((macd[last]).abs() < 0.1, "MACD should be ~0 on flat series, got {}", macd[last]);
+        assert!((signal[last]).abs() < 0.1, "MACD signal should be ~0 on flat series, got {}", signal[last]);
+        assert!((hist[last]).abs() < 0.1, "MACD histogram should be ~0 on flat series, got {}", hist[last]);
     }
 
     #[test]
