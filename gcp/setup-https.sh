@@ -26,15 +26,8 @@ fi
 echo "[2/6] Installing certbot..."
 sudo apt install -y certbot python3-certbot-nginx
 
-# ── 3. Get SSL certificate ──
-echo "[3/6] Obtaining SSL certificate from Let's Encrypt..."
-sudo certbot --nginx -d "$DOMAIN" \
-  --register-unsafely-without-email --agree-tos --non-interactive
-
-echo "  Certificate obtained. Auto-renewal is enabled via systemd timer."
-
-# ── 4. Update nginx config for HTTPS ──
-echo "[4/6] Updating nginx config..."
+# ── 3. Update nginx with domain name (needed for certbot) ──
+echo "[3/6] Preparing nginx for SSL..."
 
 sudo tee /etc/nginx/sites-available/capital-guard > /dev/null <<NGINX
 server {
@@ -90,6 +83,17 @@ NGINX
 sudo nginx -t
 sudo systemctl restart nginx
 echo "  Nginx configured for HTTPS."
+
+# ── 4. Get SSL certificate ──
+echo "[4/6] Obtaining SSL certificate from Let's Encrypt..."
+if [ -d "/etc/letsencrypt/live/$DOMAIN" ]; then
+  echo "  Certificate already exists. Installing into nginx..."
+  sudo certbot install --nginx --cert-name "$DOMAIN" --non-interactive
+else
+  sudo certbot --nginx -d "$DOMAIN" \
+    --register-unsafely-without-email --agree-tos --non-interactive
+fi
+echo "  Certificate installed. Auto-renewal is enabled via systemd timer."
 
 # ── 5. Update frontend .env.production ──
 echo "[5/6] Updating frontend environment..."
