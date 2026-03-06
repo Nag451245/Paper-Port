@@ -1063,6 +1063,11 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
       // --- Step 2: GPT/Gemini analysis (always runs for market commentary + AI signals) ---
       console.log(`[BotEngine] Bot ${botId}: running GPT/Gemini analysis cycle`);
       await this.runGptBotCycle(botId, userId, bot, symbols);
+
+      // --- Step 3: Executor bots pick up pending high-confidence signals ---
+      if (bot.role === 'EXECUTOR' || bot.role === 'SCANNER') {
+        await this.executePendingSignals(botId, userId, symbols);
+      }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       const shortErr = errMsg.length > 200 ? errMsg.substring(0, 200) : errMsg;
@@ -1145,6 +1150,55 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         lastActionAt: new Date(),
       },
     });
+  }
+
+  private async executePendingSignals(botId: string, userId: string, symbols: string[]): Promise<void> {
+    try {
+      const oneHourAgo = new Date(Date.now() - 60 * 60_000);
+      const pendingSignals = await this.prisma.aITradeSignal.findMany({
+        where: {
+          userId,
+          status: 'PENDING',
+          compositeScore: { gte: 0.65 },
+          createdAt: { gte: oneHourAgo },
+          expiresAt: { gt: new Date() },
+          signalType: { in: ['BUY', 'SELL'] },
+          symbol: { in: symbols.map(s => s.toUpperCase()) },
+        },
+        orderBy: { compositeScore: 'desc' },
+        take: 3,
+      });
+
+      if (pendingSignals.length === 0) return;
+      console.log(`[BotEngine] Bot ${botId}: found ${pendingSignals.length} pending signals to execute`);
+
+      for (const sig of pendingSignals) {
+        const result = await this.executeTrade(userId, sig.symbol, sig.signalType as 'BUY' | 'SELL', sig.rationale ?? '', botId, {
+          confidence: sig.compositeScore,
+          signalSource: 'PENDING_SIGNAL',
+        });
+
+        await this.prisma.aITradeSignal.update({
+          where: { id: sig.id },
+          data: { status: result.success ? 'EXECUTED' : 'REJECTED', executedAt: result.success ? new Date() : null },
+        });
+
+        await this.prisma.botMessage.create({
+          data: {
+            fromBotId: botId,
+            userId,
+            messageType: result.success ? 'signal' : 'alert',
+            content: result.success
+              ? `EXECUTED pending signal: ${sig.signalType} ${sig.symbol} — ${result.message}`
+              : `REJECTED pending signal: ${sig.signalType} ${sig.symbol} — ${result.message}`,
+          },
+        });
+
+        console.log(`[BotEngine] Bot ${botId}: ${result.success ? 'EXECUTED' : 'REJECTED'} pending ${sig.signalType} ${sig.symbol} (${(sig.compositeScore * 100).toFixed(0)}%): ${result.message}`);
+      }
+    } catch (err) {
+      console.log(`[BotEngine] Bot ${botId}: executePendingSignals error: ${(err as Error).message}`);
+    }
   }
 
   // ---- GPT validates a Rust signal (lightweight check) ----
@@ -1327,6 +1381,7 @@ INSTRUCTIONS:
     });
 
     if (analysis.signals && analysis.signals.length > 0) {
+      console.log(`[BotEngine] Bot ${botId} GPT signals: ${analysis.signals.map(s => `${s.direction} ${s.symbol} @${s.confidence?.toFixed(2)}`).join(', ')}`);
       for (const sig of analysis.signals.slice(0, 5)) {
         if (sig.confidence < 0.6) continue;
 
