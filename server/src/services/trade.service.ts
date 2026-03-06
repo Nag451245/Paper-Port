@@ -206,22 +206,28 @@ export class TradeService {
   }
 
   async getTotalInvestedValue(portfolioId: string): Promise<number> {
-    const openPositions = await this.prisma.position.findMany({
-      where: { portfolioId, status: 'OPEN' },
-      select: { avgEntryPrice: true, qty: true, side: true, exchange: true },
-    });
+    try {
+      const openPositions = await this.prisma.position.findMany({
+        where: { portfolioId, status: 'OPEN' },
+        select: { avgEntryPrice: true, qty: true, side: true, exchange: true },
+      });
 
-    let total = 0;
-    for (const pos of openPositions) {
-      const entryPrice = Number(pos.avgEntryPrice);
-      if (pos.side === 'LONG') {
-        total += entryPrice * pos.qty;
-      } else {
-        const rate = pos.exchange === 'MCX' ? 0.10 : pos.exchange === 'CDS' ? 0.05 : 0.25;
-        total += entryPrice * pos.qty * rate;
+      if (!openPositions || !Array.isArray(openPositions)) return 0;
+
+      let total = 0;
+      for (const pos of openPositions) {
+        const entryPrice = Number(pos.avgEntryPrice);
+        if (pos.side === 'LONG') {
+          total += entryPrice * pos.qty;
+        } else {
+          const rate = pos.exchange === 'MCX' ? 0.10 : pos.exchange === 'CDS' ? 0.05 : 0.25;
+          total += entryPrice * pos.qty * rate;
+        }
       }
+      return total;
+    } catch {
+      return 0;
     }
-    return total;
   }
 
   async recoverCapital(portfolioId: string, userId: string, amountNeeded: number): Promise<{
