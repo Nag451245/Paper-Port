@@ -4,7 +4,7 @@ export interface DecisionRecord {
   userId: string;
   botId?: string;
   symbol: string;
-  decisionType: 'ENTRY_SIGNAL' | 'EXIT_SIGNAL' | 'STRATEGY_DEPLOY' | 'RISK_BLOCK' | 'SL_TRIGGER' | 'TP_TRIGGER' | 'ROLLOVER';
+  decisionType: 'ENTRY_SIGNAL' | 'EXIT_SIGNAL' | 'STRATEGY_DEPLOY' | 'RISK_BLOCK' | 'SL_TRIGGER' | 'TP_TRIGGER' | 'ROLLOVER' | 'ML_AB_TEST' | 'POSITION_CLOSED';
   direction?: 'LONG' | 'SHORT' | 'NEUTRAL';
   confidence: number;
   signalSource: string;

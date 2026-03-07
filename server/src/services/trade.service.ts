@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
 import { MarketCalendar } from './market-calendar.js';
 import { RiskService } from './risk.service.js';
+import { OrderManagementService } from './oms.service.js';
 import { getBrokerAdapter, type BrokerAdapter, type BrokerOrderInput as BrokerInput } from '../lib/broker-adapter.js';
 import { wsHub } from '../lib/websocket.js';
 import { createChildLogger } from '../lib/logger.js';
@@ -183,11 +184,13 @@ export class TradeService {
   private calendar: MarketCalendar;
   private riskService: RiskService;
   private broker: BrokerAdapter | null = null;
+  private oms: OrderManagementService | null = null;
 
-  constructor(private prisma: PrismaClient) {
+  constructor(private prisma: PrismaClient, oms?: OrderManagementService) {
     this.marketData = new MarketDataService();
     this.calendar = new MarketCalendar();
     this.riskService = new RiskService(prisma);
+    this.oms = oms ?? null;
 
     if (TRADING_MODE === 'LIVE') {
       this.broker = getBrokerAdapter('breeze');
@@ -450,6 +453,7 @@ export class TradeService {
       }
     }
 
+    // Always create as PENDING — OMS drives the lifecycle
     const order = await this.prisma.order.create({
       data: {
         portfolioId: input.portfolioId,
@@ -461,16 +465,16 @@ export class TradeService {
         qty: input.qty,
         price: fillPrice > 0 ? fillPrice : input.price,
         triggerPrice: input.triggerPrice,
-        status: input.orderType === 'MARKET' ? 'FILLED' : 'PENDING',
-        filledQty: input.orderType === 'MARKET' ? input.qty : 0,
-        avgFillPrice: input.orderType === 'MARKET' ? fillPrice : null,
+        status: 'PENDING',
+        filledQty: 0,
+        avgFillPrice: null,
         ...costs,
         idealPrice: execSimResult?.idealPrice,
         slippageBps: execSimResult?.slippageBps,
         fillLatencyMs: execSimResult ? Math.round(execSimResult.latencyMs) : null,
         spreadCostBps: execSimResult ? Math.round(execSimResult.spreadCost * 10000 / (execSimResult.idealPrice * input.qty || 1)) : null,
         impactCost: execSimResult?.impactCost,
-        filledAt: input.orderType === 'MARKET' ? new Date() : null,
+        filledAt: null,
       },
     });
 
@@ -479,7 +483,24 @@ export class TradeService {
       symbol: input.symbol, side: input.side, qty: input.qty, orderType: input.orderType,
     }).catch(() => {});
 
+    // Transition PENDING → SUBMITTED via OMS
+    if (this.oms) {
+      await this.oms.submitOrder(order.id);
+    } else {
+      await this.prisma.order.update({ where: { id: order.id }, data: { status: 'SUBMITTED' } });
+    }
+
     if (input.orderType === 'MARKET' && fillPrice > 0) {
+      // Transition SUBMITTED → FILLED via OMS
+      if (this.oms) {
+        await this.oms.recordFill(order.id, effectiveQty, fillPrice);
+      } else {
+        await this.prisma.order.update({
+          where: { id: order.id },
+          data: { status: 'FILLED', filledQty: effectiveQty, avgFillPrice: fillPrice, filledAt: new Date() },
+        });
+      }
+
       await this.handleFill(order.id, input, fillPrice, costs);
 
       emit('execution', {
@@ -496,7 +517,9 @@ export class TradeService {
       });
     }
 
-    return { ...order, brokerOrderId, tradingMode: TRADING_MODE };
+    // Re-read order to get final state after OMS transitions
+    const finalOrder = await this.prisma.order.findUnique({ where: { id: order.id } });
+    return { ...(finalOrder ?? order), brokerOrderId, tradingMode: TRADING_MODE };
   }
 
   private shortMarginRequired(price: number, qty: number, exchange: string): number {
@@ -788,8 +811,13 @@ export class TradeService {
       throw new TradeError('Order not found', 404);
     }
 
-    if (order.status !== 'PENDING') {
-      throw new TradeError('Only pending orders can be cancelled', 400);
+    if (order.status !== 'PENDING' && order.status !== 'SUBMITTED') {
+      throw new TradeError('Only pending/submitted orders can be cancelled', 400);
+    }
+
+    if (this.oms) {
+      await this.oms.cancelOrder(orderId, `User ${userId} requested cancellation`);
+      return this.prisma.order.findUnique({ where: { id: orderId } });
     }
 
     return this.prisma.order.update({
@@ -1074,7 +1102,7 @@ export class TradeService {
     if (!this.calendar.isMarketOpen()) return { matched: 0, failed: 0 };
 
     const pendingOrders = await this.prisma.order.findMany({
-      where: { status: 'PENDING' },
+      where: { status: { in: ['PENDING', 'SUBMITTED'] } },
       include: { portfolio: true },
       take: 50,
     });
@@ -1121,10 +1149,11 @@ export class TradeService {
             where: { portfolioId: order.portfolioId, symbol: order.symbol, side: 'SHORT', status: 'OPEN' },
           });
           if (!existingShort && totalValue > availableCash) {
-            await this.prisma.order.update({
-              where: { id: order.id },
-              data: { status: 'REJECTED' },
-            });
+            if (this.oms) {
+              await this.oms.rejectOrder(order.id, 'Insufficient capital for BUY');
+            } else {
+              await this.prisma.order.update({ where: { id: order.id }, data: { status: 'REJECTED' } });
+            }
             failed++;
             continue;
           }
@@ -1135,27 +1164,26 @@ export class TradeService {
           if (!existingLong) {
             const marginRequired = this.shortMarginRequired(fillPrice, order.qty, order.exchange) + costs.totalCost;
             if (marginRequired > availableCash) {
-              await this.prisma.order.update({
-                where: { id: order.id },
-                data: { status: 'REJECTED' },
-              });
+              if (this.oms) {
+                await this.oms.rejectOrder(order.id, 'Insufficient margin for SELL');
+              } else {
+                await this.prisma.order.update({ where: { id: order.id }, data: { status: 'REJECTED' } });
+              }
               failed++;
               continue;
             }
           }
         }
 
-        // Fill the order
-        await this.prisma.order.update({
-          where: { id: order.id },
-          data: {
-            status: 'FILLED',
-            filledQty: order.qty,
-            avgFillPrice: fillPrice,
-            ...costs,
-            filledAt: new Date(),
-          },
-        });
+        // Fill the order via OMS
+        if (this.oms) {
+          await this.oms.recordFill(order.id, order.qty, fillPrice);
+        } else {
+          await this.prisma.order.update({
+            where: { id: order.id },
+            data: { status: 'FILLED', filledQty: order.qty, avgFillPrice: fillPrice, ...costs, filledAt: new Date() },
+          });
+        }
 
         const input: PlaceOrderInput = {
           portfolioId: order.portfolioId,

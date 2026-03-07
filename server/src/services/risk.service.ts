@@ -210,6 +210,11 @@ export class RiskService {
 
     if (dayPnl < 0 && dayDrawdownPct >= cfg.maxDailyDrawdownPct) {
       violations.push(`Daily loss ${dayDrawdownPct.toFixed(1)}% exceeds circuit breaker ${cfg.maxDailyDrawdownPct}%`);
+      emit('risk', {
+        type: 'CIRCUIT_BREAKER_TRIGGERED', userId,
+        reason: `Daily drawdown ${dayDrawdownPct.toFixed(2)}% >= ${cfg.maxDailyDrawdownPct}%`,
+        drawdownPct: dayDrawdownPct,
+      }).catch(() => {});
     }
 
     // Rule 6: Correlation-aware position limits

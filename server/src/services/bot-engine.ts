@@ -2,6 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import { chatCompletionJSON, getOpenAIStatus } from '../lib/openai.js';
 import { MarketDataService, type MarketMover } from './market-data.service.js';
 import { TradeService } from './trade.service.js';
+import { OrderManagementService } from './oms.service.js';
 import { engineScan, engineRisk, engineSignals, isEngineAvailable, type ScanSignal } from '../lib/rust-engine.js';
 import { calculateMaxPain, calculateIVPercentile, calculateGreeks } from './options.service.js';
 import { TargetTracker, type TargetProgress } from './target-tracker.service.js';
@@ -10,6 +11,7 @@ import { DecisionAuditService, type DecisionRecord } from './decision-audit.serv
 import { MarketCalendar } from './market-calendar.js';
 import { RiskService } from './risk.service.js';
 import { TWAPExecutor, selectOrderType } from './twap-executor.service.js';
+import { emit } from '../lib/event-bus.js';
 import { createChildLogger } from '../lib/logger.js';
 
 const log = createChildLogger('BotEngine');
@@ -174,8 +176,8 @@ export class BotEngine {
   private intradayVolatility = new Map<string, number>();
   private mlWeights: Record<string, unknown> | null = null;
 
-  constructor(private prisma: PrismaClient) {
-    this.tradeService = new TradeService(prisma);
+  constructor(private prisma: PrismaClient, oms?: OrderManagementService) {
+    this.tradeService = new TradeService(prisma, oms);
     this.targetTracker = new TargetTracker(prisma);
     this.globalMarket = new GlobalMarketService();
     this.decisionAudit = new DecisionAuditService(prisma);
@@ -185,7 +187,6 @@ export class BotEngine {
     this.rustAvailable = isEngineAvailable();
     console.log(`[BotEngine] Initialized — Rust engine: ${this.rustAvailable ? 'AVAILABLE' : 'NOT FOUND (using Gemini AI only)'}`);
 
-    // Load ML weights from DB on startup
     this.loadMLWeightsFromDB().catch(() => {});
   }
 
@@ -1488,34 +1489,22 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           existingOrders,
         }, 'Pyramiding into winning position');
 
-        // Create a scale-in order
-        await this.prisma.order.create({
-          data: {
+        // Route through TradeService for proper OMS lifecycle
+        try {
+          await this.tradeService.placeOrder(userId, {
             portfolioId: portfolios[0].id,
-            positionId: pos.id,
-            instrumentToken: pos.instrumentToken ?? pos.symbol,
             symbol: pos.symbol,
-            exchange: pos.exchange,
-            orderType: 'MARKET',
             side: pos.side === 'LONG' ? 'BUY' : 'SELL',
+            orderType: 'MARKET',
             qty: addQty,
             price: currentPrice,
-            status: 'PENDING',
+            instrumentToken: pos.instrumentToken ?? pos.symbol,
+            exchange: pos.exchange,
             strategyTag: pos.strategyTag ?? 'pyramid',
-            idealPrice: currentPrice,
-          },
-        });
-
-        // Update position qty and avg entry price (blended)
-        const newTotalQty = originalQty + addQty;
-        const newAvgEntry = (entryPrice * originalQty + currentPrice * addQty) / newTotalQty;
-        await this.prisma.position.update({
-          where: { id: pos.id },
-          data: {
-            qty: newTotalQty,
-            avgEntryPrice: Math.round(newAvgEntry * 100) / 100,
-          },
-        });
+          });
+        } catch (err) {
+          log.warn({ symbol: pos.symbol, err }, 'Pyramid order failed (risk/capital block)');
+        }
       }
     } catch (err) {
       log.warn({ botId, err }, 'Pyramid winners check failed (non-fatal)');
@@ -1568,6 +1557,13 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           expiresAt: new Date(Date.now() + 4 * 60 * 60_000),
         },
       });
+
+      emit('signals', {
+        type: 'SIGNAL_GENERATED', userId, botId,
+        symbol: sig.symbol, direction: sig.direction, confidence: finalConfidence,
+        entry: sig.entry, stopLoss: sig.stop_loss, target: sig.target,
+        source: sig.strategy ?? 'rust-engine',
+      }).catch(() => {});
 
       if (execute) {
         const result = await this.executeTrade(userId, sig.symbol, sig.direction, sig.symbol, botId, {
@@ -1687,43 +1683,89 @@ Approve or reject?` },
   }
 
   private async mlValidateSignal(sig: ScanSignal): Promise<boolean> {
+    const now = new Date();
+    let rustScore = -1;
+    let pythonScore = -1;
+    let usedModel: 'rust' | 'python' | 'confidence' = 'confidence';
+
+    const featureObj = {
+      ema_vote: sig.votes?.ema_crossover ?? 0,
+      rsi_vote: sig.votes?.rsi ?? 0,
+      macd_vote: sig.votes?.macd ?? 0,
+      supertrend_vote: sig.votes?.supertrend ?? 0,
+      bollinger_vote: sig.votes?.bollinger ?? 0,
+      vwap_vote: sig.votes?.vwap ?? 0,
+      momentum_vote: sig.votes?.momentum ?? 0,
+      volume_vote: sig.votes?.volume ?? 0,
+      composite_score: sig.confidence,
+      regime: 1.0,
+      hour_of_day: now.getHours(),
+      day_of_week: now.getDay(),
+    };
+
+    // ── Step 1: Rust scorer (fast, always available if weights exist) ──
     try {
       const { engineMLScore } = await import('../lib/rust-engine.js');
 
-      const now = new Date();
-      const regimeMap: Record<string, number> = { trending: 1, mean_reverting: 2, volatile: 3, low_vol: 4 };
-      const features = [{
-        ema_vote: sig.votes?.ema_crossover ?? 0,
-        rsi_vote: sig.votes?.rsi ?? 0,
-        macd_vote: sig.votes?.macd ?? 0,
-        supertrend_vote: sig.votes?.supertrend ?? 0,
-        bollinger_vote: sig.votes?.bollinger ?? 0,
-        vwap_vote: sig.votes?.vwap ?? 0,
-        momentum_vote: sig.votes?.momentum ?? 0,
-        volume_vote: sig.votes?.volume ?? 0,
-        composite_score: sig.confidence,
-        regime: 1.0,
-        hour_of_day: now.getHours(),
-        day_of_week: now.getDay(),
-      }];
-
-      if (!this.mlWeights) {
-        // No trained model yet, fall through to confidence-based approval
-        return sig.confidence >= 0.45;
+      if (this.mlWeights) {
+        const result = await engineMLScore({
+          command: 'predict',
+          features: [featureObj],
+          weights: this.mlWeights,
+        }) as { scores: number[] };
+        rustScore = result.scores?.[0] ?? -1;
+        usedModel = 'rust';
       }
+    } catch { /* Rust scorer unavailable */ }
 
-      const result = await engineMLScore({
-        command: 'predict',
-        features,
-        weights: this.mlWeights,
-      }) as { scores: number[] };
+    // ── Step 2: Python scorer (higher quality, may be unavailable) ──
+    try {
+      const { isMLServiceAvailable, mlScore } = await import('../lib/ml-service-client.js');
+      const pyAvailable = await isMLServiceAvailable();
 
-      const score = result.scores?.[0] ?? 0.5;
-      log.info({ symbol: sig.symbol, mlScore: score, confidence: sig.confidence }, 'ML score computed');
-      return score >= 0.5;
-    } catch {
-      return sig.confidence >= 0.45;
-    }
+      if (pyAvailable) {
+        const pyResult = await mlScore({
+          features: [{ features: featureObj }],
+          model_type: 'xgboost',
+        });
+        pythonScore = pyResult.scores?.[0] ?? -1;
+        if (pythonScore >= 0) usedModel = 'python';
+      }
+    } catch { /* Python service unavailable, no-op */ }
+
+    // ── Step 3: A/B logging ──
+    const agreed = rustScore >= 0 && pythonScore >= 0
+      ? (rustScore >= 0.5) === (pythonScore >= 0.5)
+      : null;
+
+    log.info({
+      symbol: sig.symbol, confidence: sig.confidence,
+      rustScore: rustScore >= 0 ? rustScore.toFixed(4) : 'N/A',
+      pythonScore: pythonScore >= 0 ? pythonScore.toFixed(4) : 'N/A',
+      agreed, usedModel,
+    }, 'ML A/B score comparison');
+
+    // ── Step 4: Record in DecisionAudit for later analysis ──
+    try {
+      await this.decisionAudit.recordDecision({
+        userId: 'system',
+        decisionType: 'ML_AB_TEST',
+        symbol: sig.symbol,
+        direction: sig.direction === 'BUY' ? 'LONG' : 'SHORT',
+        confidence: sig.confidence,
+        signalSource: sig.strategy ?? 'rust-engine',
+        marketDataSnapshot: {
+          rustScore, pythonScore, agreed, usedModel,
+          entry: sig.entry, stopLoss: sig.stop_loss, target: sig.target,
+        },
+        reasoning: `Rust: ${rustScore >= 0 ? rustScore.toFixed(4) : 'N/A'}, Python: ${pythonScore >= 0 ? pythonScore.toFixed(4) : 'N/A'}, Used: ${usedModel}`,
+      });
+    } catch { /* audit is best-effort */ }
+
+    // ── Step 5: Decision — prefer Python when available ──
+    if (pythonScore >= 0) return pythonScore >= 0.5;
+    if (rustScore >= 0) return rustScore >= 0.5;
+    return sig.confidence >= 0.45;
   }
 
   private async fetchFnOContext(symbols: string[]): Promise<string> {

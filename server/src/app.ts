@@ -40,6 +40,8 @@ import { registerWebSocket, wsHub } from './lib/websocket.js';
 import { on as onEvent, shutdownEventBus, type AppEvent } from './lib/event-bus.js';
 import { UptimeMonitorService } from './services/uptime-monitor.service.js';
 import { DataPipelineService } from './services/data-pipeline.service.js';
+import { OrderManagementService } from './services/oms.service.js';
+import { registerAllWorkers } from './services/event-workers.js';
 
 export interface BuildAppOptions {
   logger?: boolean;
@@ -53,7 +55,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   const authService = new AuthService(getPrisma(), env.JWT_SECRET);
-  const botEngine = new BotEngine(getPrisma());
+  const oms = new OrderManagementService(getPrisma());
+  const botEngine = new BotEngine(getPrisma(), oms);
   const learningEngine = new LearningEngine(getPrisma());
   const morningBoot = new MorningBoot(getPrisma());
   const orchestrator = new ServerOrchestrator(getPrisma(), botEngine, env.PORT);
@@ -66,6 +69,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.decorate('learningEngine', learningEngine);
   app.decorate('morningBoot', morningBoot);
   app.decorate('orchestrator', orchestrator);
+  app.decorate('oms', oms);
 
   await app.register(sensible);
 
@@ -120,9 +124,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     });
   });
 
-  // Start uptime monitoring and data pipeline
+  // Start uptime monitoring, event bus workers, and data pipeline
   uptimeMonitor.start();
-  dataPipeline.initialize().catch(() => {});
+  registerAllWorkers(getPrisma());
+  dataPipeline.initialize().then(ok => {
+    if (ok) dataPipeline.startConsumer();
+  }).catch(() => {});
 
   // Track request latency and errors for uptime monitoring
   app.addHook('onResponse', async (request, reply) => {
@@ -296,7 +303,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   // ── Stop-Loss Monitor, Price Feed & Intraday Manager ──
   const stopLossMonitor = new StopLossMonitor(getPrisma());
-  const priceFeedService = new PriceFeedService(getPrisma());
+  const priceFeedService = new PriceFeedService(getPrisma(), dataPipeline);
   const intradayManager = new IntradayManager(getPrisma());
   const optionsPositionService = new OptionsPositionService(getPrisma());
   app.decorate('stopLossMonitor', stopLossMonitor);
@@ -324,6 +331,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     botEngine.stopAll();
     stopLossMonitor.stop();
     priceFeedService.stop();
+    dataPipeline.stopConsumer();
     orchestrator.stop();
     uptimeMonitor.stop();
     await shutdownEventBus();
@@ -613,7 +621,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.addHook('onReady', async () => {
     const prisma = getPrisma();
     const { TradeService } = await import('./services/trade.service.js');
-    const tradeService = new TradeService(prisma);
+    const tradeService = new TradeService(prisma, oms);
 
     orchestrator.scheduleMarketDay('* 3-10 * * 1-5', async () => {
       try {

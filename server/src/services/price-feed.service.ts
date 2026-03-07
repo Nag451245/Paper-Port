@@ -2,6 +2,8 @@ import { PrismaClient } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
 import { wsHub } from '../lib/websocket.js';
 import { MarketCalendar } from './market-calendar.js';
+import { emit } from '../lib/event-bus.js';
+import type { DataPipelineService } from './data-pipeline.service.js';
 
 const FEED_INTERVAL_MS = 2_000;
 const PNL_PERSIST_INTERVAL_MS = 30_000;
@@ -13,13 +15,15 @@ export class PriceFeedService {
   private marketData: MarketDataService;
   private calendar: MarketCalendar;
   private prisma: PrismaClient;
+  private dataPipeline: DataPipelineService | null = null;
   private lastPrices = new Map<string, { ltp: number; volume: number; timestamp: number }>();
   private running = false;
 
-  constructor(prisma?: PrismaClient) {
+  constructor(prisma?: PrismaClient, dataPipeline?: DataPipelineService) {
     this.marketData = new MarketDataService();
     this.calendar = new MarketCalendar();
     this.prisma = prisma ?? new PrismaClient();
+    this.dataPipeline = dataPipeline ?? null;
   }
 
   start(): void {
@@ -99,6 +103,7 @@ export class PriceFeedService {
             const changed = !prev || prev.ltp !== quote.ltp || prev.volume !== quote.volume;
 
             if (changed) {
+              const now = Date.now();
               const priceData = {
                 ltp: quote.ltp,
                 change: quote.change,
@@ -108,7 +113,17 @@ export class PriceFeedService {
               };
 
               wsHub.broadcastPriceUpdate(symbol, priceData);
-              this.lastPrices.set(symbol, { ltp: quote.ltp, volume: quote.volume, timestamp: Date.now() });
+              this.lastPrices.set(symbol, { ltp: quote.ltp, volume: quote.volume, timestamp: now });
+
+              // Feed tick into the data pipeline (Redis Streams)
+              this.dataPipeline?.publishTick(symbol, quote.ltp, quote.volume, now).catch(() => {});
+
+              // Emit tick event for event bus consumers
+              emit('market-data', {
+                type: 'TICK_RECEIVED', symbol, ltp: quote.ltp,
+                change: quote.change, volume: quote.volume,
+                timestamp: priceData.timestamp,
+              }).catch(() => {});
             }
           } catch {}
         })

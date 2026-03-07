@@ -289,4 +289,151 @@ export class DataPipelineService {
       };
     }
   }
+
+  /**
+   * Start a consumer loop that reads ticks from Redis Streams, computes features,
+   * and runs ML scoring. This connects the pipeline end-to-end.
+   */
+  startConsumer(intervalMs = 5_000): void {
+    if (this.running) return;
+    this.running = true;
+
+    const consumerId = `consumer-${process.pid}`;
+
+    const loop = async () => {
+      if (!this.running) return;
+
+      const redis = getRedis();
+      if (!redis) {
+        setTimeout(loop, intervalMs * 2);
+        return;
+      }
+
+      try {
+        // Read new ticks from the consumer group
+        const results = await redis.xreadgroup(
+          'GROUP', CONSUMER_GROUP, consumerId,
+          'COUNT', '100', 'BLOCK', '1000',
+          'STREAMS', STREAM_TICKS, '>',
+        ) as Array<[string, Array<[string, string[]]>]> | null;
+
+        if (results && results.length > 0) {
+          const entries = results[0][1];
+          if (entries.length > 0) {
+            // Group ticks by symbol and accumulate for candle building
+            const ticksBySymbol = new Map<string, Array<{ ltp: number; volume: number; ts: number }>>();
+            const ackIds: string[] = [];
+
+            for (const [id, fields] of entries) {
+              const obj: Record<string, string> = {};
+              for (let i = 0; i < fields.length; i += 2) {
+                obj[fields[i]] = fields[i + 1];
+              }
+
+              const symbol = obj.symbol;
+              if (!symbol) continue;
+
+              if (!ticksBySymbol.has(symbol)) ticksBySymbol.set(symbol, []);
+              ticksBySymbol.get(symbol)!.push({
+                ltp: parseFloat(obj.ltp ?? '0'),
+                volume: parseFloat(obj.volume ?? '0'),
+                ts: parseInt(obj.ts ?? '0', 10),
+              });
+              ackIds.push(id);
+            }
+
+            // Build candle-like data for feature extraction
+            const tickBatch: Array<{ symbol: string; candles: unknown[] }> = [];
+            for (const [symbol, ticks] of ticksBySymbol) {
+              // Accumulate in-memory; only process when we have enough data points
+              if (!this.tickBuffer) (this as any).tickBuffer = new Map<string, unknown[]>();
+              const buffer = (this as any).tickBuffer as Map<string, unknown[]>;
+
+              if (!buffer.has(symbol)) buffer.set(symbol, []);
+              const symbolBuffer = buffer.get(symbol)!;
+
+              for (const t of ticks) {
+                symbolBuffer.push({
+                  close: t.ltp,
+                  high: t.ltp * 1.001,
+                  low: t.ltp * 0.999,
+                  open: t.ltp,
+                  volume: t.volume,
+                });
+              }
+
+              // Keep buffer capped at 100 candles
+              if (symbolBuffer.length > 100) {
+                buffer.set(symbol, symbolBuffer.slice(-100));
+              }
+
+              if (symbolBuffer.length >= 20) {
+                tickBatch.push({ symbol, candles: symbolBuffer });
+              }
+            }
+
+            // Process tick batch through Rust feature extraction
+            if (tickBatch.length > 0) {
+              await this.processTickBatch(tickBatch);
+            }
+
+            // Acknowledge processed messages
+            if (ackIds.length > 0) {
+              await redis.xack(STREAM_TICKS, CONSUMER_GROUP, ...ackIds).catch(() => {});
+            }
+          }
+        }
+
+        // Read features and score them
+        const featureResults = await redis.xreadgroup(
+          'GROUP', CONSUMER_GROUP, consumerId,
+          'COUNT', '50', 'BLOCK', '500',
+          'STREAMS', STREAM_FEATURES, '>',
+        ) as Array<[string, Array<[string, string[]]>]> | null;
+
+        if (featureResults && featureResults.length > 0) {
+          const featureEntries = featureResults[0][1];
+          const featureBatch: Array<{ symbol: string; featureMap: Record<string, number> }> = [];
+          const featureAckIds: string[] = [];
+
+          for (const [id, fields] of featureEntries) {
+            const obj: Record<string, string> = {};
+            for (let i = 0; i < fields.length; i += 2) {
+              obj[fields[i]] = fields[i + 1];
+            }
+
+            try {
+              const featureMap = JSON.parse(obj.data ?? '{}');
+              featureBatch.push({ symbol: obj.symbol, featureMap });
+            } catch { /* skip malformed entries */ }
+            featureAckIds.push(id);
+          }
+
+          if (featureBatch.length > 0) {
+            await this.scoreAndFilter(featureBatch);
+          }
+
+          if (featureAckIds.length > 0) {
+            await redis.xack(STREAM_FEATURES, CONSUMER_GROUP, ...featureAckIds).catch(() => {});
+          }
+        }
+      } catch (err) {
+        log.warn({ err }, 'Pipeline consumer loop error');
+      }
+
+      if (this.running) {
+        setTimeout(loop, intervalMs);
+      }
+    };
+
+    log.info({ intervalMs }, 'Data pipeline consumer started');
+    setTimeout(loop, 1000);
+  }
+
+  stopConsumer(): void {
+    this.running = false;
+    log.info('Data pipeline consumer stopped');
+  }
+
+  private tickBuffer?: Map<string, unknown[]>;
 }
