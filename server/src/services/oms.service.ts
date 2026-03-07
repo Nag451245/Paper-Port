@@ -116,7 +116,7 @@ export class OrderManagementService {
       toState,
       filledQty: details?.filledQty,
       avgFillPrice: details?.avgFillPrice,
-    }).catch(() => {});
+    }).catch(err => log.error({ err, orderId }, 'Failed to emit ORDER_STATE_CHANGE event'));
 
     return transition;
   }

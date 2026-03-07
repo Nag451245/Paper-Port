@@ -84,11 +84,14 @@ export async function intelligenceRoutes(app: FastifyInstance): Promise<void> {
 
   // ── Rust Engine Quant Endpoints ──
 
+  const ENGINE_UNAVAILABLE = { error: 'Rust engine is not available', available: false };
+
   app.get('/engine/status', async (_req, reply) => {
     return reply.send({ available: isEngineAvailable() });
   });
 
   app.post('/engine/monte-carlo', async (req, reply) => {
+    if (!isEngineAvailable()) return reply.code(503).send(ENGINE_UNAVAILABLE);
     try {
       const body = req.body as any;
       if (!body?.returns || !Array.isArray(body.returns)) return reply.code(400).send({ error: 'returns array required' });
@@ -98,6 +101,7 @@ export async function intelligenceRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/engine/portfolio-optimize', async (req, reply) => {
+    if (!isEngineAvailable()) return reply.code(503).send(ENGINE_UNAVAILABLE);
     try {
       const body = req.body as any;
       if (!body?.assets || !Array.isArray(body.assets)) return reply.code(400).send({ error: 'assets array required' });
@@ -107,6 +111,7 @@ export async function intelligenceRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/engine/options-strategy', async (req, reply) => {
+    if (!isEngineAvailable()) return reply.code(503).send(ENGINE_UNAVAILABLE);
     try {
       const body = req.body as any;
       if (!body?.legs || !Array.isArray(body.legs)) return reply.code(400).send({ error: 'legs array required' });
@@ -117,6 +122,7 @@ export async function intelligenceRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/engine/correlation', async (req, reply) => {
+    if (!isEngineAvailable()) return reply.code(503).send(ENGINE_UNAVAILABLE);
     try {
       const body = req.body as any;
       if (!body?.pairs || !Array.isArray(body.pairs)) return reply.code(400).send({ error: 'pairs array required' });
@@ -126,6 +132,7 @@ export async function intelligenceRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/engine/features', async (req, reply) => {
+    if (!isEngineAvailable()) return reply.code(503).send(ENGINE_UNAVAILABLE);
     try {
       const body = req.body as any;
       if (!body?.command) return reply.code(400).send({ error: 'command required (extract_features, detect_regime, detect_anomalies)' });

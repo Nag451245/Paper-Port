@@ -122,7 +122,7 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.get('/breeze-diag', async (_request, reply) => {
+  app.get('/breeze-diag', { preHandler: [authenticate] }, async (_request, reply) => {
     try {
       const result = await service.diagnoseBreezeConnection();
       return reply.send(result);
@@ -144,7 +144,7 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
-  app.post('/global-intelligence/refresh', async (_request, reply) => {
+  app.post('/global-intelligence/refresh', { preHandler: [authenticate] }, async (_request, reply) => {
     try {
       const intel = await globalMarketService.runDailyIntelligenceScan();
       return reply.send(intel);

@@ -101,7 +101,7 @@ export class ServerOrchestrator {
 
   private async onPhaseChange(from: MarketPhase, to: MarketPhase): Promise<void> {
     log.info({ from, to }, 'Market phase changed');
-    emit('system', { type: 'PHASE_CHANGE', from, to, timestamp: new Date().toISOString() }).catch(() => {});
+    emit('system', { type: 'PHASE_CHANGE', from, to, timestamp: new Date().toISOString() }).catch(err => log.error({ err }, 'Failed to emit PHASE_CHANGE event'));
 
     const config = this.calendar.getPhaseConfig(to);
 
@@ -135,7 +135,7 @@ export class ServerOrchestrator {
       for (let i = 0; i < bots.length; i++) {
         const bot = bots[i];
         setTimeout(() => {
-          this.botEngine.startBot(bot.id, bot.userId).catch(() => {});
+          this.botEngine.startBot(bot.id, bot.userId).catch(err => log.error({ err, botId: bot.id }, 'Failed to auto-start bot'));
         }, i * 5_000);
       }
 
@@ -146,8 +146,8 @@ export class ServerOrchestrator {
       });
       for (const agent of agents) {
         setTimeout(() => {
-          this.botEngine.startAgent(agent.userId).catch(() => {});
-          this.botEngine.startMarketScan(agent.userId).catch(() => {});
+          this.botEngine.startAgent(agent.userId).catch(err => log.error({ err, userId: agent.userId }, 'Failed to auto-start agent'));
+          this.botEngine.startMarketScan(agent.userId).catch(err => log.error({ err, userId: agent.userId }, 'Failed to auto-start market scan'));
         }, bots.length * 5_000 + 10_000);
       }
 

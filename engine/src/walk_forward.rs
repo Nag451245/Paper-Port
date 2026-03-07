@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::backtest;
-use crate::utils::round2;
+use crate::utils::{round2, norm_cdf, generate_combinations_map};
 
 #[derive(Deserialize)]
 struct WalkForwardConfig {
@@ -18,6 +18,10 @@ struct WalkForwardConfig {
     purge_bars: Option<usize>,
     #[serde(default)]
     monte_carlo_runs: Option<usize>,
+    #[serde(default)]
+    run_cpcv: Option<bool>,
+    #[serde(default)]
+    run_whites_rc: Option<bool>,
 }
 
 fn default_window_mode() -> String { "rolling".to_string() }
@@ -40,6 +44,12 @@ struct WalkForwardResult {
     overfitting_score: f64,
     window_mode: String,
     p_value: Option<f64>,
+    cpcv_pbo: Option<f64>,
+    cpcv_avg_oos_sharpe: Option<f64>,
+    whites_rc_p_value: Option<f64>,
+    whites_rc_significant: Option<bool>,
+    return_t_stat: Option<f64>,
+    return_p_value: Option<f64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -85,7 +95,7 @@ pub fn compute(data: Value) -> Result<Value, String> {
         return Err("Not enough data for requested number of folds".to_string());
     }
 
-    let param_combos = generate_combinations(&config.param_grid);
+    let param_combos = generate_combinations_map(&config.param_grid);
     if param_combos.is_empty() {
         return Err("Empty parameter grid".to_string());
     }
@@ -226,6 +236,32 @@ pub fn compute(data: Value) -> Result<Value, String> {
         None
     };
 
+    let (cpcv_pbo, cpcv_avg_oos_sharpe) = if config.run_cpcv.unwrap_or(false) {
+        let (avg, _std, pbo) = cpcv_test(
+            &candles_json, &config.strategy, &config.symbol,
+            &param_combos, config.initial_capital, purge_bars, num_folds,
+        );
+        (Some(pbo), Some(avg))
+    } else {
+        (None, None)
+    };
+
+    let (whites_rc_p_value, whites_rc_significant) = if config.run_whites_rc.unwrap_or(false) {
+        let strategy_rets: Vec<Vec<f64>> = param_scores.values().cloned().collect();
+        let (p, sig, _t) = whites_reality_check(&strategy_rets, 0.0);
+        (Some(p), Some(sig))
+    } else {
+        (None, None)
+    };
+
+    let oos_sharpes: Vec<f64> = folds.iter().map(|f| f.out_sample_sharpe).collect();
+    let (return_t_stat, return_p_value) = if oos_sharpes.len() >= 2 {
+        let (t, p, _, _) = strategy_significance(&oos_sharpes);
+        (Some(t), Some(p))
+    } else {
+        (None, None)
+    };
+
     let result = WalkForwardResult {
         folds,
         aggregate: AggregateMetrics {
@@ -240,6 +276,12 @@ pub fn compute(data: Value) -> Result<Value, String> {
         overfitting_score: round2(overfit.max(0.0).min(1.0)),
         window_mode: config.window_mode.clone(),
         p_value,
+        cpcv_pbo,
+        cpcv_avg_oos_sharpe,
+        whites_rc_p_value,
+        whites_rc_significant,
+        return_t_stat,
+        return_p_value,
     };
 
     serde_json::to_value(result).map_err(|e| format!("Serialization error: {}", e))
@@ -280,25 +322,203 @@ fn monte_carlo_test(folds: &[FoldResult], num_runs: usize) -> f64 {
     (p * 1000.0).round() / 1000.0
 }
 
-fn generate_combinations(grid: &std::collections::HashMap<String, Vec<f64>>) -> Vec<Value> {
-    let keys: Vec<&String> = grid.keys().collect();
-    let values: Vec<&Vec<f64>> = keys.iter().map(|k| grid.get(*k).unwrap()).collect();
-    if keys.is_empty() { return vec![serde_json::json!({})]; }
-    let mut combos = Vec::new();
-    let mut indices = vec![0usize; keys.len()];
-    loop {
-        let mut combo = serde_json::Map::new();
-        for (i, key) in keys.iter().enumerate() {
-            combo.insert(key.to_string(), serde_json::json!(values[i][indices[i]]));
+fn generate_index_combinations(n: usize, k: usize, max_count: usize) -> Vec<Vec<usize>> {
+    let mut result = Vec::new();
+    if k == 0 || k > n { return result; }
+    let mut combo: Vec<usize> = (0..k).collect();
+
+    'outer: loop {
+        result.push(combo.clone());
+        if result.len() >= max_count { break; }
+
+        let mut i = k - 1;
+        while combo[i] == n - k + i {
+            if i == 0 { break 'outer; }
+            i -= 1;
         }
-        combos.push(Value::Object(combo));
-        let mut carry = true;
-        for i in (0..keys.len()).rev() {
-            if carry { indices[i] += 1; if indices[i] >= values[i].len() { indices[i] = 0; } else { carry = false; } }
+        combo[i] += 1;
+        for j in (i + 1)..k {
+            combo[j] = combo[j - 1] + 1;
         }
-        if carry { break; }
     }
-    combos
+
+    result
+}
+
+fn cpcv_test(
+    candles_json: &[Value],
+    strategy: &str,
+    symbol: &str,
+    param_combos: &[Value],
+    initial_capital: f64,
+    purge_bars: usize,
+    num_blocks: usize,
+) -> (f64, f64, f64) {
+    let block_size = candles_json.len() / num_blocks;
+    if block_size < 10 || num_blocks < 2 {
+        return (0.0, 0.0, 1.0);
+    }
+
+    let half = num_blocks / 2;
+    let combinations = generate_index_combinations(num_blocks, half, 50);
+    let mut oos_sharpes: Vec<f64> = Vec::new();
+
+    for combo in &combinations {
+        let selected: std::collections::HashSet<usize> = combo.iter().copied().collect();
+        let mut train_candles: Vec<&Value> = Vec::new();
+        let mut test_candles: Vec<&Value> = Vec::new();
+
+        for b in 0..num_blocks {
+            let start = b * block_size;
+            let end = if b == num_blocks - 1 { candles_json.len() } else { (b + 1) * block_size };
+            if selected.contains(&b) {
+                for c in &candles_json[start..end] {
+                    train_candles.push(c);
+                }
+            } else {
+                let purge_start = (start + purge_bars).min(end);
+                for c in &candles_json[purge_start..end] {
+                    test_candles.push(c);
+                }
+            }
+        }
+
+        if train_candles.len() < 15 || test_candles.len() < 5 { continue; }
+
+        let train_vec: Vec<Value> = train_candles.into_iter().cloned().collect();
+        let test_vec: Vec<Value> = test_candles.into_iter().cloned().collect();
+
+        let mut best_sharpe = f64::NEG_INFINITY;
+        let mut best_params = serde_json::json!({});
+        for p in param_combos {
+            let bt_input = serde_json::json!({
+                "strategy": strategy,
+                "symbol": symbol,
+                "initial_capital": initial_capital,
+                "candles": train_vec,
+                "params": p
+            });
+            if let Ok(res) = backtest::run(bt_input) {
+                let sharpe = res.get("sharpe_ratio")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(f64::NEG_INFINITY);
+                if sharpe > best_sharpe {
+                    best_sharpe = sharpe;
+                    best_params = p.clone();
+                }
+            }
+        }
+
+        let test_input = serde_json::json!({
+            "strategy": strategy,
+            "symbol": symbol,
+            "initial_capital": initial_capital,
+            "candles": test_vec,
+            "params": best_params
+        });
+        if let Ok(res) = backtest::run(test_input) {
+            let oos_sharpe = res.get("sharpe_ratio")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            oos_sharpes.push(oos_sharpe);
+        }
+    }
+
+    if oos_sharpes.is_empty() { return (0.0, 0.0, 1.0); }
+
+    let count = oos_sharpes.len() as f64;
+    let avg = oos_sharpes.iter().sum::<f64>() / count;
+    let variance = oos_sharpes.iter().map(|s| (s - avg).powi(2)).sum::<f64>() / count;
+    let std_dev = variance.sqrt();
+    let pbo = oos_sharpes.iter().filter(|&&s| s < 0.0).count() as f64 / count;
+
+    (round2(avg), round2(std_dev), round2(pbo))
+}
+
+fn whites_reality_check(strategy_returns: &[Vec<f64>], benchmark: f64) -> (f64, bool, f64) {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    if strategy_returns.is_empty() { return (1.0, false, 0.0); }
+
+    let performances: Vec<f64> = strategy_returns.iter().map(|returns| {
+        if returns.is_empty() { return 0.0; }
+        returns.iter().sum::<f64>() / returns.len() as f64 - benchmark
+    }).collect();
+
+    let best_perf = performances.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+    let best_idx = performances.iter()
+        .position(|&p| (p - best_perf).abs() < f64::EPSILON)
+        .unwrap_or(0);
+    let best_returns = &strategy_returns[best_idx];
+    let n = best_returns.len() as f64;
+    if n < 2.0 { return (1.0, false, 0.0); }
+
+    let mean = best_returns.iter().sum::<f64>() / n;
+    let variance = best_returns.iter()
+        .map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    let t_stat = if variance > 0.0 {
+        (mean - benchmark) / (variance.sqrt() / n.sqrt())
+    } else {
+        0.0
+    };
+
+    let centered: Vec<Vec<f64>> = strategy_returns.iter().map(|returns| {
+        if returns.is_empty() { return vec![]; }
+        let mean_r = returns.iter().sum::<f64>() / returns.len() as f64;
+        returns.iter().map(|&r| r - mean_r + benchmark).collect()
+    }).collect();
+
+    let num_bootstrap = 1000;
+    let mut count_exceed = 0usize;
+
+    for b in 0..num_bootstrap {
+        let mut max_boot_perf = f64::NEG_INFINITY;
+
+        for (s, c_returns) in centered.iter().enumerate() {
+            let m = c_returns.len();
+            if m == 0 { continue; }
+
+            let mut boot_sum = 0.0;
+            for i in 0..m {
+                let mut hasher = DefaultHasher::new();
+                (b, s, i).hash(&mut hasher);
+                let idx = hasher.finish() as usize % m;
+                boot_sum += c_returns[idx];
+            }
+            let boot_mean = boot_sum / m as f64;
+            let boot_perf = boot_mean - benchmark;
+            if boot_perf > max_boot_perf { max_boot_perf = boot_perf; }
+        }
+
+        if max_boot_perf >= best_perf { count_exceed += 1; }
+    }
+
+    let p_value = count_exceed as f64 / num_bootstrap as f64;
+    let p_rounded = (p_value * 1000.0).round() / 1000.0;
+
+    (p_rounded, p_rounded < 0.05, round2(t_stat))
+}
+
+fn strategy_significance(oos_returns: &[f64]) -> (f64, f64, bool, usize) {
+    let n = oos_returns.len();
+    if n < 2 { return (0.0, 1.0, false, n); }
+
+    let nf = n as f64;
+    let mean = oos_returns.iter().sum::<f64>() / nf;
+    let variance = oos_returns.iter()
+        .map(|r| (r - mean).powi(2)).sum::<f64>() / (nf - 1.0);
+    let std_dev = variance.sqrt();
+
+    if std_dev < 1e-15 {
+        return (0.0, 1.0, false, n);
+    }
+
+    let t_stat = mean / (std_dev / nf.sqrt());
+    let p_value = 2.0 * (1.0 - norm_cdf(t_stat.abs()));
+
+    (round2(t_stat), round2(p_value.max(0.0).min(1.0)), p_value < 0.05, n)
 }
 
 #[cfg(test)]

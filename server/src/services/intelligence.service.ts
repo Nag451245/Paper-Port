@@ -813,7 +813,7 @@ export class IntelligenceService {
       if (!credential?.sessionToken) return null;
       if (credential.sessionExpiresAt && new Date(credential.sessionExpiresAt) < new Date()) return null;
 
-      const key = createHash('sha256').update(env.ENCRYPTION_KEY || env.JWT_SECRET).digest();
+      const key = createHash('sha256').update(env.ENCRYPTION_KEY).digest();
       const decryptField = (encrypted: string) => {
         const [ivHex, data] = encrypted.split(':');
         const iv = Buffer.from(ivHex, 'hex');

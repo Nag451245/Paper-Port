@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import {
   TrendingUp,
   Bot,
@@ -15,12 +15,23 @@ import { usePortfolioStore } from '@/stores/portfolio';
 import { useAIAgentStore } from '@/stores/ai-agent';
 import { useMarketDataStore } from '@/stores/market-data';
 import { tradingApi } from '@/services/api';
+import { liveSocket } from '@/services/websocket';
 
 export default function Dashboard() {
   const { portfolios, summary, isLoading: portfolioLoading, fetchPortfolios } = usePortfolioStore();
   const { status, briefing, fetchStatus, fetchBriefing } = useAIAgentStore();
   const { vix, indices, watchlists, fetchWatchlists, fetchVIX, fetchIndices } = useMarketDataStore();
   const [todayTrades, setTodayTrades] = useState<any[]>([]);
+
+  const loadTodayTrades = useCallback(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    tradingApi.listTrades({ from_date: today, to_date: today, limit: 20 })
+      .then(({ data }) => {
+        const trades = Array.isArray(data) ? data : (data as any)?.trades ?? (data as any)?.items ?? [];
+        setTodayTrades(trades);
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     fetchPortfolios();
@@ -29,14 +40,29 @@ export default function Dashboard() {
     fetchWatchlists();
     fetchVIX();
     fetchIndices();
+    loadTodayTrades();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    const today = new Date().toISOString().slice(0, 10);
-    tradingApi.listTrades({ from_date: today, to_date: today, limit: 20 })
-      .then(({ data }) => {
-        const trades = Array.isArray(data) ? data : (data as any)?.trades ?? (data as any)?.items ?? [];
-        setTodayTrades(trades);
-      })
-      .catch(() => {});
+  // Real-time WebSocket updates: refresh portfolio and trades on order/position events
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const refresh = () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => {
+        fetchPortfolios();
+        loadTodayTrades();
+      }, 500);
+    };
+
+    const unsubs = [
+      liveSocket.on('order_filled', refresh),
+      liveSocket.on('position_opened', refresh),
+      liveSocket.on('position_closed', refresh),
+      liveSocket.on('circuit_breaker', refresh),
+    ];
+
+    return () => { unsubs.forEach(u => u()); if (debounceRef.current) clearTimeout(debounceRef.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -63,14 +89,7 @@ export default function Dashboard() {
         </div>
         <button
           onClick={() => {
-            fetchIndices(); fetchVIX(); fetchPortfolios();
-            const today = new Date().toISOString().slice(0, 10);
-            tradingApi.listTrades({ from_date: today, to_date: today, limit: 20 })
-              .then(({ data }) => {
-                const trades = Array.isArray(data) ? data : (data as any)?.trades ?? (data as any)?.items ?? [];
-                setTodayTrades(trades);
-              })
-              .catch(() => {});
+            fetchIndices(); fetchVIX(); fetchPortfolios(); loadTodayTrades();
           }}
           className="p-2.5 hover:bg-teal-50 rounded-xl transition group"
           title="Refresh"

@@ -264,6 +264,101 @@ impl Strategy for EmaCrossover {
     }
 }
 
+// ─── SuperTrend Strategy ─────────────────────────────────────────────
+// Uses ATR-based trailing bands. When price crosses above the lower band,
+// it's an uptrend (buy). When price crosses below the upper band, it's a
+// downtrend (sell/short). This is NOT EMA crossover.
+
+pub struct SuperTrend {
+    atr_period: usize,
+    multiplier: f64,
+    in_uptrend: Option<bool>,
+    final_upper: f64,
+    final_lower: f64,
+}
+
+impl SuperTrend {
+    pub fn new(config: &EngineConfig) -> Self {
+        Self {
+            atr_period: config.backtest.supertrend_atr_period,
+            multiplier: config.backtest.supertrend_multiplier,
+            in_uptrend: None,
+            final_upper: 0.0,
+            final_lower: 0.0,
+        }
+    }
+}
+
+impl Strategy for SuperTrend {
+    fn name(&self) -> &str { "supertrend" }
+
+    fn warmup_period(&self) -> usize { self.atr_period + 1 }
+
+    fn reset(&mut self) {
+        self.in_uptrend = None;
+        self.final_upper = 0.0;
+        self.final_lower = 0.0;
+    }
+
+    fn on_candle(&mut self, i: usize, candle: &Candle, ind: &Indicators) -> Option<Signal> {
+        if i < self.atr_period { return None; }
+        let atr = ind.atr[i];
+        if atr <= 0.0 { return None; }
+
+        let hl2 = (candle.high + candle.low) / 2.0;
+        let basic_upper = hl2 + self.multiplier * atr;
+        let basic_lower = hl2 - self.multiplier * atr;
+
+        // Ratchet the bands — upper can only decrease, lower can only increase
+        let prev_upper = self.final_upper;
+        let prev_lower = self.final_lower;
+
+        self.final_lower = if basic_lower > prev_lower || (i > 0 && ind.closes[i - 1] < prev_lower) {
+            basic_lower
+        } else {
+            basic_lower.max(prev_lower)
+        };
+
+        self.final_upper = if basic_upper < prev_upper || (i > 0 && ind.closes[i - 1] > prev_upper) {
+            basic_upper
+        } else {
+            basic_upper.min(prev_upper)
+        };
+
+        let was_uptrend = self.in_uptrend;
+        let now_uptrend = match was_uptrend {
+            Some(true) => candle.close >= self.final_lower,
+            Some(false) => candle.close > self.final_upper,
+            None => candle.close > self.final_upper,
+        };
+        self.in_uptrend = Some(now_uptrend);
+
+        match (was_uptrend, now_uptrend) {
+            (Some(false), true) => {
+                Some(Signal {
+                    side: Side::Buy,
+                    price: candle.close,
+                    stop_loss: Some(self.final_lower),
+                    take_profit: None,
+                    confidence: ((candle.close - self.final_lower) / candle.close).min(1.0),
+                    reason: format!("SuperTrend flipped to uptrend (lower band: {:.2})", self.final_lower),
+                })
+            }
+            (Some(true), false) => {
+                Some(Signal {
+                    side: Side::Sell,
+                    price: candle.close,
+                    stop_loss: Some(self.final_upper),
+                    take_profit: None,
+                    confidence: ((self.final_upper - candle.close) / candle.close).min(1.0),
+                    reason: format!("SuperTrend flipped to downtrend (upper band: {:.2})", self.final_upper),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
 pub struct SmaCrossover {
     short_period: usize,
     long_period: usize,
@@ -1062,11 +1157,13 @@ impl Strategy for CalendarSpread {
 fn calc_vol(data: &[f64]) -> f64 {
     if data.len() < 2 { return 0.0; }
     let returns: Vec<f64> = data.windows(2)
-        .map(|w| if w[0] != 0.0 { (w[1] / w[0]).ln() } else { 0.0 })
+        .map(|w| if w[0] > 0.0 && w[1] > 0.0 { (w[1] / w[0]).ln() } else { 0.0 })
         .collect();
+    if returns.is_empty() { return 0.0; }
     let mean = returns.iter().sum::<f64>() / returns.len() as f64;
     let var = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
-    var.sqrt()
+    let result = var.sqrt();
+    if result.is_nan() || result.is_infinite() { 0.0 } else { result }
 }
 
 pub struct TrendFollowing {
@@ -1144,8 +1241,11 @@ impl Strategy for TrendFollowing {
 /// Create a strategy instance by name, configured from the engine config.
 pub fn create_strategy(name: &str, config: &EngineConfig) -> Result<Box<dyn Strategy>, String> {
     match name {
-        "ema_crossover" | "ema-crossover" | "supertrend" => {
+        "ema_crossover" | "ema-crossover" => {
             Ok(Box::new(EmaCrossover::new(config)))
+        }
+        "supertrend" | "super_trend" | "super-trend" => {
+            Ok(Box::new(SuperTrend::new(config)))
         }
         "sma_crossover" | "sma-crossover" => {
             Ok(Box::new(SmaCrossover::new(config)))
@@ -1690,6 +1790,7 @@ mod tests {
             "volatility-breakout",
             "ema-crossover",
             "supertrend",
+            "super-trend",
             "vwap-reversion",
             "trend-following",
             "pairs-trading",
@@ -1707,6 +1808,84 @@ mod tests {
                 "Alias '{}' should create a valid strategy",
                 alias,
             );
+        }
+    }
+
+    #[test]
+    fn test_supertrend_is_not_ema_crossover() {
+        let config = make_config();
+        let st = create_strategy("supertrend", &config).unwrap();
+        let ema = create_strategy("ema_crossover", &config).unwrap();
+        assert_eq!(st.name(), "supertrend");
+        assert_eq!(ema.name(), "ema_crossover");
+        assert_ne!(st.name(), ema.name(), "SuperTrend must not be EMA Crossover");
+    }
+
+    #[test]
+    fn test_supertrend_generates_buy_and_sell() {
+        let config = make_config();
+        // Price goes up strongly then down strongly — SuperTrend should flip
+        let mut candles: Vec<Candle> = Vec::new();
+        for i in 0..30 {
+            let close = 100.0 + i as f64 * 1.5;
+            candles.push(Candle {
+                timestamp: format!("2025-01-{:02}", (i % 28) + 1),
+                open: close - 0.5,
+                high: close + 2.0,
+                low: close - 1.0,
+                close,
+                volume: 100000.0,
+            });
+        }
+        for i in 0..30 {
+            let close = 145.0 - i as f64 * 2.0;
+            candles.push(Candle {
+                timestamp: format!("2025-02-{:02}", (i % 28) + 1),
+                open: close + 0.5,
+                high: close + 1.0,
+                low: close - 2.0,
+                close,
+                volume: 100000.0,
+            });
+        }
+        let indicators = Indicators::from_candles(&candles, &config);
+        let mut strat = SuperTrend::new(&config);
+        let mut buys = 0;
+        let mut sells = 0;
+        for (i, candle) in candles.iter().enumerate() {
+            if let Some(sig) = strat.on_candle(i, candle, &indicators) {
+                match sig.side {
+                    Side::Buy => buys += 1,
+                    Side::Sell => sells += 1,
+                }
+            }
+        }
+        assert!(buys > 0, "SuperTrend should generate BUY signal on uptrend");
+        assert!(sells > 0, "SuperTrend should generate SELL signal on downtrend");
+    }
+
+    #[test]
+    fn test_supertrend_stop_loss_set() {
+        let config = make_config();
+        let mut candles: Vec<Candle> = Vec::new();
+        for i in 0..40 {
+            let close = 100.0 + i as f64 * 1.0;
+            candles.push(Candle {
+                timestamp: format!("2025-01-{:02}", (i % 28) + 1),
+                open: close - 0.3,
+                high: close + 1.5,
+                low: close - 0.8,
+                close,
+                volume: 50000.0,
+            });
+        }
+        let indicators = Indicators::from_candles(&candles, &config);
+        let mut strat = SuperTrend::new(&config);
+        for (i, candle) in candles.iter().enumerate() {
+            if let Some(sig) = strat.on_candle(i, candle, &indicators) {
+                assert!(sig.stop_loss.is_some(), "SuperTrend signals should include stop_loss (ATR band)");
+                return;
+            }
         }
     }
 }

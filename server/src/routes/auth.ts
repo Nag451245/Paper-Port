@@ -152,6 +152,19 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
+  app.delete('/breeze-credentials', { preHandler: [authenticate] }, async (request, reply) => {
+    try {
+      const userId = getUserId(request);
+      await authService.deleteBreezeCredentials(userId);
+      return reply.send({ success: true });
+    } catch (err) {
+      if (err instanceof AuthError) {
+        return reply.code(err.statusCode).send({ error: err.message });
+      }
+      throw err;
+    }
+  });
+
   app.get('/breeze-credentials/status', { preHandler: [authenticate] }, async (request, reply) => {
     try {
       const userId = getUserId(request);

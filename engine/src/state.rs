@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use crate::config::EngineConfig;
@@ -78,6 +78,8 @@ pub struct AppState {
     /// Stores the day-of-year * 1000 + year for automatic daily reset
     last_reset_day: std::sync::atomic::AtomicU32,
     pub started_at: std::time::Instant,
+    /// Guards open_position/close_position/recalculate_nav to prevent TOCTOU races
+    position_lock: Mutex<()>,
 }
 
 impl AppState {
@@ -93,6 +95,7 @@ impl AppState {
             daily_trade_count: std::sync::atomic::AtomicUsize::new(0),
             last_reset_day: std::sync::atomic::AtomicU32::new(current_day_key()),
             started_at: std::time::Instant::now(),
+            position_lock: Mutex::new(()),
         })
     }
 
@@ -101,10 +104,20 @@ impl AppState {
     }
 
     pub fn set_nav(&self, val: f64) {
-        self.nav.store(val.to_bits(), std::sync::atomic::Ordering::Relaxed);
-        let peak = self.get_peak_nav();
-        if val > peak {
-            self.peak_nav.store(val.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        self.nav.store(val.to_bits(), std::sync::atomic::Ordering::Release);
+        // CAS loop: only update peak if val is strictly greater (prevents regression)
+        loop {
+            let old_peak_bits = self.peak_nav.load(std::sync::atomic::Ordering::Acquire);
+            let old_peak = f64::from_bits(old_peak_bits);
+            if val <= old_peak { break; }
+            if self.peak_nav.compare_exchange_weak(
+                old_peak_bits,
+                val.to_bits(),
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            ).is_ok() {
+                break;
+            }
         }
     }
 
@@ -117,7 +130,23 @@ impl AppState {
     }
 
     pub fn set_cash(&self, val: f64) {
-        self.cash.store(val.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        self.cash.store(val.to_bits(), std::sync::atomic::Ordering::Release);
+    }
+
+    /// Atomically add a delta to cash using CAS loop (safe under concurrency)
+    fn adjust_cash(&self, delta: f64) {
+        loop {
+            let old_bits = self.cash.load(std::sync::atomic::Ordering::Acquire);
+            let old_val = f64::from_bits(old_bits);
+            let new_bits = (old_val + delta).to_bits();
+            if self.cash.compare_exchange_weak(
+                old_bits, new_bits,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            ).is_ok() {
+                break;
+            }
+        }
     }
 
     pub fn get_realized_pnl(&self) -> f64 {
@@ -125,8 +154,18 @@ impl AppState {
     }
 
     pub fn add_realized_pnl(&self, pnl: f64) {
-        let current = self.get_realized_pnl();
-        self.realized_pnl.store((current + pnl).to_bits(), std::sync::atomic::Ordering::Relaxed);
+        loop {
+            let old_bits = self.realized_pnl.load(std::sync::atomic::Ordering::Acquire);
+            let old_val = f64::from_bits(old_bits);
+            let new_bits = (old_val + pnl).to_bits();
+            if self.realized_pnl.compare_exchange_weak(
+                old_bits, new_bits,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            ).is_ok() {
+                break;
+            }
+        }
     }
 
     pub fn increment_trades(&self) -> usize {
@@ -174,7 +213,10 @@ impl AppState {
     }
 
     /// Open a new position. Returns Err if risk limits are exceeded.
+    /// Holds position_lock to prevent TOCTOU between len check and insert.
     pub fn open_position(&self, pos: Position) -> Result<(), String> {
+        let _guard = self.position_lock.lock().unwrap();
+
         let nav = self.get_nav();
 
         if self.positions.len() >= self.config.risk.max_open_positions {
@@ -189,7 +231,6 @@ impl AppState {
             ));
         }
 
-        // Check trade count BEFORE incrementing so rejections don't inflate the counter
         self.check_daily_reset();
         let current_count = self.daily_trade_count.load(std::sync::atomic::Ordering::Relaxed);
         if current_count >= self.config.risk.max_daily_trades {
@@ -197,53 +238,63 @@ impl AppState {
         }
 
         let peak = self.get_peak_nav();
-        let dd = (peak - nav) / peak * 100.0;
+        let dd = if peak > 0.0 { (peak - nav) / peak * 100.0 } else { 0.0 };
         if dd > self.config.risk.max_drawdown_pct {
             return Err(format!(
                 "Drawdown {:.1}% exceeds circuit breaker {:.1}%", dd, self.config.risk.max_drawdown_pct
             ));
         }
 
-        // All risk checks passed — NOW increment
         self.increment_trades();
 
         let cost = position_value * self.config.costs.slippage_bps / 10_000.0
             + self.config.costs.commission_per_trade;
-        self.set_cash(self.get_cash() - position_value - cost);
+        self.adjust_cash(-(position_value + cost));
 
         self.positions.insert(pos.symbol.clone(), pos);
-        self.recalculate_nav();
+        self.recalculate_nav_locked();
         Ok(())
     }
 
     /// Close a position by symbol. Returns the realized PnL.
+    /// Holds position_lock so cash + positions are read atomically in recalculate_nav.
     pub fn close_position(&self, symbol: &str, exit_price: f64) -> Result<f64, String> {
+        let _guard = self.position_lock.lock().unwrap();
+
         match self.positions.remove(symbol) {
             Some((_, mut pos)) => {
                 pos.update_price(exit_price);
                 let pnl = pos.unrealized_pnl;
                 let value = exit_price * pos.qty.unsigned_abs() as f64;
+                let is_sell_txn = pos.side == "buy";
                 let cost = value * self.config.costs.slippage_bps / 10_000.0
                     + self.config.costs.commission_per_trade
-                    + if pos.side == "sell" { value * self.config.costs.stt_pct / 100.0 } else { 0.0 };
+                    + if is_sell_txn { value * self.config.costs.stt_pct / 100.0 } else { 0.0 };
 
                 let net_pnl = pnl - cost;
                 self.add_realized_pnl(net_pnl);
-                self.set_cash(self.get_cash() + value - cost);
-                self.recalculate_nav();
-                self.increment_trades();
+                self.adjust_cash(value - cost);
+                self.recalculate_nav_locked();
                 Ok(net_pnl)
             }
             None => Err(format!("No open position for {}", symbol)),
         }
     }
 
-    fn recalculate_nav(&self) {
+    /// Must be called while position_lock is held (open_position / close_position).
+    /// Reads cash + all position values as a consistent snapshot.
+    fn recalculate_nav_locked(&self) {
         let mut total = self.get_cash();
         for entry in self.positions.iter() {
             total += entry.value().market_value();
         }
         self.set_nav(total);
+    }
+
+    /// Public recalculate_nav that acquires the lock itself (for external callers).
+    pub fn recalculate_nav(&self) {
+        let _guard = self.position_lock.lock().unwrap();
+        self.recalculate_nav_locked();
     }
 
     pub fn cache_signal(&self, signal: CachedSignal) {

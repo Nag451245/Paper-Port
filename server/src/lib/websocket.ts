@@ -2,16 +2,20 @@ import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import websocket from '@fastify/websocket';
 
+const HEARTBEAT_INTERVAL_MS = 30_000;
+
 interface WsClient {
   socket: WebSocket;
   userId: string;
   subscribedSymbols: Set<string>;
   channels: Set<string>;
+  isAlive: boolean;
 }
 
 class WebSocketHub {
   private clients = new Map<WebSocket, WsClient>();
   private symbolSubscriptions = new Map<string, Set<WebSocket>>();
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   register(socket: WebSocket, userId: string): void {
     const client: WsClient = {
@@ -19,8 +23,14 @@ class WebSocketHub {
       userId,
       subscribedSymbols: new Set(),
       channels: new Set(['signals', 'notifications', 'bot_messages']),
+      isAlive: true,
     };
     this.clients.set(socket, client);
+
+    socket.on('pong', () => {
+      const c = this.clients.get(socket);
+      if (c) c.isAlive = true;
+    });
 
     socket.on('message', (raw) => {
       try {
@@ -33,11 +43,38 @@ class WebSocketHub {
     socket.on('error', () => this.unregister(socket));
 
     socket.send(JSON.stringify({ type: 'connected', timestamp: new Date().toISOString() }));
+
+    this.ensureHeartbeat();
+  }
+
+  private ensureHeartbeat(): void {
+    if (this.heartbeatTimer) return;
+    this.heartbeatTimer = setInterval(() => {
+      for (const [ws, client] of this.clients) {
+        if (!client.isAlive) {
+          this.unregister(ws);
+          continue;
+        }
+        client.isAlive = false;
+        try { ws.ping(); } catch { this.unregister(ws); }
+      }
+
+      if (this.clients.size === 0 && this.heartbeatTimer) {
+        clearInterval(this.heartbeatTimer);
+        this.heartbeatTimer = null;
+      }
+    }, HEARTBEAT_INTERVAL_MS);
   }
 
   private handleMessage(socket: WebSocket, msg: { action?: string; symbols?: string[]; channel?: string }): void {
     const client = this.clients.get(socket);
     if (!client) return;
+
+    if (msg.action === 'ping') {
+      client.isAlive = true;
+      try { socket.send(JSON.stringify({ type: 'pong' })); } catch { /* closed */ }
+      return;
+    }
 
     if (msg.action === 'subscribe_prices' && Array.isArray(msg.symbols)) {
       for (const sym of msg.symbols.slice(0, 50)) {
@@ -143,6 +180,18 @@ class WebSocketHub {
       return subs && subs.size > 0;
     });
   }
+
+  shutdown(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    for (const [ws] of this.clients) {
+      try { ws.close(1001, 'Server shutting down'); } catch { /* ignore */ }
+    }
+    this.clients.clear();
+    this.symbolSubscriptions.clear();
+  }
 }
 
 export const wsHub = new WebSocketHub();
@@ -154,7 +203,6 @@ export async function registerWebSocket(app: FastifyInstance): Promise<void> {
     let userId: string | null = null;
 
     try {
-      // Prefer token from Authorization header (Sec-WebSocket-Protocol or query param)
       const authHeader = req.headers['authorization'];
       let token: string | null = null;
 

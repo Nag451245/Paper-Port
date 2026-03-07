@@ -8,6 +8,8 @@ import { wsHub } from '../lib/websocket.js';
 import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
 import { TWAPExecutor, selectOrderType, type TWAPConfig } from './twap-executor.service.js';
+import { ExitCoordinator } from './exit-coordinator.service.js';
+import { DecisionAuditService } from './decision-audit.service.js';
 type OrderSide = string;
 type OrderType = string;
 type Exchange = string;
@@ -197,7 +199,7 @@ export class TradeService {
     this.marketData = new MarketDataService();
     this.calendar = new MarketCalendar();
     this.riskService = new RiskService(prisma);
-    this.oms = oms ?? null;
+    this.oms = oms ?? new OrderManagementService(prisma);
     this.twapExecutor = new TWAPExecutor(prisma);
 
     if (TRADING_MODE === 'LIVE') {
@@ -310,9 +312,21 @@ export class TradeService {
 
       try {
         const quote = await this.marketData.getQuote(pos.symbol, 'NSE');
-        await this.closePosition(pos.id, userId, quote.ltp);
-        recovered += pos.value;
-        closedPositions.push(pos.symbol);
+        const exitResult = await ExitCoordinator.closePosition({
+          positionId: pos.id,
+          userId,
+          exitPrice: quote.ltp,
+          reason: 'Capital recovery: closing worst performer',
+          source: 'CAPITAL_RECOVERY',
+          decisionType: 'EXIT_SIGNAL',
+          prisma: this.prisma,
+          tradeService: this,
+          decisionAudit: new DecisionAuditService(this.prisma),
+        });
+        if (exitResult.success) {
+          recovered += pos.value;
+          closedPositions.push(pos.symbol);
+        }
       } catch (err) {
         log.error({ err, symbol: pos.symbol }, 'Capital recovery: failed to close position');
       }
@@ -388,10 +402,12 @@ export class TradeService {
             confidence: 0.5,
             spreadPct: 0.05,
           });
-          if (routing.orderType === 'TWAP') {
+          if (routing.orderType === 'TWAP' || routing.orderType === 'VWAP') {
             log.info({
               symbol: input.symbol, qty: input.qty, reason: routing.reason,
-            }, 'Auto-routing large order through TWAP');
+              estimatedImpactBps: routing.estimatedImpactBps,
+              executionType: routing.orderType,
+            }, `Auto-routing large order through ${routing.orderType}`);
 
             const twapConfig: TWAPConfig = {
               totalQty: input.qty,
@@ -405,14 +421,17 @@ export class TradeService {
               userId,
               strategyTag: input.strategyTag,
             };
-            const twapResult = await this.twapExecutor.executeTWAP(twapConfig);
+
+            const twapResult = routing.orderType === 'VWAP'
+              ? await this.twapExecutor.executeVWAP(twapConfig)
+              : await this.twapExecutor.executeTWAP(twapConfig);
             if (twapResult.totalFilled > 0) {
               log.info({
                 symbol: input.symbol,
                 totalFilled: twapResult.totalFilled,
                 avgPrice: twapResult.avgFillPrice,
                 slippageBps: twapResult.slippageBps,
-              }, 'TWAP execution completed — returning first slice order');
+              }, `${routing.orderType} execution completed`);
             }
             return twapResult as any;
           }
@@ -535,7 +554,7 @@ export class TradeService {
     emit('execution', {
       type: 'ORDER_PLACED', userId, orderId: order.id,
       symbol: input.symbol, side: input.side, qty: input.qty, orderType: input.orderType,
-    }).catch(() => {});
+    }).catch(err => log.error({ err, orderId: order.id }, 'Failed to emit ORDER_PLACED event'));
 
     // Transition PENDING → SUBMITTED via OMS
     if (this.oms) {
@@ -561,7 +580,7 @@ export class TradeService {
         type: 'ORDER_FILLED', userId, orderId: order.id,
         symbol: input.symbol, fillPrice, qty: effectiveQty,
         slippageBps: execSimResult?.slippageBps ?? 0,
-      }).catch(() => {});
+      }).catch(err => log.error({ err, orderId: order.id }, 'Failed to emit ORDER_FILLED event'));
 
       wsHub.broadcastTradeExecution(userId, {
         symbol: input.symbol,
@@ -994,12 +1013,24 @@ export class TradeService {
           continue;
         }
 
-        const trade = await this.closePosition(posId, userId, exitPrice);
+        const exitResult = await ExitCoordinator.closePosition({
+          positionId: posId,
+          userId,
+          exitPrice,
+          reason: 'Strategy leg exit',
+          source: 'STRATEGY_LEG_EXIT',
+          decisionType: 'EXIT_SIGNAL',
+          prisma: this.prisma,
+          tradeService: this,
+          decisionAudit: new DecisionAuditService(this.prisma),
+        });
         results.push({
           positionId: posId,
-          success: true,
-          message: `${position.side === 'SHORT' ? 'Covered' : 'Sold'} ${position.qty} ${position.symbol} @ ₹${exitPrice.toFixed(2)}`,
-          pnl: Number(trade.netPnl),
+          success: exitResult.success,
+          message: exitResult.success
+            ? `${position.side === 'SHORT' ? 'Covered' : 'Sold'} ${position.qty} ${position.symbol} @ ₹${exitPrice.toFixed(2)}`
+            : (exitResult.error ?? 'Exit failed'),
+          pnl: exitResult.pnl,
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1034,6 +1065,15 @@ export class TradeService {
 
     if (position.status !== 'OPEN') {
       throw new TradeError('Position is already closed', 400);
+    }
+
+    // Atomic check-and-close: only update if still OPEN (prevents TOCTOU double-close)
+    const atomicClose = await this.prisma.position.updateMany({
+      where: { id: positionId, status: 'OPEN' },
+      data: { status: 'CLOSING' as any },
+    });
+    if (atomicClose.count === 0) {
+      throw new TradeError('Position is already being closed by another process', 409);
     }
 
     const entryPrice = Number(position.avgEntryPrice);
@@ -1094,7 +1134,7 @@ export class TradeService {
     emit('execution', {
       type: 'POSITION_CLOSED', userId, positionId,
       symbol: position.symbol, pnl: netPnl, exitPrice,
-    }).catch(() => {});
+    }).catch(err => log.error({ err, positionId }, 'Failed to emit POSITION_CLOSED event'));
 
     return trade;
   }

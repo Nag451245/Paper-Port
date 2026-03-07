@@ -139,7 +139,7 @@ export class TWAPExecutor {
       type: 'ORDER_FILLED', userId: config.userId, orderId: executionId,
       symbol: config.symbol, fillPrice: avgFillPrice, qty: totalFilled,
       slippageBps: Number(slippageBps.toFixed(2)),
-    }).catch(() => {});
+    }).catch(err => log.error({ err, executionId }, 'Failed to emit TWAP ORDER_FILLED event'));
 
     log.info({ executionId, totalFilled, avgFillPrice, slippageBps: slippageBps.toFixed(2) }, 'TWAP execution completed');
 
@@ -183,6 +183,63 @@ export class TWAPExecutor {
   getActiveExecutions(): string[] {
     return Array.from(this.activeExecutions.keys());
   }
+
+  /**
+   * Compute implementation shortfall: the cost of execution vs. decision price.
+   * IS = (Execution VWAP - Decision Price) / Decision Price * 10000 (in bps)
+   * Decomposed into: delay cost + market impact + timing cost
+   */
+  computeImplementationShortfall(
+    decisionPrice: number,
+    arrivalPrice: number,
+    executionVwap: number,
+    totalQty: number,
+    avgDailyVolume: number,
+  ): {
+    totalShortfallBps: number;
+    delayCostBps: number;
+    marketImpactBps: number;
+    timingCostBps: number;
+    participationRate: number;
+  } {
+    if (decisionPrice <= 0) {
+      return { totalShortfallBps: 0, delayCostBps: 0, marketImpactBps: 0, timingCostBps: 0, participationRate: 0 };
+    }
+
+    const totalIS = (executionVwap - decisionPrice) / decisionPrice * 10000;
+    const delayCost = (arrivalPrice - decisionPrice) / decisionPrice * 10000;
+    const marketImpact = this.estimateMarketImpact(totalQty, decisionPrice, avgDailyVolume);
+    const timingCost = totalIS - delayCost - marketImpact;
+
+    return {
+      totalShortfallBps: round2(totalIS),
+      delayCostBps: round2(delayCost),
+      marketImpactBps: round2(marketImpact),
+      timingCostBps: round2(timingCost),
+      participationRate: avgDailyVolume > 0 ? round2(totalQty / avgDailyVolume * 100) : 0,
+    };
+  }
+
+  /**
+   * Square-root market impact model: Impact = σ * sqrt(Q / V) * constant
+   * Based on Almgren-Chriss framework, simplified for Indian equities.
+   */
+  estimateMarketImpact(qty: number, price: number, avgDailyVolume: number): number {
+    if (avgDailyVolume <= 0 || price <= 0) return 0;
+
+    const participationRate = qty / avgDailyVolume;
+    // Empirical constant for Indian equities (~0.5-1.5 based on NSE studies)
+    const impactConstant = 0.8;
+    // Assumed daily volatility of 1.5% for Indian large-caps
+    const dailyVol = 0.015;
+
+    const impactPct = impactConstant * dailyVol * Math.sqrt(participationRate);
+    return impactPct * 10000;
+  }
+}
+
+function round2(v: number): number {
+  return Math.round(v * 100) / 100;
 }
 
 export function selectOrderType(params: {
@@ -191,25 +248,42 @@ export function selectOrderType(params: {
   avgDailyVolume: number;
   confidence: number;
   spreadPct: number;
-}): { orderType: 'MARKET' | 'LIMIT' | 'TWAP'; reason: string } {
+}): { orderType: 'MARKET' | 'LIMIT' | 'TWAP' | 'VWAP'; reason: string; estimatedImpactBps: number } {
   const { qty, ltp, avgDailyVolume, confidence, spreadPct } = params;
   const participationRate = avgDailyVolume > 0 ? qty / avgDailyVolume : 0;
 
+  // Square-root impact model
+  const dailyVol = 0.015;
+  const impactBps = avgDailyVolume > 0
+    ? round2(0.8 * dailyVol * Math.sqrt(participationRate) * 10000)
+    : 0;
+
+  // High participation (>2%) — use VWAP for volume-weighted distribution
+  if (participationRate > 0.02) {
+    return { orderType: 'VWAP', reason: `Order is ${(participationRate * 100).toFixed(2)}% of daily volume — VWAP to match volume profile`, estimatedImpactBps: impactBps };
+  }
+
+  // Moderate participation (>1%) — use TWAP for time-weighted slicing
   if (participationRate > 0.01) {
-    return { orderType: 'TWAP', reason: `Order is ${(participationRate * 100).toFixed(2)}% of daily volume — use TWAP to reduce impact` };
+    return { orderType: 'TWAP', reason: `Order is ${(participationRate * 100).toFixed(2)}% of daily volume — TWAP to reduce impact`, estimatedImpactBps: impactBps };
+  }
+
+  // Mid-cap with noticeable estimated impact (>5 bps) — use TWAP regardless
+  if (impactBps > 5 && qty * ltp > 50_000) {
+    return { orderType: 'TWAP', reason: `Estimated market impact ${impactBps.toFixed(1)} bps — TWAP to reduce slippage`, estimatedImpactBps: impactBps };
   }
 
   if (confidence >= 0.7) {
-    return { orderType: 'MARKET', reason: 'High confidence signal — MARKET for immediate fill' };
+    return { orderType: 'MARKET', reason: 'High confidence signal — MARKET for immediate fill', estimatedImpactBps: impactBps };
   }
 
   if (spreadPct > 0.1) {
-    return { orderType: 'LIMIT', reason: `Wide spread (${spreadPct.toFixed(2)}%) — LIMIT at mid-price to reduce cost` };
+    return { orderType: 'LIMIT', reason: `Wide spread (${spreadPct.toFixed(2)}%) — LIMIT at mid-price to reduce cost`, estimatedImpactBps: impactBps };
   }
 
   if (confidence < 0.5) {
-    return { orderType: 'LIMIT', reason: 'Low confidence — LIMIT at favorable price' };
+    return { orderType: 'LIMIT', reason: 'Low confidence — LIMIT at favorable price', estimatedImpactBps: impactBps };
   }
 
-  return { orderType: 'MARKET', reason: 'Standard execution' };
+  return { orderType: 'MARKET', reason: 'Standard execution', estimatedImpactBps: impactBps };
 }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::utils::{Candle, get_f64};
+use crate::utils::{Candle, get_f64, calc_atr_candles};
 use crate::signals;
 
 #[derive(Deserialize)]
@@ -193,7 +193,7 @@ pub fn compute(data: Value) -> Result<Value, String> {
             Some(c) => c.close,
             None => continue,
         };
-        let atr = calc_atr(ref_candles, 14);
+        let atr = calc_atr_candles(ref_candles, 14);
 
         let (entry, stop_loss, target) = if direction == "LONG" {
             (close, close - 2.0 * atr, close + 3.0 * atr)
@@ -235,21 +235,6 @@ pub fn compute(data: Value) -> Result<Value, String> {
 
     serde_json::to_value(MTFOutput { signals: out_signals })
         .map_err(|e| format!("Serialization error: {}", e))
-}
-
-fn calc_atr(candles: &[Candle], period: usize) -> f64 {
-    if candles.len() < period + 1 {
-        return 0.0;
-    }
-    let start = candles.len() - period;
-    let mut sum = 0.0;
-    for i in start..candles.len() {
-        let tr = (candles[i].high - candles[i].low)
-            .max((candles[i].high - candles[i - 1].close).abs())
-            .max((candles[i].low - candles[i - 1].close).abs());
-        sum += tr;
-    }
-    sum / period as f64
 }
 
 #[cfg(test)]

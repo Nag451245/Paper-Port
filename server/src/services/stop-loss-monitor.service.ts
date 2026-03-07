@@ -290,7 +290,7 @@ export class StopLossMonitor {
           this.prisma.position.update({
             where: { id },
             data: { unrealizedPnl },
-          }).catch(() => {})
+          }).catch(err => log.warn({ err, positionId: id }, 'Failed to persist unrealizedPnl'))
         )
       );
     }

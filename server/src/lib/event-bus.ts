@@ -16,7 +16,8 @@ export type MarketDataEvent =
 export type SignalEvent =
   | { type: 'SIGNAL_GENERATED'; userId: string; botId?: string; symbol: string; direction: string; confidence: number; entry: number; stopLoss: number; target: number; source: string }
   | { type: 'SIGNAL_VALIDATED'; userId: string; symbol: string; direction: string; approved: boolean; reason: string }
-  | { type: 'SIGNAL_EXPIRED'; userId: string; symbol: string; signalId: string };
+  | { type: 'SIGNAL_EXPIRED'; userId: string; symbol: string; signalId: string }
+  | { type: 'PIPELINE_SIGNAL'; symbol: string; direction: 'BUY' | 'SELL'; confidence: number; strategy: string; mlScore: number; source: string };
 
 export type ExecutionEvent =
   | { type: 'ORDER_PLACED'; userId: string; orderId: string; symbol: string; side: string; qty: number; orderType: string }

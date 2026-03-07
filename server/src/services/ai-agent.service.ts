@@ -6,6 +6,8 @@ import { TradeService } from './trade.service.js';
 import { MarketDataService } from './market-data.service.js';
 import { engineRisk, isEngineAvailable } from '../lib/rust-engine.js';
 import { OptionsService, calculateMaxPain, calculateIVPercentile } from './options.service.js';
+import { ExitCoordinator } from './exit-coordinator.service.js';
+import { DecisionAuditService } from './decision-audit.service.js';
 
 export interface SignalAnalysis {
   signal: 'BUY' | 'SELL' | 'HOLD';
@@ -249,7 +251,20 @@ Respond in JSON:
 
         if (exitPrice <= 0) throw new AIAgentError(`Cannot sell ${signal.symbol}: no price available`, 400);
 
-        await tradeService.closePosition(longPosition.id, userId, exitPrice);
+        const exitResult = await ExitCoordinator.closePosition({
+          positionId: longPosition.id,
+          userId,
+          exitPrice,
+          reason: `AI signal SELL for ${signal.symbol}`,
+          source: 'AI_AGENT',
+          decisionType: 'EXIT_SIGNAL',
+          prisma: this.prisma,
+          tradeService,
+          decisionAudit: new DecisionAuditService(this.prisma),
+        });
+        if (!exitResult.success && !exitResult.alreadyClosing) {
+          throw new AIAgentError(exitResult.error ?? 'Exit failed', 500);
+        }
       } else {
         // No LONG position — open a SHORT (sell without holdings)
         let ltp = 0;

@@ -112,7 +112,16 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_req, body, done) => {
-    done(null, body ? {} : {});
+    try {
+      if (!body || typeof body !== 'string' || body.length === 0) {
+        done(null, {});
+        return;
+      }
+      const parsed = Object.fromEntries(new URLSearchParams(body));
+      done(null, parsed);
+    } catch (err) {
+      done(err as Error, undefined);
+    }
   });
 
   app.setErrorHandler((error: Error & { statusCode?: number }, _request, reply) => {
@@ -130,7 +139,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   registerAllWorkers(getPrisma(), learningEngine, botEngine);
   dataPipeline.initialize().then(ok => {
     if (ok) dataPipeline.startConsumer();
-  }).catch(() => {});
+  }).catch(err => app.log.error({ err }, 'Data pipeline initialization failed'));
 
   // Track request latency and errors for uptime monitoring
   app.addHook('onResponse', async (request, reply) => {
@@ -629,7 +638,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
     // Generate initial briefing 30s after startup
     setTimeout(() => {
-      agentService.regenerateBriefing().catch(() => {});
+      agentService.regenerateBriefing().catch(err => app.log.warn({ err }, 'Initial briefing generation failed'));
       app.log.info('[Briefing] Initial briefing generation triggered');
     }, 30_000);
   });

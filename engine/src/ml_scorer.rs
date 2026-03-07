@@ -258,13 +258,24 @@ pub fn compute(data: Value) -> Result<Value, String> {
                 entry.1 /= total_score;
             }
 
-            // Apply minimum allocation floor (5%) and maximum cap (40%)
+            // Apply minimum allocation floor (5%) and maximum cap (40%), then renormalize
             let n = raw_scores.len() as f64;
             let min_alloc = (0.05f64).min(1.0 / n);
             let max_alloc = 0.40f64;
 
-            let allocations: Vec<serde_json::Value> = raw_scores.iter().map(|(id, score)| {
+            let mut clamped: Vec<(&str, f64, f64)> = raw_scores.iter().map(|(id, score)| {
                 let alloc = score.max(min_alloc).min(max_alloc);
+                (id.as_str(), alloc, *score)
+            }).collect();
+
+            let clamped_sum: f64 = clamped.iter().map(|(_, a, _)| *a).sum();
+            if clamped_sum > 0.0 && (clamped_sum - 1.0).abs() > 1e-9 {
+                for entry in &mut clamped {
+                    entry.1 /= clamped_sum;
+                }
+            }
+
+            let allocations: Vec<serde_json::Value> = clamped.iter().map(|(id, alloc, score)| {
                 serde_json::json!({
                     "strategy_id": id,
                     "allocation_pct": (alloc * 100.0 * 100.0).round() / 100.0,
@@ -393,5 +404,88 @@ mod tests {
         let result = compute(input).unwrap();
         let scores = result.get("scores").unwrap().as_array().unwrap();
         assert_eq!(scores.len(), 0, "empty features should produce empty scores");
+    }
+
+    #[test]
+    fn test_allocate_sums_to_100() {
+        let mut stats = Vec::new();
+        for i in 0..10 {
+            stats.push(json!({
+                "strategy_id": format!("strat_{}", i),
+                "wins": 10 + i * 3,
+                "losses": 5 + (10 - i) * 2,
+                "sharpe": 0.5 + i as f64 * 0.1,
+                "is_decaying": false,
+            }));
+        }
+        let input = json!({
+            "command": "allocate",
+            "strategy_stats": stats,
+            "total_capital": 1000000.0,
+        });
+        let result = compute(input).unwrap();
+        let allocs = result.get("allocations").unwrap().as_array().unwrap();
+        let total_pct: f64 = allocs.iter()
+            .map(|a| a.get("allocation_pct").unwrap().as_f64().unwrap())
+            .sum();
+        assert!(
+            (total_pct - 100.0).abs() < 1.0,
+            "Allocations must sum to ~100%, got {:.2}%", total_pct
+        );
+    }
+
+    #[test]
+    fn test_allocate_extreme_scores_still_sum_to_100() {
+        // 3 high-win strategies + 2 low-win (would over-allocate without renormalization)
+        let stats = vec![
+            json!({"strategy_id": "hot1", "wins": 95, "losses": 5, "sharpe": 2.0, "is_decaying": false}),
+            json!({"strategy_id": "hot2", "wins": 90, "losses": 10, "sharpe": 1.8, "is_decaying": false}),
+            json!({"strategy_id": "hot3", "wins": 85, "losses": 15, "sharpe": 1.5, "is_decaying": false}),
+            json!({"strategy_id": "cold1", "wins": 2, "losses": 20, "sharpe": -0.5, "is_decaying": false}),
+            json!({"strategy_id": "cold2", "wins": 2, "losses": 20, "sharpe": -0.3, "is_decaying": false}),
+        ];
+        let input = json!({
+            "command": "allocate",
+            "strategy_stats": stats,
+            "total_capital": 1000000.0,
+        });
+        let result = compute(input).unwrap();
+        let allocs = result.get("allocations").unwrap().as_array().unwrap();
+        let total_pct: f64 = allocs.iter()
+            .map(|a| a.get("allocation_pct").unwrap().as_f64().unwrap())
+            .sum();
+        assert!(
+            (total_pct - 100.0).abs() < 1.0,
+            "Even with extreme scores, allocations must sum to ~100%, got {:.2}%", total_pct
+        );
+    }
+
+    #[test]
+    fn test_allocate_with_floors_still_sum_to_100() {
+        // Many similar low-performing strategies all hit the 5% floor
+        let mut stats = Vec::new();
+        for i in 0..10 {
+            stats.push(json!({
+                "strategy_id": format!("strat_{}", i),
+                "wins": 3,
+                "losses": 20,
+                "sharpe": -0.2,
+                "is_decaying": false,
+            }));
+        }
+        let input = json!({
+            "command": "allocate",
+            "strategy_stats": stats,
+            "total_capital": 1000000.0,
+        });
+        let result = compute(input).unwrap();
+        let allocs = result.get("allocations").unwrap().as_array().unwrap();
+        let total_pct: f64 = allocs.iter()
+            .map(|a| a.get("allocation_pct").unwrap().as_f64().unwrap())
+            .sum();
+        assert!(
+            (total_pct - 100.0).abs() < 1.0,
+            "With floor-clamped allocations, must still sum to ~100%, got {:.2}%", total_pct
+        );
     }
 }

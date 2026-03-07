@@ -260,7 +260,15 @@ Currently active bots: ${bots.map(b => `${b.name} (${b.assignedStrategy || 'none
       });
 
       if (weightParam) {
-        log.info({ userId, version: weightParam.version }, 'ML weights loaded for execution engine');
+        log.info({ userId, version: weightParam.version }, 'ML weights loaded — notifying BotEngine to reload');
+        const { emit } = await import('../lib/event-bus.js');
+        const mlEvent: any = {
+          type: 'ML_WEIGHTS_UPDATED',
+          userId,
+          version: weightParam.version,
+          timestamp: new Date().toISOString(),
+        };
+        await emit('system', mlEvent).catch(err => log.error({ err, userId }, 'Failed to emit ML_WEIGHTS_UPDATED event'));
       }
     } catch (err) {
       log.error({ err, userId }, 'Failed to load ML weights');
@@ -298,13 +306,27 @@ Currently active bots: ${bots.map(b => `${b.name} (${b.assignedStrategy || 'none
       }
     } catch { /* VIX unavailable, use base limits */ }
 
-    log.info({
-      userId,
-      regime,
+    // Persist to Redis so RiskService can read them during pre-trade checks
+    const regimeLimits = {
       positionSizeMultiplier: Math.round(limits.positionSizeMultiplier * 100) / 100,
       maxPositions: limits.maxPositions,
       stopLossTighten: Math.round(limits.stopLossTighten * 100) / 100,
-    }, 'Regime-based risk limits configured');
+      regime,
+      computedAt: new Date().toISOString(),
+    };
+
+    try {
+      const { getRedis } = await import('../lib/redis.js');
+      const redis = getRedis();
+      if (redis) {
+        const key = `cg:regime_risk:${userId}`;
+        await redis.set(key, JSON.stringify(regimeLimits), 'EX', 24 * 3600);
+      }
+    } catch (err) {
+      log.warn({ err, userId }, 'Failed to persist regime limits to Redis');
+    }
+
+    log.info({ userId, ...regimeLimits }, 'Regime-based risk limits configured and persisted');
   }
 
   private async precomputeWatchlistSignals(userId: string): Promise<void> {

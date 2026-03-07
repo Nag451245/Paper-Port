@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { authenticate } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
 import { OptionsService, type OptionLeg, calculateStrategyGreeks, calculatePayoffCurve } from '../services/options.service.js';
-import { engineOptionsStrategy } from '../lib/rust-engine.js';
+import { engineOptionsStrategy, isEngineAvailable } from '../lib/rust-engine.js';
 import { MarketDataService } from '../services/market-data.service.js';
 
 const legSchema = z.object({
@@ -123,7 +123,7 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
     riskFreeRate: z.number().optional(),
   });
 
-  app.post('/payoff-engine', async (request, reply) => {
+  app.post('/payoff-engine', { preHandler: [authenticate] }, async (request, reply) => {
     const parsed = payoffEngineSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
@@ -131,8 +131,8 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
 
     const { legs, spotPrice, riskFreeRate } = parsed.data;
 
-    // Try Rust engine first
-    try {
+    // Try Rust engine first (only if available)
+    if (isEngineAvailable()) try {
       const rustLegs = legs.map(l => ({
         option_type: l.type === 'CE' ? 'call' : 'put',
         strike: l.strike,
@@ -226,7 +226,7 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
     view: z.enum(['bullish', 'bearish', 'neutral', 'volatile']).optional(),
   });
 
-  app.post('/optimize', async (request, reply) => {
+  app.post('/optimize', { preHandler: [authenticate] }, async (request, reply) => {
     const parsed = optimizeSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });

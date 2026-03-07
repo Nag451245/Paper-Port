@@ -141,7 +141,7 @@ export class IntradayManager {
               positionsClosed: openPositions.length,
             }),
           },
-        }).catch(() => {});
+        }).catch(err => log.error({ err, userId: pf.userId }, 'Failed to record circuit breaker risk event'));
 
         wsHub.broadcastToUser(pf.userId, {
           type: 'circuit_breaker',

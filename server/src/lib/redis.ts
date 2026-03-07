@@ -30,7 +30,7 @@ export function getRedis(): Redis | null {
 
 export async function disconnectRedis(): Promise<void> {
   if (redis) {
-    await redis.quit().catch(() => {});
+    await redis.quit().catch(err => console.warn('[Redis] Error during disconnect:', err?.message ?? err));
     redis = null;
     redisAvailable = false;
   }

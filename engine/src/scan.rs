@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use crate::signals;
-use crate::utils::{Candle, calc_ema_series, get_f64, round2, round3, round4};
+use crate::utils::{Candle, calc_ema_series, get_f64, round2, round3, round4, calc_atr_candles};
 
 #[derive(Deserialize)]
 struct ScanInput {
@@ -17,6 +17,8 @@ struct ScanInput {
     regime: Option<String>,
     #[serde(default)]
     current_date: Option<String>,  // YYYY-MM-DD for expiry detection
+    #[serde(default)]
+    pair_universe: Option<Vec<(String, String)>>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -266,7 +268,7 @@ pub fn compute(data: Value) -> Result<Value, String> {
             continue;
         }
 
-        let atr = calc_atr_last(&sym_data.candles, 14);
+        let atr = calc_atr_candles(&sym_data.candles, 14);
 
         // ======= MOMENTUM DETECTION (NEW - catches rallies) =======
         let momentum_score = calc_momentum(&sym_data.candles, thresholds.momentum_candles);
@@ -686,23 +688,22 @@ pub fn compute(data: Value) -> Result<Value, String> {
     }
 
     // === 7. PAIRS TRADING — market-neutral, spread mean-reversion ===
-    // Predefined cointegrated pair universe (same-sector highly correlated stocks)
-    let pair_universe: Vec<(&str, &str)> = vec![
-        ("HDFCBANK", "ICICIBANK"), ("SBIN", "BANKBARODA"), ("TCS", "INFY"),
-        ("WIPRO", "HCLTECH"), ("RELIANCE", "ONGC"), ("TATASTEEL", "JSWSTEEL"),
-        ("SUNPHARMA", "DRREDDY"), ("TATAMOTORS", "MARUTI"), ("BAJFINANCE", "BAJAJFINSV"),
-        ("NTPC", "POWERGRID"), ("ADANIENT", "ADANIPORTS"), ("HINDUNILVR", "ITC"),
+    let default_pairs: Vec<(String, String)> = vec![
+        ("HDFCBANK".into(), "ICICIBANK".into()), ("SBIN".into(), "BANKBARODA".into()), ("TCS".into(), "INFY".into()),
+        ("WIPRO".into(), "HCLTECH".into()), ("RELIANCE".into(), "ONGC".into()), ("TATASTEEL".into(), "JSWSTEEL".into()),
+        ("SUNPHARMA".into(), "DRREDDY".into()), ("TATAMOTORS".into(), "MARUTI".into()), ("BAJFINANCE".into(), "BAJAJFINSV".into()),
+        ("NTPC".into(), "POWERGRID".into()), ("ADANIENT".into(), "ADANIPORTS".into()), ("HINDUNILVR".into(), "ITC".into()),
     ];
+    let pair_universe = input.pair_universe.as_ref().unwrap_or(&default_pairs);
 
-    // Collect close prices per symbol
     let close_map: HashMap<String, Vec<f64>> = input.symbols.iter()
         .filter(|s| s.candles.len() >= 20)
         .map(|s| (s.symbol.clone(), s.candles.iter().map(|c| c.close).collect()))
         .collect();
 
-    for (sym_a, sym_b) in &pair_universe {
-        let prices_a = match close_map.get(*sym_a) { Some(p) => p, None => continue };
-        let prices_b = match close_map.get(*sym_b) { Some(p) => p, None => continue };
+    for (sym_a, sym_b) in pair_universe {
+        let prices_a = match close_map.get(sym_a.as_str()) { Some(p) => p, None => continue };
+        let prices_b = match close_map.get(sym_b.as_str()) { Some(p) => p, None => continue };
         let n = prices_a.len().min(prices_b.len());
         if n < 20 { continue; }
 
@@ -849,7 +850,7 @@ pub fn compute(data: Value) -> Result<Value, String> {
             if n < 10 { continue; }
 
             let close = sym_data.candles[n - 1].close;
-            let atr = calc_atr_last(&sym_data.candles, 14.min(n - 1));
+            let atr = calc_atr_candles(&sym_data.candles, 14.min(n - 1));
             if atr <= 0.0 || close <= 0.0 { continue; }
 
             let vol_pct = atr / close;
@@ -1006,26 +1007,6 @@ fn calc_breakout(candles: &[Candle], lookback: usize) -> f64 {
     }
 }
 
-fn calc_atr_last(candles: &[Candle], period: usize) -> f64 {
-    let n = candles.len();
-    if n < period + 1 {
-        return candles.last().map(|c| c.high - c.low).unwrap_or(1.0);
-    }
-
-    let mut atr = 0.0;
-    let start = n - period;
-    for i in start..n {
-        let tr = if i == 0 {
-            candles[i].high - candles[i].low
-        } else {
-            (candles[i].high - candles[i].low)
-                .max((candles[i].high - candles[i - 1].close).abs())
-                .max((candles[i].low - candles[i - 1].close).abs())
-        };
-        atr += tr;
-    }
-    atr / period as f64
-}
 
 #[cfg(test)]
 mod tests {
@@ -1225,7 +1206,7 @@ mod tests {
             volume: 1000.0,
             open: 99.5,
         }).collect();
-        let atr = calc_atr_last(&candles, 14);
+        let atr = calc_atr_candles(&candles, 14);
         assert!(atr > 0.0, "ATR should be positive");
         assert!(atr < 10.0, "ATR should be reasonable for this data, got {}", atr);
     }

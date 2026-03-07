@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::backtest;
+use crate::utils::generate_combinations_map;
 
 #[derive(Deserialize)]
 struct OptimizeConfig {
@@ -49,7 +50,7 @@ pub fn compute(data: Value) -> Result<Value, String> {
         return Err("No candles provided for optimization".to_string());
     }
 
-    let param_combos = generate_combinations(&config.param_grid);
+    let param_combos = generate_combinations_map(&config.param_grid);
 
     if param_combos.is_empty() {
         return Err("Empty parameter grid".to_string());
@@ -133,42 +134,3 @@ pub fn compute(data: Value) -> Result<Value, String> {
     serde_json::to_value(result).map_err(|e| format!("Serialization error: {}", e))
 }
 
-fn generate_combinations(grid: &std::collections::HashMap<String, Vec<f64>>) -> Vec<Value> {
-    let keys: Vec<&String> = grid.keys().collect();
-    let values: Vec<&Vec<f64>> = keys.iter().map(|k| grid.get(*k).unwrap()).collect();
-
-    if keys.is_empty() {
-        return vec![serde_json::json!({})];
-    }
-
-    let mut combos: Vec<Value> = Vec::new();
-    let mut indices = vec![0usize; keys.len()];
-
-    loop {
-        let mut combo = serde_json::Map::new();
-        for (i, key) in keys.iter().enumerate() {
-            combo.insert(
-                key.to_string(),
-                serde_json::json!(values[i][indices[i]]),
-            );
-        }
-        combos.push(Value::Object(combo));
-
-        let mut carry = true;
-        for i in (0..keys.len()).rev() {
-            if carry {
-                indices[i] += 1;
-                if indices[i] >= values[i].len() {
-                    indices[i] = 0;
-                } else {
-                    carry = false;
-                }
-            }
-        }
-        if carry {
-            break;
-        }
-    }
-
-    combos
-}

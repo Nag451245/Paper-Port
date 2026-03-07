@@ -262,6 +262,8 @@ model BotMessage {
   toBot   TradingBot? @relation("ToBot", fields: [toBotId], references: [id])
   user    User        @relation("UserMessages", fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([userId, createdAt])
+  @@index([fromBotId, messageType])
   @@map("bot_messages")
 }
 
@@ -280,6 +282,8 @@ model BotTask {
   bot  TradingBot @relation(fields: [botId], references: [id], onDelete: Cascade)
   user User       @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([userId, status])
+  @@index([botId, createdAt])
   @@map("bot_tasks")
 }
 

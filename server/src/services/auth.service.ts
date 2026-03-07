@@ -158,14 +158,7 @@ export class AuthService {
     private prisma: PrismaClient,
     private jwtSecret: string,
   ) {
-    if (env.ENCRYPTION_KEY) {
-      this.encKey = env.ENCRYPTION_KEY;
-    } else {
-      this.encKey = jwtSecret;
-      console.warn('[SECURITY] ENCRYPTION_KEY not set — falling back to JWT_SECRET. ' +
-        'Set a separate ENCRYPTION_KEY environment variable for production. ' +
-        'Compromising JWT_SECRET would also expose stored broker credentials.');
-    }
+    this.encKey = env.ENCRYPTION_KEY;
   }
 
   async register(input: RegisterInput): Promise<{ user: UserProfile; userId: string }> {
@@ -439,6 +432,10 @@ export class AuthService {
       autoLoginError: credential.autoLoginError ?? null,
       updatedAt: credential.updatedAt.toISOString(),
     };
+  }
+
+  async deleteBreezeCredentials(userId: string): Promise<void> {
+    await this.prisma.breezeCredential.deleteMany({ where: { userId } });
   }
 
   async getDecryptedBreezeCredentials(userId: string): Promise<{ apiKey: string; secretKey: string; sessionToken: string | null } | null> {

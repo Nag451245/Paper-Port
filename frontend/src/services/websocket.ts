@@ -7,6 +7,9 @@ class LiveSocket {
   private reconnectDelay = 2000;
   private maxReconnectDelay = 30000;
   private subscribedSymbols = new Set<string>();
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private pongReceived = true;
+  private static PING_INTERVAL = 25_000;
 
   connect(): void {
     if (this.ws?.readyState === WebSocket.OPEN) return;
@@ -29,6 +32,7 @@ class LiveSocket {
 
       this.ws.onopen = () => {
         this.reconnectDelay = 2000;
+        this.startHeartbeat();
         if (this.subscribedSymbols.size > 0) {
           this.send({ action: 'subscribe_prices', symbols: [...this.subscribedSymbols] });
         }
@@ -37,6 +41,10 @@ class LiveSocket {
       this.ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
+          if (msg.type === 'pong') {
+            this.pongReceived = true;
+            return;
+          }
           const type = msg.type as string;
           const typeHandlers = this.handlers.get(type);
           if (typeHandlers) {
@@ -49,10 +57,33 @@ class LiveSocket {
         } catch { /* ignore */ }
       };
 
-      this.ws.onclose = () => this.scheduleReconnect();
+      this.ws.onclose = () => {
+        this.stopHeartbeat();
+        this.scheduleReconnect();
+      };
       this.ws.onerror = () => { /* onclose will fire */ };
     } catch {
       this.scheduleReconnect();
+    }
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.pongReceived = true;
+    this.pingTimer = setInterval(() => {
+      if (!this.pongReceived) {
+        this.ws?.close();
+        return;
+      }
+      this.pongReceived = false;
+      this.send({ action: 'ping' });
+    }, LiveSocket.PING_INTERVAL);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
     }
   }
 
@@ -66,6 +97,7 @@ class LiveSocket {
   }
 
   disconnect(): void {
+    this.stopHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

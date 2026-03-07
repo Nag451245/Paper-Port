@@ -1,5 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { TargetTracker } from './target-tracker.service.js';
+import { getRedis } from '../lib/redis.js';
 import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
 
@@ -122,6 +123,39 @@ export class RiskService {
     return { allowed: true, violations, warnings };
   }
 
+  /**
+   * Load regime-adjusted risk limits from Redis (set by MorningBoot).
+   * Returns a partial RiskConfig override or empty object if unavailable.
+   */
+  private async getRegimeRiskOverrides(userId: string): Promise<Partial<RiskConfig>> {
+    try {
+      const redis = getRedis();
+      if (!redis) return {};
+      const raw = await redis.get(`cg:regime_risk:${userId}`);
+      if (!raw) return {};
+      const limits = JSON.parse(raw) as {
+        positionSizeMultiplier: number;
+        maxPositions: number;
+        stopLossTighten: number;
+        regime: string;
+      };
+
+      // Apply multipliers to defaults to produce regime-adjusted limits
+      return {
+        maxPositionPct: DEFAULT_CONFIG.maxPositionPct * limits.positionSizeMultiplier,
+        maxOpenPositions: limits.maxPositions,
+        maxStopLossPctPerPosition: Math.max(
+          0.1,
+          DEFAULT_CONFIG.maxStopLossPctPerPosition * (1 - limits.stopLossTighten),
+        ),
+        maxSimultaneousRiskPct: DEFAULT_CONFIG.maxSimultaneousRiskPct * limits.positionSizeMultiplier,
+      };
+    } catch (err) {
+      log.warn({ err, userId }, 'Failed to load regime risk overrides');
+      return {};
+    }
+  }
+
   async preTradeCheck(
     userId: string,
     symbol: string,
@@ -130,7 +164,8 @@ export class RiskService {
     price: number,
     config?: Partial<RiskConfig>,
   ): Promise<RiskCheck> {
-    const cfg = { ...DEFAULT_CONFIG, ...config };
+    const regimeOverrides = await this.getRegimeRiskOverrides(userId);
+    const cfg = { ...DEFAULT_CONFIG, ...regimeOverrides, ...config };
     const violations: string[] = [];
     const warnings: string[] = [];
 
@@ -214,7 +249,7 @@ export class RiskService {
         type: 'CIRCUIT_BREAKER_TRIGGERED', userId,
         reason: `Daily drawdown ${dayDrawdownPct.toFixed(2)}% >= ${cfg.maxDailyDrawdownPct}%`,
         drawdownPct: dayDrawdownPct,
-      }).catch(() => {});
+      }).catch(err => log.error({ err, userId }, 'Failed to emit CIRCUIT_BREAKER_TRIGGERED event'));
     }
 
     // Rule 6: Correlation-aware position limits
@@ -438,12 +473,12 @@ export class RiskService {
             violations, dayPnl, dayDrawdownPct, openPositions,
           }),
         },
-      }).catch(() => {});
+      }).catch(err => log.error({ err, userId, symbol }, 'Failed to create risk event record'));
 
       emit('risk', {
         type: 'RISK_VIOLATION', userId, symbol,
         violations, severity: 'critical',
-      }).catch(() => {});
+      }).catch(err => log.error({ err, userId, symbol }, 'Failed to emit RISK_VIOLATION event'));
     }
 
     return {
@@ -854,13 +889,13 @@ export class RiskService {
         severity: 'critical',
         details: JSON.stringify({ dayLossPct, closedCount, dayPnl }),
       },
-    }).catch(() => {});
+    }).catch(err => log.error({ err, userId }, 'Failed to create circuit breaker risk event'));
 
     emit('risk', {
       type: 'RISK_VIOLATION', userId, symbol: 'ALL',
       violations: [`Daily loss ${dayLossPct.toFixed(3)}% breached ${DEFAULT_CONFIG.maxDailyDrawdownPct}% — ${closedCount} positions force-closed`],
       severity: 'critical',
-    }).catch(() => {});
+    }).catch(err => log.error({ err, userId }, 'Failed to emit force-close RISK_VIOLATION event'));
 
     return { triggered: true, closedCount, dayLossPct };
   }

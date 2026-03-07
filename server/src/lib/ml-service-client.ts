@@ -4,10 +4,11 @@
  */
 
 import { createChildLogger } from './logger.js';
+import { env } from '../config.js';
 
 const log = createChildLogger('MLServiceClient');
 
-const ML_SERVICE_URL = process.env.ML_SERVICE_URL || 'http://localhost:8002';
+const ML_SERVICE_URL = env.ML_SERVICE_URL;
 const TIMEOUT_MS = 30_000;
 
 let mlServiceAvailable = false;

@@ -4,10 +4,22 @@ import { wsHub } from '../lib/websocket.js';
 import { MarketCalendar } from './market-calendar.js';
 import { emit } from '../lib/event-bus.js';
 import type { DataPipelineService } from './data-pipeline.service.js';
+import { createChildLogger } from '../lib/logger.js';
 
+const pfLog = createChildLogger('PriceFeed');
 const FEED_INTERVAL_MS = 2_000;
 const PNL_PERSIST_INTERVAL_MS = 30_000;
+const CANDLE_INTERVAL_MS = 5 * 60_000;
 const MAX_SYMBOLS_PER_BATCH = 25;
+
+interface CandleBuilder {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  bucketStart: number;
+}
 
 export class PriceFeedService {
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
@@ -17,6 +29,7 @@ export class PriceFeedService {
   private prisma: PrismaClient;
   private dataPipeline: DataPipelineService | null = null;
   private lastPrices = new Map<string, { ltp: number; volume: number; timestamp: number }>();
+  private candleBuilders = new Map<string, CandleBuilder>();
   private running = false;
 
   constructor(prisma?: PrismaClient, dataPipeline?: DataPipelineService) {
@@ -116,14 +129,17 @@ export class PriceFeedService {
               this.lastPrices.set(symbol, { ltp: quote.ltp, volume: quote.volume, timestamp: now });
 
               // Feed tick into the data pipeline (Redis Streams)
-              this.dataPipeline?.publishTick(symbol, quote.ltp, quote.volume, now).catch(() => {});
+              this.dataPipeline?.publishTick(symbol, quote.ltp, quote.volume, now).catch(err => pfLog.warn({ err, symbol }, 'Failed to publish tick to pipeline'));
+
+              // Aggregate into 5-minute candles and persist to CandleStore
+              this.updateCandleBuilder(symbol, quote.ltp, quote.volume, now);
 
               // Emit tick event for event bus consumers
               emit('market-data', {
                 type: 'TICK_RECEIVED', symbol, ltp: quote.ltp,
                 change: quote.change, volume: quote.volume,
                 timestamp: priceData.timestamp,
-              }).catch(() => {});
+              }).catch(err => pfLog.warn({ err, symbol }, 'Failed to emit TICK_RECEIVED event'));
             }
           } catch {}
         })
@@ -173,6 +189,54 @@ export class PriceFeedService {
       // The frontend computes display NAV as: currentNav + sum(position market values).
     } catch (err) {
       console.error('[PriceFeed] persistUnrealizedPnl failed:', (err as Error).message);
+    }
+  }
+
+  private updateCandleBuilder(symbol: string, ltp: number, volume: number, now: number): void {
+    const bucketStart = Math.floor(now / CANDLE_INTERVAL_MS) * CANDLE_INTERVAL_MS;
+    const existing = this.candleBuilders.get(symbol);
+
+    if (!existing || existing.bucketStart !== bucketStart) {
+      // New 5-minute bucket — persist the old candle if it exists
+      if (existing && existing.close > 0) {
+        this.persistBuiltCandle(symbol, existing).catch(err => pfLog.warn({ err, symbol }, 'Failed to persist candle'));
+      }
+      this.candleBuilders.set(symbol, {
+        open: ltp, high: ltp, low: ltp, close: ltp,
+        volume, bucketStart,
+      });
+    } else {
+      existing.high = Math.max(existing.high, ltp);
+      existing.low = Math.min(existing.low, ltp);
+      existing.close = ltp;
+      existing.volume += volume;
+    }
+  }
+
+  private async persistBuiltCandle(symbol: string, candle: CandleBuilder): Promise<void> {
+    try {
+      await this.prisma.candleStore.upsert({
+        where: {
+          symbol_exchange_interval_timestamp: {
+            symbol, exchange: 'NSE', interval: '5m',
+            timestamp: new Date(candle.bucketStart),
+          },
+        },
+        create: {
+          symbol, exchange: 'NSE', interval: '5m',
+          timestamp: new Date(candle.bucketStart),
+          open: candle.open, high: candle.high,
+          low: candle.low, close: candle.close,
+          volume: candle.volume,
+        },
+        update: {
+          open: candle.open, high: candle.high,
+          low: candle.low, close: candle.close,
+          volume: candle.volume,
+        },
+      });
+    } catch {
+      // Non-critical — don't block real-time feed
     }
   }
 }

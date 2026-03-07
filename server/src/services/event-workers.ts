@@ -142,22 +142,50 @@ export function registerAllWorkers(
     }
   }, { concurrency: 5 });
 
-  // ── Signal events: generated signals, validations ──
+  // ── Signal events: generated signals, validations, pipeline-scored signals ──
   registerWorker('signals', async (job: Job<AppEvent>) => {
     const event = job.data as SignalEvent;
 
     switch (event.type) {
       case 'SIGNAL_GENERATED':
-        wsHub.broadcastToUser(event.userId, { type: 'signal_generated', data: event });
+        if ('userId' in event) wsHub.broadcastToUser(event.userId, { type: 'signal_generated', data: event });
         break;
 
       case 'SIGNAL_VALIDATED':
-        wsHub.broadcastToUser(event.userId, { type: 'signal_validated', data: event });
+        if ('userId' in event) wsHub.broadcastToUser(event.userId, { type: 'signal_validated', data: event });
         break;
 
       case 'SIGNAL_EXPIRED':
-        wsHub.broadcastToUser(event.userId, { type: 'signal_expired', data: event });
+        if ('userId' in event) wsHub.broadcastToUser(event.userId, { type: 'signal_expired', data: event });
         break;
+
+      case 'PIPELINE_SIGNAL': {
+        log.info({
+          symbol: event.symbol,
+          direction: event.direction,
+          confidence: event.confidence,
+          strategy: event.strategy,
+          mlScore: event.mlScore,
+        }, 'Pipeline signal received — routing to bot engine');
+
+        if (botEngine) {
+          try {
+            await botEngine.executePipelineSignal({
+              symbol: event.symbol,
+              direction: event.direction,
+              confidence: event.confidence,
+              strategy: event.strategy,
+              mlScore: event.mlScore,
+              source: event.source,
+            });
+          } catch (err) {
+            log.error({ err, symbol: event.symbol }, 'Failed to execute pipeline signal');
+          }
+        } else {
+          log.warn('Pipeline signal received but no BotEngine instance available');
+        }
+        break;
+      }
     }
   }, { concurrency: 5 });
 
@@ -188,6 +216,17 @@ export function registerAllWorkers(
         wsHub.broadcastToUser(event.userId, { type: 'kill_switch', data: { active: false, timestamp: event.timestamp } });
         log.info({ userId: event.userId }, 'Kill switch deactivated');
         break;
+
+      default: {
+        // Handle ML_WEIGHTS_UPDATED and other custom system events
+        const evAny = event as any;
+        if (evAny.type === 'ML_WEIGHTS_UPDATED' && botEngine) {
+          log.info({ userId: evAny.userId, version: evAny.version }, 'Reloading ML weights in BotEngine');
+          botEngine.loadMLWeightsFromDB(evAny.userId).catch(err =>
+            log.warn({ err }, 'Failed to reload ML weights in BotEngine'));
+        }
+        break;
+      }
     }
   }, { concurrency: 3 });
 

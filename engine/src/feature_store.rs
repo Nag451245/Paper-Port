@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::utils::Candle;
+use crate::utils::{Candle, rolling_std, calc_ema_last, calc_rsi_last, calc_atr_last, round2 as r2, round4 as r4};
 
 #[derive(Deserialize)]
 struct Config {
@@ -183,9 +183,9 @@ fn extract_features(config: Config) -> Result<serde_json::Value, String> {
         } else { (0.0, 0.0) };
 
         // === MOMENTUM OSCILLATORS (10) ===
-        let rsi_14 = if idx >= 14 { calc_rsi(&closes[..=idx], 14) } else { 50.0 };
-        let rsi_7 = if idx >= 7 { calc_rsi(&closes[..=idx], 7) } else { 50.0 };
-        let rsi_21 = if idx >= 21 { calc_rsi(&closes[..=idx], 21) } else { 50.0 };
+        let rsi_14 = if idx >= 14 { calc_rsi_last(&closes[..=idx], 14) } else { 50.0 };
+        let rsi_7 = if idx >= 7 { calc_rsi_last(&closes[..=idx], 7) } else { 50.0 };
+        let rsi_21 = if idx >= 21 { calc_rsi_last(&closes[..=idx], 21) } else { 50.0 };
 
         // Stochastic %K, %D
         let (stoch_k, stoch_d) = if idx >= 14 {
@@ -221,10 +221,10 @@ fn extract_features(config: Config) -> Result<serde_json::Value, String> {
         let momentum_12 = if idx >= 12 { closes[idx] - closes[idx-12] } else { 0.0 };
 
         // === TREND INDICATORS (8) ===
-        let ema9 = ema(&closes[..=idx], 9.min(idx + 1));
-        let ema21 = ema(&closes[..=idx], 21.min(idx + 1));
-        let ema5 = ema(&closes[..=idx], 5.min(idx + 1));
-        let ema13 = ema(&closes[..=idx], 13.min(idx + 1));
+        let ema9 = calc_ema_last(&closes[..=idx], 9.min(idx + 1));
+        let ema21 = calc_ema_last(&closes[..=idx], 21.min(idx + 1));
+        let ema5 = calc_ema_last(&closes[..=idx], 5.min(idx + 1));
+        let ema13 = calc_ema_last(&closes[..=idx], 13.min(idx + 1));
         let ema_ratio_9_21 = if ema21 > 0.0 { ema9 / ema21 } else { 1.0 };
         let ema_ratio_5_13 = if ema13 > 0.0 { ema5 / ema13 } else { 1.0 };
 
@@ -270,7 +270,7 @@ fn extract_features(config: Config) -> Result<serde_json::Value, String> {
         let bb_pos = if bb_upper != bb_lower { (closes[idx] - bb_lower) / (bb_upper - bb_lower) } else { 0.5 };
         let bb_bandwidth = if closes[idx] > 0.0 { (bb_upper - bb_lower) / closes[idx] } else { 0.0 };
 
-        let atr = if idx >= 14 { calc_atr(&highs[..=idx], &lows[..=idx], &closes[..=idx], 14) } else { highs[idx] - lows[idx] };
+        let atr = if idx >= 14 { calc_atr_last(&highs[..=idx], &lows[..=idx], &closes[..=idx], 14) } else { highs[idx] - lows[idx] };
         let atr_ratio = if closes[idx] > 0.0 { atr / closes[idx] } else { 0.0 };
 
         // Garman-Klass volatility
@@ -384,8 +384,8 @@ fn extract_features(config: Config) -> Result<serde_json::Value, String> {
         let is_monday = if dow == 1 { 1.0 } else { 0.0 };
 
         // === REGIME FEATURES (6) ===
-        let ema_short_fast = ema(&closes[..=idx], 5.min(idx + 1));
-        let ema_long_slow = ema(&closes[..=idx], 30.min(idx + 1));
+        let ema_short_fast = calc_ema_last(&closes[..=idx], 5.min(idx + 1));
+        let ema_long_slow = calc_ema_last(&closes[..=idx], 30.min(idx + 1));
         let trend_strength = if ema_long_slow > 0.0 { (ema_short_fast - ema_long_slow) / ema_long_slow } else { 0.0 };
         let vol_regime = if vol_20 > 0.0 { vol_5 / vol_20 } else { 1.0 };
 
@@ -428,7 +428,7 @@ fn extract_features(config: Config) -> Result<serde_json::Value, String> {
         let trend_x_regime = trend_strength * vol_regime;
         let vol_x_bb = vol_20 * bb_bandwidth;
         let rsi_divergence = if idx >= 5 {
-            let rsi_prev = if idx >= 19 { calc_rsi(&closes[..=idx-5], 14) } else { 50.0 };
+            let rsi_prev = if idx >= 19 { calc_rsi_last(&closes[..=idx-5], 14) } else { 50.0 };
             let price_dir = if closes[idx] > closes[idx.saturating_sub(5)] { 1.0 } else { -1.0 };
             let rsi_dir = if rsi_14 > rsi_prev { 1.0 } else { -1.0 };
             price_dir * rsi_dir
@@ -654,52 +654,6 @@ fn regime_label(r: usize) -> &'static str {
     }
 }
 
-fn rolling_std(data: &[f64]) -> f64 {
-    let n = data.len() as f64;
-    if n < 2.0 { return 0.0; }
-    let mean = data.iter().sum::<f64>() / n;
-    (data.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt()
-}
-
-fn ema(data: &[f64], period: usize) -> f64 {
-    if data.is_empty() { return 0.0; }
-    let period = period.min(data.len());
-    let mul = 2.0 / (period as f64 + 1.0);
-    let mut e = data[0];
-    for i in 1..data.len() {
-        e = (data[i] - e) * mul + e;
-    }
-    e
-}
-
-fn calc_rsi(closes: &[f64], period: usize) -> f64 {
-    let n = closes.len();
-    if n <= period { return 50.0; }
-    let mut avg_gain = 0.0;
-    let mut avg_loss = 0.0;
-    for i in 1..=period {
-        let diff = closes[n - period - 1 + i] - closes[n - period - 1 + i - 1];
-        if diff > 0.0 { avg_gain += diff; } else { avg_loss += diff.abs(); }
-    }
-    avg_gain /= period as f64;
-    avg_loss /= period as f64;
-    if avg_loss == 0.0 { return 100.0; }
-    100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
-}
-
-fn calc_atr(highs: &[f64], lows: &[f64], closes: &[f64], period: usize) -> f64 {
-    let n = highs.len();
-    if n < period + 1 { return highs.last().unwrap_or(&0.0) - lows.last().unwrap_or(&0.0); }
-    let mut atr = 0.0;
-    for i in (n - period)..n {
-        let tr = (highs[i] - lows[i])
-            .max((highs[i] - closes[i - 1]).abs())
-            .max((lows[i] - closes[i - 1]).abs());
-        atr += tr;
-    }
-    atr / period as f64
-}
-
 fn linear_regression(data: &[f64]) -> (f64, f64) {
     let n = data.len() as f64;
     if n < 2.0 { return (0.0, 0.0); }
@@ -749,8 +703,6 @@ fn estimate_hurst(returns: &[f64]) -> f64 {
     } else { 0.5 }
 }
 
-fn r2(v: f64) -> f64 { (v * 100.0).round() / 100.0 }
-fn r4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
 
 #[cfg(test)]
 mod tests {

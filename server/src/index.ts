@@ -2,11 +2,14 @@ import { buildApp } from './app.js';
 import { env } from './config.js';
 
 process.on('unhandledRejection', (reason) => {
-  console.error('[UNHANDLED REJECTION]', reason instanceof Error ? reason.message : reason);
+  console.error('[UNHANDLED REJECTION]', reason instanceof Error ? reason.stack : reason);
 });
 
 process.on('uncaughtException', (err) => {
-  console.error('[UNCAUGHT EXCEPTION]', err.message);
+  console.error('[UNCAUGHT EXCEPTION]', err.stack ?? err.message);
+  // Node.js is in undefined state after uncaughtException — flush stderr and exit
+  process.stderr.write('', () => process.exit(1));
+  setTimeout(() => process.exit(1), 3000).unref();
 });
 
 const HEAP_LIMIT_MB = 512;

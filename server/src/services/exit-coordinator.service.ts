@@ -2,16 +2,13 @@ import type { PrismaClient } from '@prisma/client';
 import type { TradeService } from './trade.service.js';
 import type { DecisionAuditService } from './decision-audit.service.js';
 import { wsHub } from '../lib/websocket.js';
-import { emit } from '../lib/event-bus.js';
+import { getRedis } from '../lib/redis.js';
 import { createChildLogger } from '../lib/logger.js';
 
 const log = createChildLogger('ExitCoordinator');
 
-/**
- * Prevents double-close races by locking position IDs during exit.
- * All exit paths (StopLossMonitor, IntradayManager, manual API, BotEngine)
- * must route through this coordinator.
- */
+const LOCK_TTL_MS = 15_000;
+const LOCK_PREFIX = 'cg:exit_lock:';
 
 const activeExits = new Set<string>();
 
@@ -35,17 +32,72 @@ interface CloseResult {
   alreadyClosing?: boolean;
 }
 
+/**
+ * Acquires a Redis-based distributed lock for a position.
+ * Falls back to in-memory Set if Redis is unavailable.
+ * Returns a unique lock value for release, or null if lock was not acquired.
+ */
+async function acquireDistributedLock(positionId: string): Promise<string | null> {
+  const redis = getRedis();
+  const lockValue = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  if (redis) {
+    try {
+      const result = await redis.set(
+        LOCK_PREFIX + positionId,
+        lockValue,
+        'PX', LOCK_TTL_MS,
+        'NX',
+      );
+      if (result === 'OK') return lockValue;
+      return null;
+    } catch (err) {
+      log.warn({ err, positionId }, 'Redis lock failed, falling back to in-memory');
+    }
+  }
+
+  // Fallback: in-memory (single-process safety only)
+  if (activeExits.has(positionId)) return null;
+  activeExits.add(positionId);
+  return lockValue;
+}
+
+/**
+ * Releases the distributed lock, only if we still own it (prevents releasing
+ * a lock that expired and was re-acquired by another process).
+ */
+async function releaseDistributedLock(positionId: string, lockValue: string): Promise<void> {
+  const redis = getRedis();
+
+  if (redis) {
+    try {
+      // Atomic check-and-delete via Lua script
+      const script = `
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+          return redis.call("del", KEYS[1])
+        else
+          return 0
+        end
+      `;
+      await redis.eval(script, 1, LOCK_PREFIX + positionId, lockValue);
+    } catch (err) {
+      log.warn({ err, positionId }, 'Redis unlock failed');
+    }
+  }
+
+  activeExits.delete(positionId);
+}
+
 export class ExitCoordinator {
   static async closePosition(req: CloseRequest): Promise<CloseResult> {
-    if (activeExits.has(req.positionId)) {
-      log.warn({ positionId: req.positionId, source: req.source }, 'Duplicate close attempt blocked');
+    const lockValue = await acquireDistributedLock(req.positionId);
+    if (!lockValue) {
+      log.warn({ positionId: req.positionId, source: req.source }, 'Duplicate close attempt blocked by distributed lock');
       return { success: false, alreadyClosing: true, error: 'Position exit already in progress' };
     }
 
-    activeExits.add(req.positionId);
-
     try {
-      // Verify position is still open before closing
+      // Verify position is still open (inside the lock)
       const pos = await req.prisma.position.findUnique({ where: { id: req.positionId } });
       if (!pos || pos.status !== 'OPEN') {
         return { success: false, error: 'Position already closed' };
@@ -122,7 +174,7 @@ export class ExitCoordinator {
       log.error({ err, positionId: req.positionId, source: req.source }, 'Exit failed');
       return { success: false, error: msg };
     } finally {
-      activeExits.delete(req.positionId);
+      await releaseDistributedLock(req.positionId, lockValue);
     }
   }
 

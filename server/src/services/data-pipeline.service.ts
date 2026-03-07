@@ -156,7 +156,7 @@ export class DataPipelineService {
           // Persist last candle to CandleStore
           const lastCandle = tick.candles[tick.candles.length - 1] as any;
           if (lastCandle) {
-            this.persistCandles(tick.symbol, '5m', [lastCandle]).catch(() => {});
+            this.persistCandles(tick.symbol, '5m', [lastCandle]).catch(err => log.warn({ err, symbol: tick.symbol }, 'Failed to persist candle'));
           }
         }
       } catch (err) {
@@ -386,7 +386,7 @@ export class DataPipelineService {
 
             // Acknowledge processed messages
             if (ackIds.length > 0) {
-              await redis.xack(STREAM_TICKS, CONSUMER_GROUP, ...ackIds).catch(() => {});
+              await redis.xack(STREAM_TICKS, CONSUMER_GROUP, ...ackIds).catch(err => log.warn({ err }, 'Failed to ack tick stream messages'));
             }
           }
         }
@@ -421,7 +421,52 @@ export class DataPipelineService {
           }
 
           if (featureAckIds.length > 0) {
-            await redis.xack(STREAM_FEATURES, CONSUMER_GROUP, ...featureAckIds).catch(() => {});
+            await redis.xack(STREAM_FEATURES, CONSUMER_GROUP, ...featureAckIds).catch(err => log.warn({ err }, 'Failed to ack feature stream messages'));
+          }
+        }
+
+        // Read scored signals and route to execution via event bus
+        const signalResults = await redis.xreadgroup(
+          'GROUP', CONSUMER_GROUP, consumerId,
+          'COUNT', '50', 'BLOCK', '500',
+          'STREAMS', STREAM_SIGNALS, '>',
+        ) as Array<[string, Array<[string, string[]]>]> | null;
+
+        if (signalResults && signalResults.length > 0) {
+          const signalEntries = signalResults[0][1];
+          const signalAckIds: string[] = [];
+
+          for (const [id, fields] of signalEntries) {
+            const obj: Record<string, string> = {};
+            for (let i = 0; i < fields.length; i += 2) {
+              obj[fields[i]] = fields[i + 1];
+            }
+
+            const riskApproved = obj.risk_approved === '1';
+            const confidence = parseFloat(obj.confidence ?? '0');
+            const mlScore = parseFloat(obj.ml_score ?? '0');
+
+            if (riskApproved && confidence >= 0.6) {
+              emit('signals', {
+                type: 'PIPELINE_SIGNAL',
+                symbol: obj.symbol,
+                direction: obj.direction as 'BUY' | 'SELL',
+                confidence,
+                strategy: obj.strategy,
+                mlScore,
+                source: 'DATA_PIPELINE',
+              });
+              log.info({
+                symbol: obj.symbol, direction: obj.direction,
+                confidence, mlScore, strategy: obj.strategy,
+              }, 'Pipeline signal forwarded to event bus');
+            }
+
+            signalAckIds.push(id);
+          }
+
+          if (signalAckIds.length > 0) {
+            await redis.xack(STREAM_SIGNALS, CONSUMER_GROUP, ...signalAckIds).catch(err => log.warn({ err }, 'Failed to ack signal stream messages'));
           }
         }
       } catch (err) {

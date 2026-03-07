@@ -538,14 +538,14 @@ export class MarketDataService {
     const bars = await this.fetchFromBreeze(symbol, interval, fromDate, toDate, userId, exchange);
     if (bars.length > 0) {
       if (this.cache) await this.cache.set(cacheKey, bars, ttl);
-      this.backfillCandleStore(symbol, exchange, interval, bars).catch(() => {});
+      this.backfillCandleStore(symbol, exchange, interval, bars).catch(err => log.warn({ err, symbol }, 'Failed to backfill candle store'));
       return this.validateCandles(bars, symbol, interval);
     }
 
     const yahooBars = await this.fetchHistoryFromYahoo(symbol, interval, fromDate, toDate, exchange);
     if (yahooBars.length > 0) {
       if (this.cache) await this.cache.set(cacheKey, yahooBars, ttl);
-      this.backfillCandleStore(symbol, exchange, interval, yahooBars).catch(() => {});
+      this.backfillCandleStore(symbol, exchange, interval, yahooBars).catch(err => log.warn({ err, symbol }, 'Failed to backfill candle store'));
       return this.validateCandles(yahooBars, symbol, interval);
     }
     return [];
@@ -625,7 +625,7 @@ export class MarketDataService {
         issues: issues.slice(0, 10),
         barCount: interpolated.length,
         lastTimestamp: interpolated[interpolated.length - 1]?.timestamp ?? new Date().toISOString(),
-      }).catch(() => {});
+      }).catch(err => log.warn({ err, symbol }, 'Failed to emit DATA_QUALITY_REPORT'));
     }
 
     return interpolated;
@@ -678,7 +678,7 @@ export class MarketDataService {
           },
           update: { open: rec.open, high: rec.high, low: rec.low, close: rec.close, volume: rec.volume },
           create: rec,
-        }).catch(() => {});
+        }).catch(err => log.warn({ err, symbol: rec.symbol }, 'Failed to upsert candle store record'));
       }
     } catch {
       // Non-critical — don't block the main data flow
@@ -706,7 +706,7 @@ export class MarketDataService {
       );
 
       if (!res.ok) {
-        await res.text().catch(() => {});
+        await res.text().catch(() => { /* drain response */ });
         return this.fallbackMovers(count);
       }
 
@@ -842,7 +842,7 @@ export class MarketDataService {
     // Fallback: NSE direct
     try {
       const res = await this.nseFetch('https://www.nseindia.com/api/allIndices');
-      if (!res.ok) { await res.text().catch(() => {}); return []; }
+      if (!res.ok) { await res.text().catch(() => { /* drain */ }); return []; }
       const data = await res.json() as any;
       return (data.data ?? []).slice(0, 10).map((idx: any) => ({
         name: idx.index,
@@ -893,7 +893,7 @@ export class MarketDataService {
     // Fallback: NSE
     try {
       const res = await this.nseFetch('https://www.nseindia.com/api/allIndices');
-      if (!res.ok) { await res.text().catch(() => {}); return { value: 0, change: 0, changePercent: 0 }; }
+      if (!res.ok) { await res.text().catch(() => { /* drain */ }); return { value: 0, change: 0, changePercent: 0 }; }
       const data = await res.json() as any;
       const vix = (data.data ?? []).find((idx: any) => idx.index === 'INDIA VIX');
       if (vix) {
@@ -1312,7 +1312,7 @@ export class MarketDataService {
   private async fetchFromNSE(symbol: string): Promise<MarketQuote | null> {
     try {
       const res = await this.nseFetch(`https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(symbol)}`);
-      if (!res.ok) { await res.text().catch(() => {}); return null; }
+      if (!res.ok) { await res.text().catch(() => { /* drain */ }); return null; }
       const data = await res.json() as any;
       const priceInfo = data.priceInfo ?? {};
 
@@ -1453,7 +1453,7 @@ export class MarketDataService {
         return null;
       }
 
-      const key = createHash('sha256').update(env.ENCRYPTION_KEY || env.JWT_SECRET).digest();
+      const key = createHash('sha256').update(env.ENCRYPTION_KEY).digest();
       const decryptField = (encrypted: string) => {
         const [ivHex, data] = encrypted.split(':');
         const iv = Buffer.from(ivHex, 'hex');

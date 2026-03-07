@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::f64::consts::E;
 
-use crate::utils::{norm_cdf, norm_pdf, round4};
+use crate::utils::{norm_cdf, norm_pdf, round4, bs_price};
 
 #[derive(Deserialize)]
 struct GreeksInput {
@@ -10,8 +10,13 @@ struct GreeksInput {
     strike: f64,
     time_to_expiry: f64,
     risk_free_rate: f64,
+    #[serde(default)]
     volatility: f64,
     option_type: String,
+    /// When provided, IV is solved from this market price via bisection.
+    /// `volatility` is only used as a fallback when `market_price` is absent.
+    #[serde(default)]
+    market_price: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -25,26 +30,32 @@ struct GreeksOutput {
     implied_volatility: f64,
 }
 
-pub fn compute(data: Value) -> Result<Value, String> {
-    let input: GreeksInput =
-        serde_json::from_value(data).map_err(|e| format!("Invalid greeks input: {}", e))?;
+/// Solve implied volatility from a market price using bisection search.
+fn solve_iv(spot: f64, strike: f64, r: f64, t: f64, market_price: f64, is_call: bool) -> f64 {
+    if t <= 0.0 || market_price <= 0.0 { return 0.0; }
+    let intrinsic = if is_call { (spot - strike * E.powf(-r * t)).max(0.0) } else { (strike * E.powf(-r * t) - spot).max(0.0) };
+    if market_price < intrinsic { return 0.0; }
 
-    let is_call = input.option_type.to_lowercase() == "call" || input.option_type.to_lowercase() == "ce";
+    let mut lo = 0.001;
+    let mut hi = 5.0;
+    for _ in 0..200 {
+        let mid = (lo + hi) / 2.0;
+        let price = bs_price(spot, strike, r, t, mid, is_call);
+        if (price - market_price).abs() < 1e-6 { return mid; }
+        if price > market_price { hi = mid; } else { lo = mid; }
+    }
+    (lo + hi) / 2.0
+}
 
-    let s = input.spot;
-    let k = input.strike;
-    let t = input.time_to_expiry;
-    let r = input.risk_free_rate;
-    let sigma = input.volatility;
-
+fn compute_greeks_at_vol(s: f64, k: f64, r: f64, t: f64, sigma: f64, is_call: bool) -> GreeksOutput {
     if t <= 0.0 {
         let intrinsic = if is_call { (s - k).max(0.0) } else { (k - s).max(0.0) };
-        return serde_json::to_value(GreeksOutput {
+        return GreeksOutput {
             price: round4(intrinsic),
             delta: if is_call { if s > k { 1.0 } else { 0.0 } } else { if s < k { -1.0 } else { 0.0 } },
             gamma: 0.0, theta: 0.0, vega: 0.0, rho: 0.0,
-            implied_volatility: sigma,
-        }).map_err(|e| e.to_string());
+            implied_volatility: round4(sigma),
+        };
     }
 
     let d1 = ((s / k).ln() + (r + sigma * sigma / 2.0) * t) / (sigma * t.sqrt());
@@ -76,7 +87,7 @@ pub fn compute(data: Value) -> Result<Value, String> {
     };
     let vega = s * pdf_d1 * t.sqrt() / 100.0;
 
-    let output = GreeksOutput {
+    GreeksOutput {
         price: round4(price),
         delta: round4(delta),
         gamma: round4(gamma),
@@ -84,8 +95,30 @@ pub fn compute(data: Value) -> Result<Value, String> {
         vega: round4(vega),
         rho: round4(rho_val),
         implied_volatility: round4(sigma),
+    }
+}
+
+pub fn compute(data: Value) -> Result<Value, String> {
+    let input: GreeksInput =
+        serde_json::from_value(data).map_err(|e| format!("Invalid greeks input: {}", e))?;
+
+    let is_call = input.option_type.to_lowercase() == "call" || input.option_type.to_lowercase() == "ce";
+
+    let s = input.spot;
+    let k = input.strike;
+    let t = input.time_to_expiry;
+    let r = input.risk_free_rate;
+
+    let sigma = match input.market_price {
+        Some(mp) if mp > 0.0 => solve_iv(s, k, r, t, mp, is_call),
+        _ => input.volatility,
     };
 
+    if sigma <= 0.0 {
+        return Err("Cannot compute Greeks: volatility is zero or negative and no market_price provided to solve IV".into());
+    }
+
+    let output = compute_greeks_at_vol(s, k, r, t, sigma, is_call);
     serde_json::to_value(output).map_err(|e| format!("Serialization error: {}", e))
 }
 
@@ -199,5 +232,65 @@ mod tests {
         let ce = compute_greeks(100.0, 100.0, 0.5, 0.05, 0.25, "CE");
         let call = compute_greeks(100.0, 100.0, 0.5, 0.05, 0.25, "call");
         assert_near(ce.price, call.price, 0.001, "CE and call should produce same price");
+    }
+
+    #[test]
+    fn test_iv_solver_recovers_known_vol() {
+        // First compute a price at known vol, then solve IV from that price
+        let known_vol = 0.25;
+        let g = compute_greeks(100.0, 100.0, 0.5, 0.05, known_vol, "call");
+        let market_price = g.price;
+
+        let result = compute(json!({
+            "spot": 100.0, "strike": 100.0, "time_to_expiry": 0.5,
+            "risk_free_rate": 0.05, "option_type": "call",
+            "market_price": market_price,
+        })).unwrap();
+        let output: GreeksOutput = serde_json::from_value(result).unwrap();
+        assert_near(output.implied_volatility, known_vol, 0.005, "IV solver should recover known vol");
+    }
+
+    #[test]
+    fn test_iv_solver_put() {
+        let known_vol = 0.30;
+        let g = compute_greeks(100.0, 105.0, 0.25, 0.065, known_vol, "put");
+        let market_price = g.price;
+
+        let result = compute(json!({
+            "spot": 100.0, "strike": 105.0, "time_to_expiry": 0.25,
+            "risk_free_rate": 0.065, "option_type": "put",
+            "market_price": market_price,
+        })).unwrap();
+        let output: GreeksOutput = serde_json::from_value(result).unwrap();
+        assert_near(output.implied_volatility, known_vol, 0.005, "IV solver should recover put vol");
+    }
+
+    #[test]
+    fn test_iv_solver_uses_market_price_over_volatility() {
+        // When both are provided, market_price should be used to solve IV
+        let known_vol = 0.25;
+        let g = compute_greeks(100.0, 100.0, 0.5, 0.05, known_vol, "call");
+
+        let result = compute(json!({
+            "spot": 100.0, "strike": 100.0, "time_to_expiry": 0.5,
+            "risk_free_rate": 0.05, "option_type": "call",
+            "volatility": 0.50, // wrong vol
+            "market_price": g.price,
+        })).unwrap();
+        let output: GreeksOutput = serde_json::from_value(result).unwrap();
+        assert_near(output.implied_volatility, known_vol, 0.005,
+            "IV solver should use market_price, not volatility input");
+    }
+
+    #[test]
+    fn test_iv_solver_falls_back_to_volatility_input() {
+        let result = compute(json!({
+            "spot": 100.0, "strike": 100.0, "time_to_expiry": 0.5,
+            "risk_free_rate": 0.05, "option_type": "call",
+            "volatility": 0.20,
+        })).unwrap();
+        let output: GreeksOutput = serde_json::from_value(result).unwrap();
+        assert_near(output.implied_volatility, 0.20, 0.001,
+            "Without market_price, should use volatility input");
     }
 }

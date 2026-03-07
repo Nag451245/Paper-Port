@@ -100,7 +100,7 @@ export class UniverseSelectorService {
             reason: 'NIFTY50_liquid',
             avgVolume: c.avgVolume,
           },
-        }).catch(() => {});
+        }).catch(err => log.warn({ err, symbol: c.symbol }, 'Failed to insert trading universe symbol'));
         added.push(c.symbol);
       }
     }

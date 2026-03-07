@@ -350,7 +350,7 @@ export const breezeApi = {
   loginUrl: () =>
     api.get<{ login_url: string; callback_url: string }>('/auth/breeze-session/login-url'),
 
-  disconnect: () => api.post<void>('/breeze/disconnect'),
+  disconnect: () => api.delete<{ success: boolean }>('/auth/breeze-credentials'),
 };
 
 // ─── Bots ─────────────────────────────────────────────────────────

@@ -83,8 +83,12 @@ fi
 echo "  Generating Prisma client..."
 npx prisma generate
 
-echo "  Pushing database schema..."
-npx prisma db push --accept-data-loss
+echo "  Running database migrations..."
+npx prisma migrate deploy 2>/dev/null || {
+  echo "  No migrations found — creating initial baseline..."
+  npx prisma migrate dev --name init --create-only 2>/dev/null || true
+  npx prisma migrate deploy
+}
 
 echo "  Building TypeScript..."
 npm run build
@@ -142,6 +146,8 @@ server {
         proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
     }
 
     # Cache static assets

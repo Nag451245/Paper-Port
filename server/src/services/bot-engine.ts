@@ -11,6 +11,7 @@ import { DecisionAuditService, type DecisionRecord } from './decision-audit.serv
 import { MarketCalendar } from './market-calendar.js';
 import { RiskService } from './risk.service.js';
 import { TWAPExecutor, selectOrderType } from './twap-executor.service.js';
+import { ExitCoordinator } from './exit-coordinator.service.js';
 import { emit } from '../lib/event-bus.js';
 import { createChildLogger } from '../lib/logger.js';
 
@@ -147,7 +148,8 @@ export class BotEngine {
   private runningAgents = new Map<string, RunningAgent>();
   private marketData = new MarketDataService();
   private tradeService: TradeService;
-  private rustAvailable: boolean;
+  private _rustAvailable: boolean;
+  private lastEngineCheck = 0;
   private scannerTimer: ReturnType<typeof setInterval> | null = null;
   private scannerUserId: string | null = null;
   private lastScanResult: MarketScanResult | null = null;
@@ -184,10 +186,10 @@ export class BotEngine {
     this.calendar = new MarketCalendar();
     this.riskService = new RiskService(prisma);
     this.twapExecutor = new TWAPExecutor(prisma);
-    this.rustAvailable = isEngineAvailable();
-    console.log(`[BotEngine] Initialized — Rust engine: ${this.rustAvailable ? 'AVAILABLE' : 'NOT FOUND (using Gemini AI only)'}`);
+    this._rustAvailable = isEngineAvailable();
+    console.log(`[BotEngine] Initialized — Rust engine: ${this._rustAvailable ? 'AVAILABLE' : 'NOT FOUND (using Gemini AI only)'}`);
 
-    this.loadMLWeightsFromDB().catch(() => {});
+    this.loadMLWeightsFromDB().catch(err => log.warn({ err }, 'Failed to load ML weights at startup'));
   }
 
   /**
@@ -220,9 +222,11 @@ export class BotEngine {
     }
   }
 
+  private alphaDecayCache = new Map<string, { isDecaying: boolean; ts: number }>();
+
   /**
    * Thompson sampling: select strategy by sampling from Beta(alpha, beta) posteriors.
-   * Returns the strategy with the highest sampled value (explore/exploit balance).
+   * Applies alpha decay penalty — decaying strategies get 50% score reduction.
    */
   thompsonSelectStrategy(availableStrategies: string[]): string | null {
     if (availableStrategies.length === 0) return null;
@@ -232,11 +236,16 @@ export class BotEngine {
 
     for (const stratId of availableStrategies) {
       const prior = this.strategyBeta.get(stratId) ?? { alpha: 1, beta: 1 };
-      // Deterministic approximation of Beta sample: mean + exploration bonus
       const mean = prior.alpha / (prior.alpha + prior.beta);
       const n = prior.alpha + prior.beta;
       const explorationBonus = Math.sqrt(2 * Math.log(n + 1) / (n + 1));
-      const sample = mean + explorationBonus;
+      let sample = mean + explorationBonus;
+
+      // Apply alpha decay penalty from Redis cache
+      const decayEntry = this.alphaDecayCache.get(stratId);
+      if (decayEntry?.isDecaying) {
+        sample *= 0.5;
+      }
 
       if (sample > bestSample) {
         bestSample = sample;
@@ -245,6 +254,25 @@ export class BotEngine {
     }
 
     return bestStrategy;
+  }
+
+  async loadAlphaDecayState(userId: string): Promise<void> {
+    try {
+      const decayRecords = await this.prisma.alphaDecay.findMany({
+        where: { userId },
+        orderBy: { date: 'desc' },
+        distinct: ['strategyId'],
+      });
+      for (const d of decayRecords) {
+        this.alphaDecayCache.set(d.strategyId, {
+          isDecaying: d.isDecaying,
+          ts: d.date.getTime(),
+        });
+      }
+      log.info({ userId, strategies: decayRecords.length }, 'Alpha decay state loaded');
+    } catch (err) {
+      log.warn({ err, userId }, 'Failed to load alpha decay state');
+    }
   }
 
   /**
@@ -338,9 +366,19 @@ export class BotEngine {
     }
   }
 
+  private get rustAvailable(): boolean {
+    const now = Date.now();
+    if (now - this.lastEngineCheck > 30_000) {
+      this.lastEngineCheck = now;
+      this._rustAvailable = isEngineAvailable();
+    }
+    return this._rustAvailable;
+  }
+
   refreshRustAvailability(): void {
-    this.rustAvailable = isEngineAvailable();
-    console.log(`[BotEngine] Rust engine availability refreshed: ${this.rustAvailable}`);
+    this._rustAvailable = isEngineAvailable();
+    this.lastEngineCheck = Date.now();
+    console.log(`[BotEngine] Rust engine availability refreshed: ${this._rustAvailable}`);
   }
 
   /**
@@ -491,6 +529,8 @@ export class BotEngine {
 
     console.log(`[BotEngine] Starting bot ${botId} (stagger: ${staggerMs}ms, tick: ${this.tickInterval}ms)`);
 
+    this.loadAlphaDecayState(userId).catch(err => log.warn({ err, userId }, 'Failed to load alpha decay state'));
+
     setTimeout(() => {
       this.runBotCycle(botId, userId).catch(err => {
         console.error(`[BotEngine] Initial cycle failed for bot ${botId}:`, (err as Error).message);
@@ -605,11 +645,11 @@ export class BotEngine {
 
     // Delay first scan by 30s
     setTimeout(() => {
-      this.runMarketScan(userId).catch(() => {});
+      this.runMarketScan(userId).catch(err => log.error({ err, userId }, 'Market scan failed'));
     }, 30_000);
 
     this.scannerTimer = setInterval(() => {
-      this.runMarketScan(userId).catch(() => {});
+      this.runMarketScan(userId).catch(err => log.error({ err, userId }, 'Market scan failed'));
     }, this.marketScanInterval);
   }
 
@@ -630,7 +670,7 @@ export class BotEngine {
       clearInterval(entry.timer);
       const timer = setInterval(() => {
         if (!this.cycleInProgress.has(botId)) {
-          this.runBotCycle(botId, entry.userId).catch(() => {});
+          this.runBotCycle(botId, entry.userId).catch(err => log.error({ err, botId }, 'Bot cycle failed'));
         }
       }, this.tickInterval);
       this.runningBots.set(botId, { ...entry, timer });
@@ -647,7 +687,7 @@ export class BotEngine {
       clearInterval(this.scannerTimer);
       const userId = this.scannerUserId;
       this.scannerTimer = setInterval(() => {
-        this.runMarketScan(userId).catch(() => {});
+        this.runMarketScan(userId).catch(err => log.error({ err, userId }, 'Market scan failed'));
       }, this.marketScanInterval);
       console.log(`[BotEngine] Market scan interval updated to ${ms}ms`);
     }
@@ -973,8 +1013,11 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         });
         log.info({ symbol, orderType: orderTypeDecision.orderType, reason: orderTypeDecision.reason }, 'Order type selected');
 
-        if (orderTypeDecision.orderType === 'TWAP' && qty > 10) {
-          const twapResult = await this.twapExecutor.executeTWAP({
+        if ((orderTypeDecision.orderType === 'TWAP' || orderTypeDecision.orderType === 'VWAP') && qty > 10) {
+          const execFn = orderTypeDecision.orderType === 'VWAP'
+            ? this.twapExecutor.executeVWAP.bind(this.twapExecutor)
+            : this.twapExecutor.executeTWAP.bind(this.twapExecutor);
+          const twapResult = await execFn({
             totalQty: qty, numSlices: Math.min(5, qty),
             durationMinutes: 10, maxDeviationPct: 1.0,
             symbol, side: 'BUY', exchange,
@@ -1017,8 +1060,23 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
 
           if (exitPrice <= 0) return { success: false, message: `Cannot sell ${symbol}: no price available` };
 
-          const trade = await this.tradeService.closePosition(longPosition.id, userId, exitPrice);
-          const pnl = Number(trade.netPnl);
+          const exitResult = await ExitCoordinator.closePosition({
+            positionId: longPosition.id,
+            userId,
+            exitPrice,
+            reason: `Bot SELL signal for ${symbol}`,
+            source: 'BOT_ENGINE',
+            decisionType: 'EXIT_SIGNAL',
+            prisma: this.prisma,
+            tradeService: this.tradeService,
+            decisionAudit: this.decisionAudit,
+            extraSnapshot: { botId, aggressiveness: 'MODERATE' },
+          });
+
+          if (!exitResult.success) {
+            return { success: false, message: exitResult.error ?? 'Exit failed' };
+          }
+          const pnl = exitResult.pnl ?? 0;
 
           if (botId) {
             await this.updateBotTradeStats(botId, pnl);
@@ -1563,7 +1621,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         symbol: sig.symbol, direction: sig.direction, confidence: finalConfidence,
         entry: sig.entry, stopLoss: sig.stop_loss, target: sig.target,
         source: sig.strategy ?? 'rust-engine',
-      }).catch(() => {});
+      }).catch(err => log.error({ err, userId }, 'Failed to emit SIGNAL_GENERATED event'));
 
       if (execute) {
         const result = await this.executeTrade(userId, sig.symbol, sig.direction, sig.symbol, botId, {
@@ -2354,6 +2412,90 @@ Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted
       ).join('\n');
     } catch {
       return '';
+    }
+  }
+
+  /**
+   * Execute a signal produced by the data pipeline (Python ML scored).
+   * Routes through risk checks and TradeService for proper OMS lifecycle.
+   */
+  async executePipelineSignal(signal: {
+    symbol: string;
+    direction: 'BUY' | 'SELL';
+    confidence: number;
+    strategy: string;
+    mlScore: number;
+    source: string;
+  }): Promise<void> {
+    const runningBots = [...this.runningBots.values()];
+    if (runningBots.length === 0) {
+      log.warn({ symbol: signal.symbol }, 'Pipeline signal ignored — no running bots');
+      return;
+    }
+
+    const bot = runningBots[0];
+    const portfolio = await this.prisma.portfolio.findFirst({ where: { userId: bot.userId } });
+    if (!portfolio) return;
+
+    const nav = Number(portfolio.currentNav);
+    const estimatedPrice = nav * 0.05 / 1; // placeholder, refined below with real LTP
+    const riskResult = await this.riskService.preTradeCheck(bot.userId, signal.symbol, signal.direction, 1, estimatedPrice);
+    if (!riskResult.allowed) {
+      log.info({ symbol: signal.symbol, violations: riskResult.violations }, 'Pipeline signal rejected by risk');
+      return;
+    }
+
+    if (signal.direction === 'SELL') {
+      const longPos = await this.prisma.position.findFirst({
+        where: { portfolioId: portfolio.id, symbol: signal.symbol, side: 'LONG', status: 'OPEN' },
+      });
+      if (longPos) {
+        const exitResult = await ExitCoordinator.closePosition({
+          positionId: longPos.id,
+          userId: bot.userId,
+          exitPrice: Number(longPos.avgEntryPrice),
+          reason: `Pipeline ML signal (confidence: ${signal.confidence.toFixed(2)}, strategy: ${signal.strategy})`,
+          source: 'PIPELINE_ML',
+          decisionType: 'EXIT_SIGNAL',
+          prisma: this.prisma,
+          tradeService: this.tradeService,
+          decisionAudit: this.decisionAudit,
+        });
+        log.info({ symbol: signal.symbol, success: exitResult.success }, 'Pipeline SELL signal executed');
+      }
+      return;
+    }
+
+    const existingPos = await this.prisma.position.findFirst({
+      where: { portfolioId: portfolio.id, symbol: signal.symbol, status: 'OPEN' },
+    });
+    if (existingPos) return;
+
+    const positionSizePct = Math.min(signal.confidence * 15, 10);
+    const positionValue = nav * positionSizePct / 100;
+    let ltp = 0;
+    try {
+      const quote = await this.marketData.getQuote(signal.symbol);
+      ltp = quote.ltp;
+    } catch { /* price fetch failed */ }
+    if (ltp <= 0) return;
+    const qty = Math.max(1, Math.floor(positionValue / ltp));
+
+    try {
+      await this.tradeService.placeOrder(bot.userId, {
+        portfolioId: portfolio.id,
+        symbol: signal.symbol,
+        side: 'BUY',
+        orderType: 'MARKET',
+        qty,
+        price: ltp,
+        instrumentToken: signal.symbol,
+        exchange: 'NSE',
+        strategyTag: `PIPELINE_${signal.strategy}`,
+      });
+      log.info({ symbol: signal.symbol, qty, ltp, confidence: signal.confidence }, 'Pipeline BUY signal executed');
+    } catch (err) {
+      log.error({ err, symbol: signal.symbol }, 'Failed to execute pipeline signal');
     }
   }
 }

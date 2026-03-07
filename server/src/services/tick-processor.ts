@@ -1,5 +1,8 @@
 import { wsHub } from '../lib/websocket.js';
 import { engineSignals, engineFeatureStore, isEngineAvailable } from '../lib/rust-engine.js';
+import { createChildLogger } from '../lib/logger.js';
+
+const log = createChildLogger('TickProcessor');
 
 interface TickBuffer {
   symbol: string;
@@ -37,7 +40,7 @@ export function ingestTick(symbol: string, tick: { price: number; volume: number
 
   if (buf.candles.length >= 15 && now - buf.lastProcessed > MIN_PROCESS_INTERVAL_MS) {
     buf.lastProcessed = now;
-    processBuffer(buf).catch(() => {});
+    processBuffer(buf).catch(err => log.error({ err, symbol: buf.symbol }, 'Tick buffer processing failed'));
   }
 }
 

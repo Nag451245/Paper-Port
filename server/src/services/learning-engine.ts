@@ -4,6 +4,7 @@ import { MarketDataService } from './market-data.service.js';
 import { engineOptimize, engineFeatureStore, engineMLScore, isEngineAvailable, type OptimizeInput } from '../lib/rust-engine.js';
 import { isMLServiceAvailable, mlTrain, mlDetectRegime, mlAllocate } from '../lib/ml-service-client.js';
 import { LearningStoreService } from './learning-store.service.js';
+import { getRedis } from '../lib/redis.js';
 import { createChildLogger } from '../lib/logger.js';
 
 const log = createChildLogger('LearningEngine');
@@ -949,10 +950,13 @@ Top losers: ${JSON.stringify(topLosers)}`,
 
   // Track consecutive losses per strategy for intraday deallocation
   private consecutiveLosses = new Map<string, number>();
+  private intradayTradeCount = 0;
+  private lastRegimeCheck = 0;
 
   /**
    * Intraday Bayesian update — called on each POSITION_CLOSED event during trading hours.
-   * Updates per-strategy Thompson sampling alpha/beta and adjusts confidence multiplier.
+   * Updates per-strategy Thompson sampling alpha/beta, adjusts confidence,
+   * persists state to Redis, and triggers regime re-detection every 5 trades.
    */
   async runIntradayUpdate(trade: {
     strategyTag: string;
@@ -965,6 +969,7 @@ Top losers: ${JSON.stringify(topLosers)}`,
 
     const won = netPnl > 0;
     const key = `${userId}:${strategyTag}`;
+    this.intradayTradeCount++;
 
     // Update consecutive loss tracker
     if (won) {
@@ -1016,6 +1021,129 @@ Top losers: ${JSON.stringify(topLosers)}`,
     } catch (err) {
       log.warn({ err, strategyTag, userId }, 'Intraday Bayesian update failed');
     }
+
+    // Persist Thompson sampling state to Redis for crash recovery
+    await this.persistThompsonState(userId, strategyTag, won);
+
+    // Intraday regime re-detection every 5 trades
+    if (this.intradayTradeCount % 5 === 0) {
+      this.intradayRegimeRecheck(userId).catch(err =>
+        log.warn({ err }, 'Intraday regime recheck failed'),
+      );
+    }
+
+    // Intraday alpha decay check every 10 trades
+    if (this.intradayTradeCount % 10 === 0) {
+      this.intradayAlphaDecayCheck(userId, strategyTag).catch(err =>
+        log.warn({ err }, 'Intraday alpha decay check failed'),
+      );
+    }
+  }
+
+  private async persistThompsonState(userId: string, strategyTag: string, won: boolean): Promise<void> {
+    try {
+      const redis = getRedis();
+      if (!redis) return;
+
+      const key = `cg:thompson:${userId}:${strategyTag}`;
+      const raw = await redis.get(key);
+      const state = raw ? JSON.parse(raw) : { alpha: 1, beta: 1, emaWinRate: 0.5, totalTrades: 0 };
+
+      if (won) { state.alpha += 1; } else { state.beta += 1; }
+      state.totalTrades += 1;
+      const decay = 0.05;
+      state.emaWinRate = state.emaWinRate * (1 - decay) + (won ? 1.0 : 0.0) * decay;
+      state.lastUpdate = new Date().toISOString();
+
+      await redis.set(key, JSON.stringify(state), 'EX', 24 * 3600);
+    } catch (err) {
+      log.warn({ err, userId, strategyTag }, 'Failed to persist Thompson state');
+    }
+  }
+
+  private async intradayRegimeRecheck(userId: string): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastRegimeCheck < 120_000) return;
+    this.lastRegimeCheck = now;
+
+    if (!await isMLServiceAvailable()) return;
+
+    try {
+      const candles = await this.marketData.getHistory('NIFTY 50', '5m',
+        new Date(now - 2 * 86400000).toISOString().split('T')[0],
+        new Date().toISOString().split('T')[0], undefined, 'NSE',
+      );
+      if (!candles || candles.length < 30) return;
+
+      const closes = candles.slice(-60).map(c => c.close);
+      const returns = closes.slice(1).map((c, i) => (c - closes[i]) / closes[i]);
+      const volatility = returns.map((_, i) => {
+        const window = returns.slice(Math.max(0, i - 9), i + 1);
+        const mean = window.reduce((a, b) => a + b, 0) / window.length;
+        return Math.sqrt(window.reduce((s, r) => s + (r - mean) ** 2, 0) / window.length);
+      });
+
+      const regime = await mlDetectRegime({ returns, volatility });
+
+      const redis = getRedis();
+      if (redis && regime?.current_regime) {
+        const maxProb = Math.max(...Object.values(regime.regime_probabilities ?? {}), 0);
+        await redis.set(`cg:intraday_regime:${userId}`, JSON.stringify({
+          regime: regime.current_regime,
+          confidence: maxProb,
+          timestamp: new Date().toISOString(),
+        }), 'EX', 3600);
+        log.info({ userId, regime: regime.current_regime, confidence: maxProb },
+          'Intraday regime re-detected');
+      }
+    } catch (err) {
+      log.warn({ err, userId }, 'Intraday regime recheck failed');
+    }
+  }
+
+  private async intradayAlphaDecayCheck(userId: string, strategyTag: string): Promise<void> {
+    try {
+      const since = new Date();
+      since.setDate(since.getDate() - 7);
+
+      const recentTrades = await this.prisma.trade.findMany({
+        where: {
+          portfolio: { userId },
+          strategyTag,
+          exitTime: { gte: since },
+        },
+        select: { netPnl: true },
+        orderBy: { exitTime: 'desc' },
+        take: 20,
+      });
+
+      if (recentTrades.length < 5) return;
+
+      const returns = recentTrades.map(t => Number(t.netPnl));
+      const wins = returns.filter(r => r > 0).length;
+      const hitRate = wins / returns.length;
+      const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+      const std = Math.sqrt(returns.reduce((s, r) => s + (r - mean) ** 2, 0) / returns.length);
+      const recentSharpe = std > 0 ? (mean / std) * Math.sqrt(252) : 0;
+
+      const isDecaying = recentSharpe < 0.3 && hitRate < 0.4;
+
+      if (isDecaying) {
+        log.warn({
+          userId, strategyTag, recentSharpe: round2(recentSharpe),
+          hitRate: round2(hitRate), sampleSize: returns.length,
+        }, 'Intraday alpha decay detected — strategy underperforming in recent trades');
+
+        const redis = getRedis();
+        if (redis) {
+          await redis.set(`cg:alpha_decay_alert:${userId}:${strategyTag}`,
+            JSON.stringify({ isDecaying, recentSharpe, hitRate, detectedAt: new Date().toISOString() }),
+            'EX', 8 * 3600);
+        }
+      }
+    } catch (err) {
+      log.warn({ err, userId, strategyTag }, 'Intraday alpha decay check failed');
+    }
   }
 
   /**
@@ -1024,6 +1152,8 @@ Top losers: ${JSON.stringify(topLosers)}`,
    */
   resetIntradayState(): void {
     this.consecutiveLosses.clear();
+    this.intradayTradeCount = 0;
+    this.lastRegimeCheck = 0;
     log.info('Intraday learning state reset for new trading day');
   }
 }

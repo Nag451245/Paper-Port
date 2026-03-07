@@ -220,11 +220,9 @@ pub fn calc_rsi_series(data: &[f64], period: usize) -> Vec<f64> {
 }
 
 pub fn calc_sma(data: &[f64], period: usize) -> Vec<f64> {
+    if period == 0 || data.is_empty() { return vec![0.0; data.len()]; }
     let mut result = vec![0.0; data.len()];
-    for i in 0..data.len() {
-        if i < period - 1 {
-            continue;
-        }
+    for i in (period - 1)..data.len() {
         let sum: f64 = data[i + 1 - period..=i].iter().sum();
         result[i] = sum / period as f64;
     }
@@ -314,6 +312,75 @@ pub fn generate_combinations(params: &[Vec<serde_json::Value>]) -> Vec<Vec<serde
         result = new_result;
     }
     result
+}
+
+/// Single-value RSI for the latest period of a close series
+pub fn calc_rsi_last(closes: &[f64], period: usize) -> f64 {
+    let n = closes.len();
+    if n <= period { return 50.0; }
+    let mut avg_gain = 0.0;
+    let mut avg_loss = 0.0;
+    for i in 1..=period {
+        let diff = closes[n - period - 1 + i] - closes[n - period - 1 + i - 1];
+        if diff > 0.0 { avg_gain += diff; } else { avg_loss += diff.abs(); }
+    }
+    avg_gain /= period as f64;
+    avg_loss /= period as f64;
+    if avg_loss == 0.0 { return 100.0; }
+    100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+}
+
+/// Single ATR value from separate high/low/close slices
+pub fn calc_atr_last(highs: &[f64], lows: &[f64], closes: &[f64], period: usize) -> f64 {
+    let n = highs.len();
+    if n < period + 1 { return highs.last().unwrap_or(&0.0) - lows.last().unwrap_or(&0.0); }
+    let mut atr = 0.0;
+    for i in (n - period)..n {
+        let tr = (highs[i] - lows[i])
+            .max((highs[i] - closes[i - 1]).abs())
+            .max((lows[i] - closes[i - 1]).abs());
+        atr += tr;
+    }
+    atr / period as f64
+}
+
+/// Single ATR value from a slice of Candle structs
+pub fn calc_atr_candles(candles: &[Candle], period: usize) -> f64 {
+    if candles.len() < period + 1 { return 0.0; }
+    let start = candles.len() - period;
+    let mut sum = 0.0;
+    for i in start..candles.len() {
+        let tr = (candles[i].high - candles[i].low)
+            .max((candles[i].high - candles[i - 1].close).abs())
+            .max((candles[i].low - candles[i - 1].close).abs());
+        sum += tr;
+    }
+    sum / period as f64
+}
+
+/// Generate Cartesian product of named parameter ranges (HashMap variant)
+pub fn generate_combinations_map(grid: &std::collections::HashMap<String, Vec<f64>>) -> Vec<serde_json::Value> {
+    let keys: Vec<&String> = grid.keys().collect();
+    let values: Vec<&Vec<f64>> = keys.iter().map(|k| grid.get(*k).unwrap()).collect();
+    if keys.is_empty() { return vec![serde_json::json!({})]; }
+    let mut combos = Vec::new();
+    let mut indices = vec![0usize; keys.len()];
+    loop {
+        let mut combo = serde_json::Map::new();
+        for (i, key) in keys.iter().enumerate() {
+            combo.insert(key.to_string(), serde_json::json!(values[i][indices[i]]));
+        }
+        combos.push(serde_json::Value::Object(combo));
+        let mut carry = true;
+        for i in (0..keys.len()).rev() {
+            if carry {
+                indices[i] += 1;
+                if indices[i] >= values[i].len() { indices[i] = 0; } else { carry = false; }
+            }
+        }
+        if carry { break; }
+    }
+    combos
 }
 
 /// Extract f64 from a JSON indicator object at a given array index

@@ -144,6 +144,8 @@ pub struct BacktestConfig {
     pub adx_trend_threshold: f64,
     pub gap_min_pct: f64,
     pub sector_ema_period: usize,
+    pub supertrend_atr_period: usize,
+    pub supertrend_multiplier: f64,
 }
 
 impl Default for BacktestConfig {
@@ -169,6 +171,8 @@ impl Default for BacktestConfig {
             adx_trend_threshold: 25.0,
             gap_min_pct: 1.0,
             sector_ema_period: 21,
+            supertrend_atr_period: 10,
+            supertrend_multiplier: 3.0,
         }
     }
 }

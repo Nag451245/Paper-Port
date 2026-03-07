@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { TradeService, TradeError } from '../services/trade.service.js';
+import { ExitCoordinator } from '../services/exit-coordinator.service.js';
+import { DecisionAuditService } from '../services/decision-audit.service.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
 
@@ -213,8 +215,22 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
     try {
       const { positionId } = request.params as { positionId: string };
       const userId = getUserId(request);
-      const trade = await service.closePosition(positionId, userId, parsed.data.exit_price);
-      return reply.send(trade);
+      const prisma = getPrisma();
+      const result = await ExitCoordinator.closePosition({
+        positionId,
+        userId,
+        exitPrice: parsed.data.exit_price,
+        reason: 'Manual close via API',
+        source: 'MANUAL_API',
+        decisionType: 'POSITION_CLOSED',
+        prisma,
+        tradeService: service,
+        decisionAudit: new DecisionAuditService(prisma),
+      });
+      if (!result.success) {
+        return reply.code(result.alreadyClosing ? 409 : 400).send({ error: result.error });
+      }
+      return reply.send({ success: true, pnl: result.pnl });
     } catch (err) {
       if (err instanceof TradeError) return reply.code(err.statusCode).send({ error: err.message });
       throw err;
