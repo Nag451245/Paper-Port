@@ -145,6 +145,11 @@ model Order {
   stampDuty       Decimal  @default(0) @map("stamp_duty")
   totalCost       Decimal  @default(0) @map("total_cost")
   strategyTag     String?  @map("strategy_tag")
+  idealPrice      Decimal? @map("ideal_price")
+  slippageBps     Decimal? @map("slippage_bps")
+  fillLatencyMs   Int?     @map("fill_latency_ms")
+  spreadCostBps   Decimal? @map("spread_cost_bps")
+  impactCost      Decimal? @map("impact_cost")
   createdAt       DateTime @default(now()) @map("created_at")
   filledAt        DateTime? @map("filled_at")
 
@@ -622,4 +627,56 @@ model DecisionAudit {
   @@index([botId, createdAt])
   @@index([decisionType])
   @@map("decision_audits")
+}
+
+model CandleStore {
+  id        String   @id @default(uuid())
+  symbol    String
+  exchange  String   @default("NSE")
+  interval  String
+  timestamp DateTime
+  open      Decimal
+  high      Decimal
+  low       Decimal
+  close     Decimal
+  volume    Decimal  @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([symbol, exchange, interval, timestamp])
+  @@index([symbol, interval, timestamp])
+  @@map("candle_store")
+}
+
+model TradingUniverse {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  symbol    String
+  exchange  String   @default("NSE")
+  sector    String?
+  reason    String?
+  avgVolume Decimal? @map("avg_volume")
+  addedAt   DateTime @default(now()) @map("added_at")
+
+  @@unique([userId, symbol])
+  @@index([userId])
+  @@map("trading_universe")
+}
+
+model AlphaDecay {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  strategyId      String   @map("strategy_id")
+  date            DateTime @db.Date
+  sharpe30d       Float?   @map("sharpe_30d")
+  sharpe60d       Float?   @map("sharpe_60d")
+  sharpe90d       Float?   @map("sharpe_90d")
+  hitRate30d      Float?   @map("hit_rate_30d")
+  signalCount     Int      @default(0) @map("signal_count")
+  avgTimeToProft  Float?   @map("avg_time_to_profit")
+  isDecaying      Boolean  @default(false) @map("is_decaying")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, strategyId, date])
+  @@index([userId, strategyId])
+  @@map("alpha_decay")
 }

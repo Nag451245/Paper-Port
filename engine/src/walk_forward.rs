@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::backtest;
+use crate::utils::round2;
 
 #[derive(Deserialize)]
 struct WalkForwardConfig {
@@ -11,7 +12,15 @@ struct WalkForwardConfig {
     param_grid: std::collections::HashMap<String, Vec<f64>>,
     in_sample_ratio: Option<f64>,
     num_folds: Option<usize>,
+    #[serde(default = "default_window_mode")]
+    window_mode: String,
+    #[serde(default)]
+    purge_bars: Option<usize>,
+    #[serde(default)]
+    monte_carlo_runs: Option<usize>,
 }
+
+fn default_window_mode() -> String { "rolling".to_string() }
 
 #[derive(Deserialize, Clone)]
 struct CandleWF {
@@ -29,6 +38,8 @@ struct WalkForwardResult {
     aggregate: AggregateMetrics,
     best_robust_params: Value,
     overfitting_score: f64,
+    window_mode: String,
+    p_value: Option<f64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -65,6 +76,9 @@ pub fn compute(data: Value) -> Result<Value, String> {
 
     let num_folds = config.num_folds.unwrap_or(5).max(2).min(10);
     let is_ratio = config.in_sample_ratio.unwrap_or(0.7).max(0.5).min(0.9);
+    let purge_bars = config.purge_bars.unwrap_or(5);
+    let is_expanding = config.window_mode == "expanding";
+    let mc_runs = config.monte_carlo_runs.unwrap_or(0);
 
     let fold_size = n / num_folds;
     if fold_size < 20 {
@@ -87,7 +101,9 @@ pub fn compute(data: Value) -> Result<Value, String> {
     let mut param_scores: std::collections::HashMap<String, Vec<f64>> = std::collections::HashMap::new();
 
     for fold in 0..num_folds {
-        let fold_start = fold * fold_size;
+        // Expanding window: in-sample always starts from index 0
+        // Rolling window: in-sample starts from fold_start
+        let fold_start = if is_expanding { 0 } else { fold * fold_size };
         let fold_end = if fold == num_folds - 1 { n } else { (fold + 1) * fold_size };
         let fold_candles = &candles_json[fold_start..fold_end];
 
@@ -96,8 +112,10 @@ pub fn compute(data: Value) -> Result<Value, String> {
             continue;
         }
 
+        // Purged cross-validation: add embargo gap between train and test
+        let purge_end = (split + purge_bars).min(fold_candles.len());
         let in_sample = &fold_candles[..split];
-        let out_sample = &fold_candles[split..];
+        let out_sample = if purge_end < fold_candles.len() { &fold_candles[purge_end..] } else { continue };
 
         let mut best_is_sharpe = f64::NEG_INFINITY;
         let mut best_params = serde_json::json!({});
@@ -201,6 +219,13 @@ pub fn compute(data: Value) -> Result<Value, String> {
 
     let overfit = if avg_is > 0.0 { (avg_is - avg_oos) / avg_is } else { 0.0 };
 
+    // Monte Carlo permutation test for statistical significance
+    let p_value = if mc_runs > 0 && total_oos_pnl != 0.0 {
+        Some(monte_carlo_test(&folds, mc_runs))
+    } else {
+        None
+    };
+
     let result = WalkForwardResult {
         folds,
         aggregate: AggregateMetrics {
@@ -213,9 +238,46 @@ pub fn compute(data: Value) -> Result<Value, String> {
         },
         best_robust_params: best_robust,
         overfitting_score: round2(overfit.max(0.0).min(1.0)),
+        window_mode: config.window_mode.clone(),
+        p_value,
     };
 
     serde_json::to_value(result).map_err(|e| format!("Serialization error: {}", e))
+}
+
+fn monte_carlo_test(folds: &[FoldResult], num_runs: usize) -> f64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let real_sharpe: f64 = folds.iter().map(|f| f.out_sample_sharpe).sum::<f64>() / folds.len() as f64;
+
+    let mut pnls: Vec<f64> = folds.iter().map(|f| f.out_sample_pnl).collect();
+    if pnls.is_empty() { return 1.0; }
+
+    let mut better_count = 0usize;
+
+    for run in 0..num_runs {
+        // Deterministic shuffle using hash-based seed
+        let n = pnls.len();
+        for i in 0..n {
+            let mut hasher = DefaultHasher::new();
+            (run, i).hash(&mut hasher);
+            let j = hasher.finish() as usize % n;
+            pnls.swap(i, j);
+        }
+
+        let mean = pnls.iter().sum::<f64>() / n as f64;
+        let variance = pnls.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / n as f64;
+        let std = variance.sqrt();
+        let shuffled_sharpe = if std > 0.0 { mean / std } else { 0.0 };
+
+        if shuffled_sharpe >= real_sharpe {
+            better_count += 1;
+        }
+    }
+
+    let p = better_count as f64 / num_runs as f64;
+    (p * 1000.0).round() / 1000.0
 }
 
 fn generate_combinations(grid: &std::collections::HashMap<String, Vec<f64>>) -> Vec<Value> {
@@ -238,5 +300,3 @@ fn generate_combinations(grid: &std::collections::HashMap<String, Vec<f64>>) -> 
     }
     combos
 }
-
-fn round2(v: f64) -> f64 { (v * 100.0).round() / 100.0 }

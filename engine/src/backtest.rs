@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::utils::{round2, TransactionCosts, RiskLimits};
+use crate::utils::{round2, Candle, TransactionCosts, RiskLimits, calc_ema_last, calc_sma, calc_rsi_series};
 
 #[derive(Deserialize)]
 struct BacktestConfig {
@@ -11,16 +11,6 @@ struct BacktestConfig {
     params: Option<Value>,
     transaction_costs: Option<CostConfig>,
     risk_limits: Option<RiskLimitConfig>,
-}
-
-#[derive(Deserialize, Clone)]
-struct Candle {
-    timestamp: String,
-    open: f64,
-    high: f64,
-    low: f64,
-    close: f64,
-    volume: f64,
 }
 
 #[derive(Deserialize)]
@@ -94,12 +84,13 @@ pub fn run(data: Value) -> Result<Value, String> {
     let costs = build_costs(&config.transaction_costs);
     let risk = build_risk_limits(&config.risk_limits);
 
+    let mut cash = config.initial_capital;
     let mut nav = config.initial_capital;
     let mut peak = nav;
     let mut max_dd = 0.0_f64;
     let mut trades: Vec<TradeEntry> = Vec::new();
     let mut equity_curve: Vec<EquityPoint> = Vec::new();
-    let mut position: Option<(f64, String)> = None;
+    let mut position: Option<(f64, i64, String)> = None; // (entry_price, qty, entry_time)
     let mut total_costs = 0.0_f64;
     let mut risk_rejections = 0usize;
     let mut circuit_breaks = 0usize;
@@ -111,7 +102,7 @@ pub fn run(data: Value) -> Result<Value, String> {
     let params = config.params.clone().unwrap_or(serde_json::json!({}));
     let strat = config.strategy.as_str();
 
-    let rsi_vals = calc_rsi(&closes, 14);
+    let rsi_vals = calc_rsi_series(&closes, 14);
     let sma_short_p = params.get("shortPeriod").and_then(|v| v.as_f64()).unwrap_or(10.0) as usize;
     let sma_long_p = params.get("longPeriod").and_then(|v| v.as_f64()).unwrap_or(30.0) as usize;
     let sma_short_vals = calc_sma(&closes, sma_short_p);
@@ -126,21 +117,34 @@ pub fn run(data: Value) -> Result<Value, String> {
     let rsi_overbought = params.get("overbought").and_then(|v| v.as_f64()).unwrap_or(70.0);
     let orb_target_pct = params.get("target").and_then(|v| v.as_f64()).unwrap_or(1.5) / 100.0;
     let orb_sl_pct = params.get("stop_loss").and_then(|v| v.as_f64()).unwrap_or(0.75) / 100.0;
-    let mut short_position: Option<(f64, String)> = None;
+    let mut short_position: Option<(f64, i64, String)> = None; // (entry_price, qty, entry_time)
+
+    // Helper closures for open/close position with proper cash accounting
+    // open_long: cash -= position_value + entry_cost
+    // close_long: cash += exit_value - exit_cost, pnl = (exit - entry) * qty - costs
+    // NAV = cash + open_position_market_value (recalculated each candle)
 
     for (i, candle) in config.candles.iter().enumerate() {
+        // Recalculate NAV = cash + open position market value
+        nav = cash;
+        if let Some((ep, qty, _)) = &position {
+            nav += candle.close * (*qty) as f64;
+        }
+        if let Some((ep, qty, _)) = &short_position {
+            // Short position value: margin locked + unrealized P&L
+            nav += (*ep) * (*qty) as f64 + ((*ep) - candle.close) * (*qty) as f64;
+        }
         equity_curve.push(EquityPoint { date: candle.timestamp.clone(), nav: round2(nav) });
 
         let dd_check = risk.check_drawdown(nav, peak);
         if !dd_check.approved {
-            if position.is_some() {
-                let (ep, et) = position.take().unwrap();
-                let qty = calc_qty(nav, ep, &risk);
+            if let Some((ep, qty, et)) = position.take() {
                 let exit_price = costs.slippage_adjusted_price(candle.close, false);
+                let exit_value = exit_price * qty as f64;
                 let gross_pnl = (exit_price - ep) * qty as f64;
-                let exit_cost = costs.total_cost(exit_price * qty as f64, true);
+                let exit_cost = costs.total_cost(exit_value, true);
                 let net_pnl = gross_pnl - exit_cost;
-                nav += net_pnl;
+                cash += exit_value - exit_cost;
                 total_costs += exit_cost;
                 trades.push(TradeEntry {
                     symbol: config.symbol.clone(), side: "CIRCUIT_BREAK_EXIT".into(),
@@ -157,10 +161,10 @@ pub fn run(data: Value) -> Result<Value, String> {
         match strat {
             "ema-crossover" | "ema_crossover" | "supertrend" => {
                 if i >= 21 {
-                    let ema_short = ema(&config.candles[..=i], 9);
-                    let ema_long = ema(&config.candles[..=i], 21);
+                    let ema_short = calc_ema_last(&closes[..=i], 9);
+                    let ema_long = calc_ema_last(&closes[..=i], 21);
                     if position.is_none() && ema_short > ema_long {
-                        let qty = calc_qty(nav, candle.close, &risk);
+                        let qty = calc_qty(cash, candle.close, &risk);
                         let check = risk.check_position_size(nav, candle.close, qty, None);
                         if !check.approved {
                             risk_rejections += 1;
@@ -168,24 +172,25 @@ pub fn run(data: Value) -> Result<Value, String> {
                         }
                         if qty > 0 {
                             let entry_price = costs.slippage_adjusted_price(candle.close, true);
-                            let entry_cost = costs.total_cost(entry_price * qty as f64, false);
-                            nav -= entry_cost;
+                            let position_value = entry_price * qty as f64;
+                            let entry_cost = costs.total_cost(position_value, false);
+                            cash -= position_value + entry_cost;
                             total_costs += entry_cost;
-                            position = Some((entry_price, candle.timestamp.clone()));
+                            position = Some((entry_price, qty, candle.timestamp.clone()));
                         }
-                    } else if let Some((entry_price, entry_time)) = &position {
+                    } else if let Some((entry_price, qty, entry_time)) = &position {
                         if ema_short < ema_long {
-                            let qty = (nav * 0.1 / entry_price) as i64;
                             let exit_price = costs.slippage_adjusted_price(candle.close, false);
-                            let gross_pnl = (exit_price - entry_price) * qty as f64;
-                            let exit_cost = costs.total_cost(exit_price * qty as f64, true);
+                            let exit_value = exit_price * (*qty) as f64;
+                            let gross_pnl = (exit_price - entry_price) * (*qty) as f64;
+                            let exit_cost = costs.total_cost(exit_value, true);
                             let net_pnl = gross_pnl - exit_cost;
-                            nav += net_pnl;
+                            cash += exit_value - exit_cost;
                             total_costs += exit_cost;
                             trades.push(TradeEntry {
                                 symbol: config.symbol.clone(), side: "BUY".into(),
                                 entry_price: round2(*entry_price), exit_price: round2(exit_price),
-                                qty, pnl: round2(net_pnl), gross_pnl: round2(gross_pnl),
+                                qty: *qty, pnl: round2(net_pnl), gross_pnl: round2(gross_pnl),
                                 costs: round2(exit_cost),
                                 entry_time: entry_time.clone(), exit_time: candle.timestamp.clone(),
                             });
@@ -202,24 +207,25 @@ pub fn run(data: Value) -> Result<Value, String> {
                     let pl = if i > 0 { sma_long_vals[i-1] } else { 0.0 };
                     if s > 0.0 && l > 0.0 && ps > 0.0 && pl > 0.0 {
                         if position.is_none() && ps <= pl && s > l {
-                            let qty = calc_qty(nav, candle.close, &risk);
+                            let qty = calc_qty(cash, candle.close, &risk);
                             let check = risk.check_position_size(nav, candle.close, qty, None);
                             if !check.approved { risk_rejections += 1; continue; }
                             if qty > 0 {
                                 let entry_price = costs.slippage_adjusted_price(candle.close, true);
-                                let entry_cost = costs.total_cost(entry_price * qty as f64, false);
-                                nav -= entry_cost;
+                                let position_value = entry_price * qty as f64;
+                                let entry_cost = costs.total_cost(position_value, false);
+                                cash -= position_value + entry_cost;
                                 total_costs += entry_cost;
-                                position = Some((entry_price, candle.timestamp.clone()));
+                                position = Some((entry_price, qty, candle.timestamp.clone()));
                             }
                         } else if position.is_some() && ps >= pl && s < l {
-                            let (ep, et) = position.take().unwrap();
-                            let qty = (nav * 0.2 / ep) as i64;
+                            let (ep, qty, et) = position.take().unwrap();
                             let exit_price = costs.slippage_adjusted_price(candle.close, false);
+                            let exit_value = exit_price * qty as f64;
                             let gross_pnl = (exit_price - ep) * qty as f64;
-                            let exit_cost = costs.total_cost(exit_price * qty as f64, true);
+                            let exit_cost = costs.total_cost(exit_value, true);
                             let net_pnl = gross_pnl - exit_cost;
-                            nav += net_pnl;
+                            cash += exit_value - exit_cost;
                             total_costs += exit_cost;
                             trades.push(TradeEntry {
                                 symbol: config.symbol.clone(), side: "BUY".into(),
@@ -236,24 +242,25 @@ pub fn run(data: Value) -> Result<Value, String> {
                 if i < rsi_vals.len() && rsi_vals[i] > 0.0 {
                     let r = rsi_vals[i];
                     if position.is_none() && r < rsi_oversold {
-                        let qty = calc_qty(nav, candle.close, &risk);
+                        let qty = calc_qty(cash, candle.close, &risk);
                         let check = risk.check_position_size(nav, candle.close, qty, None);
                         if !check.approved { risk_rejections += 1; continue; }
                         if qty > 0 {
                             let entry_price = costs.slippage_adjusted_price(candle.close, true);
-                            let entry_cost = costs.total_cost(entry_price * qty as f64, false);
-                            nav -= entry_cost;
+                            let position_value = entry_price * qty as f64;
+                            let entry_cost = costs.total_cost(position_value, false);
+                            cash -= position_value + entry_cost;
                             total_costs += entry_cost;
-                            position = Some((entry_price, candle.timestamp.clone()));
+                            position = Some((entry_price, qty, candle.timestamp.clone()));
                         }
                     } else if position.is_some() && r > rsi_overbought {
-                        let (ep, et) = position.take().unwrap();
-                        let qty = (nav * 0.15 / ep) as i64;
+                        let (ep, qty, et) = position.take().unwrap();
                         let exit_price = costs.slippage_adjusted_price(candle.close, false);
+                        let exit_value = exit_price * qty as f64;
                         let gross_pnl = (exit_price - ep) * qty as f64;
-                        let exit_cost = costs.total_cost(exit_price * qty as f64, true);
+                        let exit_cost = costs.total_cost(exit_value, true);
                         let net_pnl = gross_pnl - exit_cost;
-                        nav += net_pnl;
+                        cash += exit_value - exit_cost;
                         total_costs += exit_cost;
                         trades.push(TradeEntry {
                             symbol: config.symbol.clone(), side: "BUY".into(),
@@ -276,36 +283,38 @@ pub fn run(data: Value) -> Result<Value, String> {
                         let z = (closes[i] - avg) / std;
                         if position.is_none() && short_position.is_none() {
                             if z < -mr_threshold {
-                                let qty = calc_qty(nav, candle.close, &risk);
+                                let qty = calc_qty(cash, candle.close, &risk);
                                 let check = risk.check_position_size(nav, candle.close, qty, None);
                                 if !check.approved { risk_rejections += 1; continue; }
                                 if qty > 0 {
                                     let entry_price = costs.slippage_adjusted_price(candle.close, true);
-                                    let entry_cost = costs.total_cost(entry_price * qty as f64, false);
-                                    nav -= entry_cost;
+                                    let position_value = entry_price * qty as f64;
+                                    let entry_cost = costs.total_cost(position_value, false);
+                                    cash -= position_value + entry_cost;
                                     total_costs += entry_cost;
-                                    position = Some((entry_price, candle.timestamp.clone()));
+                                    position = Some((entry_price, qty, candle.timestamp.clone()));
                                 }
                             } else if z > mr_threshold {
-                                let qty = calc_qty(nav, candle.close, &risk);
+                                let qty = calc_qty(cash, candle.close, &risk);
                                 let check = risk.check_position_size(nav, candle.close, qty, None);
                                 if !check.approved { risk_rejections += 1; continue; }
                                 if qty > 0 {
                                     let entry_price = costs.slippage_adjusted_price(candle.close, false);
-                                    let entry_cost = costs.total_cost(entry_price * qty as f64, false);
-                                    nav -= entry_cost;
+                                    let margin = entry_price * qty as f64;
+                                    let entry_cost = costs.total_cost(margin, false);
+                                    cash -= margin + entry_cost;
                                     total_costs += entry_cost;
-                                    short_position = Some((entry_price, candle.timestamp.clone()));
+                                    short_position = Some((entry_price, qty, candle.timestamp.clone()));
                                 }
                             }
                         } else if position.is_some() && z >= 0.0 {
-                            let (ep, et) = position.take().unwrap();
-                            let qty = (nav * 0.15 / ep) as i64;
+                            let (ep, qty, et) = position.take().unwrap();
                             let exit_price = costs.slippage_adjusted_price(candle.close, false);
+                            let exit_value = exit_price * qty as f64;
                             let gross_pnl = (exit_price - ep) * qty as f64;
-                            let exit_cost = costs.total_cost(exit_price * qty as f64, true);
+                            let exit_cost = costs.total_cost(exit_value, true);
                             let net_pnl = gross_pnl - exit_cost;
-                            nav += net_pnl;
+                            cash += exit_value - exit_cost;
                             total_costs += exit_cost;
                             trades.push(TradeEntry {
                                 symbol: config.symbol.clone(), side: "BUY".into(),
@@ -315,13 +324,13 @@ pub fn run(data: Value) -> Result<Value, String> {
                                 entry_time: et, exit_time: candle.timestamp.clone(),
                             });
                         } else if short_position.is_some() && z <= 0.0 {
-                            let (ep, et) = short_position.take().unwrap();
-                            let qty = (nav * 0.15 / ep) as i64;
+                            let (ep, qty, et) = short_position.take().unwrap();
                             let exit_price = costs.slippage_adjusted_price(candle.close, true);
+                            let margin = ep * qty as f64;
                             let gross_pnl = (ep - exit_price) * qty as f64;
                             let exit_cost = costs.total_cost(exit_price * qty as f64, true);
                             let net_pnl = gross_pnl - exit_cost;
-                            nav += net_pnl;
+                            cash += margin + net_pnl;
                             total_costs += exit_cost;
                             trades.push(TradeEntry {
                                 symbol: config.symbol.clone(), side: "SHORT".into(),
@@ -339,13 +348,13 @@ pub fn run(data: Value) -> Result<Value, String> {
                     if hold_counter > 0 {
                         hold_counter -= 1;
                         if hold_counter == 0 && position.is_some() {
-                            let (ep, et) = position.take().unwrap();
-                            let qty = (nav * 0.15 / ep) as i64;
+                            let (ep, qty, et) = position.take().unwrap();
                             let exit_price = costs.slippage_adjusted_price(candle.close, false);
+                            let exit_value = exit_price * qty as f64;
                             let gross_pnl = (exit_price - ep) * qty as f64;
-                            let exit_cost = costs.total_cost(exit_price * qty as f64, true);
+                            let exit_cost = costs.total_cost(exit_value, true);
                             let net_pnl = gross_pnl - exit_cost;
-                            nav += net_pnl;
+                            cash += exit_value - exit_cost;
                             total_costs += exit_cost;
                             trades.push(TradeEntry {
                                 symbol: config.symbol.clone(), side: "BUY".into(),
@@ -358,15 +367,16 @@ pub fn run(data: Value) -> Result<Value, String> {
                     } else if position.is_none() {
                         let past_ret = (closes[i] - closes[i - mom_lookback]) / closes[i - mom_lookback];
                         if past_ret > 0.05 {
-                            let qty = calc_qty(nav, candle.close, &risk);
+                            let qty = calc_qty(cash, candle.close, &risk);
                             let check = risk.check_position_size(nav, candle.close, qty, None);
                             if !check.approved { risk_rejections += 1; continue; }
                             if qty > 0 {
                                 let entry_price = costs.slippage_adjusted_price(candle.close, true);
-                                let entry_cost = costs.total_cost(entry_price * qty as f64, false);
-                                nav -= entry_cost;
+                                let position_value = entry_price * qty as f64;
+                                let entry_cost = costs.total_cost(position_value, false);
+                                cash -= position_value + entry_cost;
                                 total_costs += entry_cost;
-                                position = Some((entry_price, candle.timestamp.clone()));
+                                position = Some((entry_price, qty, candle.timestamp.clone()));
                                 hold_counter = mom_hold;
                             }
                         }
@@ -387,13 +397,13 @@ pub fn run(data: Value) -> Result<Value, String> {
                                 else if candle.low <= sl { sl }
                                 else { candle.close };
                             let exit = costs.slippage_adjusted_price(exit_raw, false);
-                            let qty = calc_qty(nav, entry, &risk);
+                            let qty = calc_qty(cash, entry, &risk);
                             if qty > 0 {
                                 let gross_pnl = (exit - entry) * qty as f64;
                                 let entry_cost = costs.total_cost(entry * qty as f64, false);
                                 let exit_cost = costs.total_cost(exit * qty as f64, true);
                                 let net_pnl = gross_pnl - entry_cost - exit_cost;
-                                nav += net_pnl;
+                                cash += net_pnl;
                                 total_costs += entry_cost + exit_cost;
                                 trades.push(TradeEntry {
                                     symbol: config.symbol.clone(), side: "BUY".into(),
@@ -412,13 +422,13 @@ pub fn run(data: Value) -> Result<Value, String> {
                                 else if candle.high >= sl { sl }
                                 else { candle.close };
                             let exit = costs.slippage_adjusted_price(exit_raw, true);
-                            let qty = calc_qty(nav, entry, &risk);
+                            let qty = calc_qty(cash, entry, &risk);
                             if qty > 0 {
                                 let gross_pnl = (entry - exit) * qty as f64;
                                 let entry_cost = costs.total_cost(entry * qty as f64, false);
                                 let exit_cost = costs.total_cost(exit * qty as f64, true);
                                 let net_pnl = gross_pnl - entry_cost - exit_cost;
-                                nav += net_pnl;
+                                cash += net_pnl;
                                 total_costs += entry_cost + exit_cost;
                                 trades.push(TradeEntry {
                                     symbol: config.symbol.clone(), side: "SHORT".into(),
@@ -435,30 +445,31 @@ pub fn run(data: Value) -> Result<Value, String> {
             }
             _ => {
                 if i >= 21 {
-                    let ema_short = ema(&config.candles[..=i], 9);
-                    let ema_long = ema(&config.candles[..=i], 21);
+                    let ema_short = calc_ema_last(&closes[..=i], 9);
+                    let ema_long = calc_ema_last(&closes[..=i], 21);
                     if position.is_none() && ema_short > ema_long {
-                        let qty = calc_qty(nav, candle.close, &risk);
+                        let qty = calc_qty(cash, candle.close, &risk);
                         if qty > 0 {
                             let entry_price = costs.slippage_adjusted_price(candle.close, true);
-                            let entry_cost = costs.total_cost(entry_price * qty as f64, false);
-                            nav -= entry_cost;
+                            let position_value = entry_price * qty as f64;
+                            let entry_cost = costs.total_cost(position_value, false);
+                            cash -= position_value + entry_cost;
                             total_costs += entry_cost;
-                            position = Some((entry_price, candle.timestamp.clone()));
+                            position = Some((entry_price, qty, candle.timestamp.clone()));
                         }
-                    } else if let Some((entry_price, entry_time)) = &position {
+                    } else if let Some((entry_price, qty, entry_time)) = &position {
                         if ema_short < ema_long {
-                            let qty = (nav * 0.1 / entry_price) as i64;
                             let exit_price = costs.slippage_adjusted_price(candle.close, false);
-                            let gross_pnl = (exit_price - entry_price) * qty as f64;
-                            let exit_cost = costs.total_cost(exit_price * qty as f64, true);
+                            let exit_value = exit_price * (*qty) as f64;
+                            let gross_pnl = (exit_price - entry_price) * (*qty) as f64;
+                            let exit_cost = costs.total_cost(exit_value, true);
                             let net_pnl = gross_pnl - exit_cost;
-                            nav += net_pnl;
+                            cash += exit_value - exit_cost;
                             total_costs += exit_cost;
                             trades.push(TradeEntry {
                                 symbol: config.symbol.clone(), side: "BUY".into(),
                                 entry_price: round2(*entry_price), exit_price: round2(exit_price),
-                                qty, pnl: round2(net_pnl), gross_pnl: round2(gross_pnl),
+                                qty: *qty, pnl: round2(net_pnl), gross_pnl: round2(gross_pnl),
                                 costs: round2(exit_cost),
                                 entry_time: entry_time.clone(), exit_time: candle.timestamp.clone(),
                             });
@@ -469,6 +480,14 @@ pub fn run(data: Value) -> Result<Value, String> {
             }
         }
 
+        // Final NAV recalculation
+        nav = cash;
+        if let Some((_, qty, _)) = &position {
+            nav += candle.close * (*qty) as f64;
+        }
+        if let Some((ep, qty, _)) = &short_position {
+            nav += (*ep) * (*qty) as f64 + ((*ep) - candle.close) * (*qty) as f64;
+        }
         if nav > peak { peak = nav; }
         let dd = if peak > 0.0 { (peak - nav) / peak } else { 0.0 };
         if dd > max_dd { max_dd = dd; }
@@ -555,49 +574,6 @@ fn calc_qty(nav: f64, price: f64, risk: &RiskLimits) -> i64 {
     if price <= 0.0 { return 0; }
     let max_value = nav * risk.max_position_size_pct / 100.0;
     (max_value / price).min(i64::MAX as f64) as i64
-}
-
-fn ema(candles: &[Candle], period: usize) -> f64 {
-    if candles.len() < period { return 0.0; }
-    let multiplier = 2.0 / (period as f64 + 1.0);
-    let mut ema_val = candles[candles.len() - period].close;
-    for candle in &candles[candles.len() - period + 1..] {
-        ema_val = (candle.close - ema_val) * multiplier + ema_val;
-    }
-    ema_val
-}
-
-fn calc_sma(data: &[f64], period: usize) -> Vec<f64> {
-    let mut result = vec![0.0; data.len()];
-    for i in 0..data.len() {
-        if i < period - 1 { continue; }
-        let sum: f64 = data[i + 1 - period..=i].iter().sum();
-        result[i] = sum / period as f64;
-    }
-    result
-}
-
-fn calc_rsi(closes: &[f64], period: usize) -> Vec<f64> {
-    let mut result = vec![0.0; closes.len()];
-    if closes.len() <= period { return result; }
-    let mut avg_gain = 0.0;
-    let mut avg_loss = 0.0;
-    for i in 1..=period {
-        let diff = closes[i] - closes[i - 1];
-        if diff > 0.0 { avg_gain += diff; } else { avg_loss += diff.abs(); }
-    }
-    avg_gain /= period as f64;
-    avg_loss /= period as f64;
-    result[period] = if avg_loss == 0.0 { 100.0 } else { 100.0 - 100.0 / (1.0 + avg_gain / avg_loss) };
-    for i in (period + 1)..closes.len() {
-        let diff = closes[i] - closes[i - 1];
-        let gain = if diff > 0.0 { diff } else { 0.0 };
-        let loss = if diff < 0.0 { diff.abs() } else { 0.0 };
-        avg_gain = (avg_gain * (period as f64 - 1.0) + gain) / period as f64;
-        avg_loss = (avg_loss * (period as f64 - 1.0) + loss) / period as f64;
-        result[i] = if avg_loss == 0.0 { 100.0 } else { 100.0 - 100.0 / (1.0 + avg_gain / avg_loss) };
-    }
-    result
 }
 
 #[cfg(test)]

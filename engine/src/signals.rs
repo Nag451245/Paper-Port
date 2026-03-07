@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use crate::utils::{calc_ema_series as calc_ema, calc_rsi_series as calc_rsi, calc_atr_series as calc_atr};
 
 #[derive(Deserialize)]
 struct SignalInput {
@@ -53,44 +54,6 @@ pub fn compute(data: Value) -> Result<Value, String> {
     };
 
     serde_json::to_value(output).map_err(|e| format!("Serialization error: {}", e))
-}
-
-fn calc_ema(data: &[f64], period: usize) -> Vec<f64> {
-    if data.len() < period { return vec![0.0; data.len()]; }
-    let mut result = vec![0.0; data.len()];
-    let mult = 2.0 / (period as f64 + 1.0);
-    result[period - 1] = data[..period].iter().sum::<f64>() / period as f64;
-    for i in period..data.len() {
-        result[i] = (data[i] - result[i - 1]) * mult + result[i - 1];
-    }
-    result
-}
-
-fn calc_rsi(data: &[f64], period: usize) -> Vec<f64> {
-    if data.len() < period + 1 { return vec![50.0; data.len()]; }
-    let mut result = vec![50.0; data.len()];
-    let mut avg_gain = 0.0;
-    let mut avg_loss = 0.0;
-
-    for i in 1..=period {
-        let diff = data[i] - data[i - 1];
-        if diff > 0.0 { avg_gain += diff; } else { avg_loss -= diff; }
-    }
-    avg_gain /= period as f64;
-    avg_loss /= period as f64;
-
-    if avg_loss == 0.0 { result[period] = 100.0; }
-    else { result[period] = 100.0 - 100.0 / (1.0 + avg_gain / avg_loss); }
-
-    for i in period + 1..data.len() {
-        let diff = data[i] - data[i - 1];
-        let (gain, loss) = if diff > 0.0 { (diff, 0.0) } else { (0.0, -diff) };
-        avg_gain = (avg_gain * (period as f64 - 1.0) + gain) / period as f64;
-        avg_loss = (avg_loss * (period as f64 - 1.0) + loss) / period as f64;
-        if avg_loss == 0.0 { result[i] = 100.0; }
-        else { result[i] = 100.0 - 100.0 / (1.0 + avg_gain / avg_loss); }
-    }
-    result
 }
 
 fn calc_macd(data: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
@@ -152,27 +115,6 @@ fn calc_supertrend(highs: &[f64], lows: &[f64], closes: &[f64], period: usize, m
         if result[i] == 0.0 { result[i] = lower; }
     }
     result
-}
-
-fn calc_atr(highs: &[f64], lows: &[f64], closes: &[f64], period: usize) -> Vec<f64> {
-    let n = closes.len();
-    let mut tr = vec![0.0; n];
-    let mut atr = vec![0.0; n];
-
-    tr[0] = highs[0] - lows[0];
-    for i in 1..n {
-        tr[i] = (highs[i] - lows[i])
-            .max((highs[i] - closes[i - 1]).abs())
-            .max((lows[i] - closes[i - 1]).abs());
-    }
-
-    if n >= period {
-        atr[period - 1] = tr[..period].iter().sum::<f64>() / period as f64;
-        for i in period..n {
-            atr[i] = (atr[i - 1] * (period as f64 - 1.0) + tr[i]) / period as f64;
-        }
-    }
-    atr
 }
 
 #[cfg(test)]

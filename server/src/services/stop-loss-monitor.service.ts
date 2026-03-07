@@ -1,6 +1,11 @@
 import { PrismaClient } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
+import { TradeService } from './trade.service.js';
 import { wsHub } from '../lib/websocket.js';
+import { DecisionAuditService } from './decision-audit.service.js';
+import { createChildLogger } from '../lib/logger.js';
+
+const log = createChildLogger('StopLossMonitor');
 
 interface StopLossConfig {
   symbol: string;
@@ -28,10 +33,14 @@ export class StopLossMonitor {
   private monitoredPositions = new Map<string, MonitoredPosition>();
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private marketData: MarketDataService;
+  private tradeService: TradeService;
+  private decisionAudit: DecisionAuditService;
   private checkIntervalMs = 3_000;
 
   constructor(private prisma: PrismaClient) {
     this.marketData = new MarketDataService();
+    this.tradeService = new TradeService(prisma);
+    this.decisionAudit = new DecisionAuditService(prisma);
   }
 
   async start(): Promise<void> {
@@ -203,56 +212,45 @@ export class StopLossMonitor {
 
   private async executeStopLossExit(monitored: MonitoredPosition, ltp: number, reason: string): Promise<void> {
     const { config } = monitored;
-    console.log(`[StopLossMonitor] EXIT triggered for ${config.symbol}: ${reason}`);
+    log.info({ symbol: config.symbol, reason, ltp }, 'EXIT triggered');
 
     try {
-      const position = await this.prisma.position.findUnique({ where: { id: config.positionId } });
-      if (!position || position.status !== 'OPEN') return;
+      const trade = await this.tradeService.closePosition(config.positionId, config.userId, ltp);
+      const netPnl = Number(trade.netPnl);
+      const outcome = netPnl > 0 ? 'WIN' : 'LOSS';
 
-      const entryPrice = Number(position.avgEntryPrice);
-      const grossPnl = config.side === 'LONG'
-        ? (ltp - entryPrice) * config.qty
-        : (entryPrice - ltp) * config.qty;
+      // Record in DecisionAudit so the nightly learning pipeline can use this data
+      const decisionType = reason.includes('Take-profit') ? 'TP_TRIGGER' as const
+        : reason.includes('Time-based') ? 'EXIT_SIGNAL' as const
+        : 'SL_TRIGGER' as const;
 
-      const turnover = ltp * config.qty;
-      const brokerage = Math.min(turnover * 0.0003, 20);
-      const stt = turnover * 0.001;
-      const totalCost = brokerage + stt + (brokerage * 0.18);
-      const netPnl = grossPnl - totalCost;
-
-      await this.prisma.trade.create({
-        data: {
-          portfolioId: config.portfolioId,
-          positionId: config.positionId,
+      try {
+        const auditId = await this.decisionAudit.recordDecision({
+          userId: config.userId,
           symbol: config.symbol,
-          exchange: 'NSE',
-          side: config.side === 'LONG' ? 'SELL' : 'BUY',
-          entryPrice,
-          exitPrice: ltp,
-          qty: config.qty,
-          grossPnl,
-          totalCosts: totalCost,
-          netPnl,
-          entryTime: position.openedAt,
-          exitTime: new Date(),
-          strategyTag: `SL_EXIT:${reason.split(':')[0]}`,
-        },
-      });
-
-      await this.prisma.position.update({
-        where: { id: config.positionId },
-        data: { status: 'CLOSED', realizedPnl: netPnl, closedAt: new Date() },
-      });
-
-      const portfolio = await this.prisma.portfolio.findUnique({ where: { id: config.portfolioId } });
-      if (portfolio) {
-        const cashReturn = config.side === 'LONG'
-          ? ltp * config.qty - totalCost
-          : this.shortMarginRelease(entryPrice, config.qty) + netPnl;
-        await this.prisma.portfolio.update({
-          where: { id: config.portfolioId },
-          data: { currentNav: Number(portfolio.currentNav) + cashReturn },
+          decisionType,
+          direction: config.side === 'LONG' ? 'LONG' : 'SHORT',
+          confidence: 1.0,
+          signalSource: 'STOP_LOSS_MONITOR',
+          marketDataSnapshot: {
+            ltp,
+            entryPrice: config.entryPrice,
+            highWaterMark: monitored.highWaterMark,
+            lowWaterMark: monitored.lowWaterMark,
+            trailingStop: monitored.currentTrailingStop,
+          },
+          reasoning: reason,
+          entryPrice: config.entryPrice,
         });
+
+        await this.decisionAudit.resolveDecision(auditId, {
+          exitPrice: ltp,
+          pnl: netPnl,
+          predictionAccuracy: outcome === 'WIN' ? 1 : 0,
+          outcomeNotes: `${outcome}: P&L ₹${netPnl.toFixed(2)} | ${reason}`,
+        });
+      } catch {
+        // Audit is best-effort — don't block the exit
       }
 
       await this.prisma.riskEvent.create({
@@ -262,8 +260,8 @@ export class StopLossMonitor {
           severity: 'high',
           symbol: config.symbol,
           details: JSON.stringify({
-            reason, ltp, entryPrice, qty: config.qty,
-            grossPnl, netPnl, side: config.side,
+            reason, ltp, entryPrice: config.entryPrice, qty: config.qty,
+            netPnl, side: config.side,
             highWaterMark: monitored.highWaterMark,
             lowWaterMark: monitored.lowWaterMark,
           }),
@@ -286,11 +284,7 @@ export class StopLossMonitor {
       });
 
     } catch (err) {
-      console.error(`[StopLossMonitor] Failed to exit ${config.symbol}:`, (err as Error).message);
+      log.error({ err, symbol: config.symbol }, 'Failed to execute stop-loss exit');
     }
-  }
-
-  private shortMarginRelease(entryPrice: number, qty: number): number {
-    return entryPrice * qty * 0.25;
   }
 }

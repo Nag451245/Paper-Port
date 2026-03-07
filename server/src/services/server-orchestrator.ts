@@ -2,6 +2,10 @@ import cron from 'node-cron';
 import type { PrismaClient } from '@prisma/client';
 import { MarketCalendar, type MarketPhase } from './market-calendar.js';
 import type { BotEngine } from './bot-engine.js';
+import { createChildLogger } from '../lib/logger.js';
+import { emit } from '../lib/event-bus.js';
+
+const log = createChildLogger('Orchestrator');
 
 interface OrchestratorStats {
   pingsSentToday: number;
@@ -96,7 +100,8 @@ export class ServerOrchestrator {
   }
 
   private async onPhaseChange(from: MarketPhase, to: MarketPhase): Promise<void> {
-    console.log(`[Orchestrator] Phase changed: ${from} -> ${to}`);
+    log.info({ from, to }, 'Market phase changed');
+    emit('system', { type: 'PHASE_CHANGE', from, to, timestamp: new Date().toISOString() }).catch(() => {});
 
     const config = this.calendar.getPhaseConfig(to);
 
@@ -106,7 +111,9 @@ export class ServerOrchestrator {
       this.botEngine.setTickInterval(config.botTickMs || 60_000);
       this.botEngine.setMarketScanInterval(config.scanIntervalMs || 5 * 60_000);
     } else {
-      // Outside market hours — slow down but don't stop
+      if (from === 'MARKET_HOURS') {
+        await this.autoStopBots();
+      }
       this.botEngine.setTickInterval(10 * 60_000);
       this.botEngine.setMarketScanInterval(30 * 60_000);
     }

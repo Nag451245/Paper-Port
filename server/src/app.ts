@@ -37,6 +37,9 @@ import { PriceFeedService } from './services/price-feed.service.js';
 import { IntradayManager } from './services/intraday-manager.service.js';
 import { OptionsPositionService } from './services/options-position.service.js';
 import { registerWebSocket, wsHub } from './lib/websocket.js';
+import { on as onEvent, shutdownEventBus, type AppEvent } from './lib/event-bus.js';
+import { UptimeMonitorService } from './services/uptime-monitor.service.js';
+import { DataPipelineService } from './services/data-pipeline.service.js';
 
 export interface BuildAppOptions {
   logger?: boolean;
@@ -54,6 +57,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const learningEngine = new LearningEngine(getPrisma());
   const morningBoot = new MorningBoot(getPrisma());
   const orchestrator = new ServerOrchestrator(getPrisma(), botEngine, env.PORT);
+  const uptimeMonitor = new UptimeMonitorService(async () => {
+    try { await getPrisma().$queryRaw`SELECT 1`; return true; } catch { return false; }
+  });
+  const dataPipeline = new DataPipelineService();
+
   app.decorate('botEngine', botEngine);
   app.decorate('learningEngine', learningEngine);
   app.decorate('morningBoot', morningBoot);
@@ -112,6 +120,17 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     });
   });
 
+  // Start uptime monitoring and data pipeline
+  uptimeMonitor.start();
+  dataPipeline.initialize().catch(() => {});
+
+  // Track request latency and errors for uptime monitoring
+  app.addHook('onResponse', async (request, reply) => {
+    const latencyMs = reply.elapsedTime;
+    if (latencyMs > 0) uptimeMonitor.recordLatency(latencyMs);
+    if (reply.statusCode >= 500) uptimeMonitor.recordError();
+  });
+
   app.get('/health', async () => {
     const checks: Record<string, string> = {};
 
@@ -132,11 +151,23 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const overall = checks.database === 'ok' && checks.engine === 'ok' ? 'ok'
       : checks.database === 'ok' ? 'degraded' : 'error';
 
+    const uptimeStatus = uptimeMonitor.getStatus();
+
     return {
       status: overall,
       timestamp: new Date().toISOString(),
       uptime: Math.round(process.uptime()),
       checks,
+      monitoring: {
+        uptimePct: uptimeStatus.uptimePct,
+        marketHoursUptimePct: uptimeStatus.marketHoursUptimePct,
+        servicesUp: uptimeStatus.servicesUp,
+        servicesTotal: uptimeStatus.servicesTotal,
+        target: uptimeStatus.target,
+        onTrack: uptimeStatus.onTrack,
+        recentErrors: uptimeStatus.recentErrors,
+        avgLatencyMs: uptimeStatus.avgLatencyMs,
+      },
     };
   });
 
@@ -257,6 +288,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   orchestrator.scheduleMarketDay('20 3 * * 1-5', async () => {
     const result = await morningBoot.runMorningBoot();
     console.log(`[Morning Boot] Processed ${result.usersProcessed} users, activated ${result.strategiesActivated} strategies`);
+
+    // Close the loop: load nightly-trained ML weights into the live bot engine
+    await botEngine.loadMLWeightsFromDB();
+    console.log('[Morning Boot] ML weights loaded into execution engine');
   });
 
   // ── Stop-Loss Monitor, Price Feed & Intraday Manager ──
@@ -290,6 +325,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     stopLossMonitor.stop();
     priceFeedService.stop();
     orchestrator.stop();
+    uptimeMonitor.stop();
+    await shutdownEventBus();
     await disconnectPrisma();
   });
 
@@ -307,6 +344,23 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       }
     } catch (err: any) {
       console.error('[startup] Rust engine check failed:', err.message, '— bots will use Gemini AI only');
+    }
+  });
+
+  // Bridge key events to WebSocket for real-time UI updates
+  onEvent('RISK_VIOLATION', (e: AppEvent) => {
+    if ('userId' in e && 'violations' in e) {
+      wsHub.broadcastToUser(e.userId, { type: 'risk_violation', data: e });
+    }
+  });
+  onEvent('CIRCUIT_BREAKER_TRIGGERED', (e: AppEvent) => {
+    if ('userId' in e) {
+      wsHub.broadcastToUser(e.userId, { type: 'circuit_breaker', data: e });
+    }
+  });
+  onEvent('PHASE_CHANGE', (e: AppEvent) => {
+    if ('from' in e && 'to' in e) {
+      wsHub.broadcastRegime({ regime: (e as any).to, confidence: 1.0, timestamp: (e as any).timestamp });
     }
   });
 

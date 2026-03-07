@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::utils::{round2, round4};
 
 #[derive(Deserialize)]
 struct Config {
@@ -212,9 +213,6 @@ fn adf_score(spread: &[f64]) -> f64 {
     let se_beta = if var_lag > 0.0 { se / var_lag.sqrt() } else { 1.0 };
     if se_beta > 0.0 { beta / se_beta } else { 0.0 }
 }
-
-fn round2(v: f64) -> f64 { (v * 100.0).round() / 100.0 }
-fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
 
 #[cfg(test)]
 mod tests {

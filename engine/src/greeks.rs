@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::f64::consts::{E, PI};
+use std::f64::consts::E;
+
+use crate::utils::{norm_cdf, norm_pdf};
 
 #[derive(Deserialize)]
 struct GreeksInput {
@@ -85,21 +87,6 @@ pub fn compute(data: Value) -> Result<Value, String> {
     };
 
     serde_json::to_value(output).map_err(|e| format!("Serialization error: {}", e))
-}
-
-fn norm_cdf(x: f64) -> f64 {
-    0.5 * (1.0 + erf(x / 2.0_f64.sqrt()))
-}
-
-fn norm_pdf(x: f64) -> f64 {
-    E.powf(-x * x / 2.0) / (2.0 * PI).sqrt()
-}
-
-fn erf(x: f64) -> f64 {
-    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
-    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
-    let result = 1.0 - poly * E.powf(-x * x);
-    if x >= 0.0 { result } else { -result }
 }
 
 fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }

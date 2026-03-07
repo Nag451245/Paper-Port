@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use crate::utils::{norm_cdf, erf, bs_price};
 #[derive(Deserialize)]
 struct IVSurfaceConfig {
     spot: f64,
@@ -268,30 +269,6 @@ fn implied_vol(option_price: f64, spot: f64, strike: f64, r: f64, t: f64, is_cal
         if bs > option_price { hi = mid; } else { lo = mid; }
     }
     (lo + hi) / 2.0
-}
-
-fn bs_price(s: f64, k: f64, r: f64, t: f64, sigma: f64, is_call: bool) -> f64 {
-    let d1 = ((s / k).ln() + (r + sigma * sigma / 2.0) * t) / (sigma * t.sqrt());
-    let d2 = d1 - sigma * t.sqrt();
-    if is_call {
-        s * norm_cdf(d1) - k * (-r * t).exp() * norm_cdf(d2)
-    } else {
-        k * (-r * t).exp() * norm_cdf(-d2) - s * norm_cdf(-d1)
-    }
-}
-
-fn norm_cdf(x: f64) -> f64 {
-    0.5 * (1.0 + erf(x / (2.0_f64).sqrt()))
-}
-
-fn erf(x: f64) -> f64 {
-    let a1 = 0.254829592; let a2 = -0.284496736; let a3 = 1.421413741;
-    let a4 = -1.453152027; let a5 = 1.061405429; let p = 0.3275911;
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-    let t = 1.0 / (1.0 + p * x);
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
-    sign * y
 }
 
 fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }

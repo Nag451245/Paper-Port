@@ -1,5 +1,9 @@
 import type { PrismaClient } from '@prisma/client';
 import { TargetTracker } from './target-tracker.service.js';
+import { createChildLogger } from '../lib/logger.js';
+import { emit } from '../lib/event-bus.js';
+
+const log = createChildLogger('RiskService');
 
 export interface RiskConfig {
   maxPositionPct: number;
@@ -10,17 +14,48 @@ export interface RiskConfig {
   maxSectorConcentrationPct: number;
   maxCorrelatedPositions: number;
   marginUtilizationLimitPct: number;
+  maxVolumeParticipationPct: number;
+  // 4.3 tight risk limits for 0.5% daily target
+  maxStopLossPctPerPosition: number;
+  maxSimultaneousRiskPct: number;
+  maxSameSectorPositions: number;
+  maxCorrelationBetweenPositions: number;
+  weeklyLossLimitPct: number;
+  consecutiveLossPauseCount: number;
+  dailyLossPauseCount: number;
+  consecutiveLosingDaysReduceSize: number;
+  consecutiveLosingDaysHalt: number;
 }
 
 const DEFAULT_CONFIG: RiskConfig = {
+  maxPositionPct: 1,        // Max 1% of capital per position (tightened from 10%)
+  maxDailyDrawdownPct: 0.1, // Max 0.1% daily loss (tightened from 3%)
+  maxOpenPositions: 5,      // Max 5 open positions (tightened from 10)
+  maxSymbolConcentration: 1, // 1 position per symbol
+  maxOrderValue: 100_000,   // Tightened
+  maxSectorConcentrationPct: 20,
+  maxCorrelatedPositions: 3, // Max 3 in same sector
+  marginUtilizationLimitPct: 50,
+  maxVolumeParticipationPct: 5,
+  // Tight per-trade risk
+  maxStopLossPctPerPosition: 0.5, // Stop loss at 0.5% of capital max
+  maxSimultaneousRiskPct: 2.0,    // Never risk more than 2% simultaneously
+  maxSameSectorPositions: 3,
+  maxCorrelationBetweenPositions: 0.5,
+  weeklyLossLimitPct: 0.3,        // 0.3% weekly loss → reduce size 50%
+  consecutiveLossPauseCount: 3,   // 3 consecutive losses → pause 30min
+  dailyLossPauseCount: 5,         // 5 losses in a day → stop for the day
+  consecutiveLosingDaysReduceSize: 2, // 2 losing days → reduce 50%
+  consecutiveLosingDaysHalt: 5,       // 5 losing days → halt auto-trading
+};
+
+// Aggressive config that allows wider limits (for users who opt in)
+export const AGGRESSIVE_CONFIG: Partial<RiskConfig> = {
   maxPositionPct: 10,
   maxDailyDrawdownPct: 3,
   maxOpenPositions: 10,
   maxSymbolConcentration: 2,
   maxOrderValue: 500_000,
-  maxSectorConcentrationPct: 30,
-  maxCorrelatedPositions: 4,
-  marginUtilizationLimitPct: 80,
 };
 
 const SECTOR_MAP: Record<string, string> = {
@@ -98,6 +133,13 @@ export class RiskService {
     const cfg = { ...DEFAULT_CONFIG, ...config };
     const violations: string[] = [];
     const warnings: string[] = [];
+
+    // Rule 0: Check consecutive-loss pause (hard 30-min block)
+    const pauseState = await this.checkConsecutiveLossPause(userId);
+    if (pauseState.paused && pauseState.pauseUntil) {
+      violations.push(`Trading paused until ${pauseState.pauseUntil.toLocaleTimeString('en-IN')} (${pauseState.consecutiveLosses} consecutive losses)`);
+      return { allowed: false, violations, warnings };
+    }
 
     const orderValue = qty * price;
 
@@ -196,9 +238,178 @@ export class RiskService {
       }
     }
 
+    // Rule 6b: Pairwise return correlation — reject if new position is too correlated with existing
+    if (side === 'BUY') {
+      const existingPositions = await this.prisma.position.findMany({
+        where: { portfolioId: portfolio.id, status: 'OPEN' },
+        select: { symbol: true },
+      });
+
+      if (existingPositions.length > 0) {
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+        const allSymbols = [...new Set([symbol, ...existingPositions.map(p => p.symbol)])];
+        const tradesBySymbol = new Map<string, number[]>();
+
+        for (const sym of allSymbols) {
+          const trades = await this.prisma.trade.findMany({
+            where: { portfolioId: portfolio.id, symbol: sym, exitTime: { gte: thirtyDaysAgo } },
+            select: { netPnl: true },
+            orderBy: { exitTime: 'asc' },
+          });
+          if (trades.length >= 5) {
+            tradesBySymbol.set(sym, trades.map(t => Number(t.netPnl)));
+          }
+        }
+
+        const newReturns = tradesBySymbol.get(symbol);
+        if (newReturns) {
+          for (const pos of existingPositions) {
+            const existingReturns = tradesBySymbol.get(pos.symbol);
+            if (existingReturns) {
+              const corr = pearsonCorr(newReturns, existingReturns);
+              if (corr > cfg.maxCorrelationBetweenPositions) {
+                violations.push(
+                  `${symbol} is too correlated with open position ${pos.symbol} (r=${corr.toFixed(2)}, max ${cfg.maxCorrelationBetweenPositions})`
+                );
+              } else if (corr > cfg.maxCorrelationBetweenPositions * 0.8) {
+                warnings.push(`${symbol}↔${pos.symbol} correlation ${corr.toFixed(2)} approaching limit`);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Rule 7: Portfolio heat — total open exposure as % of capital
+    if (side === 'BUY') {
+      const allOpen = await this.prisma.position.findMany({
+        where: { portfolioId: portfolio.id, status: 'OPEN' },
+        select: { avgEntryPrice: true, qty: true },
+      });
+      const totalExposure = allOpen.reduce((s, p) => s + Number(p.avgEntryPrice) * p.qty, 0) + orderValue;
+      const heatPct = capital > 0 ? (totalExposure / capital) * 100 : 0;
+      if (heatPct > 80) {
+        violations.push(`Portfolio heat ${heatPct.toFixed(1)}% exceeds 80% limit (exposure ₹${totalExposure.toFixed(0)} on ₹${capital} capital)`);
+      } else if (heatPct > 60) {
+        warnings.push(`Portfolio heat at ${heatPct.toFixed(1)}% — approaching 80% limit`);
+      }
+    }
+
+    // Rule 8: Sector concentration by value (% of capital)
+    if (side === 'BUY') {
+      const newSectorForValue = SECTOR_MAP[symbol] ?? 'Other';
+      const sectorPositions = await this.prisma.position.findMany({
+        where: { portfolioId: portfolio.id, status: 'OPEN' },
+        select: { symbol: true, avgEntryPrice: true, qty: true },
+      });
+      let sectorValue = orderValue;
+      for (const p of sectorPositions) {
+        if ((SECTOR_MAP[p.symbol] ?? 'Other') === newSectorForValue) {
+          sectorValue += Number(p.avgEntryPrice) * p.qty;
+        }
+      }
+      const sectorPct = capital > 0 ? (sectorValue / capital) * 100 : 0;
+      if (sectorPct > cfg.maxSectorConcentrationPct) {
+        violations.push(`${newSectorForValue} sector concentration ${sectorPct.toFixed(1)}% exceeds ${cfg.maxSectorConcentrationPct}% limit`);
+      }
+    }
+
+    // Rule 9: Volume participation limits
+    if (side === 'BUY') {
+      const avgDailyVolume = 500_000;
+      const participationPct = avgDailyVolume > 0 ? (qty / avgDailyVolume) * 100 : 0;
+      if (participationPct > cfg.maxVolumeParticipationPct) {
+        violations.push(`Order is ${participationPct.toFixed(1)}% of avg daily volume (max ${cfg.maxVolumeParticipationPct}%)`);
+      } else if (participationPct > cfg.maxVolumeParticipationPct * 0.4) {
+        warnings.push(`Volume participation at ${participationPct.toFixed(1)}% — approaching limit`);
+      }
+
+      // Estimate market impact for the caller
+      const k = 0.10;
+      const estVol = 0.018;
+      const impactBps = k * Math.sqrt(participationPct / 100) * estVol * 10000;
+      if (impactBps > 5) {
+        warnings.push(`Estimated market impact: ${impactBps.toFixed(1)}bps`);
+      }
+    }
+
+    // Rule 10: Stop-loss sizing — position risk must fit within capital risk budget
+    if (side === 'BUY') {
+      const stopLossRisk = orderValue * (cfg.maxStopLossPctPerPosition / 100);
+      const maxCapRisk = capital * (cfg.maxStopLossPctPerPosition / 100);
+      if (stopLossRisk > maxCapRisk) {
+        violations.push(`Position risk ₹${stopLossRisk.toFixed(0)} exceeds max per-trade risk ₹${maxCapRisk.toFixed(0)} (${cfg.maxStopLossPctPerPosition}% of capital)`);
+      }
+    }
+
+    // Rule 11: Simultaneous risk budget — total open risk must stay under limit
+    if (side === 'BUY') {
+      const allOpen = await this.prisma.position.findMany({
+        where: { portfolioId: portfolio.id, status: 'OPEN' },
+        select: { avgEntryPrice: true, qty: true },
+      });
+      const currentRisk = allOpen.reduce((s, p) =>
+        s + Number(p.avgEntryPrice) * p.qty * (cfg.maxStopLossPctPerPosition / 100), 0);
+      const newRisk = currentRisk + orderValue * (cfg.maxStopLossPctPerPosition / 100);
+      const riskPct = capital > 0 ? (newRisk / capital) * 100 : 0;
+      if (riskPct > cfg.maxSimultaneousRiskPct) {
+        violations.push(`Total simultaneous risk ${riskPct.toFixed(2)}% would exceed ${cfg.maxSimultaneousRiskPct}% limit`);
+      }
+    }
+
+    // Rule 12: Consecutive loss circuit breakers
+    const recentTrades = await this.prisma.trade.findMany({
+      where: { portfolioId: portfolio.id, exitTime: { gte: todayStart } },
+      select: { netPnl: true, exitTime: true },
+      orderBy: { exitTime: 'desc' },
+    });
+
+    // 12a: Count today's losses
+    const todayLosses = recentTrades.filter(t => Number(t.netPnl) < 0).length;
+    if (todayLosses >= cfg.dailyLossPauseCount) {
+      violations.push(`${todayLosses} losses today — trading halted (max ${cfg.dailyLossPauseCount})`);
+    }
+
+    // 12b: Consecutive losses — hard pause is enforced by Rule 0 above
+
+    // Rule 13: Weekly loss limit
+    const weekStart = new Date();
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+    weekStart.setHours(0, 0, 0, 0);
+
+    const weekTrades = await this.prisma.trade.findMany({
+      where: { portfolioId: portfolio.id, exitTime: { gte: weekStart } },
+      select: { netPnl: true },
+    });
+    const weekPnl = weekTrades.reduce((s, t) => s + Number(t.netPnl), 0);
+    const weekLossPct = capital > 0 ? Math.abs(Math.min(weekPnl, 0)) / capital * 100 : 0;
+    if (weekLossPct >= cfg.weeklyLossLimitPct) {
+      warnings.push(`Weekly loss ${weekLossPct.toFixed(2)}% hit ${cfg.weeklyLossLimitPct}% limit — position sizes should be halved`);
+    }
+
+    // Rule 14: Consecutive losing days
+    const recentDays = await this.prisma.dailyPnlRecord.findMany({
+      where: { userId },
+      orderBy: { date: 'desc' },
+      take: 7,
+      select: { netPnl: true },
+    });
+    let consecutiveLosingDays = 0;
+    for (const d of recentDays) {
+      if (Number(d.netPnl) < 0) consecutiveLosingDays++;
+      else break;
+    }
+    if (consecutiveLosingDays >= cfg.consecutiveLosingDaysHalt) {
+      violations.push(`${consecutiveLosingDays} consecutive losing days — auto-trading halted for manual review`);
+    } else if (consecutiveLosingDays >= cfg.consecutiveLosingDaysReduceSize) {
+      warnings.push(`${consecutiveLosingDays} consecutive losing days — position sizes reduced by 50%`);
+    }
+
     // Warnings (non-blocking)
     if (dayDrawdownPct >= cfg.maxDailyDrawdownPct * 0.7) {
-      warnings.push(`Approaching daily loss limit: ${dayDrawdownPct.toFixed(1)}% of ${cfg.maxDailyDrawdownPct}% max`);
+      warnings.push(`Approaching daily loss limit: ${dayDrawdownPct.toFixed(2)}% of ${cfg.maxDailyDrawdownPct}% max`);
     }
 
     if (positionPct > cfg.maxPositionPct * 0.7) {
@@ -222,6 +433,11 @@ export class RiskService {
             violations, dayPnl, dayDrawdownPct, openPositions,
           }),
         },
+      }).catch(() => {});
+
+      emit('risk', {
+        type: 'RISK_VIOLATION', userId, symbol,
+        violations, severity: 'critical',
       }).catch(() => {});
     }
 
@@ -467,6 +683,100 @@ export class RiskService {
     };
   }
 
+  /**
+   * Position size calculator per 4.3 risk architecture:
+   * position_size = risk_amount / (entry - stop_loss)
+   * where risk_amount = capital * maxStopLossPctPerPosition / 100
+   */
+  computePositionSize(
+    capital: number,
+    entryPrice: number,
+    stopLossPrice: number,
+    config?: Partial<RiskConfig>,
+  ): { qty: number; riskAmount: number; riskPct: number; positionValue: number } {
+    const cfg = { ...DEFAULT_CONFIG, ...config };
+    const riskAmount = capital * (cfg.maxStopLossPctPerPosition / 100);
+    const riskPerShare = Math.abs(entryPrice - stopLossPrice);
+
+    if (riskPerShare <= 0 || entryPrice <= 0) {
+      return { qty: 0, riskAmount: 0, riskPct: 0, positionValue: 0 };
+    }
+
+    let qty = Math.floor(riskAmount / riskPerShare);
+
+    // Cap by max position percentage
+    const maxPositionValue = capital * (cfg.maxPositionPct / 100);
+    const positionValue = qty * entryPrice;
+    if (positionValue > maxPositionValue) {
+      qty = Math.floor(maxPositionValue / entryPrice);
+    }
+
+    // Cap by max order value
+    if (qty * entryPrice > cfg.maxOrderValue) {
+      qty = Math.floor(cfg.maxOrderValue / entryPrice);
+    }
+
+    qty = Math.max(0, qty);
+    const finalValue = qty * entryPrice;
+    const riskPct = capital > 0 ? (riskPerShare * qty / capital) * 100 : 0;
+
+    return {
+      qty,
+      riskAmount: Number((riskPerShare * qty).toFixed(2)),
+      riskPct: Number(riskPct.toFixed(4)),
+      positionValue: Number(finalValue.toFixed(2)),
+    };
+  }
+
+  /**
+   * Check if position sizing should be reduced due to drawdown conditions.
+   * Returns a multiplier (0.5 = half size, 1.0 = full size).
+   */
+  async getSizeMultiplier(userId: string): Promise<number> {
+    let multiplier = 1.0;
+
+    // Check weekly loss
+    const portfolios = await this.prisma.portfolio.findMany({
+      where: { userId },
+      select: { id: true, initialCapital: true },
+    });
+    if (portfolios.length === 0) return 1.0;
+    const capital = Number(portfolios[0].initialCapital);
+
+    const weekStart = new Date();
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+    weekStart.setHours(0, 0, 0, 0);
+
+    const weekTrades = await this.prisma.trade.findMany({
+      where: { portfolioId: portfolios[0].id, exitTime: { gte: weekStart } },
+      select: { netPnl: true },
+    });
+    const weekPnl = weekTrades.reduce((s, t) => s + Number(t.netPnl), 0);
+    const weekLossPct = capital > 0 ? Math.abs(Math.min(weekPnl, 0)) / capital * 100 : 0;
+
+    if (weekLossPct >= DEFAULT_CONFIG.weeklyLossLimitPct) {
+      multiplier *= 0.5;
+    }
+
+    // Check consecutive losing days
+    const recentDays = await this.prisma.dailyPnlRecord.findMany({
+      where: { userId },
+      orderBy: { date: 'desc' },
+      take: 5,
+      select: { netPnl: true },
+    });
+    let consecutiveLosingDays = 0;
+    for (const d of recentDays) {
+      if (Number(d.netPnl) < 0) consecutiveLosingDays++;
+      else break;
+    }
+    if (consecutiveLosingDays >= DEFAULT_CONFIG.consecutiveLosingDaysReduceSize) {
+      multiplier *= 0.5;
+    }
+
+    return multiplier;
+  }
+
   async getComprehensiveRisk(userId: string): Promise<{
     daily: Awaited<ReturnType<RiskService['getDailyRiskSummary']>>;
     var95: Awaited<ReturnType<RiskService['getPortfolioVaR']>>;
@@ -482,4 +792,136 @@ export class RiskService {
 
     return { daily, var95, sectors, margin };
   }
+
+  /**
+   * Force-close all open positions when daily loss limit is breached.
+   * Called by IntradayManager or a circuit-breaker cron.
+   */
+  async forceCloseOnDailyLossLimit(
+    userId: string,
+    closePositionFn: (positionId: string, userId: string, exitPrice: number) => Promise<unknown>,
+  ): Promise<{ triggered: boolean; closedCount: number; dayLossPct: number }> {
+    const portfolios = await this.prisma.portfolio.findMany({
+      where: { userId },
+      select: { id: true, initialCapital: true },
+    });
+    if (portfolios.length === 0) return { triggered: false, closedCount: 0, dayLossPct: 0 };
+
+    const capital = Number(portfolios[0].initialCapital);
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const todayTrades = await this.prisma.trade.findMany({
+      where: { portfolioId: portfolios[0].id, exitTime: { gte: todayStart } },
+      select: { netPnl: true },
+    });
+    const dayPnl = todayTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
+    const dayLossPct = capital > 0 ? Math.abs(Math.min(dayPnl, 0)) / capital * 100 : 0;
+
+    if (dayLossPct < DEFAULT_CONFIG.maxDailyDrawdownPct) {
+      return { triggered: false, closedCount: 0, dayLossPct };
+    }
+
+    // Force-close all open positions
+    const openPositions = await this.prisma.position.findMany({
+      where: { portfolioId: portfolios[0].id, status: 'OPEN' },
+      select: { id: true, symbol: true, avgEntryPrice: true },
+    });
+
+    let closedCount = 0;
+    for (const pos of openPositions) {
+      try {
+        await closePositionFn(pos.id, userId, Number(pos.avgEntryPrice));
+        closedCount++;
+      } catch (err) {
+        log.error({ positionId: pos.id, symbol: pos.symbol, err }, 'Failed to force-close position');
+      }
+    }
+
+    log.warn({
+      userId, dayLossPct, closedCount, total: openPositions.length,
+    }, 'CIRCUIT BREAKER: Daily loss limit hit — all positions force-closed');
+
+    await this.prisma.riskEvent.create({
+      data: {
+        userId,
+        ruleType: 'DAILY_LOSS_CIRCUIT_BREAKER',
+        severity: 'critical',
+        details: JSON.stringify({ dayLossPct, closedCount, dayPnl }),
+      },
+    }).catch(() => {});
+
+    emit('risk', {
+      type: 'RISK_VIOLATION', userId, symbol: 'ALL',
+      violations: [`Daily loss ${dayLossPct.toFixed(3)}% breached ${DEFAULT_CONFIG.maxDailyDrawdownPct}% — ${closedCount} positions force-closed`],
+      severity: 'critical',
+    }).catch(() => {});
+
+    return { triggered: true, closedCount, dayLossPct };
+  }
+
+  /**
+   * Check and enforce the consecutive-loss pause.
+   * Returns the pause end time if active, null if trading is allowed.
+   */
+  private pauseUntilMap = new Map<string, Date>();
+
+  async checkConsecutiveLossPause(userId: string): Promise<{ paused: boolean; pauseUntil: Date | null; consecutiveLosses: number }> {
+    // Check if an existing pause is still active
+    const existingPause = this.pauseUntilMap.get(userId);
+    if (existingPause && existingPause.getTime() > Date.now()) {
+      return { paused: true, pauseUntil: existingPause, consecutiveLosses: 0 };
+    }
+    // Clear expired pause
+    if (existingPause) this.pauseUntilMap.delete(userId);
+
+    const portfolios = await this.prisma.portfolio.findMany({
+      where: { userId },
+      select: { id: true },
+    });
+    if (portfolios.length === 0) return { paused: false, pauseUntil: null, consecutiveLosses: 0 };
+
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const recentTrades = await this.prisma.trade.findMany({
+      where: { portfolioId: portfolios[0].id, exitTime: { gte: todayStart } },
+      select: { netPnl: true },
+      orderBy: { exitTime: 'desc' },
+    });
+
+    let consecutiveLosses = 0;
+    for (const t of recentTrades) {
+      if (Number(t.netPnl) < 0) consecutiveLosses++;
+      else break;
+    }
+
+    if (consecutiveLosses >= DEFAULT_CONFIG.consecutiveLossPauseCount) {
+      const pauseUntil = new Date(Date.now() + 30 * 60_000);
+      this.pauseUntilMap.set(userId, pauseUntil);
+      log.warn({ userId, consecutiveLosses, pauseUntil }, 'CIRCUIT BREAKER: 30-min pause activated');
+      return { paused: true, pauseUntil, consecutiveLosses };
+    }
+
+    return { paused: false, pauseUntil: null, consecutiveLosses };
+  }
+}
+
+function pearsonCorr(x: number[], y: number[]): number {
+  const n = Math.min(x.length, y.length);
+  if (n < 5) return 0;
+  const xSlice = x.slice(0, n);
+  const ySlice = y.slice(0, n);
+  const xMean = xSlice.reduce((a, b) => a + b, 0) / n;
+  const yMean = ySlice.reduce((a, b) => a + b, 0) / n;
+  let num = 0, denX = 0, denY = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = xSlice[i] - xMean;
+    const dy = ySlice[i] - yMean;
+    num += dx * dy;
+    denX += dx * dx;
+    denY += dy * dy;
+  }
+  const den = Math.sqrt(denX * denY);
+  return den > 0 ? num / den : 0;
 }

@@ -1,6 +1,11 @@
 import { PrismaClient } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
+import { TradeService } from './trade.service.js';
 import { wsHub } from '../lib/websocket.js';
+import { DecisionAuditService } from './decision-audit.service.js';
+import { createChildLogger } from '../lib/logger.js';
+
+const log = createChildLogger('IntradayManager');
 
 interface SquareOffResult {
   symbol: string;
@@ -14,14 +19,19 @@ const CIRCUIT_BREAKER_CHECK_INTERVAL = 10_000;
 
 export class IntradayManager {
   private marketData: MarketDataService;
+  private tradeService: TradeService;
   private squareOffTime = '15:15';
   private squareOffHandle: ReturnType<typeof setInterval> | null = null;
   private circuitBreakerHandle: ReturnType<typeof setInterval> | null = null;
   private circuitBreakerTriggered = false;
-  private maxDrawdownPct = 3.0; // 3% of capital = circuit breaker
+  private maxDrawdownPct = 3.0;
+
+  private decisionAudit: DecisionAuditService;
 
   constructor(private prisma: PrismaClient) {
     this.marketData = new MarketDataService();
+    this.tradeService = new TradeService(prisma);
+    this.decisionAudit = new DecisionAuditService(prisma);
   }
 
   setSquareOffTime(time: string): void {
@@ -52,7 +62,6 @@ export class IntradayManager {
       }
     }, 30_000);
 
-    // Start intraday drawdown circuit breaker monitor
     this.circuitBreakerHandle = setInterval(async () => {
       if (this.circuitBreakerTriggered) return;
 
@@ -88,14 +97,12 @@ export class IntradayManager {
       const capital = Number(pf.initialCapital);
       if (capital <= 0) continue;
 
-      // Realized losses today
       const todayTrades = await this.prisma.trade.findMany({
         where: { portfolioId: pf.id, exitTime: { gte: todayStart } },
         select: { netPnl: true },
       });
       const realizedPnl = todayTrades.reduce((s, t) => s + Number(t.netPnl), 0);
 
-      // Unrealized losses from open positions
       const openPositions = await this.prisma.position.findMany({
         where: { portfolioId: pf.id, status: 'OPEN' },
         select: { id: true, symbol: true, exchange: true, side: true, qty: true, avgEntryPrice: true, unrealizedPnl: true },
@@ -111,7 +118,6 @@ export class IntradayManager {
 
         this.circuitBreakerTriggered = true;
 
-        // Square off ALL open positions
         for (const pos of openPositions) {
           try {
             await this.squareOffPosition(pos.id, `CIRCUIT BREAKER: ${drawdownPct.toFixed(1)}% drawdown`);
@@ -120,7 +126,6 @@ export class IntradayManager {
           }
         }
 
-        // Log risk event
         await this.prisma.riskEvent.create({
           data: {
             userId: pf.userId,
@@ -137,7 +142,6 @@ export class IntradayManager {
           },
         }).catch(() => {});
 
-        // Notify user
         wsHub.broadcastToUser(pf.userId, {
           type: 'circuit_breaker',
           drawdownPct: drawdownPct.toFixed(2),
@@ -151,7 +155,7 @@ export class IntradayManager {
           notificationType: 'error',
         });
 
-        break; // Only trigger once per check
+        break;
       }
     }
   }
@@ -190,55 +194,44 @@ export class IntradayManager {
 
     if (!position || position.status !== 'OPEN') return null;
 
-    const entryPrice = Number(position.avgEntryPrice);
-    let exitPrice = entryPrice;
+    let exitPrice = Number(position.avgEntryPrice);
 
     try {
       const quote = await this.marketData.getQuote(position.symbol, position.exchange);
       if (quote.ltp > 0) exitPrice = quote.ltp;
-    } catch {}
+    } catch { /* use entry price as fallback */ }
 
-    const grossPnl = position.side === 'LONG'
-      ? (exitPrice - entryPrice) * position.qty
-      : (entryPrice - exitPrice) * position.qty;
+    const trade = await this.tradeService.closePosition(positionId, position.portfolio.userId, exitPrice);
+    const netPnl = Number(trade.netPnl);
+    const entryPrice = Number(position.avgEntryPrice);
+    const outcome = netPnl > 0 ? 'WIN' : 'LOSS';
 
-    const turnover = exitPrice * position.qty;
-    const totalCost = Math.min(turnover * 0.0003, 20) + turnover * 0.001;
-    const netPnl = grossPnl - totalCost;
-
-    await this.prisma.trade.create({
-      data: {
-        portfolioId: position.portfolioId,
-        positionId: position.id,
+    // Record in DecisionAudit to feed into the learning pipeline
+    try {
+      const auditId = await this.decisionAudit.recordDecision({
+        userId: position.portfolio.userId,
         symbol: position.symbol,
-        exchange: position.exchange,
-        side: position.side === 'LONG' ? 'SELL' : 'BUY',
+        decisionType: reason.includes('CIRCUIT BREAKER') ? 'EXIT_SIGNAL' : 'EXIT_SIGNAL',
+        direction: position.side as 'LONG' | 'SHORT',
+        confidence: 1.0,
+        signalSource: reason.includes('CIRCUIT BREAKER') ? 'CIRCUIT_BREAKER' : 'INTRADAY_SQUAREOFF',
+        marketDataSnapshot: {
+          ltp: exitPrice,
+          entryPrice,
+          reason,
+        },
+        reasoning: reason,
         entryPrice,
-        exitPrice,
-        qty: position.qty,
-        grossPnl,
-        totalCosts: totalCost,
-        netPnl,
-        entryTime: position.openedAt,
-        exitTime: new Date(),
-        strategyTag: `SQOFF:${reason}`,
-      },
-    });
-
-    await this.prisma.position.update({
-      where: { id: positionId },
-      data: { status: 'CLOSED', realizedPnl: netPnl, closedAt: new Date() },
-    });
-
-    const portfolio = await this.prisma.portfolio.findUnique({ where: { id: position.portfolioId } });
-    if (portfolio) {
-      const cashChange = position.side === 'LONG'
-        ? exitPrice * position.qty - totalCost
-        : entryPrice * position.qty * 0.25 + netPnl;
-      await this.prisma.portfolio.update({
-        where: { id: position.portfolioId },
-        data: { currentNav: Number(portfolio.currentNav) + cashChange },
       });
+
+      await this.decisionAudit.resolveDecision(auditId, {
+        exitPrice,
+        pnl: netPnl,
+        predictionAccuracy: outcome === 'WIN' ? 1 : 0,
+        outcomeNotes: `${outcome}: P&L ₹${netPnl.toFixed(2)} | ${reason}`,
+      });
+    } catch {
+      // Audit is best-effort
     }
 
     wsHub.broadcastToUser(position.portfolio.userId, {
@@ -283,7 +276,7 @@ export class IntradayManager {
     try {
       const quote = await this.marketData.getQuote(position.symbol, position.exchange);
       if (quote.ltp > 0) exitPrice = quote.ltp;
-    } catch {}
+    } catch { /* use entry price as fallback */ }
 
     const grossPnl = position.side === 'LONG'
       ? (exitPrice - entryPrice) * exitQty

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::utils::{round4 as r4, Xorshift64};
+use crate::utils::{round4, Xorshift64};
 
 #[derive(Deserialize)]
 struct Config {
@@ -181,8 +181,6 @@ fn portfolio_vol(w: &[f64], cov: &[Vec<f64>]) -> f64 {
     }
     var.max(0.0).sqrt()
 }
-
-fn round4(v: f64) -> f64 { r4(v) }
 
 #[cfg(test)]
 mod tests {

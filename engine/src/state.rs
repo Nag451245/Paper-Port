@@ -192,6 +192,7 @@ impl AppState {
         self.set_cash(self.get_cash() - position_value - cost);
 
         self.positions.insert(pos.symbol.clone(), pos);
+        self.recalculate_nav();
         Ok(())
     }
 

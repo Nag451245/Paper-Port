@@ -4,9 +4,13 @@ import { MarketCalendar } from './market-calendar.js';
 import { RiskService } from './risk.service.js';
 import { getBrokerAdapter, type BrokerAdapter, type BrokerOrderInput as BrokerInput } from '../lib/broker-adapter.js';
 import { wsHub } from '../lib/websocket.js';
+import { createChildLogger } from '../lib/logger.js';
+import { emit } from '../lib/event-bus.js';
 type OrderSide = string;
 type OrderType = string;
 type Exchange = string;
+
+const log = createChildLogger('TradeService');
 
 const TRADING_MODE: 'PAPER' | 'LIVE' = (process.env.TRADING_MODE ?? 'PAPER').toUpperCase() as any;
 
@@ -120,14 +124,35 @@ function simulateExecution(
     };
   }
 
-  const spreadBps = exchange === 'MCX' ? 8 : exchange === 'CDS' ? 5 : 3;
+  // Spread model: base spread by exchange, scaled by time-of-day
+  const baseSpreadBps: Record<string, number> = { MCX: 8, CDS: 5, NSE: 3, BSE: 4, NFO: 6 };
+  let spreadBps = baseSpreadBps[exchange] ?? 3;
+
+  // Time-of-day widening: wider at open (9:15-9:45) and close (15:00-15:30)
+  const now = new Date();
+  const hour = now.getHours();
+  const minute = now.getMinutes();
+  const minuteOfDay = hour * 60 + minute;
+  if (minuteOfDay < 585 || minuteOfDay > 900) { // Before 9:45 or after 15:00
+    spreadBps *= 1.8;
+  } else if (minuteOfDay < 615) { // 9:45 - 10:15
+    spreadBps *= 1.3;
+  }
+
   const spreadHalf = idealPrice * spreadBps / 20000;
   const spreadAdjusted = side === 'BUY' ? idealPrice + spreadHalf : idealPrice - spreadHalf;
 
+  // Square-root market impact model: impact_bps = k * sqrt(participation_rate) * vol
+  const k = exchange === 'MCX' ? 0.15 : exchange === 'NFO' ? 0.12 : 0.10;
+  const estimatedDailyVolume = 500_000;
+  const participationRate = estimatedDailyVolume > 0 ? qty / estimatedDailyVolume : 0.01;
+  const estimatedVol = exchange === 'MCX' ? 0.025 : 0.018;
+  const impactBps = k * Math.sqrt(participationRate) * estimatedVol * 10000;
+
   const slippageFactor = Math.min(qty * idealPrice / 5_000_000, 0.003);
-  const randomJitter = (Math.random() - 0.5) * 0.001;
-  const slippage = slippageFactor + Math.abs(randomJitter);
-  const slippageAmount = spreadAdjusted * slippage;
+  const randomJitter = (Math.random() - 0.5) * 0.0005;
+  const totalSlippage = slippageFactor + impactBps / 10000 + Math.abs(randomJitter);
+  const slippageAmount = spreadAdjusted * totalSlippage;
   const fillPrice = side === 'BUY'
     ? spreadAdjusted + slippageAmount
     : spreadAdjusted - slippageAmount;
@@ -143,7 +168,7 @@ function simulateExecution(
   return {
     idealPrice: Number(idealPrice.toFixed(2)),
     fillPrice: Number(fillPrice.toFixed(2)),
-    slippageBps: Number((slippage * 10000).toFixed(1)),
+    slippageBps: Number((totalSlippage * 10000).toFixed(1)),
     spreadCost: Number((spreadHalf * 2 * qty).toFixed(2)),
     impactCost: Number(impactCost.toFixed(2)),
     filledQty,
@@ -167,7 +192,7 @@ export class TradeService {
     if (TRADING_MODE === 'LIVE') {
       this.broker = getBrokerAdapter('breeze');
       if (this.broker) {
-        this.broker.connect({}).catch(err => console.error('[TradeService] Broker connection failed:', err.message));
+        this.broker.connect({}).catch(err => log.error({ err }, 'Broker connection failed'));
       }
     }
   }
@@ -278,7 +303,7 @@ export class TradeService {
         recovered += pos.value;
         closedPositions.push(pos.symbol);
       } catch (err) {
-        console.error(`[TradeService] Capital recovery: failed to close ${pos.symbol}:`, (err as Error).message);
+        log.error({ err, symbol: pos.symbol }, 'Capital recovery: failed to close position');
       }
     }
 
@@ -337,7 +362,7 @@ export class TradeService {
       }
     } catch (err) {
       if (err instanceof TradeError) throw err;
-      console.error('[TradeService] Risk check error (non-blocking):', (err as Error).message);
+      log.warn({ err }, 'Risk check error (non-blocking)');
     }
 
     let fillPrice = input.price ?? 0;
@@ -357,6 +382,7 @@ export class TradeService {
 
     let brokerOrderId: string | undefined;
     let effectiveQty = input.qty;
+    let execSimResult: ExecutionSimulation | undefined;
 
     if (this.isLiveMode()) {
       try {
@@ -368,10 +394,11 @@ export class TradeService {
           if (status.filledQty > 0) effectiveQty = status.filledQty;
         }
       } catch (err) {
-        console.error('[TradeService] Live order failed, falling back to paper:', (err as Error).message);
+        log.error({ err }, 'Live order failed, falling back to paper');
       }
     } else {
       const execSim = simulateExecution(fillPrice, input.qty, input.side as 'BUY' | 'SELL', exchange, input.orderType);
+      execSimResult = execSim;
       fillPrice = execSim.fillPrice;
       effectiveQty = execSim.filledQty;
     }
@@ -438,12 +465,28 @@ export class TradeService {
         filledQty: input.orderType === 'MARKET' ? input.qty : 0,
         avgFillPrice: input.orderType === 'MARKET' ? fillPrice : null,
         ...costs,
+        idealPrice: execSimResult?.idealPrice,
+        slippageBps: execSimResult?.slippageBps,
+        fillLatencyMs: execSimResult ? Math.round(execSimResult.latencyMs) : null,
+        spreadCostBps: execSimResult ? Math.round(execSimResult.spreadCost * 10000 / (execSimResult.idealPrice * input.qty || 1)) : null,
+        impactCost: execSimResult?.impactCost,
         filledAt: input.orderType === 'MARKET' ? new Date() : null,
       },
     });
 
+    emit('execution', {
+      type: 'ORDER_PLACED', userId, orderId: order.id,
+      symbol: input.symbol, side: input.side, qty: input.qty, orderType: input.orderType,
+    }).catch(() => {});
+
     if (input.orderType === 'MARKET' && fillPrice > 0) {
       await this.handleFill(order.id, input, fillPrice, costs);
+
+      emit('execution', {
+        type: 'ORDER_FILLED', userId, orderId: order.id,
+        symbol: input.symbol, fillPrice, qty: effectiveQty,
+        slippageBps: execSimResult?.slippageBps ?? 0,
+      }).catch(() => {});
 
       wsHub.broadcastTradeExecution(userId, {
         symbol: input.symbol,
@@ -464,7 +507,7 @@ export class TradeService {
   private async safeUpdateNav(portfolioId: string, currentNav: number, delta: number): Promise<void> {
     const newNav = currentNav + delta;
     if (!isFinite(newNav) || isNaN(newNav)) {
-      console.error(`[TradeService] CRITICAL: NAV update would produce invalid value. current=${currentNav}, delta=${delta}, result=${newNav}`);
+      log.error({ currentNav, delta, newNav }, 'CRITICAL: NAV update would produce invalid value');
       throw new TradeError(`P&L calculation produced invalid NAV. Trade aborted.`, 500);
     }
     await this.prisma.portfolio.update({
@@ -965,6 +1008,11 @@ export class TradeService {
         data: { currentNav: newNav },
       });
     }
+
+    emit('execution', {
+      type: 'POSITION_CLOSED', userId, positionId,
+      symbol: position.symbol, pnl: netPnl, exitPrice,
+    }).catch(() => {});
 
     return trade;
   }

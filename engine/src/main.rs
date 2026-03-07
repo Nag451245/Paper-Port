@@ -18,6 +18,7 @@ mod options_strategy;
 mod correlation;
 mod feature_store;
 mod multi_timeframe;
+mod ml_scorer;
 
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -171,6 +172,7 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
         "correlation" => correlation::compute(req.data),
         "feature_store" => feature_store::compute(req.data),
         "multi_timeframe_scan" => multi_timeframe::compute(req.data),
+        "ml_score" => ml_scorer::compute(req.data),
 
         "portfolio_snapshot" => {
             Ok(serde_json::to_value(state.snapshot()).unwrap_or_default())

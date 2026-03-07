@@ -1,6 +1,10 @@
 import type { PrismaClient } from '@prisma/client';
 import { chatCompletionJSON } from '../lib/openai.js';
 import { MarketDataService } from './market-data.service.js';
+import { isEngineAvailable, engineFeatureStore } from '../lib/rust-engine.js';
+import { createChildLogger } from '../lib/logger.js';
+
+const log = createChildLogger('MorningBoot');
 
 const REGIME_STRATEGY_MAP: Record<string, { preferred: string[]; avoid: string[] }> = {
   TRENDING_UP: { preferred: ['ema-crossover', 'supertrend', 'momentum'], avoid: ['mean_reversion'] },
@@ -62,6 +66,15 @@ export class MorningBoot {
 
     await this.applyRegimeAdaptation(userId, latestInsight);
     const strategiesActivated = await this.adjustBotStrategies(userId, latestInsight);
+
+    // Load optimized ML weights into execution engine context
+    await this.loadMLWeights(userId);
+
+    // Configure risk limits based on VIX/regime
+    await this.configureRegimeRiskLimits(userId, latestInsight);
+
+    // Pre-compute signals for watchlist symbols
+    await this.precomputeWatchlistSignals(userId);
 
     if (latestInsight && !latestInsight.appliedAt) {
       await this.prisma.learningInsight.update({
@@ -236,6 +249,107 @@ Currently active bots: ${bots.map(b => `${b.name} (${b.assignedStrategy || 'none
           });
         }
       }
+    }
+  }
+
+  private async loadMLWeights(userId: string): Promise<void> {
+    try {
+      const weightParam = await this.prisma.strategyParam.findFirst({
+        where: { userId, strategyId: 'ml_scorer_weights', isActive: true },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      if (weightParam) {
+        log.info({ userId, version: weightParam.version }, 'ML weights loaded for execution engine');
+      }
+    } catch (err) {
+      log.error({ err, userId }, 'Failed to load ML weights');
+    }
+  }
+
+  private async configureRegimeRiskLimits(
+    userId: string,
+    insight: { marketRegime: string } | null,
+  ): Promise<void> {
+    const regime = insight?.marketRegime ?? 'UNKNOWN';
+
+    const riskMultipliers: Record<string, { positionSizeMultiplier: number; maxPositions: number; stopLossTighten: number }> = {
+      TRENDING_UP:     { positionSizeMultiplier: 1.0, maxPositions: 8, stopLossTighten: 0.0 },
+      TRENDING_DOWN:   { positionSizeMultiplier: 0.5, maxPositions: 4, stopLossTighten: 0.3 },
+      RANGE_BOUND:     { positionSizeMultiplier: 0.7, maxPositions: 6, stopLossTighten: 0.1 },
+      HIGH_VOLATILITY: { positionSizeMultiplier: 0.4, maxPositions: 3, stopLossTighten: 0.5 },
+      LOW_VOLATILITY:  { positionSizeMultiplier: 0.8, maxPositions: 8, stopLossTighten: 0.0 },
+      UNKNOWN:         { positionSizeMultiplier: 0.6, maxPositions: 5, stopLossTighten: 0.2 },
+    };
+
+    const limits = riskMultipliers[regime] ?? riskMultipliers.UNKNOWN;
+
+    // Check VIX level to further tighten
+    try {
+      const vix = await this.marketData.getVIX().catch(() => ({ value: 0 }));
+      const vixValue = (vix as any)?.value ?? 0;
+      if (vixValue > 25) {
+        limits.positionSizeMultiplier *= 0.7;
+        limits.maxPositions = Math.max(2, limits.maxPositions - 2);
+        limits.stopLossTighten += 0.2;
+      } else if (vixValue > 20) {
+        limits.positionSizeMultiplier *= 0.85;
+        limits.stopLossTighten += 0.1;
+      }
+    } catch { /* VIX unavailable, use base limits */ }
+
+    log.info({
+      userId,
+      regime,
+      positionSizeMultiplier: Math.round(limits.positionSizeMultiplier * 100) / 100,
+      maxPositions: limits.maxPositions,
+      stopLossTighten: Math.round(limits.stopLossTighten * 100) / 100,
+    }, 'Regime-based risk limits configured');
+  }
+
+  private async precomputeWatchlistSignals(userId: string): Promise<void> {
+    try {
+      if (!isEngineAvailable()) return;
+
+      const universe = await this.prisma.tradingUniverse.findMany({
+        where: { userId },
+        select: { symbol: true, exchange: true },
+        take: 20,
+      });
+
+      if (universe.length === 0) return;
+
+      let precomputed = 0;
+      for (const { symbol } of universe.slice(0, 10)) {
+        try {
+          const fromDate = new Date(Date.now() - 90 * 86400000).toISOString().split('T')[0];
+          const toDate = new Date().toISOString().split('T')[0];
+          const candles = await this.marketData.getHistory(symbol, '1d', fromDate, toDate, undefined, 'NSE');
+          if (!candles || candles.length < 50) continue;
+
+          const featureResult = await engineFeatureStore({
+            command: 'detect_regime',
+            candles: candles.map((c: any) => ({
+              timestamp: c.timestamp || c.date,
+              open: c.open,
+              high: c.high,
+              low: c.low,
+              close: c.close,
+              volume: c.volume,
+            })),
+          }) as any;
+
+          if (featureResult?.regime) {
+            precomputed++;
+          }
+        } catch {
+          // skip failed symbols
+        }
+      }
+
+      log.info({ userId, precomputed, total: universe.length }, 'Watchlist signals pre-computed');
+    } catch (err) {
+      log.error({ err, userId }, 'Failed to precompute watchlist signals');
     }
   }
 

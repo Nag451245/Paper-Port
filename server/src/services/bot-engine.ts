@@ -8,6 +8,11 @@ import { TargetTracker, type TargetProgress } from './target-tracker.service.js'
 import { GlobalMarketService } from './global-market.service.js';
 import { DecisionAuditService, type DecisionRecord } from './decision-audit.service.js';
 import { MarketCalendar } from './market-calendar.js';
+import { RiskService } from './risk.service.js';
+import { TWAPExecutor, selectOrderType } from './twap-executor.service.js';
+import { createChildLogger } from '../lib/logger.js';
+
+const log = createChildLogger('BotEngine');
 
 const DEFAULT_TICK_INTERVAL = 30_000;         // 30 seconds — Rust scan is fast, skip if still running
 const DEFAULT_SIGNAL_INTERVAL = 2 * 60_000;   // 2 minutes
@@ -145,7 +150,9 @@ export class BotEngine {
   private scannerUserId: string | null = null;
   private lastScanResult: MarketScanResult | null = null;
   private scanInProgress = false;
+  private _killSwitchActive = false;
   private cycleInProgress = new Set<string>();
+  private cycleCandles = new Map<string, any[]>();
   private rollingAccuracy = new Map<string, RollingAccuracy>();
   private tickInterval = DEFAULT_TICK_INTERVAL;
   private signalInterval = DEFAULT_SIGNAL_INTERVAL;
@@ -155,6 +162,17 @@ export class BotEngine {
   private globalMarket: GlobalMarketService;
   private decisionAudit: DecisionAuditService;
   private calendar: MarketCalendar;
+  private riskService: RiskService;
+  private twapExecutor: TWAPExecutor;
+
+  private cachedStrategyParams = new Map<string, Record<string, unknown>>();
+  private paramsLastLoaded = 0;
+
+  // Online learning state
+  private strategyBeta = new Map<string, { alpha: number; beta: number }>();
+  private recentWinRates = new Map<string, { wins: number; total: number; emaWinRate: number }>();
+  private intradayVolatility = new Map<string, number>();
+  private mlWeights: Record<string, unknown> | null = null;
 
   constructor(private prisma: PrismaClient) {
     this.tradeService = new TradeService(prisma);
@@ -162,8 +180,161 @@ export class BotEngine {
     this.globalMarket = new GlobalMarketService();
     this.decisionAudit = new DecisionAuditService(prisma);
     this.calendar = new MarketCalendar();
+    this.riskService = new RiskService(prisma);
+    this.twapExecutor = new TWAPExecutor(prisma);
     this.rustAvailable = isEngineAvailable();
     console.log(`[BotEngine] Initialized — Rust engine: ${this.rustAvailable ? 'AVAILABLE' : 'NOT FOUND (using Gemini AI only)'}`);
+
+    // Load ML weights from DB on startup
+    this.loadMLWeightsFromDB().catch(() => {});
+  }
+
+  /**
+   * Load trained ML weights from the database (persisted by nightly LearningEngine).
+   * Called on startup and can be called externally after morning boot.
+   */
+  async loadMLWeightsFromDB(userId?: string): Promise<void> {
+    try {
+      const whereClause: any = { strategyId: 'ml_scorer_weights', isActive: true };
+      if (userId) whereClause.userId = userId;
+
+      const weightParam = await this.prisma.strategyParam.findFirst({
+        where: whereClause,
+        orderBy: { createdAt: 'desc' },
+      });
+
+      if (weightParam) {
+        const parsed = JSON.parse(weightParam.params);
+        if (parsed.w && Array.isArray(parsed.w)) {
+          this.mlWeights = parsed;
+          log.info({
+            weightDim: parsed.w.length,
+            version: weightParam.version,
+            accuracy: parsed.training_accuracy,
+          }, 'ML weights loaded from DB');
+        }
+      }
+    } catch (err) {
+      log.warn({ err }, 'Failed to load ML weights from DB');
+    }
+  }
+
+  /**
+   * Thompson sampling: select strategy by sampling from Beta(alpha, beta) posteriors.
+   * Returns the strategy with the highest sampled value (explore/exploit balance).
+   */
+  thompsonSelectStrategy(availableStrategies: string[]): string | null {
+    if (availableStrategies.length === 0) return null;
+
+    let bestStrategy = availableStrategies[0];
+    let bestSample = -1;
+
+    for (const stratId of availableStrategies) {
+      const prior = this.strategyBeta.get(stratId) ?? { alpha: 1, beta: 1 };
+      // Deterministic approximation of Beta sample: mean + exploration bonus
+      const mean = prior.alpha / (prior.alpha + prior.beta);
+      const n = prior.alpha + prior.beta;
+      const explorationBonus = Math.sqrt(2 * Math.log(n + 1) / (n + 1));
+      const sample = mean + explorationBonus;
+
+      if (sample > bestSample) {
+        bestSample = sample;
+        bestStrategy = stratId;
+      }
+    }
+
+    return bestStrategy;
+  }
+
+  /**
+   * Bayesian update: after a trade outcome, update the Beta distribution for a strategy.
+   */
+  bayesianUpdate(strategyId: string, won: boolean): void {
+    const prior = this.strategyBeta.get(strategyId) ?? { alpha: 1, beta: 1 };
+    if (won) {
+      prior.alpha += 1;
+    } else {
+      prior.beta += 1;
+    }
+    this.strategyBeta.set(strategyId, prior);
+
+    // Also update EMA win rate
+    const rates = this.recentWinRates.get(strategyId) ?? { wins: 0, total: 0, emaWinRate: 0.5 };
+    rates.total += 1;
+    if (won) rates.wins += 1;
+    const decay = 0.05; // EMA decay factor
+    const outcome = won ? 1.0 : 0.0;
+    rates.emaWinRate = rates.emaWinRate * (1 - decay) + outcome * decay;
+    this.recentWinRates.set(strategyId, rates);
+
+    log.info({
+      strategyId,
+      outcome: won ? 'WIN' : 'LOSS',
+      alpha: prior.alpha,
+      beta: prior.beta,
+      emaWinRate: Math.round(rates.emaWinRate * 1000) / 1000,
+    }, 'Bayesian update applied');
+  }
+
+  /**
+   * Compute dynamic stop-loss based on intraday volatility.
+   * Widens stops in high-vol conditions, tightens in low-vol.
+   */
+  computeDynamicStopLoss(symbol: string, baseStopPct: number): number {
+    const volMultiplier = this.intradayVolatility.get(symbol) ?? 1.0;
+    // Base stop adjusted by volatility: wider in high-vol, tighter in low-vol
+    const adjustedStop = baseStopPct * Math.max(0.5, Math.min(2.0, volMultiplier));
+    return Math.round(adjustedStop * 100) / 100;
+  }
+
+  /**
+   * Update intraday volatility estimate for a symbol using latest candle data.
+   */
+  updateIntradayVolatility(symbol: string, recentReturns: number[]): void {
+    if (recentReturns.length < 5) return;
+    const mean = recentReturns.reduce((a, b) => a + b, 0) / recentReturns.length;
+    const variance = recentReturns.reduce((s, r) => s + (r - mean) ** 2, 0) / recentReturns.length;
+    const currentVol = Math.sqrt(variance);
+
+    // Compare to baseline (annualized ~20% vol → daily ~1.26% → 15min ~ 0.14%)
+    const baseline = 0.0014;
+    const ratio = baseline > 0 ? currentVol / baseline : 1.0;
+
+    const prevRatio = this.intradayVolatility.get(symbol) ?? 1.0;
+    const smoothed = prevRatio * 0.7 + ratio * 0.3;
+    this.intradayVolatility.set(symbol, smoothed);
+  }
+
+  private async loadStrategyParams(userId: string): Promise<Record<string, unknown>> {
+    const now = Date.now();
+    const cacheKey = userId;
+    if (now - this.paramsLastLoaded < 5 * 60_000 && this.cachedStrategyParams.has(cacheKey)) {
+      return this.cachedStrategyParams.get(cacheKey)!;
+    }
+
+    try {
+      const activeParams = await this.prisma.strategyParam.findMany({
+        where: { userId, isActive: true },
+        select: { strategyId: true, params: true, version: true, source: true },
+      });
+
+      const merged: Record<string, unknown> = {};
+      for (const p of activeParams) {
+        try {
+          merged[p.strategyId] = JSON.parse(p.params);
+        } catch { /* malformed params, skip */ }
+      }
+
+      this.cachedStrategyParams.set(cacheKey, merged);
+      this.paramsLastLoaded = now;
+
+      if (Object.keys(merged).length > 0) {
+        console.log(`[BotEngine] Loaded ${Object.keys(merged).length} optimized strategy params for user ${userId}`);
+      }
+      return merged;
+    } catch {
+      return {};
+    }
   }
 
   refreshRustAvailability(): void {
@@ -377,6 +548,54 @@ export class BotEngine {
     for (const [id] of this.runningBots) this.stopBot(id);
     for (const [id] of this.runningAgents) this.stopAgent(id);
     this.stopMarketScan();
+  }
+
+  get killSwitchActive(): boolean { return this._killSwitchActive; }
+
+  activateKillSwitch(): void {
+    this._killSwitchActive = true;
+    this.stopAll();
+    log.fatal('KILL SWITCH ACTIVATED — all trading halted');
+  }
+
+  deactivateKillSwitch(): void {
+    this._killSwitchActive = false;
+    log.warn('Kill switch deactivated — trading re-enabled');
+  }
+
+  private async detectCurrentRegime(
+    candleData: Array<{ symbol: string; candles: any[] }>,
+  ): Promise<string | null> {
+    try {
+      if (candleData.length === 0 || candleData[0].candles.length < 20) return null;
+      const closes = candleData[0].candles.map((c: any) => c.close);
+
+      const shortEma = this.calcSimpleEma(closes, 10);
+      const longEma = this.calcSimpleEma(closes, 30);
+      const returns = closes.slice(1).map((c: number, i: number) => (c - closes[i]) / closes[i]);
+      const volatility = Math.sqrt(returns.reduce((s: number, r: number) => s + r * r, 0) / returns.length) * Math.sqrt(252);
+
+      const trend = shortEma > longEma ? 'up' : 'down';
+      const trendStrength = Math.abs(shortEma - longEma) / longEma;
+
+      if (volatility > 0.30) return 'volatile';
+      if (trendStrength > 0.02 && trend === 'up') return 'trending';
+      if (trendStrength > 0.02 && trend === 'down') return 'trending';
+      if (volatility < 0.12) return 'low_vol';
+      return 'mean_reverting';
+    } catch {
+      return null;
+    }
+  }
+
+  private calcSimpleEma(data: number[], period: number): number {
+    if (data.length === 0) return 0;
+    const k = 2 / (period + 1);
+    let ema = data[0];
+    for (let i = 1; i < data.length; i++) {
+      ema = data[i] * k + ema * (1 - k);
+    }
+    return ema;
   }
 
   async startMarketScan(userId: string): Promise<void> {
@@ -611,6 +830,20 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         }
       } catch { /* skip enrichment */ }
 
+      // Dynamic stop-loss: adjust based on intraday volatility
+      for (const sig of signals) {
+        if (sig.entry > 0 && sig.stopLoss > 0) {
+          const baseStopPct = Math.abs(sig.entry - sig.stopLoss) / sig.entry * 100;
+          const adjustedPct = this.computeDynamicStopLoss(sig.symbol, baseStopPct);
+          if (adjustedPct !== baseStopPct) {
+            sig.stopLoss = sig.direction === 'BUY'
+              ? sig.entry * (1 - adjustedPct / 100)
+              : sig.entry * (1 + adjustedPct / 100);
+            sig.stopLoss = Math.round(sig.stopLoss * 100) / 100;
+          }
+        }
+      }
+
       // Store high-confidence signals in the database
       for (const sig of signals.filter(s => s.confidence >= 0.65)) {
         try {
@@ -657,7 +890,10 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     signalMeta?: { confidence?: number; indicators?: string; ltp?: number; signalSource?: string },
   ): Promise<{ success: boolean; message: string }> {
     try {
-      // STRICT: Bots must never trade after market hours
+      if (this._killSwitchActive) {
+        return { success: false, message: 'KILL SWITCH ACTIVE — all trading halted' };
+      }
+
       const exchange = this.detectExchange(symbol);
       if (!this.calendar.isMarketOpen(exchange)) {
         console.log(`[BotEngine] BLOCKED: ${direction} ${symbol} — market closed`);
@@ -669,8 +905,12 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
 
       const nav = Number(portfolio.currentNav);
 
-      // Record the decision in audit trail
+      // Record the decision in audit trail, enriched with vote data for the learning loop
       let auditId: string | undefined;
+      const parsedIndicators = signalMeta?.indicators ? (() => {
+        try { return JSON.parse(signalMeta.indicators); } catch { return {}; }
+      })() : {};
+
       try {
         auditId = await this.decisionAudit.recordDecision({
           userId,
@@ -684,6 +924,15 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
             ltp: signalMeta?.ltp,
             indicators: signalMeta?.indicators,
             nav,
+            // Preserve vote decomposition for Feature Store → Model Training loop
+            ema_vote: parsedIndicators.ema_crossover ?? parsedIndicators.ema ?? 0,
+            rsi_vote: parsedIndicators.rsi ?? 0,
+            macd_vote: parsedIndicators.macd ?? 0,
+            supertrend_vote: parsedIndicators.supertrend ?? 0,
+            bollinger_vote: parsedIndicators.bollinger ?? 0,
+            vwap_vote: parsedIndicators.vwap ?? 0,
+            momentum_vote: parsedIndicators.momentum ?? 0,
+            volume_vote: parsedIndicators.volume ?? 0,
           },
           reasoning: rationale,
         });
@@ -700,12 +949,48 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         const maxPerTrade = nav * kellyAllocation;
         const qty = ltp > 0 ? Math.max(1, Math.floor(maxPerTrade / ltp)) : 1;
 
+        // Enforce all risk limits before placing the order
+        const riskCheck = await this.riskService.preTradeCheck(userId, symbol, 'BUY', qty, ltp > 0 ? ltp : nav * kellyAllocation);
+        if (!riskCheck.allowed) {
+          const msg = `RISK BLOCKED: ${riskCheck.violations.join('; ')}`;
+          console.log(`[BotEngine] ${msg}`);
+          if (auditId) {
+            try { await this.decisionAudit.resolveDecision(auditId, { exitPrice: 0, pnl: 0, predictionAccuracy: 0, outcomeNotes: msg }); } catch {}
+          }
+          return { success: false, message: msg };
+        }
+        if (riskCheck.warnings.length > 0) {
+          log.warn({ warnings: riskCheck.warnings }, 'Risk warnings');
+        }
+
+        const orderTypeDecision = selectOrderType({
+          qty,
+          ltp: ltp > 0 ? ltp : nav * kellyAllocation,
+          avgDailyVolume: 500_000,
+          confidence: signalMeta?.confidence ?? 0.5,
+          spreadPct: 0.05,
+        });
+        log.info({ symbol, orderType: orderTypeDecision.orderType, reason: orderTypeDecision.reason }, 'Order type selected');
+
+        if (orderTypeDecision.orderType === 'TWAP' && qty > 10) {
+          const twapResult = await this.twapExecutor.executeTWAP({
+            totalQty: qty, numSlices: Math.min(5, qty),
+            durationMinutes: 10, maxDeviationPct: 1.0,
+            symbol, side: 'BUY', exchange,
+            portfolioId: portfolio.id, userId, strategyTag: 'AI-BOT',
+          });
+
+          if (botId) await this.updateBotTradeStats(botId, 0);
+          return { success: true, message: `TWAP: Bought ${twapResult.totalFilled} ${symbol} @ avg ₹${twapResult.avgFillPrice.toFixed(2)} (slippage: ${twapResult.slippageBps}bps)` };
+        }
+
         const order = await this.tradeService.placeOrder(userId, {
           portfolioId: portfolio.id,
           symbol,
           side: 'BUY',
-          orderType: 'MARKET',
+          orderType: orderTypeDecision.orderType === 'LIMIT' ? 'LIMIT' : 'MARKET',
           qty,
+          price: orderTypeDecision.orderType === 'LIMIT' && ltp > 0 ? Number((ltp * 1.001).toFixed(2)) : undefined,
           instrumentToken: symbol,
           exchange,
           strategyTag: 'AI-BOT',
@@ -741,6 +1026,9 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           const strategyTag = longPosition.strategyTag || 'AI-BOT';
           const outcome: 'WIN' | 'LOSS' | 'BREAKEVEN' = Math.abs(pnl) < 10 ? 'BREAKEVEN' : pnl > 0 ? 'WIN' : 'LOSS';
           const accuracy = this.trackOutcome(strategyTag, outcome);
+
+          // Bayesian update for Thompson sampling
+          this.bayesianUpdate(strategyTag, outcome === 'WIN');
 
           try {
             const signal = await this.prisma.aITradeSignal.findFirst({
@@ -901,8 +1189,37 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     return 'NSE';
   }
 
-  private async computeKellySize(userId: string, symbol: string, nav: number): Promise<number> {
+  private cachedAllocations: Record<string, number> | null = null;
+  private allocationsLastLoaded = 0;
+
+  private async computeKellySize(userId: string, symbol: string, nav: number, strategyTag?: string): Promise<number> {
     try {
+      // Check persisted strategy allocations from nightly optimization
+      const now = Date.now();
+      if (!this.cachedAllocations || now - this.allocationsLastLoaded > 30 * 60_000) {
+        try {
+          const allocParam = await this.prisma.strategyParam.findFirst({
+            where: { userId, strategyId: 'strategy_allocations', isActive: true },
+            orderBy: { createdAt: 'desc' },
+          });
+          if (allocParam) {
+            const parsed = JSON.parse(allocParam.params);
+            const allocMap: Record<string, number> = {};
+            for (const a of (parsed.allocations ?? [])) {
+              allocMap[a.strategy_id] = (a.allocation_pct / 100);
+            }
+            this.cachedAllocations = allocMap;
+          }
+        } catch { /* use Kelly fallback */ }
+        this.allocationsLastLoaded = now;
+      }
+
+      // If we have an allocation for this strategy, use it as the cap
+      let allocationCap = 0.15;
+      if (strategyTag && this.cachedAllocations?.[strategyTag]) {
+        allocationCap = this.cachedAllocations[strategyTag];
+      }
+
       const recentTrades = await this.prisma.trade.findMany({
         where: { portfolio: { userId }, symbol },
         orderBy: { exitTime: 'desc' },
@@ -910,7 +1227,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
       });
 
       if (recentTrades.length < 5) {
-        return 0.05;
+        return Math.min(0.05, allocationCap);
       }
 
       const wins = recentTrades.filter(t => Number(t.netPnl) > 0);
@@ -923,7 +1240,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
       const kelly = winRate - (1 - winRate) / wlRatio;
       const halfKelly = kelly / 2;
 
-      return Math.max(0.02, Math.min(0.15, halfKelly));
+      return Math.max(0.02, Math.min(allocationCap, halfKelly));
     } catch {
       return 0.05;
     }
@@ -1041,13 +1358,34 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         const candleData = await this.fetchCandles(symbols, userId);
 
         if (candleData.length > 0) {
+          // Update intraday volatility estimates from candle data
+          for (const cd of candleData) {
+            if (cd.candles && cd.candles.length >= 10) {
+              const recentCloses = cd.candles.slice(-20).map((c: any) => c.close);
+              const rets = [];
+              for (let j = 1; j < recentCloses.length; j++) {
+                if (recentCloses[j - 1] > 0) {
+                  rets.push((recentCloses[j] - recentCloses[j - 1]) / recentCloses[j - 1]);
+                }
+              }
+              this.updateIntradayVolatility(cd.symbol, rets);
+            }
+          }
+
           const aggressiveness = aggression === 'none' ? 'low' : aggression;
           let rustSignals: ScanSignal[] = [];
 
+          const strategyParams = await this.loadStrategyParams(userId);
+          const regime = await this.detectCurrentRegime(candleData);
           try {
-            const scanResult = await engineScan({ symbols: candleData, aggressiveness: aggressiveness as any });
+            const scanResult = await engineScan({
+              symbols: candleData,
+              aggressiveness: aggressiveness as any,
+              strategy_params: Object.keys(strategyParams).length > 0 ? strategyParams : undefined,
+              regime: regime ?? undefined,
+            });
             rustSignals = scanResult.signals ?? [];
-            console.log(`[BotEngine] Bot ${botId}: Rust scan returned ${rustSignals.length} signals`);
+            log.info({ botId, signalCount: rustSignals.length, regime }, 'Rust scan completed');
           } catch (err) {
             console.error(`[BotEngine] Bot ${botId}: Rust scan error:`, (err as Error).message);
             rustSignals = [];
@@ -1059,6 +1397,9 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           }
         }
       }
+
+      // --- Step 1b: Pyramid into winning positions ---
+      await this.pyramidWinners(bot, userId, botId);
 
       // --- Step 2: GPT/Gemini analysis (always runs for market commentary + AI signals) ---
       console.log(`[BotEngine] Bot ${botId}: running GPT/Gemini analysis cycle`);
@@ -1082,6 +1423,105 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     }
   }
 
+  /**
+   * Auto-pyramid: add to winning positions when they're in profit.
+   * Only adds if position is > 0.5% in profit and total risk stays within limits.
+   */
+  private async pyramidWinners(bot: any, userId: string, botId: string): Promise<void> {
+    try {
+      const portfolios = await this.prisma.portfolio.findMany({
+        where: { userId },
+        select: { id: true, initialCapital: true },
+      });
+      if (portfolios.length === 0) return;
+
+      const capital = Number(portfolios[0].initialCapital);
+      const openPositions = await this.prisma.position.findMany({
+        where: { portfolioId: portfolios[0].id, status: 'OPEN' },
+      });
+
+      for (const pos of openPositions) {
+        const entryPrice = Number(pos.avgEntryPrice);
+        if (entryPrice <= 0) continue;
+
+        // Use unrealizedPnl from position monitoring to gauge profit
+        const unrealizedPnl = Number(pos.unrealizedPnl ?? 0);
+        const positionValue = entryPrice * pos.qty;
+        const unrealizedPnlPct = positionValue > 0 ? (unrealizedPnl / positionValue) * 100 : 0;
+
+        // Only pyramid if position is > 0.5% in profit
+        if (unrealizedPnlPct < 0.5) continue;
+
+        // Estimate current price from unrealized PnL
+        const currentPrice = pos.side === 'LONG'
+          ? entryPrice + unrealizedPnl / pos.qty
+          : entryPrice - unrealizedPnl / pos.qty;
+        if (currentPrice <= 0) continue;
+
+        // Don't pyramid if already scaled in (check qty vs original)
+        const originalQty = pos.qty;
+        if (originalQty <= 0) continue;
+
+        // Check how many times we've already pyramided (max 2 add-ons)
+        const existingOrders = await this.prisma.order.count({
+          where: {
+            positionId: pos.id,
+            side: pos.side === 'LONG' ? 'BUY' : 'SELL',
+            status: 'FILLED',
+          },
+        });
+        if (existingOrders >= 3) continue; // original + 2 pyramids max
+
+        // Add 50% of original position size
+        const addQty = Math.max(1, Math.floor(originalQty * 0.5));
+        const addValue = addQty * currentPrice;
+
+        // Risk check: total position shouldn't exceed 2% of capital
+        const totalValue = (originalQty + addQty) * currentPrice;
+        if (totalValue / capital > 0.02) continue;
+
+        // Move stop-loss to breakeven before adding
+        log.info({
+          symbol: pos.symbol,
+          unrealizedPnlPct: unrealizedPnlPct.toFixed(2),
+          addQty,
+          existingOrders,
+        }, 'Pyramiding into winning position');
+
+        // Create a scale-in order
+        await this.prisma.order.create({
+          data: {
+            portfolioId: portfolios[0].id,
+            positionId: pos.id,
+            instrumentToken: pos.instrumentToken ?? pos.symbol,
+            symbol: pos.symbol,
+            exchange: pos.exchange,
+            orderType: 'MARKET',
+            side: pos.side === 'LONG' ? 'BUY' : 'SELL',
+            qty: addQty,
+            price: currentPrice,
+            status: 'PENDING',
+            strategyTag: pos.strategyTag ?? 'pyramid',
+            idealPrice: currentPrice,
+          },
+        });
+
+        // Update position qty and avg entry price (blended)
+        const newTotalQty = originalQty + addQty;
+        const newAvgEntry = (entryPrice * originalQty + currentPrice * addQty) / newTotalQty;
+        await this.prisma.position.update({
+          where: { id: pos.id },
+          data: {
+            qty: newTotalQty,
+            avgEntryPrice: Math.round(newAvgEntry * 100) / 100,
+          },
+        });
+      }
+    } catch (err) {
+      log.warn({ botId, err }, 'Pyramid winners check failed (non-fatal)');
+    }
+  }
+
   // ---- Process Rust-generated signals ----
   private async handleRustSignals(
     rustSignals: ScanSignal[],
@@ -1091,7 +1531,22 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
   ): Promise<void> {
     const shouldAutoExecute = bot.role === 'EXECUTOR' || bot.role === 'SCANNER';
 
-    for (const sig of rustSignals.slice(0, 3)) {
+    // Thompson sampling: prioritize signals from strategies with better posteriors
+    let prioritized = rustSignals;
+    if (rustSignals.length > 1) {
+      const strategyIds = [...new Set(rustSignals.map(s => s.strategy ?? bot.assignedStrategy ?? 'default'))];
+      const selectedStrategy = this.thompsonSelectStrategy(strategyIds);
+
+      if (selectedStrategy) {
+        prioritized = [
+          ...rustSignals.filter(s => (s.strategy ?? bot.assignedStrategy) === selectedStrategy),
+          ...rustSignals.filter(s => (s.strategy ?? bot.assignedStrategy) !== selectedStrategy),
+        ];
+        log.info({ selectedStrategy, totalSignals: rustSignals.length }, 'Thompson sampling prioritized strategy');
+      }
+    }
+
+    for (const sig of prioritized.slice(0, 3)) {
       const gptApproved = await this.gptValidateSignal(sig, bot, userId);
 
       const finalConfidence = gptApproved ? sig.confidence : sig.confidence * 0.8;
@@ -1202,9 +1657,13 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
   }
 
   // ---- GPT validates a Rust signal (lightweight check) ----
-  private async gptValidateSignal(sig: ScanSignal, bot: any, userId: string): Promise<boolean> {
-    if (bot.role === 'EXECUTOR') return true; // auto-approve for executor bots
+  private async gptValidateSignal(sig: ScanSignal, bot: any, _userId: string): Promise<boolean> {
+    // For EXECUTOR bots: use deterministic ML scorer (fast, reproducible, backtestable)
+    if (bot.role === 'EXECUTOR') {
+      return this.mlValidateSignal(sig);
+    }
 
+    // For ADVISOR/ANALYST bots: use LLM validation
     try {
       const result = await chatCompletionJSON<{ approved: boolean; reason: string }>({
         messages: [
@@ -1224,6 +1683,46 @@ Approve or reject?` },
       return result.approved ?? true;
     } catch {
       return true;
+    }
+  }
+
+  private async mlValidateSignal(sig: ScanSignal): Promise<boolean> {
+    try {
+      const { engineMLScore } = await import('../lib/rust-engine.js');
+
+      const now = new Date();
+      const regimeMap: Record<string, number> = { trending: 1, mean_reverting: 2, volatile: 3, low_vol: 4 };
+      const features = [{
+        ema_vote: sig.votes?.ema_crossover ?? 0,
+        rsi_vote: sig.votes?.rsi ?? 0,
+        macd_vote: sig.votes?.macd ?? 0,
+        supertrend_vote: sig.votes?.supertrend ?? 0,
+        bollinger_vote: sig.votes?.bollinger ?? 0,
+        vwap_vote: sig.votes?.vwap ?? 0,
+        momentum_vote: sig.votes?.momentum ?? 0,
+        volume_vote: sig.votes?.volume ?? 0,
+        composite_score: sig.confidence,
+        regime: 1.0,
+        hour_of_day: now.getHours(),
+        day_of_week: now.getDay(),
+      }];
+
+      if (!this.mlWeights) {
+        // No trained model yet, fall through to confidence-based approval
+        return sig.confidence >= 0.45;
+      }
+
+      const result = await engineMLScore({
+        command: 'predict',
+        features,
+        weights: this.mlWeights,
+      }) as { scores: number[] };
+
+      const score = result.scores?.[0] ?? 0.5;
+      log.info({ symbol: sig.symbol, mlScore: score, confidence: sig.confidence }, 'ML score computed');
+      return score >= 0.5;
+    } catch {
+      return sig.confidence >= 0.45;
     }
   }
 
@@ -1532,10 +2031,17 @@ INSTRUCTIONS:
           const aggressiveness = 'high';
           let rustSignals: ScanSignal[] = [];
 
+          const agentStrategyParams = await this.loadStrategyParams(userId);
+          const agentRegime = await this.detectCurrentRegime(candleData);
           try {
-            const scanResult = await engineScan({ symbols: candleData, aggressiveness: aggressiveness as any });
+            const scanResult = await engineScan({
+              symbols: candleData,
+              aggressiveness: aggressiveness as any,
+              strategy_params: Object.keys(agentStrategyParams).length > 0 ? agentStrategyParams : undefined,
+              regime: agentRegime ?? undefined,
+            });
             rustSignals = scanResult.signals ?? [];
-            console.log(`[BotEngine] Agent Rust scan: ${rustSignals.length} signals`);
+            log.info({ signalCount: rustSignals.length, regime: agentRegime }, 'Agent Rust scan completed');
           } catch { /* fall through */ }
 
           // Compute portfolio risk via Rust

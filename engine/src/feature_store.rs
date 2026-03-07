@@ -91,63 +91,395 @@ fn extract_features(config: Config) -> Result<serde_json::Value, String> {
     }).collect();
 
     let columns = vec![
-        "return".into(), "log_return_5d".into(), "log_return_10d".into(),
-        "volatility_10d".into(), "volatility_20d".into(),
-        "rsi_14".into(), "rsi_7".into(),
-        "ema_ratio_9_21".into(), "bb_position".into(),
-        "volume_ratio".into(), "atr_ratio".into(),
+        // Price returns (6)
+        "return_1d".into(), "return_5d".into(), "return_10d".into(),
+        "return_20d".into(), "log_return_1d".into(), "log_return_5d".into(),
+        // Realized volatility (6)
+        "vol_5d".into(), "vol_10d".into(), "vol_20d".into(),
+        "vol_of_vol_20d".into(), "skewness_20d".into(), "kurtosis_20d".into(),
+        // Momentum oscillators (10)
+        "rsi_14".into(), "rsi_7".into(), "rsi_21".into(),
+        "stochastic_k".into(), "stochastic_d".into(),
+        "williams_r".into(), "cci_20".into(), "roc_10".into(),
+        "roc_20".into(), "momentum_12d".into(),
+        // Trend indicators (8)
+        "ema_ratio_9_21".into(), "ema_ratio_5_13".into(),
+        "sma_ratio_10_50".into(), "adx_14".into(),
+        "aroon_up".into(), "aroon_down".into(),
+        "linreg_slope_20".into(), "linreg_r2_20".into(),
+        // Volatility indicators (6)
+        "bb_position".into(), "bb_bandwidth".into(),
+        "atr_ratio".into(), "atr_14".into(),
+        "garman_klass_vol".into(), "yang_zhang_vol".into(),
+        // Volume features (8)
+        "volume_ratio_20d".into(), "volume_ratio_5d".into(),
+        "vwap_deviation".into(), "obv_slope".into(),
+        "ad_line_slope".into(), "money_flow_ratio".into(),
+        "volume_zscore".into(), "volume_momentum".into(),
+        // Candlestick features (6)
         "body_ratio".into(), "upper_shadow".into(), "lower_shadow".into(),
-        "gap".into(), "high_low_range".into(),
+        "gap_pct".into(), "high_low_range".into(), "close_position".into(),
+        // Cross-sectional / relative (4)
+        "return_rank".into(), "vol_rank".into(),
+        "relative_strength_5d".into(), "relative_strength_20d".into(),
+        // Calendar features (6)
+        "day_of_week".into(), "day_of_month".into(),
+        "month".into(), "is_expiry_week".into(),
+        "days_to_month_end".into(), "is_monday".into(),
+        // Regime / state features (6)
+        "trend_strength".into(), "vol_regime".into(),
+        "mean_reversion_zscore".into(), "hurst_exponent".into(),
+        "consecutive_up_days".into(), "consecutive_down_days".into(),
+        // Microstructure proxies (4)
+        "spread_proxy".into(), "depth_imbalance_proxy".into(),
+        "trade_imbalance".into(), "kyle_lambda_proxy".into(),
+        // Interaction features (6)
+        "rsi_x_vol".into(), "momentum_x_volume".into(),
+        "trend_x_regime".into(), "vol_x_bb".into(),
+        "rsi_divergence".into(), "volume_price_trend".into(),
     ];
 
     let mut data: Vec<Vec<f64>> = Vec::new();
 
+    // Pre-compute OBV and A/D line
+    let mut obv = vec![0.0f64; n];
+    let mut ad_line = vec![0.0f64; n];
+    for i in 1..n {
+        let clv = if highs[i] != lows[i] {
+            ((closes[i] - lows[i]) - (highs[i] - closes[i])) / (highs[i] - lows[i])
+        } else { 0.0 };
+        ad_line[i] = ad_line[i-1] + clv * volumes[i];
+        obv[i] = obv[i-1] + if closes[i] > closes[i-1] { volumes[i] }
+            else if closes[i] < closes[i-1] { -volumes[i] }
+            else { 0.0 };
+    }
+
     for i in 0..returns.len() {
         let idx = i + 1;
-        let ret = returns[i];
+
+        // === PRICE RETURNS (6) ===
+        let ret_1d = returns[i];
         let ret_5d = if i >= 5 { (closes[idx] / closes[idx - 5]).ln() } else { 0.0 };
         let ret_10d = if i >= 10 { (closes[idx] / closes[idx - 10]).ln() } else { 0.0 };
+        let ret_20d = if i >= 20 { (closes[idx] / closes[idx - 20]).ln() } else { 0.0 };
+        let simple_ret = if idx > 0 && closes[idx-1] > 0.0 { (closes[idx] - closes[idx-1]) / closes[idx-1] } else { 0.0 };
 
+        // === REALIZED VOLATILITY (6) ===
+        let vol_5 = if i >= 5 { rolling_std(&returns[i-4..=i]) } else { 0.0 };
         let vol_10 = if i >= 10 { rolling_std(&returns[i-9..=i]) } else { 0.0 };
         let vol_20 = if i >= 20 { rolling_std(&returns[i-19..=i]) } else { 0.0 };
 
+        // vol-of-vol: std of rolling 5d vol
+        let vol_of_vol = if i >= 20 {
+            let rlen = returns.len();
+            let vol_series: Vec<f64> = (0..5).map(|j| {
+                let start = i - 19 + j * 4;
+                let end = (start + 5).min(rlen);
+                if end > start + 1 { rolling_std(&returns[start..end]) } else { 0.0 }
+            }).collect();
+            rolling_std(&vol_series)
+        } else { 0.0 };
+
+        let (skew, kurt) = if i >= 20 {
+            let window = &returns[i-19..=i];
+            let mean = window.iter().sum::<f64>() / 20.0;
+            let std = rolling_std(window);
+            if std > 0.0 {
+                let m3 = window.iter().map(|r| ((r - mean) / std).powi(3)).sum::<f64>() / 20.0;
+                let m4 = window.iter().map(|r| ((r - mean) / std).powi(4)).sum::<f64>() / 20.0 - 3.0;
+                (m3, m4)
+            } else { (0.0, 0.0) }
+        } else { (0.0, 0.0) };
+
+        // === MOMENTUM OSCILLATORS (10) ===
         let rsi_14 = if idx >= 14 { calc_rsi(&closes[..=idx], 14) } else { 50.0 };
         let rsi_7 = if idx >= 7 { calc_rsi(&closes[..=idx], 7) } else { 50.0 };
+        let rsi_21 = if idx >= 21 { calc_rsi(&closes[..=idx], 21) } else { 50.0 };
 
+        // Stochastic %K, %D
+        let (stoch_k, stoch_d) = if idx >= 14 {
+            let window_h = &highs[idx-13..=idx];
+            let window_l = &lows[idx-13..=idx];
+            let highest = window_h.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let lowest = window_l.iter().cloned().fold(f64::INFINITY, f64::min);
+            let k = if highest != lowest { (closes[idx] - lowest) / (highest - lowest) * 100.0 } else { 50.0 };
+            (k, k) // %D would be SMA of %K but single-point approximation
+        } else { (50.0, 50.0) };
+
+        // Williams %R
+        let williams_r = if idx >= 14 {
+            let window_h = &highs[idx-13..=idx];
+            let window_l = &lows[idx-13..=idx];
+            let highest = window_h.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let lowest = window_l.iter().cloned().fold(f64::INFINITY, f64::min);
+            if highest != lowest { (highest - closes[idx]) / (highest - lowest) * -100.0 } else { -50.0 }
+        } else { -50.0 };
+
+        // CCI
+        let cci = if idx >= 20 {
+            let tp_values: Vec<f64> = (idx-19..=idx).map(|j| (highs[j] + lows[j] + closes[j]) / 3.0).collect();
+            let tp_mean = tp_values.iter().sum::<f64>() / 20.0;
+            let mean_dev = tp_values.iter().map(|v| (v - tp_mean).abs()).sum::<f64>() / 20.0;
+            let tp = (highs[idx] + lows[idx] + closes[idx]) / 3.0;
+            if mean_dev > 0.0 { (tp - tp_mean) / (0.015 * mean_dev) } else { 0.0 }
+        } else { 0.0 };
+
+        // Rate of change
+        let roc_10 = if idx >= 10 && closes[idx-10] > 0.0 { (closes[idx] - closes[idx-10]) / closes[idx-10] * 100.0 } else { 0.0 };
+        let roc_20 = if idx >= 20 && closes[idx-20] > 0.0 { (closes[idx] - closes[idx-20]) / closes[idx-20] * 100.0 } else { 0.0 };
+        let momentum_12 = if idx >= 12 { closes[idx] - closes[idx-12] } else { 0.0 };
+
+        // === TREND INDICATORS (8) ===
         let ema9 = ema(&closes[..=idx], 9.min(idx + 1));
         let ema21 = ema(&closes[..=idx], 21.min(idx + 1));
-        let ema_ratio = if ema21 > 0.0 { ema9 / ema21 } else { 1.0 };
+        let ema5 = ema(&closes[..=idx], 5.min(idx + 1));
+        let ema13 = ema(&closes[..=idx], 13.min(idx + 1));
+        let ema_ratio_9_21 = if ema21 > 0.0 { ema9 / ema21 } else { 1.0 };
+        let ema_ratio_5_13 = if ema13 > 0.0 { ema5 / ema13 } else { 1.0 };
 
+        let sma10 = if idx >= 10 { closes[idx-9..=idx].iter().sum::<f64>() / 10.0 } else { closes[idx] };
+        let sma50 = if idx >= 50 { closes[idx-49..=idx].iter().sum::<f64>() / 50.0 } else { closes[idx] };
+        let sma_ratio_10_50 = if sma50 > 0.0 { sma10 / sma50 } else { 1.0 };
+
+        // ADX (simplified: DI+ - DI- magnitude)
+        let adx = if idx >= 14 {
+            let mut plus_dm_sum = 0.0;
+            let mut minus_dm_sum = 0.0;
+            for j in (idx-13)..=idx {
+                if j > 0 {
+                    let up = highs[j] - highs[j-1];
+                    let down = lows[j-1] - lows[j];
+                    if up > down && up > 0.0 { plus_dm_sum += up; }
+                    if down > up && down > 0.0 { minus_dm_sum += down; }
+                }
+            }
+            let total = plus_dm_sum + minus_dm_sum;
+            if total > 0.0 { ((plus_dm_sum - minus_dm_sum).abs() / total * 100.0).min(100.0) } else { 0.0 }
+        } else { 0.0 };
+
+        // Aroon
+        let (aroon_up, aroon_down) = if idx >= 25 {
+            let window = &closes[idx-24..=idx];
+            let max_idx = window.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, _)| i).unwrap_or(0);
+            let min_idx = window.iter().enumerate().min_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, _)| i).unwrap_or(0);
+            (max_idx as f64 / 25.0 * 100.0, min_idx as f64 / 25.0 * 100.0)
+        } else { (50.0, 50.0) };
+
+        // Linear regression slope and R²
+        let (lr_slope, lr_r2) = if idx >= 20 {
+            linear_regression(&closes[idx-19..=idx])
+        } else { (0.0, 0.0) };
+
+        // === VOLATILITY INDICATORS (6) ===
         let (bb_upper, bb_lower) = if idx >= 20 {
             let sma = closes[idx-19..=idx].iter().sum::<f64>() / 20.0;
             let std = rolling_std(&closes[idx-19..=idx]);
             (sma + 2.0 * std, sma - 2.0 * std)
         } else { (closes[idx] * 1.1, closes[idx] * 0.9) };
         let bb_pos = if bb_upper != bb_lower { (closes[idx] - bb_lower) / (bb_upper - bb_lower) } else { 0.5 };
-
-        let vol_avg = if idx >= 20 { volumes[idx-19..=idx].iter().sum::<f64>() / 20.0 } else { volumes[idx] };
-        let vol_ratio = if vol_avg > 0.0 { volumes[idx] / vol_avg } else { 1.0 };
+        let bb_bandwidth = if closes[idx] > 0.0 { (bb_upper - bb_lower) / closes[idx] } else { 0.0 };
 
         let atr = if idx >= 14 { calc_atr(&highs[..=idx], &lows[..=idx], &closes[..=idx], 14) } else { highs[idx] - lows[idx] };
         let atr_ratio = if closes[idx] > 0.0 { atr / closes[idx] } else { 0.0 };
 
+        // Garman-Klass volatility
+        let gk_vol = if idx >= 20 {
+            let mut sum = 0.0;
+            for j in (idx-19)..=idx {
+                if lows[j] > 0.0 && opens[j] > 0.0 {
+                    let u = (highs[j] / opens[j]).ln();
+                    let d = (lows[j] / opens[j]).ln();
+                    let c = (closes[j] / opens[j]).ln();
+                    sum += 0.5 * (u - d).powi(2) - (2.0_f64.ln() - 1.0) * c.powi(2);
+                }
+            }
+            (sum / 20.0).sqrt() * (252.0_f64).sqrt()
+        } else { 0.0 };
+
+        // Yang-Zhang volatility
+        let yz_vol = if idx >= 20 {
+            let mut o2c = Vec::new();
+            let mut c2o = Vec::new();
+            for j in (idx-19)..=idx {
+                if closes[j] > 0.0 && opens[j] > 0.0 {
+                    o2c.push((closes[j] / opens[j]).ln());
+                }
+                if j > 0 && opens[j] > 0.0 && closes[j-1] > 0.0 {
+                    c2o.push((opens[j] / closes[j-1]).ln());
+                }
+            }
+            let var_o = if c2o.len() > 1 { rolling_std(&c2o).powi(2) } else { 0.0 };
+            let var_c = if o2c.len() > 1 { rolling_std(&o2c).powi(2) } else { 0.0 };
+            let k = 0.34 / (1.34 + 2.0 / 20.0);
+            ((var_o + k * var_c + (1.0 - k) * gk_vol.powi(2) / 252.0).max(0.0)).sqrt() * (252.0_f64).sqrt()
+        } else { 0.0 };
+
+        // === VOLUME FEATURES (8) ===
+        let vol_avg_20 = if idx >= 20 { volumes[idx-19..=idx].iter().sum::<f64>() / 20.0 } else { volumes[idx] };
+        let vol_avg_5 = if idx >= 5 { volumes[idx-4..=idx].iter().sum::<f64>() / 5.0 } else { volumes[idx] };
+        let vol_ratio_20 = if vol_avg_20 > 0.0 { volumes[idx] / vol_avg_20 } else { 1.0 };
+        let vol_ratio_5 = if vol_avg_5 > 0.0 { volumes[idx] / vol_avg_5 } else { 1.0 };
+
+        let typical_price = (highs[idx] + lows[idx] + closes[idx]) / 3.0;
+        let vwap_approx = if idx >= 20 {
+            let mut tp_vol_sum = 0.0;
+            let mut vol_sum = 0.0;
+            for j in (idx-19)..=idx {
+                let tp = (highs[j] + lows[j] + closes[j]) / 3.0;
+                tp_vol_sum += tp * volumes[j];
+                vol_sum += volumes[j];
+            }
+            if vol_sum > 0.0 { tp_vol_sum / vol_sum } else { typical_price }
+        } else { typical_price };
+        let vwap_dev = if vwap_approx > 0.0 { (closes[idx] - vwap_approx) / vwap_approx } else { 0.0 };
+
+        // OBV slope
+        let obv_slope_val = if idx >= 10 {
+            let (s, _) = linear_regression(&obv[idx-9..=idx]);
+            s
+        } else { 0.0 };
+
+        // A/D line slope
+        let ad_slope_val = if idx >= 10 {
+            let (s, _) = linear_regression(&ad_line[idx-9..=idx]);
+            s
+        } else { 0.0 };
+
+        // Money flow ratio
+        let mf_ratio = if idx >= 14 {
+            let mut pos_flow = 0.0;
+            let mut neg_flow = 0.0;
+            for j in (idx-13)..=idx {
+                let tp_j = (highs[j] + lows[j] + closes[j]) / 3.0;
+                let tp_prev = if j > 0 { (highs[j-1] + lows[j-1] + closes[j-1]) / 3.0 } else { tp_j };
+                let flow = tp_j * volumes[j];
+                if tp_j > tp_prev { pos_flow += flow; } else { neg_flow += flow; }
+            }
+            if neg_flow > 0.0 { pos_flow / neg_flow } else { 1.0 }
+        } else { 1.0 };
+
+        let vol_zscore = if vol_avg_20 > 0.0 {
+            let vol_std = if idx >= 20 { rolling_std(&volumes[idx-19..=idx]) } else { 1.0 };
+            if vol_std > 0.0 { (volumes[idx] - vol_avg_20) / vol_std } else { 0.0 }
+        } else { 0.0 };
+
+        let vol_momentum = if idx >= 10 {
+            let vol_5_now = volumes[idx-4..=idx].iter().sum::<f64>() / 5.0;
+            let vol_5_prev = volumes[idx-9..idx-4].iter().sum::<f64>() / 5.0;
+            if vol_5_prev > 0.0 { vol_5_now / vol_5_prev } else { 1.0 }
+        } else { 1.0 };
+
+        // === CANDLESTICK FEATURES (6) ===
         let body = (closes[idx] - opens[idx]).abs();
         let range = highs[idx] - lows[idx];
         let body_ratio = if range > 0.0 { body / range } else { 0.0 };
         let upper_shadow = if range > 0.0 { (highs[idx] - closes[idx].max(opens[idx])) / range } else { 0.0 };
         let lower_shadow = if range > 0.0 { (closes[idx].min(opens[idx]) - lows[idx]) / range } else { 0.0 };
-
         let gap = if idx > 0 && closes[idx - 1] > 0.0 { (opens[idx] - closes[idx - 1]) / closes[idx - 1] } else { 0.0 };
         let hl_range = if closes[idx] > 0.0 { range / closes[idx] } else { 0.0 };
+        let close_position = if range > 0.0 { (closes[idx] - lows[idx]) / range } else { 0.5 };
+
+        // === CROSS-SECTIONAL (4) — placeholders for single-symbol ===
+        let return_rank = 0.5;
+        let vol_rank = 0.5;
+        let rs_5 = ret_5d;
+        let rs_20 = ret_20d;
+
+        // === CALENDAR FEATURES (6) ===
+        let ts = &candles[idx].timestamp;
+        let (dow, dom, month_val) = parse_calendar(ts);
+        let is_expiry_week = if dom >= 22 && dom <= 31 { 1.0 } else { 0.0 };
+        let days_to_month_end = (30 - dom).max(0) as f64;
+        let is_monday = if dow == 1 { 1.0 } else { 0.0 };
+
+        // === REGIME FEATURES (6) ===
+        let ema_short_fast = ema(&closes[..=idx], 5.min(idx + 1));
+        let ema_long_slow = ema(&closes[..=idx], 30.min(idx + 1));
+        let trend_strength = if ema_long_slow > 0.0 { (ema_short_fast - ema_long_slow) / ema_long_slow } else { 0.0 };
+        let vol_regime = if vol_20 > 0.0 { vol_5 / vol_20 } else { 1.0 };
+
+        let mr_zscore = if idx >= 20 {
+            let sma20 = closes[idx-19..=idx].iter().sum::<f64>() / 20.0;
+            let std20 = rolling_std(&closes[idx-19..=idx]);
+            if std20 > 0.0 { (closes[idx] - sma20) / std20 } else { 0.0 }
+        } else { 0.0 };
+
+        let hurst = if i >= 20 {
+            estimate_hurst(&returns[i-19..=i])
+        } else { 0.5 };
+
+        let mut consec_up = 0i32;
+        let mut consec_down = 0i32;
+        for j in (0..idx).rev() {
+            if j + 1 <= idx && closes[j + 1] > closes[j] { consec_up += 1; } else { break; }
+        }
+        for j in (0..idx).rev() {
+            if j + 1 <= idx && closes[j + 1] < closes[j] { consec_down += 1; } else { break; }
+        }
+
+        // === MICROSTRUCTURE PROXIES (4) ===
+        let spread_proxy = hl_range * 0.5;
+        let depth_imbalance = if vol_avg_20 > 0.0 {
+            (volumes[idx] - vol_avg_20) / vol_avg_20 * if closes[idx] > opens[idx] { 1.0 } else { -1.0 }
+        } else { 0.0 };
+        let trade_imbalance = if volumes[idx] > 0.0 {
+            let buy_vol = if closes[idx] >= opens[idx] { volumes[idx] * 0.6 } else { volumes[idx] * 0.4 };
+            (2.0 * buy_vol / volumes[idx]) - 1.0
+        } else { 0.0 };
+        let kyle_lambda = if volumes[idx] > 0.0 && idx > 0 {
+            let price_change = (closes[idx] - closes[idx-1]).abs();
+            price_change / volumes[idx].sqrt()
+        } else { 0.0 };
+
+        // === INTERACTION FEATURES (6) ===
+        let rsi_x_vol = (rsi_14 / 100.0) * vol_20;
+        let mom_x_vol = (momentum_12 / closes[idx].max(1.0)) * vol_ratio_20;
+        let trend_x_regime = trend_strength * vol_regime;
+        let vol_x_bb = vol_20 * bb_bandwidth;
+        let rsi_divergence = if idx >= 5 {
+            let rsi_prev = if idx >= 19 { calc_rsi(&closes[..=idx-5], 14) } else { 50.0 };
+            let price_dir = if closes[idx] > closes[idx.saturating_sub(5)] { 1.0 } else { -1.0 };
+            let rsi_dir = if rsi_14 > rsi_prev { 1.0 } else { -1.0 };
+            price_dir * rsi_dir
+        } else { 0.0 };
+        let vpt = if idx > 0 && closes[idx-1] > 0.0 {
+            ((closes[idx] - closes[idx-1]) / closes[idx-1]) * volumes[idx]
+        } else { 0.0 };
 
         data.push(vec![
-            r4(ret), r4(ret_5d), r4(ret_10d),
-            r4(vol_10), r4(vol_20),
-            r2(rsi_14), r2(rsi_7),
-            r4(ema_ratio), r4(bb_pos),
-            r2(vol_ratio), r4(atr_ratio),
+            // Price returns (6)
+            r4(ret_1d), r4(ret_5d), r4(ret_10d), r4(ret_20d), r4(simple_ret), r4(ret_5d),
+            // Volatility (6)
+            r4(vol_5), r4(vol_10), r4(vol_20), r4(vol_of_vol), r4(skew), r4(kurt),
+            // Momentum (10)
+            r2(rsi_14), r2(rsi_7), r2(rsi_21),
+            r2(stoch_k), r2(stoch_d), r2(williams_r), r2(cci),
+            r2(roc_10), r2(roc_20), r2(momentum_12),
+            // Trend (8)
+            r4(ema_ratio_9_21), r4(ema_ratio_5_13), r4(sma_ratio_10_50),
+            r2(adx), r2(aroon_up), r2(aroon_down), r4(lr_slope), r4(lr_r2),
+            // Volatility indicators (6)
+            r4(bb_pos), r4(bb_bandwidth), r4(atr_ratio), r2(atr),
+            r4(gk_vol), r4(yz_vol),
+            // Volume (8)
+            r2(vol_ratio_20), r2(vol_ratio_5), r4(vwap_dev), r4(obv_slope_val),
+            r4(ad_slope_val), r2(mf_ratio), r2(vol_zscore), r2(vol_momentum),
+            // Candlestick (6)
             r4(body_ratio), r4(upper_shadow), r4(lower_shadow),
-            r4(gap), r4(hl_range),
+            r4(gap), r4(hl_range), r4(close_position),
+            // Cross-sectional (4)
+            r4(return_rank), r4(vol_rank), r4(rs_5), r4(rs_20),
+            // Calendar (6)
+            dow as f64, dom as f64, month_val as f64,
+            is_expiry_week, days_to_month_end, is_monday,
+            // Regime (6)
+            r4(trend_strength), r4(vol_regime), r4(mr_zscore),
+            r4(hurst), consec_up as f64, consec_down as f64,
+            // Microstructure (4)
+            r4(spread_proxy), r4(depth_imbalance), r4(trade_imbalance), r4(kyle_lambda),
+            // Interactions (6)
+            r4(rsi_x_vol), r4(mom_x_vol), r4(trend_x_regime),
+            r4(vol_x_bb), r4(rsi_divergence), r4(vpt),
         ]);
     }
 
@@ -377,6 +709,55 @@ fn calc_atr(highs: &[f64], lows: &[f64], closes: &[f64], period: usize) -> f64 {
     atr / period as f64
 }
 
+fn linear_regression(data: &[f64]) -> (f64, f64) {
+    let n = data.len() as f64;
+    if n < 2.0 { return (0.0, 0.0); }
+    let x_mean = (n - 1.0) / 2.0;
+    let y_mean = data.iter().sum::<f64>() / n;
+    let mut ss_xy = 0.0;
+    let mut ss_xx = 0.0;
+    let mut ss_yy = 0.0;
+    for (i, &y) in data.iter().enumerate() {
+        let x = i as f64;
+        ss_xy += (x - x_mean) * (y - y_mean);
+        ss_xx += (x - x_mean).powi(2);
+        ss_yy += (y - y_mean).powi(2);
+    }
+    let slope = if ss_xx > 0.0 { ss_xy / ss_xx } else { 0.0 };
+    let r2_val = if ss_xx > 0.0 && ss_yy > 0.0 { (ss_xy.powi(2)) / (ss_xx * ss_yy) } else { 0.0 };
+    (slope, r2_val)
+}
+
+fn parse_calendar(ts: &str) -> (u32, u32, u32) {
+    // Parse "2024-01-15" or "2024-01-15T..." format
+    let parts: Vec<&str> = ts.split(&['-', 'T'][..]).collect();
+    let month = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+    let day = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+    let year = parts.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(2024);
+    // Zeller's formula for day of week (0=Sun, 1=Mon, ...)
+    let (m, y) = if month <= 2 { (month + 12, year - 1) } else { (month, year) };
+    let dow = ((day + (13 * (m + 1)) / 5 + y + y / 4 - y / 100 + y / 400) % 7) as u32;
+    (dow, day, month)
+}
+
+fn estimate_hurst(returns: &[f64]) -> f64 {
+    let n = returns.len();
+    if n < 10 { return 0.5; }
+    let mean = returns.iter().sum::<f64>() / n as f64;
+    let deviations: Vec<f64> = returns.iter().map(|r| r - mean).collect();
+    let mut cumsum = vec![0.0; n];
+    cumsum[0] = deviations[0];
+    for i in 1..n { cumsum[i] = cumsum[i-1] + deviations[i]; }
+    let range = cumsum.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+              - cumsum.iter().cloned().fold(f64::INFINITY, f64::min);
+    let std = rolling_std(returns);
+    if std > 0.0 && range > 0.0 {
+        let rs = range / std;
+        // Hurst ≈ log(R/S) / log(n)
+        (rs.ln() / (n as f64).ln()).max(0.0).min(1.0)
+    } else { 0.5 }
+}
+
 fn r2(v: f64) -> f64 { (v * 100.0).round() / 100.0 }
 fn r4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
 
@@ -407,12 +788,12 @@ mod tests {
 
         let features = result.get("features").expect("missing features");
         let columns = features.get("columns").expect("missing columns").as_array().unwrap();
-        assert_eq!(columns.len(), 16);
+        assert_eq!(columns.len(), 76, "expected 76 feature columns, got {}", columns.len());
 
         let data = features.get("data").expect("missing data").as_array().unwrap();
         assert!(!data.is_empty());
         for row in data {
-            assert_eq!(row.as_array().unwrap().len(), 16);
+            assert_eq!(row.as_array().unwrap().len(), 76, "expected 76 values per row");
         }
     }
 

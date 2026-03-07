@@ -291,6 +291,7 @@ export interface ScanSignal {
   target: number;
   indicators: Record<string, number>;
   votes: Record<string, number>;
+  strategy?: string;
 }
 
 export type Aggressiveness = 'high' | 'medium' | 'low';
@@ -615,6 +616,9 @@ export async function engineScan(data: {
     candles: Array<{ close: number; high: number; low: number; volume: number }>;
   }>;
   aggressiveness?: 'high' | 'medium' | 'low';
+  strategy_params?: Record<string, unknown>;
+  vote_weights?: Record<string, number>;
+  regime?: string;
 }): Promise<ScanResult> {
   const res = await runEngine('scan', data);
   if (!res.success) throw new Error(res.error ?? 'Scan computation failed');
@@ -690,6 +694,40 @@ export async function engineMultiTimeframeScan(data: unknown): Promise<unknown> 
   const res = await runEngine('multi_timeframe_scan', data);
   if (!res.success) throw new Error(res.error ?? 'Multi-timeframe scan failed');
   return res.data;
+}
+
+// ── ML Scorer ──
+
+export interface MLScoreResult {
+  scores: number[];
+  model_version: string;
+}
+
+export interface MLTrainResult {
+  weights: {
+    w: number[];
+    bias: number;
+    feature_names: string[];
+    training_samples: number;
+    training_accuracy: number;
+  };
+  training_accuracy: number;
+  samples_used: number;
+}
+
+export async function engineMLScore(data: {
+  command: 'predict' | 'train' | 'allocate';
+  features?: Array<Record<string, unknown>>;
+  weights?: Record<string, unknown>;
+  training_data?: Array<{ features: Record<string, unknown>; outcome: number }>;
+  learning_rate?: number;
+  epochs?: number;
+  strategy_stats?: Array<{ strategy_id: string; wins: number; losses: number; sharpe: number; is_decaying: boolean }>;
+  total_capital?: number;
+}): Promise<MLScoreResult | MLTrainResult | Record<string, unknown>> {
+  const res = await runEngine('ml_score', data);
+  if (!res.success) throw new Error(res.error ?? 'ML scorer failed');
+  return res.data as MLScoreResult | MLTrainResult | Record<string, unknown>;
 }
 
 // ── Engine Health / Meta ──

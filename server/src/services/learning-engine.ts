@@ -1,8 +1,12 @@
 import type { PrismaClient } from '@prisma/client';
 import { chatCompletionJSON, chatCompletion } from '../lib/openai.js';
 import { MarketDataService } from './market-data.service.js';
-import { engineOptimize, isEngineAvailable, type OptimizeInput } from '../lib/rust-engine.js';
+import { engineOptimize, engineFeatureStore, engineMLScore, isEngineAvailable, type OptimizeInput } from '../lib/rust-engine.js';
+import { isMLServiceAvailable, mlTrain, mlDetectRegime, mlAllocate } from '../lib/ml-service-client.js';
 import { LearningStoreService } from './learning-store.service.js';
+import { createChildLogger } from '../lib/logger.js';
+
+const log = createChildLogger('LearningEngine');
 
 const STRATEGIES = ['ema-crossover', 'supertrend', 'sma_crossover', 'mean_reversion', 'momentum', 'rsi_reversal', 'orb'];
 
@@ -86,7 +90,13 @@ export class LearningEngine {
     await this.trackRegimeAndAdjust(userId, today, insight.marketRegime, ledgers);
     await this.trackStrategyEvolution(userId, today, ledgers);
 
-    console.log(`[LearningEngine] User ${userId}: ${trades.length} trades, regime=${insight.marketRegime}`);
+    // Phase 3: ML model retraining (using expanded features from feature_store)
+    await this.retrainMLScorer(userId);
+
+    // Phase 4: Strategy allocation optimization via Thompson sampling
+    await this.optimizeStrategyAllocation(userId, ledgers);
+
+    log.info({ userId, trades: trades.length, regime: insight.marketRegime }, 'Nightly learning completed');
   }
 
   private async computeStrategyLedgers(
@@ -569,6 +579,367 @@ Top losers: ${JSON.stringify(topLosers)}`,
       } catch (err) {
         console.error(`[LearningEngine] Strategy evolution write failed for ${ledger.strategyId}:`, (err as Error).message);
       }
+    }
+
+    // Alpha decay tracking
+    await this.trackAlphaDecay(userId, date, ledgers);
+  }
+
+  private async trackAlphaDecay(
+    userId: string,
+    date: Date,
+    ledgers: Array<{ strategyId: string; winRate: number; netPnl: any; sharpeRatio: number; tradesCount: number }>,
+  ): Promise<void> {
+    for (const ledger of ledgers) {
+      try {
+        const dateOnly = new Date(date.toISOString().split('T')[0]);
+
+        // Compute rolling Sharpe from recent trade history
+        const windows = [30, 60, 90];
+        const sharpes: Record<string, number | null> = {};
+        let hitRate30d: number | null = null;
+
+        for (const days of windows) {
+          const since = new Date(date);
+          since.setDate(since.getDate() - days);
+          const trades = await this.prisma.trade.findMany({
+            where: {
+              portfolio: { userId },
+              strategyTag: ledger.strategyId,
+              exitTime: { gte: since, lte: date },
+            },
+            select: { netPnl: true },
+          });
+
+          if (trades.length >= 5) {
+            const returns = trades.map(t => Number(t.netPnl));
+            const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+            const std = Math.sqrt(returns.reduce((s, r) => s + (r - mean) ** 2, 0) / returns.length);
+            sharpes[`sharpe${days}d`] = std > 0 ? (mean / std) * Math.sqrt(252 / days) : 0;
+
+            if (days === 30) {
+              hitRate30d = returns.filter(r => r > 0).length / returns.length;
+            }
+          } else {
+            sharpes[`sharpe${days}d`] = null;
+          }
+        }
+
+        const isDecaying = (sharpes['sharpe30d'] ?? 1) < 0.5 && (sharpes['sharpe60d'] ?? 1) > (sharpes['sharpe30d'] ?? 0);
+
+        await this.prisma.alphaDecay.upsert({
+          where: {
+            userId_strategyId_date: { userId, strategyId: ledger.strategyId, date: dateOnly },
+          },
+          update: {
+            sharpe30d: sharpes['sharpe30d'],
+            sharpe60d: sharpes['sharpe60d'],
+            sharpe90d: sharpes['sharpe90d'],
+            hitRate30d: hitRate30d,
+            signalCount: ledger.tradesCount,
+            isDecaying,
+          },
+          create: {
+            userId,
+            strategyId: ledger.strategyId,
+            date: dateOnly,
+            sharpe30d: sharpes['sharpe30d'],
+            sharpe60d: sharpes['sharpe60d'],
+            sharpe90d: sharpes['sharpe90d'],
+            hitRate30d: hitRate30d,
+            signalCount: ledger.tradesCount,
+            isDecaying,
+          },
+        });
+
+        if (isDecaying) {
+          console.warn(`[LearningEngine] Alpha decay detected for ${ledger.strategyId}: 30d Sharpe=${sharpes['sharpe30d']?.toFixed(2)}`);
+        }
+      } catch (err) {
+        console.error(`[LearningEngine] Alpha decay tracking failed for ${ledger.strategyId}:`, (err as Error).message);
+      }
+    }
+  }
+
+  private async retrainMLScorer(userId: string): Promise<void> {
+    try {
+      if (!isEngineAvailable()) return;
+
+      // Collect last 90 days of decision audits with outcomes
+      const since = new Date();
+      since.setDate(since.getDate() - 90);
+
+      const decisions = await this.prisma.decisionAudit.findMany({
+        where: {
+          userId,
+          createdAt: { gte: since },
+          outcome: { not: null },
+          decisionType: 'ENTRY_SIGNAL',
+        },
+        select: {
+          symbol: true,
+          confidence: true,
+          direction: true,
+          outcome: true,
+          marketDataSnapshot: true,
+          entryPrice: true,
+          exitPrice: true,
+          pnl: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 500,
+      });
+
+      if (decisions.length < 30) {
+        log.info({ userId, samples: decisions.length }, 'Not enough samples for ML retraining (need 30)');
+        return;
+      }
+
+      // Build training data, enriching with full 76-feature vectors from the Feature Store
+      const trainingData = [];
+      for (const d of decisions) {
+        const snapshot = typeof d.marketDataSnapshot === 'string'
+          ? JSON.parse(d.marketDataSnapshot) : d.marketDataSnapshot;
+
+        const hour = d.createdAt.getHours();
+        const dow = d.createdAt.getDay();
+
+        // Attempt to compute rich features from stored candle data
+        let rawFeatures: number[] = [];
+        if (isEngineAvailable()) {
+          try {
+            const fromDate = new Date(d.createdAt.getTime() - 60 * 86400000).toISOString().split('T')[0];
+            const toDate = d.createdAt.toISOString().split('T')[0];
+            const candles = await this.marketData.getHistory(
+              d.symbol, '1d', fromDate, toDate, undefined, 'NSE',
+            );
+            if (candles && candles.length >= 30) {
+              const featureResult = await engineFeatureStore({
+                command: 'extract_features',
+                candles: candles.map((c: any) => ({
+                  timestamp: c.timestamp || c.date,
+                  open: c.open, high: c.high, low: c.low,
+                  close: c.close, volume: c.volume,
+                })),
+              }) as any;
+              // Use the last row of features (most recent day)
+              if (featureResult?.features?.data?.length > 0) {
+                const lastRow = featureResult.features.data[featureResult.features.data.length - 1];
+                rawFeatures = lastRow;
+              }
+            }
+          } catch {
+            // Fall back to empty raw_features — base features still work
+          }
+        }
+
+        trainingData.push({
+          features: {
+            ema_vote: snapshot?.ema_vote ?? d.confidence * 0.5,
+            rsi_vote: snapshot?.rsi_vote ?? 0,
+            macd_vote: snapshot?.macd_vote ?? 0,
+            supertrend_vote: snapshot?.supertrend_vote ?? 0,
+            bollinger_vote: snapshot?.bollinger_vote ?? 0,
+            vwap_vote: snapshot?.vwap_vote ?? 0,
+            momentum_vote: snapshot?.momentum_vote ?? d.confidence * 0.6,
+            volume_vote: snapshot?.volume_vote ?? 0,
+            composite_score: d.confidence,
+            regime: 1.0,
+            hour_of_day: hour,
+            day_of_week: dow,
+            raw_features: rawFeatures,
+          },
+          outcome: d.outcome === 'WIN' ? 1.0 : 0.0,
+        });
+      }
+
+      // Ensure all feature rows have consistent dimension (some may lack raw_features)
+      const maxRawLen = Math.max(...trainingData.map(d => d.features.raw_features.length));
+      if (maxRawLen > 0) {
+        for (const d of trainingData) {
+          while (d.features.raw_features.length < maxRawLen) {
+            d.features.raw_features.push(0);
+          }
+        }
+      }
+
+      const result = await engineMLScore({
+        command: 'train',
+        training_data: trainingData,
+        learning_rate: 0.01,
+        epochs: 500,
+      }) as { weights: Record<string, unknown>; training_accuracy: number; samples_used: number };
+
+      // Persist weights for the bot engine to load
+      const existingWeights = await this.prisma.strategyParam.findFirst({
+        where: { userId, strategyId: 'ml_scorer_weights' },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      if (existingWeights) {
+        await this.prisma.strategyParam.update({
+          where: { id: existingWeights.id },
+          data: {
+            params: JSON.stringify(result.weights),
+            isActive: true,
+            version: existingWeights.version + 1,
+          },
+        });
+      } else {
+        await this.prisma.strategyParam.create({
+          data: {
+            userId,
+            strategyId: 'ml_scorer_weights',
+            params: JSON.stringify(result.weights),
+            isActive: true,
+            version: 1,
+          },
+        });
+      }
+
+      log.info({
+        userId,
+        accuracy: result.training_accuracy,
+        samples: result.samples_used,
+      }, 'Rust ML scorer retrained');
+
+      // Also train Python XGBoost/LightGBM if available
+      if (await isMLServiceAvailable()) {
+        try {
+          const xgbResult = await mlTrain({
+            training_data: trainingData,
+            model_type: 'xgboost',
+            walk_forward_days: 30,
+            purge_gap_days: 5,
+          });
+          log.info({
+            userId,
+            model: 'xgboost',
+            accuracy: xgbResult.accuracy,
+            auc: xgbResult.auc_roc,
+            trainSamples: xgbResult.training_samples,
+          }, 'Python XGBoost model retrained');
+
+          const lgbResult = await mlTrain({
+            training_data: trainingData,
+            model_type: 'lightgbm',
+            walk_forward_days: 30,
+            purge_gap_days: 5,
+          });
+          log.info({
+            userId,
+            model: 'lightgbm',
+            accuracy: lgbResult.accuracy,
+            auc: lgbResult.auc_roc,
+          }, 'Python LightGBM model retrained');
+        } catch (pyErr) {
+          log.warn({ err: pyErr }, 'Python ML training failed (non-fatal, Rust model still active)');
+        }
+      }
+    } catch (err) {
+      log.error({ err, userId }, 'ML scorer retraining failed');
+    }
+  }
+
+  private async optimizeStrategyAllocation(
+    userId: string,
+    ledgers: Array<{ strategyId: string; wins: number; losses: number; sharpeRatio: number }>,
+  ): Promise<void> {
+    try {
+      if (!isEngineAvailable()) return;
+      if (ledgers.length === 0) return;
+
+      // Get alpha decay data for each strategy
+      const decayData = await this.prisma.alphaDecay.findMany({
+        where: { userId },
+        orderBy: { date: 'desc' },
+        distinct: ['strategyId'],
+      });
+      const decayMap = new Map(decayData.map(d => [d.strategyId, d.isDecaying]));
+
+      const strategyStats = ledgers.map(l => ({
+        strategy_id: l.strategyId,
+        wins: l.wins,
+        losses: l.losses,
+        sharpe: l.sharpeRatio,
+        is_decaying: decayMap.get(l.strategyId) ?? false,
+      }));
+
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { virtualCapital: true },
+      });
+      const capital = Number(user?.virtualCapital ?? 1_000_000);
+
+      const result = await engineMLScore({
+        command: 'allocate' as any,
+        strategy_stats: strategyStats as any,
+        total_capital: capital,
+      }) as any;
+
+      if (result?.allocations) {
+        // Persist allocation result so bot-engine can use it for capital sizing
+        const existingAlloc = await this.prisma.strategyParam.findFirst({
+          where: { userId, strategyId: 'strategy_allocations' },
+          orderBy: { createdAt: 'desc' },
+        });
+
+        const allocData = JSON.stringify({
+          allocations: result.allocations,
+          method: result.method,
+          computedAt: new Date().toISOString(),
+        });
+
+        if (existingAlloc) {
+          await this.prisma.strategyParam.update({
+            where: { id: existingAlloc.id },
+            data: { params: allocData, isActive: true, version: existingAlloc.version + 1 },
+          });
+        } else {
+          await this.prisma.strategyParam.create({
+            data: {
+              userId,
+              strategyId: 'strategy_allocations',
+              params: allocData,
+              isActive: true,
+              version: 1,
+            },
+          });
+        }
+
+        log.info({
+          userId,
+          allocations: result.allocations,
+          method: result.method,
+        }, 'Strategy allocation optimized and persisted (Rust)');
+      }
+
+      // Also call Python ML service for enhanced Bayesian allocation
+      if (await isMLServiceAvailable()) {
+        try {
+          const pyResult = await mlAllocate({
+            strategy_stats: strategyStats.map(s => ({
+              ...s,
+              avg_return: 0,
+            })),
+            total_capital: capital,
+            current_regime: 'unknown',
+            risk_budget_pct: 2.0,
+          });
+
+          log.info({
+            userId,
+            allocations: pyResult.allocations,
+            method: pyResult.method,
+            explorationRate: pyResult.exploration_rate,
+          }, 'Python strategy allocation computed');
+        } catch (pyErr) {
+          log.warn({ err: pyErr }, 'Python allocation failed (non-fatal)');
+        }
+      }
+    } catch (err) {
+      log.error({ err, userId }, 'Strategy allocation optimization failed');
     }
   }
 }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::utils::{norm_cdf, round2, round4};
 
 #[derive(Deserialize)]
 struct Config {
@@ -233,27 +234,6 @@ fn bs_greeks(s: f64, k: f64, t: f64, r: f64, sigma: f64, opt_type: &str) -> (f64
 
     (delta, gamma, theta, vega)
 }
-
-fn norm_cdf(x: f64) -> f64 {
-    0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
-}
-
-fn erf(x: f64) -> f64 {
-    let a1 = 0.254829592;
-    let a2 = -0.284496736;
-    let a3 = 1.421413741;
-    let a4 = -1.453152027;
-    let a5 = 1.061405429;
-    let p = 0.3275911;
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-    let t = 1.0 / (1.0 + p * x);
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
-    sign * y
-}
-
-fn round2(v: f64) -> f64 { (v * 100.0).round() / 100.0 }
-fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
 
 #[cfg(test)]
 mod tests {

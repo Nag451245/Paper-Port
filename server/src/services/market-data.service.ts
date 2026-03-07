@@ -1,9 +1,13 @@
-import { CacheService } from '../lib/redis.js';
+import { CacheService, getRedis } from '../lib/redis.js';
 import { getPrisma } from '../lib/prisma.js';
 import { createHash, createDecipheriv } from 'crypto';
 import https from 'https';
 import { createRequire } from 'module';
 import { env } from '../config.js';
+import { createChildLogger } from '../lib/logger.js';
+import { emit } from '../lib/event-bus.js';
+
+const log = createChildLogger('MarketData');
 
 const require = createRequire(import.meta.url);
 
@@ -20,8 +24,10 @@ function getBreezeConnectClass(): any {
   return BreezeConnect;
 }
 
-const CACHE_TTL_QUOTE = 30;
+const CACHE_TTL_QUOTE = 2;
+const CACHE_TTL_HISTORY_INTRADAY = 30;
 const CACHE_TTL_HISTORY = 300;
+const CACHE_TTL_OPTION_CHAIN = 15;
 const CACHE_TTL_SEARCH = 3600;
 const CACHE_TTL_INDICES = 60;
 const FETCH_TIMEOUT_MS = 10_000;
@@ -169,7 +175,12 @@ export class MarketDataService {
   private activeNseRequests = 0;
 
   constructor(cache?: CacheService) {
-    this.cache = cache ?? null;
+    if (cache) {
+      this.cache = cache;
+    } else {
+      const redis = getRedis();
+      this.cache = redis ? new CacheService(redis) : null;
+    }
   }
 
   // ── Yahoo Finance: primary data source (works from any server, no auth) ──
@@ -489,6 +500,7 @@ export class MarketDataService {
     userId?: string,
     exchange: string = 'NSE',
   ): Promise<HistoricalBar[]> {
+    const ttl = interval.includes('day') || interval.includes('1d') ? CACHE_TTL_HISTORY : CACHE_TTL_HISTORY_INTRADAY;
     const cacheKey = `history:${exchange}:${symbol}:${interval}:${fromDate}:${toDate}`;
 
     if (this.cache) {
@@ -496,26 +508,118 @@ export class MarketDataService {
       if (cached) return cached;
     }
 
+    // Check persistent candle store first
+    try {
+      const prisma = getPrisma();
+      const stored = await prisma.candleStore.findMany({
+        where: {
+          symbol, exchange, interval,
+          timestamp: { gte: new Date(fromDate), lte: new Date(toDate) },
+        },
+        orderBy: { timestamp: 'asc' },
+      });
+      if (stored.length >= 5) {
+        const bars: HistoricalBar[] = stored.map((c: any) => ({
+          timestamp: c.timestamp.toISOString(),
+          open: Number(c.open), high: Number(c.high),
+          low: Number(c.low), close: Number(c.close), volume: Number(c.volume),
+        }));
+        if (this.cache) await this.cache.set(cacheKey, bars, ttl);
+        return bars;
+      }
+    } catch { /* DB not available, continue to live fetch */ }
+
     if (exchange === 'MCX' || exchange === 'CDS') {
       const bars = this.generateSimulatedHistory(symbol, exchange, fromDate, toDate);
-      if (this.cache) await this.cache.set(cacheKey, bars, CACHE_TTL_HISTORY);
+      if (this.cache) await this.cache.set(cacheKey, bars, ttl);
       return bars;
     }
 
-    // Primary: Breeze API (direct broker data, most reliable when session is active)
     const bars = await this.fetchFromBreeze(symbol, interval, fromDate, toDate, userId, exchange);
     if (bars.length > 0) {
-      if (this.cache) await this.cache.set(cacheKey, bars, CACHE_TTL_HISTORY);
-      return bars;
+      if (this.cache) await this.cache.set(cacheKey, bars, ttl);
+      this.backfillCandleStore(symbol, exchange, interval, bars).catch(() => {});
+      return this.validateCandles(bars, symbol, interval);
     }
 
-    // Fallback: Yahoo Finance
     const yahooBars = await this.fetchHistoryFromYahoo(symbol, interval, fromDate, toDate, exchange);
     if (yahooBars.length > 0) {
-      if (this.cache) await this.cache.set(cacheKey, yahooBars, CACHE_TTL_HISTORY);
-      return yahooBars;
+      if (this.cache) await this.cache.set(cacheKey, yahooBars, ttl);
+      this.backfillCandleStore(symbol, exchange, interval, yahooBars).catch(() => {});
+      return this.validateCandles(yahooBars, symbol, interval);
     }
     return [];
+  }
+
+  private validateCandles(bars: HistoricalBar[], symbol: string, interval: string): HistoricalBar[] {
+    if (bars.length < 2) return bars;
+
+    const issues: string[] = [];
+    const closes = bars.map(b => b.close);
+    const mean = closes.reduce((a, b) => a + b, 0) / closes.length;
+    const stdDev = Math.sqrt(closes.reduce((s, c) => s + (c - mean) ** 2, 0) / closes.length);
+
+    for (let i = 1; i < bars.length; i++) {
+      const ts = bars[i].timestamp;
+      const prevTs = bars[i - 1].timestamp;
+      if (ts && prevTs) {
+        const gap = new Date(ts).getTime() - new Date(prevTs).getTime();
+        const expectedMs = interval.includes('day') ? 86400000 : interval.includes('1h') ? 3600000 : 60000;
+        if (gap > expectedMs * 3) {
+          issues.push(`gap at ${ts} (${Math.round(gap / expectedMs)}x interval)`);
+        }
+      }
+
+      if (stdDev > 0 && Math.abs(bars[i].close - mean) > 3 * stdDev) {
+        issues.push(`outlier at ${bars[i].timestamp}: close=${bars[i].close} (mean=${mean.toFixed(2)})`);
+      }
+
+      if (bars[i].volume === 0) {
+        issues.push(`zero volume at ${bars[i].timestamp}`);
+      }
+    }
+
+    if (issues.length > 0) {
+      log.warn({ symbol, interval, issueCount: issues.length, sample: issues.slice(0, 3) }, 'Data quality issues detected');
+      emit('market-data', {
+        type: 'DATA_GAP_DETECTED', symbol, interval,
+        gapMinutes: issues.length,
+        lastTimestamp: bars[bars.length - 1].timestamp ?? new Date().toISOString(),
+      }).catch(() => {});
+    }
+
+    return bars;
+  }
+
+  private async backfillCandleStore(symbol: string, exchange: string, interval: string, bars: HistoricalBar[]): Promise<void> {
+    try {
+      const prisma = getPrisma();
+      const records = bars
+        .filter(b => b.timestamp && b.close > 0)
+        .map(b => ({
+          symbol, exchange, interval,
+          timestamp: new Date(b.timestamp),
+          open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume ?? 0,
+        }));
+
+      if (records.length === 0) return;
+
+      // Upsert in batches to avoid unique constraint violations
+      for (const rec of records) {
+        await prisma.candleStore.upsert({
+          where: {
+            symbol_exchange_interval_timestamp: {
+              symbol: rec.symbol, exchange: rec.exchange,
+              interval: rec.interval, timestamp: rec.timestamp,
+            },
+          },
+          update: { open: rec.open, high: rec.high, low: rec.low, close: rec.close, volume: rec.volume },
+          create: rec,
+        }).catch(() => {});
+      }
+    } catch {
+      // Non-critical — don't block the main data flow
+    }
   }
 
   async getTopMovers(count = 20): Promise<{ gainers: MarketMover[]; losers: MarketMover[] }> {
