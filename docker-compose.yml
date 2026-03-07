@@ -27,6 +27,21 @@ services:
       timeout: 5s
       retries: 5
 
+  ml-service:
+    build: ./server/ml-service
+    ports:
+      - "8002:8002"
+    environment:
+      ML_SERVICE_PORT: "8002"
+    volumes:
+      - ml-models:/app/models
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   server:
     build: ./server
     ports:
@@ -35,10 +50,13 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/capitalguard
       REDIS_URL: redis://redis:6379
+      ML_SERVICE_URL: http://ml-service:8002
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      ml-service:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -58,3 +76,4 @@ services:
 
 volumes:
   pgdata:
+  ml-models:

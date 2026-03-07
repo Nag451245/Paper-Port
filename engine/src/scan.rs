@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use crate::signals;
-use crate::utils::{calc_ema_series, round2, round3, round4};
+use crate::utils::{Candle, calc_ema_series, get_f64, round2, round3, round4};
 
 #[derive(Deserialize)]
 struct ScanInput {
@@ -79,16 +79,6 @@ struct ResolvedPeriods {
 struct SymbolData {
     symbol: String,
     candles: Vec<Candle>,
-}
-
-#[derive(Deserialize, Serialize, Clone)]
-struct Candle {
-    close: f64,
-    high: f64,
-    low: f64,
-    volume: f64,
-    #[serde(default)]
-    open: f64,
 }
 
 fn default_aggressiveness() -> String {
@@ -232,9 +222,12 @@ pub fn compute(data: Value) -> Result<Value, String> {
             continue;
         }
 
-        let candles_json = serde_json::to_value(
+        let candles_json = match serde_json::to_value(
             &serde_json::json!({ "candles": sym_data.candles })
-        ).unwrap();
+        ) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         let indicators = match signals::compute(candles_json) {
             Ok(v) => v,
             Err(_) => continue,
@@ -1013,14 +1006,6 @@ fn calc_breakout(candles: &[Candle], lookback: usize) -> f64 {
     }
 }
 
-fn get_f64(indicators: &Value, key: &str, idx: usize) -> f64 {
-    indicators
-        .get(key)
-        .and_then(|arr| arr.get(idx))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0)
-}
-
 fn calc_atr_last(candles: &[Candle], period: usize) -> f64 {
     let n = candles.len();
     if n < period + 1 {
@@ -1048,7 +1033,8 @@ mod tests {
     use serde_json::json;
 
     fn make_candles(closes: &[f64]) -> Vec<Candle> {
-        closes.iter().map(|&c| Candle {
+        closes.iter().enumerate().map(|(i, &c)| Candle {
+            timestamp: format!("2025-01-{:02}", (i % 28) + 1),
             close: c,
             high: c * 1.01,
             low: c * 0.99,
@@ -1058,7 +1044,8 @@ mod tests {
     }
 
     fn make_candles_with_volume(data: &[(f64, f64)]) -> Vec<Candle> {
-        data.iter().map(|&(c, v)| Candle {
+        data.iter().enumerate().map(|(i, &(c, v))| Candle {
+            timestamp: format!("2025-01-{:02}", (i % 28) + 1),
             close: c,
             high: c * 1.01,
             low: c * 0.99,
@@ -1231,6 +1218,7 @@ mod tests {
     #[test]
     fn test_atr_basic() {
         let candles: Vec<Candle> = (0..20).map(|i| Candle {
+            timestamp: format!("2025-01-{:02}", (i % 28) + 1),
             close: 100.0 + (i % 3) as f64,
             high: 103.0,
             low: 98.0,
@@ -1389,10 +1377,11 @@ mod tests {
         let candles: Vec<Candle> = closes.iter().enumerate().map(|(i, &c)| {
             let prev_close = if i > 0 { closes[i - 1] } else { c };
             Candle {
+                timestamp: format!("2025-01-{:02}", (i % 28) + 1),
                 close: c,
                 high: c * 1.01,
                 low: c * 0.99,
-                volume: if i == 29 { 5000.0 } else { 1000.0 }, // volume surge on gap
+                volume: if i == 29 { 5000.0 } else { 1000.0 },
                 open: if i == 29 { prev_close + 5.0 } else { c * 0.998 },
             }
         }).collect();

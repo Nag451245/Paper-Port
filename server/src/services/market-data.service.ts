@@ -559,36 +559,99 @@ export class MarketDataService {
     const mean = closes.reduce((a, b) => a + b, 0) / closes.length;
     const stdDev = Math.sqrt(closes.reduce((s, c) => s + (c - mean) ** 2, 0) / closes.length);
 
-    for (let i = 1; i < bars.length; i++) {
-      const ts = bars[i].timestamp;
-      const prevTs = bars[i - 1].timestamp;
+    // Step 1: Remove outliers (>3 sigma from mean)
+    let filtered = bars;
+    if (stdDev > 0) {
+      const before = filtered.length;
+      filtered = filtered.filter(b => Math.abs(b.close - mean) <= 3 * stdDev);
+      if (before - filtered.length > 0) {
+        issues.push(`removed ${before - filtered.length} outlier bars (>3σ)`);
+      }
+    }
+
+    // Step 2: Detect and interpolate small gaps (1-2 missing bars)
+    const expectedMs = interval.includes('day') || interval.includes('1d') ? 86400000
+      : interval.includes('1h') || interval.includes('60') ? 3600000
+      : interval.includes('5m') || interval.includes('5min') ? 300000
+      : 60000;
+
+    const interpolated: HistoricalBar[] = [filtered[0]];
+    for (let i = 1; i < filtered.length; i++) {
+      const ts = filtered[i].timestamp;
+      const prevTs = filtered[i - 1].timestamp;
       if (ts && prevTs) {
         const gap = new Date(ts).getTime() - new Date(prevTs).getTime();
-        const expectedMs = interval.includes('day') ? 86400000 : interval.includes('1h') ? 3600000 : 60000;
-        if (gap > expectedMs * 3) {
-          issues.push(`gap at ${ts} (${Math.round(gap / expectedMs)}x interval)`);
+        const missingBars = Math.round(gap / expectedMs) - 1;
+
+        if (missingBars >= 1 && missingBars <= 2) {
+          // Interpolate missing bars
+          for (let j = 1; j <= missingBars; j++) {
+            const frac = j / (missingBars + 1);
+            const interpTs = new Date(new Date(prevTs).getTime() + expectedMs * j).toISOString();
+            const prev = filtered[i - 1];
+            const next = filtered[i];
+            interpolated.push({
+              timestamp: interpTs.includes('T') ? interpTs : interpTs.slice(0, 10),
+              open: Number((prev.close + (next.open - prev.close) * frac).toFixed(2)),
+              high: Number((Math.max(prev.high, next.high) * (1 - frac * 0.1)).toFixed(2)),
+              low: Number((Math.min(prev.low, next.low) * (1 + frac * 0.1)).toFixed(2)),
+              close: Number((prev.close + (next.close - prev.close) * frac).toFixed(2)),
+              volume: Math.round((prev.volume + next.volume) / 2),
+            });
+          }
+          issues.push(`interpolated ${missingBars} gap(s) near ${ts}`);
+        } else if (missingBars > 2) {
+          issues.push(`large gap at ${ts} (${missingBars + 1} intervals) — flagged for review`);
         }
       }
+      interpolated.push(filtered[i]);
+    }
 
-      if (stdDev > 0 && Math.abs(bars[i].close - mean) > 3 * stdDev) {
-        issues.push(`outlier at ${bars[i].timestamp}: close=${bars[i].close} (mean=${mean.toFixed(2)})`);
-      }
-
-      if (bars[i].volume === 0) {
-        issues.push(`zero volume at ${bars[i].timestamp}`);
+    // Step 3: Detect overnight gaps >10% for corporate action review
+    for (let i = 1; i < interpolated.length; i++) {
+      const prevClose = interpolated[i - 1].close;
+      if (prevClose > 0) {
+        const gapPct = Math.abs(interpolated[i].open - prevClose) / prevClose * 100;
+        if (gapPct > 10) {
+          issues.push(`large overnight gap ${gapPct.toFixed(1)}% at ${interpolated[i].timestamp} — possible corporate action`);
+        }
       }
     }
 
     if (issues.length > 0) {
-      log.warn({ symbol, interval, issueCount: issues.length, sample: issues.slice(0, 3) }, 'Data quality issues detected');
+      log.warn({ symbol, interval, issueCount: issues.length, sample: issues.slice(0, 5) }, 'Data quality: processed');
       emit('market-data', {
-        type: 'DATA_GAP_DETECTED', symbol, interval,
-        gapMinutes: issues.length,
-        lastTimestamp: bars[bars.length - 1].timestamp ?? new Date().toISOString(),
+        type: 'DATA_QUALITY_REPORT', symbol, interval,
+        issues: issues.slice(0, 10),
+        barCount: interpolated.length,
+        lastTimestamp: interpolated[interpolated.length - 1]?.timestamp ?? new Date().toISOString(),
       }).catch(() => {});
     }
 
-    return bars;
+    return interpolated;
+  }
+
+  /**
+   * Check if data is fresh enough for live trading (not stale during market hours).
+   */
+  isDataFresh(timestamp: string | Date, maxAgeMs = 5 * 60 * 1000): boolean {
+    const now = Date.now();
+    const dataTime = new Date(timestamp).getTime();
+    const age = now - dataTime;
+
+    // Only enforce during Indian market hours (9:15-15:30 IST = 3:45-10:00 UTC)
+    const utcHour = new Date().getUTCHours();
+    const utcMin = new Date().getUTCMinutes();
+    const utcMins = utcHour * 60 + utcMin;
+    const marketOpen = 3 * 60 + 45;
+    const marketClose = 10 * 60;
+    const isMarketHours = utcMins >= marketOpen && utcMins <= marketClose;
+
+    if (isMarketHours && age > maxAgeMs) {
+      log.warn({ age: Math.round(age / 1000), maxAgeSec: maxAgeMs / 1000 }, 'Stale data detected during market hours');
+      return false;
+    }
+    return true;
   }
 
   private async backfillCandleStore(symbol: string, exchange: string, interval: string, bars: HistoricalBar[]): Promise<void> {

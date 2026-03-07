@@ -18,10 +18,16 @@ import {
 } from '../lib/event-bus.js';
 import { wsHub } from '../lib/websocket.js';
 import { createChildLogger } from '../lib/logger.js';
+import type { LearningEngine } from './learning-engine.js';
+import type { BotEngine } from './bot-engine.js';
 
 const log = createChildLogger('EventWorkers');
 
-export function registerAllWorkers(prisma: PrismaClient): void {
+export function registerAllWorkers(
+  prisma: PrismaClient,
+  learningEngine?: LearningEngine,
+  botEngine?: BotEngine,
+): void {
   log.info('Registering event bus workers for all 5 categories');
 
   // ── Execution events: order fills, position changes, OMS state transitions ──
@@ -55,6 +61,21 @@ export function registerAllWorkers(prisma: PrismaClient): void {
             },
           });
         } catch { /* audit is best-effort */ }
+
+        // Intraday Bayesian update: adjust strategy confidence in real-time
+        if (learningEngine) {
+          learningEngine.runIntradayUpdate({
+            strategyTag: event.strategyTag ?? '',
+            netPnl: event.pnl ?? 0,
+            userId: event.userId,
+            symbol: event.symbol,
+          }).catch(err => log.warn({ err }, 'Intraday learning update failed'));
+        }
+
+        // Update BotEngine's Thompson sampling posteriors
+        if (botEngine && event.strategyTag) {
+          botEngine.bayesianUpdate(event.strategyTag, event.pnl >= 0);
+        }
         break;
       }
 

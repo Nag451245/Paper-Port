@@ -24,8 +24,36 @@ setInterval(() => {
   }
 }, 60_000);
 
+let isShuttingDown = false;
+
+async function gracefulShutdown(signal: string, app: ReturnType<typeof buildApp> extends Promise<infer T> ? T : never): Promise<void> {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
+  console.log(`\n[SHUTDOWN] Received ${signal} — starting graceful shutdown...`);
+
+  const shutdownTimeout = setTimeout(() => {
+    console.error('[SHUTDOWN] Timed out after 15s — forcing exit');
+    process.exit(1);
+  }, 15_000);
+
+  try {
+    await app.close();
+    console.log('[SHUTDOWN] Fastify closed (DB, Redis, services, Rust engine stopped)');
+  } catch (err) {
+    console.error('[SHUTDOWN] Error during close:', err instanceof Error ? err.message : err);
+  } finally {
+    clearTimeout(shutdownTimeout);
+    console.log('[SHUTDOWN] Goodbye.');
+    process.exit(0);
+  }
+}
+
 async function main(): Promise<void> {
   const app = await buildApp({ logger: false });
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM', app));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT', app));
 
   try {
     await app.listen({ host: env.HOST, port: env.PORT });

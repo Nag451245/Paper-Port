@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::utils::{norm_cdf, round2, round4};
+use crate::utils::{round2, round4, bs_greeks as utils_bs_greeks};
 
 #[derive(Deserialize)]
 struct Config {
@@ -222,16 +222,8 @@ fn detect_strategy(legs: &[Leg]) -> String {
 }
 
 fn bs_greeks(s: f64, k: f64, t: f64, r: f64, sigma: f64, opt_type: &str) -> (f64, f64, f64, f64) {
-    let d1 = ((s / k).ln() + (r + sigma * sigma / 2.0) * t) / (sigma * t.sqrt());
-    let _d2 = d1 - sigma * t.sqrt();
-    let pdf_d1 = (-d1 * d1 / 2.0).exp() / (2.0 * std::f64::consts::PI).sqrt();
-    let nd1 = norm_cdf(d1);
-
-    let delta = if opt_type == "call" { nd1 } else { nd1 - 1.0 };
-    let gamma = pdf_d1 / (s * sigma * t.sqrt());
-    let theta = -(s * pdf_d1 * sigma) / (2.0 * t.sqrt()) / 365.0;
-    let vega = s * pdf_d1 * t.sqrt() / 100.0;
-
+    let is_call = opt_type == "call";
+    let (delta, gamma, theta, vega, _rho) = utils_bs_greeks(s, k, t, r, sigma, is_call);
     (delta, gamma, theta, vega)
 }
 

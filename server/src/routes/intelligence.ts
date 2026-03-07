@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { authenticate } from '../middleware/auth.js';
 import { IntelligenceService } from '../services/intelligence.service.js';
 import {
   engineMonteCarlo, enginePortfolioOptimize, engineOptionsStrategy,
@@ -14,6 +15,7 @@ function parseSymbol(params: unknown): string | null {
 }
 
 export async function intelligenceRoutes(app: FastifyInstance): Promise<void> {
+  app.addHook('preHandler', authenticate);
   const service = new IntelligenceService();
 
   app.get('/fii-dii', async (_req, reply) => reply.send(await service.getFIIDII()));

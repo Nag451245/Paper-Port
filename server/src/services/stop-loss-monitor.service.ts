@@ -1,11 +1,14 @@
 import { PrismaClient } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
 import { TradeService } from './trade.service.js';
+import { ExitCoordinator } from './exit-coordinator.service.js';
 import { wsHub } from '../lib/websocket.js';
 import { DecisionAuditService } from './decision-audit.service.js';
 import { createChildLogger } from '../lib/logger.js';
 
 const log = createChildLogger('StopLossMonitor');
+
+const RELOAD_INTERVAL_MS = 30_000;
 
 interface StopLossConfig {
   symbol: string;
@@ -18,7 +21,7 @@ interface StopLossConfig {
   stopLossPrice: number;
   trailingStopPct?: number;
   takeProfitPrice?: number;
-  timeBasedExitAt?: string;  // e.g. "15:15" for intraday
+  timeBasedExitAt?: string;
 }
 
 interface MonitoredPosition {
@@ -32,6 +35,7 @@ interface MonitoredPosition {
 export class StopLossMonitor {
   private monitoredPositions = new Map<string, MonitoredPosition>();
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
+  private reloadHandle: ReturnType<typeof setInterval> | null = null;
   private marketData: MarketDataService;
   private tradeService: TradeService;
   private decisionAudit: DecisionAuditService;
@@ -45,15 +49,21 @@ export class StopLossMonitor {
 
   async start(): Promise<void> {
     if (this.intervalHandle) return;
-    console.log('[StopLossMonitor] Starting — checking every 3s');
+    log.info('Starting — checking every 3s, reloading positions every 30s');
 
     await this.loadOpenPositions();
 
     this.intervalHandle = setInterval(() => {
       this.runChecks().catch(err =>
-        console.error('[StopLossMonitor] Check cycle error:', err.message)
+        log.error({ err }, 'Check cycle error')
       );
     }, this.checkIntervalMs);
+
+    this.reloadHandle = setInterval(() => {
+      this.syncOpenPositions().catch(err =>
+        log.warn({ err }, 'Position reload error')
+      );
+    }, RELOAD_INTERVAL_MS);
   }
 
   stop(): void {
@@ -61,10 +71,15 @@ export class StopLossMonitor {
       clearInterval(this.intervalHandle);
       this.intervalHandle = null;
     }
-    console.log('[StopLossMonitor] Stopped');
+    if (this.reloadHandle) {
+      clearInterval(this.reloadHandle);
+      this.reloadHandle = null;
+    }
+    log.info('Stopped');
   }
 
   addPosition(config: StopLossConfig): void {
+    if (this.monitoredPositions.has(config.positionId)) return;
     this.monitoredPositions.set(config.positionId, {
       config,
       highWaterMark: config.entryPrice,
@@ -72,7 +87,7 @@ export class StopLossMonitor {
       currentTrailingStop: config.stopLossPrice,
       lastCheckedAt: new Date(),
     });
-    console.log(`[StopLossMonitor] Tracking ${config.symbol} (${config.side}) SL@${config.stopLossPrice}`);
+    log.info({ symbol: config.symbol, side: config.side, stopLoss: config.stopLossPrice }, 'Tracking position');
   }
 
   removePosition(positionId: string): void {
@@ -101,6 +116,56 @@ export class StopLossMonitor {
     }));
   }
 
+  /**
+   * Periodically sync with DB: add new positions, remove closed ones,
+   * update qty/entryPrice for pyramided positions, and refresh unrealizedPnl.
+   */
+  private async syncOpenPositions(): Promise<void> {
+    const positions = await this.prisma.position.findMany({
+      where: { status: 'OPEN' },
+      include: { portfolio: { select: { userId: true } } },
+    });
+
+    const dbPositionIds = new Set(positions.map(p => p.id));
+
+    // Remove positions that have been closed elsewhere
+    for (const posId of this.monitoredPositions.keys()) {
+      if (!dbPositionIds.has(posId)) {
+        this.monitoredPositions.delete(posId);
+        log.info({ positionId: posId }, 'Removed closed position from monitor');
+      }
+    }
+
+    // Add new positions and update existing ones
+    for (const pos of positions) {
+      const entryPrice = Number(pos.avgEntryPrice);
+      const existing = this.monitoredPositions.get(pos.id);
+
+      if (existing) {
+        // Update qty and entry price if position was pyramided
+        existing.config.qty = pos.qty;
+        existing.config.entryPrice = entryPrice;
+      } else {
+        const defaultStopPct = 0.03;
+        const stopLossPrice = pos.side === 'LONG'
+          ? entryPrice * (1 - defaultStopPct)
+          : entryPrice * (1 + defaultStopPct);
+
+        this.addPosition({
+          symbol: pos.symbol,
+          positionId: pos.id,
+          portfolioId: pos.portfolioId,
+          userId: pos.portfolio.userId,
+          side: pos.side as 'LONG' | 'SHORT',
+          qty: pos.qty,
+          entryPrice,
+          stopLossPrice: Number(stopLossPrice.toFixed(2)),
+          trailingStopPct: 2,
+        });
+      }
+    }
+  }
+
   private async loadOpenPositions(): Promise<void> {
     const positions = await this.prisma.position.findMany({
       where: { status: 'OPEN' },
@@ -109,7 +174,7 @@ export class StopLossMonitor {
 
     for (const pos of positions) {
       const entryPrice = Number(pos.avgEntryPrice);
-      const defaultStopPct = pos.side === 'LONG' ? 0.03 : 0.03;
+      const defaultStopPct = 0.03;
       const stopLossPrice = pos.side === 'LONG'
         ? entryPrice * (1 - defaultStopPct)
         : entryPrice * (1 + defaultStopPct);
@@ -127,7 +192,7 @@ export class StopLossMonitor {
       });
     }
 
-    console.log(`[StopLossMonitor] Loaded ${positions.length} open positions`);
+    log.info({ count: positions.length }, 'Loaded open positions');
   }
 
   private async runChecks(): Promise<void> {
@@ -148,12 +213,21 @@ export class StopLossMonitor {
     const now = new Date();
     const currentTime = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
 
+    // Batch-update unrealizedPnl for all monitored positions
+    const pnlUpdates: Array<{ id: string; unrealizedPnl: number }> = [];
+
     for (const [posId, monitored] of this.monitoredPositions) {
       const { config } = monitored;
       const ltp = priceMap.get(config.symbol);
       if (!ltp) continue;
 
       monitored.lastCheckedAt = now;
+
+      // Calculate and track unrealizedPnl
+      const unrealizedPnl = config.side === 'LONG'
+        ? (ltp - config.entryPrice) * config.qty
+        : (config.entryPrice - ltp) * config.qty;
+      pnlUpdates.push({ id: posId, unrealizedPnl });
 
       // Update watermarks
       if (ltp > monitored.highWaterMark) monitored.highWaterMark = ltp;
@@ -208,83 +282,47 @@ export class StopLossMonitor {
         this.monitoredPositions.delete(posId);
       }
     }
+
+    // Persist unrealizedPnl to DB in a single batch
+    if (pnlUpdates.length > 0) {
+      await Promise.allSettled(
+        pnlUpdates.map(({ id, unrealizedPnl }) =>
+          this.prisma.position.update({
+            where: { id },
+            data: { unrealizedPnl },
+          }).catch(() => {})
+        )
+      );
+    }
   }
 
   private async executeStopLossExit(monitored: MonitoredPosition, ltp: number, reason: string): Promise<void> {
     const { config } = monitored;
     log.info({ symbol: config.symbol, reason, ltp }, 'EXIT triggered');
 
-    try {
-      const trade = await this.tradeService.closePosition(config.positionId, config.userId, ltp);
-      const netPnl = Number(trade.netPnl);
-      const outcome = netPnl > 0 ? 'WIN' : 'LOSS';
+    const decisionType = reason.includes('Take-profit') ? 'TP_TRIGGER' as const
+      : reason.includes('Time-based') ? 'EXIT_SIGNAL' as const
+      : 'SL_TRIGGER' as const;
 
-      // Record in DecisionAudit so the nightly learning pipeline can use this data
-      const decisionType = reason.includes('Take-profit') ? 'TP_TRIGGER' as const
-        : reason.includes('Time-based') ? 'EXIT_SIGNAL' as const
-        : 'SL_TRIGGER' as const;
+    const result = await ExitCoordinator.closePosition({
+      positionId: config.positionId,
+      userId: config.userId,
+      exitPrice: ltp,
+      reason,
+      source: 'STOP_LOSS_MONITOR',
+      decisionType,
+      prisma: this.prisma,
+      tradeService: this.tradeService,
+      decisionAudit: this.decisionAudit,
+      extraSnapshot: {
+        highWaterMark: monitored.highWaterMark,
+        lowWaterMark: monitored.lowWaterMark,
+        trailingStop: monitored.currentTrailingStop,
+      },
+    });
 
-      try {
-        const auditId = await this.decisionAudit.recordDecision({
-          userId: config.userId,
-          symbol: config.symbol,
-          decisionType,
-          direction: config.side === 'LONG' ? 'LONG' : 'SHORT',
-          confidence: 1.0,
-          signalSource: 'STOP_LOSS_MONITOR',
-          marketDataSnapshot: {
-            ltp,
-            entryPrice: config.entryPrice,
-            highWaterMark: monitored.highWaterMark,
-            lowWaterMark: monitored.lowWaterMark,
-            trailingStop: monitored.currentTrailingStop,
-          },
-          reasoning: reason,
-          entryPrice: config.entryPrice,
-        });
-
-        await this.decisionAudit.resolveDecision(auditId, {
-          exitPrice: ltp,
-          pnl: netPnl,
-          predictionAccuracy: outcome === 'WIN' ? 1 : 0,
-          outcomeNotes: `${outcome}: P&L ₹${netPnl.toFixed(2)} | ${reason}`,
-        });
-      } catch {
-        // Audit is best-effort — don't block the exit
-      }
-
-      await this.prisma.riskEvent.create({
-        data: {
-          userId: config.userId,
-          ruleType: 'STOP_LOSS_EXIT',
-          severity: 'high',
-          symbol: config.symbol,
-          details: JSON.stringify({
-            reason, ltp, entryPrice: config.entryPrice, qty: config.qty,
-            netPnl, side: config.side,
-            highWaterMark: monitored.highWaterMark,
-            lowWaterMark: monitored.lowWaterMark,
-          }),
-        },
-      });
-
-      wsHub.broadcastToUser(config.userId, {
-        type: 'stop_loss_exit',
-        symbol: config.symbol,
-        side: config.side,
-        exitPrice: ltp,
-        pnl: netPnl,
-        reason,
-      });
-
-      wsHub.broadcastNotification(config.userId, {
-        title: 'Stop-Loss Triggered',
-        message: `${config.symbol} ${config.side} exited at ₹${ltp.toFixed(2)} — P&L: ₹${netPnl.toFixed(2)} | ${reason}`,
-        notificationType: 'warning',
-      });
-
-    } catch (err) {
-      log.error({ err, symbol: config.symbol }, 'Failed to execute stop-loss exit');
+    if (!result.success) {
+      log.warn({ positionId: config.positionId, error: result.error }, 'Exit coordinator rejected close');
     }
   }
 }

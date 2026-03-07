@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
 import { TradeService } from './trade.service.js';
+import { ExitCoordinator } from './exit-coordinator.service.js';
 import { wsHub } from '../lib/websocket.js';
 import { DecisionAuditService } from './decision-audit.service.js';
 import { createChildLogger } from '../lib/logger.js';
@@ -113,8 +114,8 @@ export class IntradayManager {
       const drawdownPct = capital > 0 ? Math.abs(Math.min(totalDayPnl, 0)) / capital * 100 : 0;
 
       if (totalDayPnl < 0 && drawdownPct >= this.maxDrawdownPct) {
-        console.warn(`[IntradayManager] CIRCUIT BREAKER TRIGGERED for user ${pf.userId}: ` +
-          `Drawdown ${drawdownPct.toFixed(2)}% (₹${totalDayPnl.toFixed(0)}) exceeds ${this.maxDrawdownPct}% limit`);
+        log.warn({ userId: pf.userId, drawdownPct, totalDayPnl, limit: this.maxDrawdownPct },
+          'CIRCUIT BREAKER TRIGGERED');
 
         this.circuitBreakerTriggered = true;
 
@@ -122,7 +123,7 @@ export class IntradayManager {
           try {
             await this.squareOffPosition(pos.id, `CIRCUIT BREAKER: ${drawdownPct.toFixed(1)}% drawdown`);
           } catch (err) {
-            console.error(`[IntradayManager] Circuit breaker square-off failed for ${pos.symbol}:`, (err as Error).message);
+            log.error({ symbol: pos.symbol, err }, 'Circuit breaker square-off failed');
           }
         }
 
@@ -160,26 +161,31 @@ export class IntradayManager {
     }
   }
 
+  /**
+   * Square off ALL open positions at EOD. Delivery-tagged positions are excluded
+   * (they survive overnight). Everything else — AI-BOT, RUST_ENGINE, ML_SCORED,
+   * INTRADAY, etc. — gets closed.
+   */
   async squareOffAllIntraday(): Promise<SquareOffResult[]> {
-    const intradayPositions = await this.prisma.position.findMany({
+    const openPositions = await this.prisma.position.findMany({
       where: {
         status: 'OPEN',
-        strategyTag: { contains: 'INTRADAY' },
+        NOT: { strategyTag: { contains: 'DELIVERY' } },
       },
       include: { portfolio: { select: { userId: true } } },
     });
 
-    if (intradayPositions.length === 0) return [];
+    if (openPositions.length === 0) return [];
 
-    console.log(`[IntradayManager] Squaring off ${intradayPositions.length} intraday positions`);
+    log.info({ count: openPositions.length }, 'Squaring off all non-delivery positions at EOD');
     const results: SquareOffResult[] = [];
 
-    for (const pos of intradayPositions) {
+    for (const pos of openPositions) {
       try {
         const result = await this.squareOffPosition(pos.id, 'Auto square-off at EOD');
         if (result) results.push(result);
       } catch (err) {
-        console.error(`[IntradayManager] Failed to square off ${pos.symbol}:`, (err as Error).message);
+        log.error({ symbol: pos.symbol, err }, 'Failed to square off position');
       }
     }
 
@@ -201,53 +207,32 @@ export class IntradayManager {
       if (quote.ltp > 0) exitPrice = quote.ltp;
     } catch { /* use entry price as fallback */ }
 
-    const trade = await this.tradeService.closePosition(positionId, position.portfolio.userId, exitPrice);
-    const netPnl = Number(trade.netPnl);
-    const entryPrice = Number(position.avgEntryPrice);
-    const outcome = netPnl > 0 ? 'WIN' : 'LOSS';
+    const source = reason.includes('CIRCUIT BREAKER') ? 'CIRCUIT_BREAKER' : 'INTRADAY_SQUAREOFF';
 
-    // Record in DecisionAudit to feed into the learning pipeline
-    try {
-      const auditId = await this.decisionAudit.recordDecision({
-        userId: position.portfolio.userId,
-        symbol: position.symbol,
-        decisionType: reason.includes('CIRCUIT BREAKER') ? 'EXIT_SIGNAL' : 'EXIT_SIGNAL',
-        direction: position.side as 'LONG' | 'SHORT',
-        confidence: 1.0,
-        signalSource: reason.includes('CIRCUIT BREAKER') ? 'CIRCUIT_BREAKER' : 'INTRADAY_SQUAREOFF',
-        marketDataSnapshot: {
-          ltp: exitPrice,
-          entryPrice,
-          reason,
-        },
-        reasoning: reason,
-        entryPrice,
-      });
-
-      await this.decisionAudit.resolveDecision(auditId, {
-        exitPrice,
-        pnl: netPnl,
-        predictionAccuracy: outcome === 'WIN' ? 1 : 0,
-        outcomeNotes: `${outcome}: P&L ₹${netPnl.toFixed(2)} | ${reason}`,
-      });
-    } catch {
-      // Audit is best-effort
-    }
-
-    wsHub.broadcastToUser(position.portfolio.userId, {
-      type: 'position_squared_off',
-      symbol: position.symbol,
-      side: position.side,
+    const result = await ExitCoordinator.closePosition({
+      positionId,
+      userId: position.portfolio.userId,
       exitPrice,
-      pnl: netPnl,
       reason,
+      source,
+      decisionType: 'EXIT_SIGNAL',
+      prisma: this.prisma,
+      tradeService: this.tradeService,
+      decisionAudit: this.decisionAudit,
     });
+
+    if (!result.success) {
+      if (!result.alreadyClosing) {
+        log.warn({ positionId, error: result.error }, 'Square-off failed');
+      }
+      return null;
+    }
 
     return {
       symbol: position.symbol,
       positionId,
       exitPrice,
-      pnl: Number(netPnl.toFixed(2)),
+      pnl: Number((result.pnl ?? 0).toFixed(2)),
       reason,
     };
   }

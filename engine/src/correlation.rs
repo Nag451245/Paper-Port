@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::utils::{round2, round4};
+use crate::utils::{round2, round4, pearson_correlation, ols_slope};
 
 #[derive(Deserialize)]
 struct Config {
@@ -115,36 +115,6 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
     serde_json::to_value(out).map_err(|e| e.to_string())
 }
 
-fn pearson_correlation(a: &[f64], b: &[f64]) -> f64 {
-    let n = a.len() as f64;
-    let mean_a = a.iter().sum::<f64>() / n;
-    let mean_b = b.iter().sum::<f64>() / n;
-    let mut num = 0.0;
-    let mut da = 0.0;
-    let mut db = 0.0;
-    for i in 0..a.len() {
-        let xa = a[i] - mean_a;
-        let xb = b[i] - mean_b;
-        num += xa * xb;
-        da += xa * xa;
-        db += xb * xb;
-    }
-    let denom = (da * db).sqrt();
-    if denom > 0.0 { num / denom } else { 0.0 }
-}
-
-fn ols_slope(x: &[f64], y: &[f64]) -> f64 {
-    let n = x.len() as f64;
-    let mx = x.iter().sum::<f64>() / n;
-    let my = y.iter().sum::<f64>() / n;
-    let mut num = 0.0;
-    let mut den = 0.0;
-    for i in 0..x.len() {
-        num += (x[i] - mx) * (y[i] - my);
-        den += (x[i] - mx).powi(2);
-    }
-    if den > 0.0 { num / den } else { 1.0 }
-}
 
 fn compute_half_life(spread: &[f64]) -> f64 {
     if spread.len() < 3 { return 999.0; }

@@ -14,6 +14,7 @@ import { emit } from '../lib/event-bus.js';
 import { engineFeatureStore, engineScan, isEngineAvailable } from '../lib/rust-engine.js';
 import { isMLServiceAvailable, mlScore, mlDetectRegime } from '../lib/ml-service-client.js';
 import { createChildLogger } from '../lib/logger.js';
+import { getPrisma } from '../lib/prisma.js';
 
 const log = createChildLogger('DataPipeline');
 
@@ -151,6 +152,12 @@ export class DataPipelineService {
           }
 
           await this.publishFeatures(tick.symbol, featureMap);
+
+          // Persist last candle to CandleStore
+          const lastCandle = tick.candles[tick.candles.length - 1] as any;
+          if (lastCandle) {
+            this.persistCandles(tick.symbol, '5m', [lastCandle]).catch(() => {});
+          }
         }
       } catch (err) {
         log.warn({ symbol: tick.symbol, err }, 'Feature extraction failed');
@@ -436,4 +443,83 @@ export class DataPipelineService {
   }
 
   private tickBuffer?: Map<string, unknown[]>;
+
+  /**
+   * Persist candles to DB via CandleStore model. Upserts on conflict (symbol+exchange+interval+timestamp).
+   */
+  async persistCandles(
+    symbol: string,
+    interval: string,
+    candles: Array<{ open: number; high: number; low: number; close: number; volume: number; timestamp?: string | number }>,
+    exchange = 'NSE',
+  ): Promise<number> {
+    const prisma = getPrisma();
+    let persisted = 0;
+
+    for (const c of candles) {
+      const ts = c.timestamp
+        ? new Date(typeof c.timestamp === 'number' ? c.timestamp : c.timestamp)
+        : new Date();
+
+      try {
+        await prisma.candleStore.upsert({
+          where: {
+            symbol_exchange_interval_timestamp: { symbol, exchange, interval, timestamp: ts },
+          },
+          create: { symbol, exchange, interval, timestamp: ts, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume },
+          update: { open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume },
+        });
+        persisted++;
+      } catch (err) {
+        log.warn({ symbol, err }, 'Failed to persist candle');
+      }
+    }
+    return persisted;
+  }
+
+  /**
+   * Load historical candles from DB to bootstrap tick buffer on restart.
+   */
+  async loadHistoricalCandles(
+    symbol: string,
+    interval: string,
+    since: Date,
+    exchange = 'NSE',
+  ): Promise<Array<{ open: number; high: number; low: number; close: number; volume: number }>> {
+    const prisma = getPrisma();
+    try {
+      const rows = await prisma.candleStore.findMany({
+        where: { symbol, exchange, interval, timestamp: { gte: since } },
+        orderBy: { timestamp: 'asc' },
+        take: 200,
+      });
+      return rows.map(r => ({
+        open: Number(r.open),
+        high: Number(r.high),
+        low: Number(r.low),
+        close: Number(r.close),
+        volume: Number(r.volume),
+      }));
+    } catch (err) {
+      log.warn({ symbol, err }, 'Failed to load historical candles');
+      return [];
+    }
+  }
+
+  /**
+   * Bootstrap tick buffers from DB for all recently-traded symbols.
+   */
+  async bootstrapFromDB(symbols: string[], interval = '5m'): Promise<void> {
+    const since = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000); // last 2 days
+    if (!this.tickBuffer) (this as any).tickBuffer = new Map<string, unknown[]>();
+    const buffer = this.tickBuffer!;
+
+    for (const symbol of symbols) {
+      const candles = await this.loadHistoricalCandles(symbol, interval, since);
+      if (candles.length > 0) {
+        buffer.set(symbol, candles);
+        log.info({ symbol, count: candles.length }, 'Bootstrapped candle buffer from DB');
+      }
+    }
+  }
 }

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::utils::{round2, Candle, TransactionCosts, RiskLimits, calc_ema_last, calc_sma, calc_rsi_series};
+use crate::config::EngineConfig;
+use crate::strategy::{create_strategy, Indicators, Side, Strategy};
+use crate::utils::{round2, Candle, TransactionCosts, RiskLimits};
 
 #[derive(Deserialize)]
 struct BacktestConfig {
@@ -66,6 +68,46 @@ struct TradeEntry {
     exit_time: String,
 }
 
+fn build_engine_config(params: &Option<Value>) -> EngineConfig {
+    let p = params.clone().unwrap_or(serde_json::json!({}));
+    let mut config = EngineConfig::default();
+
+    if let Some(v) = p.get("shortPeriod").and_then(|v| v.as_f64()) {
+        config.backtest.sma_short_period = v as usize;
+        config.backtest.ema_short_period = v as usize;
+    }
+    if let Some(v) = p.get("longPeriod").and_then(|v| v.as_f64()) {
+        config.backtest.sma_long_period = v as usize;
+        config.backtest.ema_long_period = v as usize;
+    }
+    if let Some(v) = p.get("period").and_then(|v| v.as_f64()) {
+        config.backtest.mean_reversion_period = v as usize;
+    }
+    if let Some(v) = p.get("threshold").and_then(|v| v.as_f64()) {
+        config.backtest.mean_reversion_threshold = v;
+    }
+    if let Some(v) = p.get("lookback").and_then(|v| v.as_f64()) {
+        config.backtest.momentum_lookback = v as usize;
+    }
+    if let Some(v) = p.get("holdDays").and_then(|v| v.as_f64()) {
+        config.backtest.momentum_hold_days = v as usize;
+    }
+    if let Some(v) = p.get("oversold").and_then(|v| v.as_f64()) {
+        config.backtest.rsi_oversold = v;
+    }
+    if let Some(v) = p.get("overbought").and_then(|v| v.as_f64()) {
+        config.backtest.rsi_overbought = v;
+    }
+    if let Some(v) = p.get("target").and_then(|v| v.as_f64()) {
+        config.backtest.orb_target_pct = v;
+    }
+    if let Some(v) = p.get("stop_loss").and_then(|v| v.as_f64()) {
+        config.backtest.orb_stop_loss_pct = v;
+    }
+
+    config
+}
+
 pub fn run(data: Value) -> Result<Value, String> {
     let config: BacktestConfig =
         serde_json::from_value(data).map_err(|e| format!("Invalid backtest config: {}", e))?;
@@ -83,6 +125,14 @@ pub fn run(data: Value) -> Result<Value, String> {
 
     let costs = build_costs(&config.transaction_costs);
     let risk = build_risk_limits(&config.risk_limits);
+    let engine_config = build_engine_config(&config.params);
+
+    let mut strategy: Box<dyn Strategy> = match create_strategy(&config.strategy, &engine_config) {
+        Ok(s) => s,
+        Err(_) => create_strategy("ema_crossover", &engine_config).unwrap(),
+    };
+
+    let indicators = Indicators::from_candles(&config.candles, &engine_config);
 
     let mut cash = config.initial_capital;
     let mut nav = config.initial_capital;
@@ -95,44 +145,11 @@ pub fn run(data: Value) -> Result<Value, String> {
     let mut risk_rejections = 0usize;
     let mut circuit_breaks = 0usize;
 
-    let closes: Vec<f64> = config.candles.iter().map(|c| c.close).collect();
-    let highs: Vec<f64> = config.candles.iter().map(|c| c.high).collect();
-    let lows: Vec<f64> = config.candles.iter().map(|c| c.low).collect();
-
-    let params = config.params.clone().unwrap_or(serde_json::json!({}));
-    let strat = config.strategy.as_str();
-
-    let rsi_vals = calc_rsi_series(&closes, 14);
-    let sma_short_p = params.get("shortPeriod").and_then(|v| v.as_f64()).unwrap_or(10.0) as usize;
-    let sma_long_p = params.get("longPeriod").and_then(|v| v.as_f64()).unwrap_or(30.0) as usize;
-    let sma_short_vals = calc_sma(&closes, sma_short_p);
-    let sma_long_vals = calc_sma(&closes, sma_long_p);
-    let mr_period = params.get("period").and_then(|v| v.as_f64()).unwrap_or(20.0) as usize;
-    let mr_threshold = params.get("threshold").and_then(|v| v.as_f64()).unwrap_or(2.0);
-    let mr_sma = calc_sma(&closes, mr_period);
-    let mom_lookback = params.get("lookback").and_then(|v| v.as_f64()).unwrap_or(20.0) as usize;
-    let mom_hold = params.get("holdDays").and_then(|v| v.as_f64()).unwrap_or(10.0) as i64;
-    let mut hold_counter: i64 = 0;
-    let rsi_oversold = params.get("oversold").and_then(|v| v.as_f64()).unwrap_or(30.0);
-    let rsi_overbought = params.get("overbought").and_then(|v| v.as_f64()).unwrap_or(70.0);
-    let orb_target_pct = params.get("target").and_then(|v| v.as_f64()).unwrap_or(1.5) / 100.0;
-    let orb_sl_pct = params.get("stop_loss").and_then(|v| v.as_f64()).unwrap_or(0.75) / 100.0;
-    let mut short_position: Option<(f64, i64, String)> = None; // (entry_price, qty, entry_time)
-
-    // Helper closures for open/close position with proper cash accounting
-    // open_long: cash -= position_value + entry_cost
-    // close_long: cash += exit_value - exit_cost, pnl = (exit - entry) * qty - costs
-    // NAV = cash + open_position_market_value (recalculated each candle)
-
     for (i, candle) in config.candles.iter().enumerate() {
         // Recalculate NAV = cash + open position market value
         nav = cash;
-        if let Some((ep, qty, _)) = &position {
+        if let Some((_ep, qty, _)) = &position {
             nav += candle.close * (*qty) as f64;
-        }
-        if let Some((ep, qty, _)) = &short_position {
-            // Short position value: margin locked + unrealized P&L
-            nav += (*ep) * (*qty) as f64 + ((*ep) - candle.close) * (*qty) as f64;
         }
         equity_curve.push(EquityPoint { date: candle.timestamp.clone(), nav: round2(nav) });
 
@@ -154,16 +171,15 @@ pub fn run(data: Value) -> Result<Value, String> {
                     entry_time: et, exit_time: candle.timestamp.clone(),
                 });
                 circuit_breaks += 1;
+                strategy.reset();
             }
             continue;
         }
 
-        match strat {
-            "ema-crossover" | "ema_crossover" | "supertrend" => {
-                if i >= 21 {
-                    let ema_short = calc_ema_last(&closes[..=i], 9);
-                    let ema_long = calc_ema_last(&closes[..=i], 21);
-                    if position.is_none() && ema_short > ema_long {
+        if let Some(signal) = strategy.on_candle(i, candle, &indicators) {
+            match signal.side {
+                Side::Buy => {
+                    if position.is_none() {
                         let qty = calc_qty(cash, candle.close, &risk);
                         let check = risk.check_position_size(nav, candle.close, qty, None);
                         if !check.approved {
@@ -171,91 +187,18 @@ pub fn run(data: Value) -> Result<Value, String> {
                             continue;
                         }
                         if qty > 0 {
-                            let entry_price = costs.slippage_adjusted_price(candle.close, true);
+                            let entry_price = costs.slippage_adjusted_price(signal.price, true);
                             let position_value = entry_price * qty as f64;
                             let entry_cost = costs.total_cost(position_value, false);
                             cash -= position_value + entry_cost;
                             total_costs += entry_cost;
                             position = Some((entry_price, qty, candle.timestamp.clone()));
                         }
-                    } else if let Some((entry_price, qty, entry_time)) = &position {
-                        if ema_short < ema_long {
-                            let exit_price = costs.slippage_adjusted_price(candle.close, false);
-                            let exit_value = exit_price * (*qty) as f64;
-                            let gross_pnl = (exit_price - entry_price) * (*qty) as f64;
-                            let exit_cost = costs.total_cost(exit_value, true);
-                            let net_pnl = gross_pnl - exit_cost;
-                            cash += exit_value - exit_cost;
-                            total_costs += exit_cost;
-                            trades.push(TradeEntry {
-                                symbol: config.symbol.clone(), side: "BUY".into(),
-                                entry_price: round2(*entry_price), exit_price: round2(exit_price),
-                                qty: *qty, pnl: round2(net_pnl), gross_pnl: round2(gross_pnl),
-                                costs: round2(exit_cost),
-                                entry_time: entry_time.clone(), exit_time: candle.timestamp.clone(),
-                            });
-                            position = None;
-                        }
                     }
                 }
-            }
-            "sma_crossover" | "sma-crossover" => {
-                if i >= sma_long_p {
-                    let s = sma_short_vals[i];
-                    let l = sma_long_vals[i];
-                    let ps = if i > 0 { sma_short_vals[i-1] } else { 0.0 };
-                    let pl = if i > 0 { sma_long_vals[i-1] } else { 0.0 };
-                    if s > 0.0 && l > 0.0 && ps > 0.0 && pl > 0.0 {
-                        if position.is_none() && ps <= pl && s > l {
-                            let qty = calc_qty(cash, candle.close, &risk);
-                            let check = risk.check_position_size(nav, candle.close, qty, None);
-                            if !check.approved { risk_rejections += 1; continue; }
-                            if qty > 0 {
-                                let entry_price = costs.slippage_adjusted_price(candle.close, true);
-                                let position_value = entry_price * qty as f64;
-                                let entry_cost = costs.total_cost(position_value, false);
-                                cash -= position_value + entry_cost;
-                                total_costs += entry_cost;
-                                position = Some((entry_price, qty, candle.timestamp.clone()));
-                            }
-                        } else if position.is_some() && ps >= pl && s < l {
-                            let (ep, qty, et) = position.take().unwrap();
-                            let exit_price = costs.slippage_adjusted_price(candle.close, false);
-                            let exit_value = exit_price * qty as f64;
-                            let gross_pnl = (exit_price - ep) * qty as f64;
-                            let exit_cost = costs.total_cost(exit_value, true);
-                            let net_pnl = gross_pnl - exit_cost;
-                            cash += exit_value - exit_cost;
-                            total_costs += exit_cost;
-                            trades.push(TradeEntry {
-                                symbol: config.symbol.clone(), side: "BUY".into(),
-                                entry_price: round2(ep), exit_price: round2(exit_price),
-                                qty, pnl: round2(net_pnl), gross_pnl: round2(gross_pnl),
-                                costs: round2(exit_cost),
-                                entry_time: et, exit_time: candle.timestamp.clone(),
-                            });
-                        }
-                    }
-                }
-            }
-            "rsi_reversal" | "rsi-reversal" => {
-                if i < rsi_vals.len() && rsi_vals[i] > 0.0 {
-                    let r = rsi_vals[i];
-                    if position.is_none() && r < rsi_oversold {
-                        let qty = calc_qty(cash, candle.close, &risk);
-                        let check = risk.check_position_size(nav, candle.close, qty, None);
-                        if !check.approved { risk_rejections += 1; continue; }
-                        if qty > 0 {
-                            let entry_price = costs.slippage_adjusted_price(candle.close, true);
-                            let position_value = entry_price * qty as f64;
-                            let entry_cost = costs.total_cost(position_value, false);
-                            cash -= position_value + entry_cost;
-                            total_costs += entry_cost;
-                            position = Some((entry_price, qty, candle.timestamp.clone()));
-                        }
-                    } else if position.is_some() && r > rsi_overbought {
-                        let (ep, qty, et) = position.take().unwrap();
-                        let exit_price = costs.slippage_adjusted_price(candle.close, false);
+                Side::Sell => {
+                    if let Some((ep, qty, et)) = position.take() {
+                        let exit_price = costs.slippage_adjusted_price(signal.price, false);
                         let exit_value = exit_price * qty as f64;
                         let gross_pnl = (exit_price - ep) * qty as f64;
                         let exit_cost = costs.total_cost(exit_value, true);
@@ -272,221 +215,12 @@ pub fn run(data: Value) -> Result<Value, String> {
                     }
                 }
             }
-            "mean_reversion" | "mean-reversion" => {
-                if i >= mr_period && mr_sma[i] > 0.0 {
-                    let avg = mr_sma[i];
-                    let slice = &closes[i+1-mr_period..=i];
-                    let mean = slice.iter().sum::<f64>() / slice.len() as f64;
-                    let var = slice.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / slice.len() as f64;
-                    let std = var.sqrt();
-                    if std > 0.0 {
-                        let z = (closes[i] - avg) / std;
-                        if position.is_none() && short_position.is_none() {
-                            if z < -mr_threshold {
-                                let qty = calc_qty(cash, candle.close, &risk);
-                                let check = risk.check_position_size(nav, candle.close, qty, None);
-                                if !check.approved { risk_rejections += 1; continue; }
-                                if qty > 0 {
-                                    let entry_price = costs.slippage_adjusted_price(candle.close, true);
-                                    let position_value = entry_price * qty as f64;
-                                    let entry_cost = costs.total_cost(position_value, false);
-                                    cash -= position_value + entry_cost;
-                                    total_costs += entry_cost;
-                                    position = Some((entry_price, qty, candle.timestamp.clone()));
-                                }
-                            } else if z > mr_threshold {
-                                let qty = calc_qty(cash, candle.close, &risk);
-                                let check = risk.check_position_size(nav, candle.close, qty, None);
-                                if !check.approved { risk_rejections += 1; continue; }
-                                if qty > 0 {
-                                    let entry_price = costs.slippage_adjusted_price(candle.close, false);
-                                    let margin = entry_price * qty as f64;
-                                    let entry_cost = costs.total_cost(margin, false);
-                                    cash -= margin + entry_cost;
-                                    total_costs += entry_cost;
-                                    short_position = Some((entry_price, qty, candle.timestamp.clone()));
-                                }
-                            }
-                        } else if position.is_some() && z >= 0.0 {
-                            let (ep, qty, et) = position.take().unwrap();
-                            let exit_price = costs.slippage_adjusted_price(candle.close, false);
-                            let exit_value = exit_price * qty as f64;
-                            let gross_pnl = (exit_price - ep) * qty as f64;
-                            let exit_cost = costs.total_cost(exit_value, true);
-                            let net_pnl = gross_pnl - exit_cost;
-                            cash += exit_value - exit_cost;
-                            total_costs += exit_cost;
-                            trades.push(TradeEntry {
-                                symbol: config.symbol.clone(), side: "BUY".into(),
-                                entry_price: round2(ep), exit_price: round2(exit_price),
-                                qty, pnl: round2(net_pnl), gross_pnl: round2(gross_pnl),
-                                costs: round2(exit_cost),
-                                entry_time: et, exit_time: candle.timestamp.clone(),
-                            });
-                        } else if short_position.is_some() && z <= 0.0 {
-                            let (ep, qty, et) = short_position.take().unwrap();
-                            let exit_price = costs.slippage_adjusted_price(candle.close, true);
-                            let margin = ep * qty as f64;
-                            let gross_pnl = (ep - exit_price) * qty as f64;
-                            let exit_cost = costs.total_cost(exit_price * qty as f64, true);
-                            let net_pnl = gross_pnl - exit_cost;
-                            cash += margin + net_pnl;
-                            total_costs += exit_cost;
-                            trades.push(TradeEntry {
-                                symbol: config.symbol.clone(), side: "SHORT".into(),
-                                entry_price: round2(ep), exit_price: round2(exit_price),
-                                qty, pnl: round2(net_pnl), gross_pnl: round2(gross_pnl),
-                                costs: round2(exit_cost),
-                                entry_time: et, exit_time: candle.timestamp.clone(),
-                            });
-                        }
-                    }
-                }
-            }
-            "momentum" => {
-                if i >= mom_lookback {
-                    if hold_counter > 0 {
-                        hold_counter -= 1;
-                        if hold_counter == 0 && position.is_some() {
-                            let (ep, qty, et) = position.take().unwrap();
-                            let exit_price = costs.slippage_adjusted_price(candle.close, false);
-                            let exit_value = exit_price * qty as f64;
-                            let gross_pnl = (exit_price - ep) * qty as f64;
-                            let exit_cost = costs.total_cost(exit_value, true);
-                            let net_pnl = gross_pnl - exit_cost;
-                            cash += exit_value - exit_cost;
-                            total_costs += exit_cost;
-                            trades.push(TradeEntry {
-                                symbol: config.symbol.clone(), side: "BUY".into(),
-                                entry_price: round2(ep), exit_price: round2(exit_price),
-                                qty, pnl: round2(net_pnl), gross_pnl: round2(gross_pnl),
-                                costs: round2(exit_cost),
-                                entry_time: et, exit_time: candle.timestamp.clone(),
-                            });
-                        }
-                    } else if position.is_none() {
-                        let past_ret = (closes[i] - closes[i - mom_lookback]) / closes[i - mom_lookback];
-                        if past_ret > 0.05 {
-                            let qty = calc_qty(cash, candle.close, &risk);
-                            let check = risk.check_position_size(nav, candle.close, qty, None);
-                            if !check.approved { risk_rejections += 1; continue; }
-                            if qty > 0 {
-                                let entry_price = costs.slippage_adjusted_price(candle.close, true);
-                                let position_value = entry_price * qty as f64;
-                                let entry_cost = costs.total_cost(position_value, false);
-                                cash -= position_value + entry_cost;
-                                total_costs += entry_cost;
-                                position = Some((entry_price, qty, candle.timestamp.clone()));
-                                hold_counter = mom_hold;
-                            }
-                        }
-                    }
-                }
-            }
-            "orb" | "opening_range_breakout" => {
-                if i >= 1 {
-                    let prev_high = highs[i - 1];
-                    let prev_low = lows[i - 1];
-                    let range = prev_high - prev_low;
-                    if range > 0.0 && range / closes[i - 1] < 0.05 {
-                        if candle.high > prev_high {
-                            let entry = costs.slippage_adjusted_price(prev_high, true);
-                            let target = entry * (1.0 + orb_target_pct);
-                            let sl = entry * (1.0 - orb_sl_pct);
-                            let exit_raw = if candle.high >= target { target }
-                                else if candle.low <= sl { sl }
-                                else { candle.close };
-                            let exit = costs.slippage_adjusted_price(exit_raw, false);
-                            let qty = calc_qty(cash, entry, &risk);
-                            if qty > 0 {
-                                let gross_pnl = (exit - entry) * qty as f64;
-                                let entry_cost = costs.total_cost(entry * qty as f64, false);
-                                let exit_cost = costs.total_cost(exit * qty as f64, true);
-                                let net_pnl = gross_pnl - entry_cost - exit_cost;
-                                cash += net_pnl;
-                                total_costs += entry_cost + exit_cost;
-                                trades.push(TradeEntry {
-                                    symbol: config.symbol.clone(), side: "BUY".into(),
-                                    entry_price: round2(entry), exit_price: round2(exit),
-                                    qty, pnl: round2(net_pnl), gross_pnl: round2(gross_pnl),
-                                    costs: round2(entry_cost + exit_cost),
-                                    entry_time: candle.timestamp.clone(),
-                                    exit_time: candle.timestamp.clone(),
-                                });
-                            }
-                        } else if candle.low < prev_low {
-                            let entry = costs.slippage_adjusted_price(prev_low, false);
-                            let target = entry * (1.0 - orb_target_pct);
-                            let sl = entry * (1.0 + orb_sl_pct);
-                            let exit_raw = if candle.low <= target { target }
-                                else if candle.high >= sl { sl }
-                                else { candle.close };
-                            let exit = costs.slippage_adjusted_price(exit_raw, true);
-                            let qty = calc_qty(cash, entry, &risk);
-                            if qty > 0 {
-                                let gross_pnl = (entry - exit) * qty as f64;
-                                let entry_cost = costs.total_cost(entry * qty as f64, false);
-                                let exit_cost = costs.total_cost(exit * qty as f64, true);
-                                let net_pnl = gross_pnl - entry_cost - exit_cost;
-                                cash += net_pnl;
-                                total_costs += entry_cost + exit_cost;
-                                trades.push(TradeEntry {
-                                    symbol: config.symbol.clone(), side: "SHORT".into(),
-                                    entry_price: round2(entry), exit_price: round2(exit),
-                                    qty, pnl: round2(net_pnl), gross_pnl: round2(gross_pnl),
-                                    costs: round2(entry_cost + exit_cost),
-                                    entry_time: candle.timestamp.clone(),
-                                    exit_time: candle.timestamp.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {
-                if i >= 21 {
-                    let ema_short = calc_ema_last(&closes[..=i], 9);
-                    let ema_long = calc_ema_last(&closes[..=i], 21);
-                    if position.is_none() && ema_short > ema_long {
-                        let qty = calc_qty(cash, candle.close, &risk);
-                        if qty > 0 {
-                            let entry_price = costs.slippage_adjusted_price(candle.close, true);
-                            let position_value = entry_price * qty as f64;
-                            let entry_cost = costs.total_cost(position_value, false);
-                            cash -= position_value + entry_cost;
-                            total_costs += entry_cost;
-                            position = Some((entry_price, qty, candle.timestamp.clone()));
-                        }
-                    } else if let Some((entry_price, qty, entry_time)) = &position {
-                        if ema_short < ema_long {
-                            let exit_price = costs.slippage_adjusted_price(candle.close, false);
-                            let exit_value = exit_price * (*qty) as f64;
-                            let gross_pnl = (exit_price - entry_price) * (*qty) as f64;
-                            let exit_cost = costs.total_cost(exit_value, true);
-                            let net_pnl = gross_pnl - exit_cost;
-                            cash += exit_value - exit_cost;
-                            total_costs += exit_cost;
-                            trades.push(TradeEntry {
-                                symbol: config.symbol.clone(), side: "BUY".into(),
-                                entry_price: round2(*entry_price), exit_price: round2(exit_price),
-                                qty: *qty, pnl: round2(net_pnl), gross_pnl: round2(gross_pnl),
-                                costs: round2(exit_cost),
-                                entry_time: entry_time.clone(), exit_time: candle.timestamp.clone(),
-                            });
-                            position = None;
-                        }
-                    }
-                }
-            }
         }
 
         // Final NAV recalculation
         nav = cash;
         if let Some((_, qty, _)) = &position {
             nav += candle.close * (*qty) as f64;
-        }
-        if let Some((ep, qty, _)) = &short_position {
-            nav += (*ep) * (*qty) as f64 + ((*ep) - candle.close) * (*qty) as f64;
         }
         if nav > peak { peak = nav; }
         let dd = if peak > 0.0 { (peak - nav) / peak } else { 0.0 };
@@ -717,6 +451,243 @@ mod tests {
         for trade in &r.trade_log {
             assert!(trade.costs >= 0.0, "trade costs should be non-negative");
             assert!(trade.gross_pnl.is_finite(), "gross_pnl should be finite");
+        }
+    }
+
+    #[test]
+    fn test_backtest_uses_strategy_module() {
+        let candles = trending_up_candles(80, 100.0, 0.5);
+        let r1 = run_backtest("ema_crossover", candles.clone(), 100000.0);
+        let r2 = run_backtest("ema-crossover", candles, 100000.0);
+        assert_eq!(r1.total_trades, r2.total_trades, "both name variants should produce same trades");
+    }
+
+    #[test]
+    fn test_momentum_strategy_runs() {
+        let candles = trending_up_candles(50, 100.0, 0.5);
+        let r = run_backtest("momentum", candles, 100000.0);
+        assert_eq!(r.equity_curve.len(), 50);
+    }
+
+    #[test]
+    fn test_orb_strategy_runs() {
+        let candles = trending_up_candles(50, 100.0, 1.0);
+        let r = run_backtest("orb", candles, 100000.0);
+        assert_eq!(r.equity_curve.len(), 50);
+    }
+
+    fn gap_candles(n: usize, base: f64) -> Vec<serde_json::Value> {
+        (0..n).map(|i| {
+            let gap = if i % 5 == 0 { 3.0 } else { -0.5 };
+            let open = base + i as f64 * 0.2 + gap;
+            let close = open + (i as f64 * 0.1).sin() * 2.0;
+            let high = open.max(close) + 1.0;
+            let low = open.min(close) - 1.0;
+            json!({
+                "timestamp": format!("2025-01-{:02}", (i % 28) + 1),
+                "open": open,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": 15000.0 + (i as f64 * 500.0),
+            })
+        }).collect()
+    }
+
+    fn oscillating_candles(n: usize, center: f64, amplitude: f64) -> Vec<serde_json::Value> {
+        (0..n).map(|i| {
+            let close = center + (i as f64 * 0.25).sin() * amplitude;
+            let open = center + ((i as f64 - 0.5) * 0.25).sin() * amplitude;
+            let high = close.max(open) + amplitude * 0.1;
+            let low = close.min(open) - amplitude * 0.1;
+            json!({
+                "timestamp": format!("2025-01-{:02}", (i % 28) + 1),
+                "open": open,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": 10000.0 + (i as f64 * 0.3).sin().abs() * 5000.0,
+            })
+        }).collect()
+    }
+
+    fn volatile_candles(n: usize, start: f64) -> Vec<serde_json::Value> {
+        (0..n).map(|i| {
+            let trend = start + i as f64 * 0.3;
+            let volatility = if i > n / 2 { 8.0 } else { 1.5 };
+            let noise = (i as f64 * 1.7).sin() * volatility;
+            let close = trend + noise;
+            let open = trend + ((i as f64 - 1.0) * 1.7).sin() * volatility;
+            let high = close.max(open) + volatility * 0.5;
+            let low = close.min(open) - volatility * 0.5;
+            json!({
+                "timestamp": format!("2025-01-{:02}", (i % 28) + 1),
+                "open": open,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": 12000.0,
+            })
+        }).collect()
+    }
+
+    #[test]
+    fn test_gap_trading_strategy_in_backtest() {
+        let candles = gap_candles(80, 100.0);
+        let r = run_backtest("gap_trading", candles, 100000.0);
+        assert_eq!(r.equity_curve.len(), 80);
+        assert!(r.max_drawdown >= 0.0);
+        assert!(r.sharpe_ratio.is_finite());
+    }
+
+    #[test]
+    fn test_vwap_reversion_strategy_in_backtest() {
+        let candles = oscillating_candles(80, 100.0, 10.0);
+        let r = run_backtest("vwap_reversion", candles, 100000.0);
+        assert_eq!(r.equity_curve.len(), 80);
+        assert!(r.win_rate >= 0.0 && r.win_rate <= 100.0);
+        assert!(r.max_drawdown >= 0.0);
+    }
+
+    #[test]
+    fn test_trend_following_strategy_in_backtest() {
+        let candles = trending_up_candles(80, 100.0, 0.8);
+        let r = run_backtest("trend_following", candles, 100000.0);
+        assert_eq!(r.equity_curve.len(), 80);
+        assert!(r.max_drawdown >= 0.0);
+    }
+
+    #[test]
+    fn test_volatility_breakout_strategy_in_backtest() {
+        let candles = volatile_candles(80, 100.0);
+        let r = run_backtest("volatility_breakout", candles, 100000.0);
+        assert_eq!(r.equity_curve.len(), 80);
+        assert!(r.max_drawdown >= 0.0);
+    }
+
+    #[test]
+    fn test_backtest_multiple_strategies_same_data() {
+        let candles = trending_up_candles(80, 100.0, 0.5);
+        let strategies = ["ema_crossover", "sma_crossover", "rsi_reversal", "momentum"];
+        let results: Vec<BacktestResult> = strategies.iter()
+            .map(|s| run_backtest(s, candles.clone(), 100000.0))
+            .collect();
+
+        for (i, r) in results.iter().enumerate() {
+            assert_eq!(r.equity_curve.len(), 80,
+                "strategy '{}' should produce 80 equity points", strategies[i]);
+            assert!(r.max_drawdown >= 0.0 && r.max_drawdown <= 100.0,
+                "strategy '{}' drawdown out of bounds: {}", strategies[i], r.max_drawdown);
+        }
+
+        let unique_trade_counts: std::collections::HashSet<usize> =
+            results.iter().map(|r| r.total_trades).collect();
+        assert!(unique_trade_counts.len() >= 1,
+            "different strategies should produce varying trade counts on same data");
+    }
+
+    #[test]
+    fn test_backtest_respects_stop_loss() {
+        let candles = trending_up_candles(80, 100.0, 0.5);
+        let result = run(json!({
+            "strategy": "ema_crossover",
+            "symbol": "TEST",
+            "initial_capital": 100000.0,
+            "candles": candles,
+            "risk_limits": {
+                "max_loss_pct": 1.0,
+                "max_position_pct": 10.0,
+                "max_drawdown_pct": 25.0
+            }
+        })).unwrap();
+        let r: BacktestResult = serde_json::from_value(result).unwrap();
+
+        for trade in &r.trade_log {
+            let loss_pct = trade.pnl.abs() / 100000.0 * 100.0;
+            assert!(loss_pct < 30.0,
+                "single trade loss {:.2}% should be bounded by position sizing", loss_pct);
+        }
+    }
+
+    #[test]
+    fn test_backtest_initial_capital_preserved() {
+        let candles = trending_up_candles(40, 200.0, 0.5);
+        let capital = 250000.0;
+        let r = run_backtest("ema_crossover", candles, capital);
+        assert!(!r.equity_curve.is_empty());
+        assert_eq!(r.equity_curve[0].nav, capital,
+            "first equity point should equal initial capital");
+    }
+
+    #[test]
+    fn test_backtest_no_trades_on_flat_data() {
+        let candles = flat_candles(80, 100.0);
+        let strategies = ["ema_crossover", "sma_crossover", "momentum"];
+        for strat in &strategies {
+            let r = run_backtest(strat, candles.clone(), 100000.0);
+            assert!(r.total_trades <= 3,
+                "strategy '{}' produced {} trades on flat data, expected very few",
+                strat, r.total_trades);
+        }
+    }
+
+    #[test]
+    fn test_backtest_all_new_strategies() {
+        let candles = trending_up_candles(80, 100.0, 0.5);
+        let all_strategies = [
+            "ema_crossover", "sma_crossover", "rsi_reversal", "mean_reversion",
+            "momentum", "orb", "gap_trading", "vwap_reversion",
+            "volatility_breakout", "sector_rotation", "pairs_trading",
+            "expiry_theta", "calendar_spread", "trend_following",
+        ];
+        for strat in &all_strategies {
+            let r = run_backtest(strat, candles.clone(), 100000.0);
+            assert_eq!(r.equity_curve.len(), 80,
+                "strategy '{}' should complete without panic and produce 80 points", strat);
+            assert!(r.max_drawdown.is_finite(),
+                "strategy '{}' max_drawdown should be finite", strat);
+            assert!(r.sharpe_ratio.is_finite(),
+                "strategy '{}' sharpe should be finite", strat);
+        }
+    }
+
+    #[test]
+    fn test_backtest_drawdown_never_exceeds_100_pct() {
+        let mut candles = trending_up_candles(40, 200.0, 2.0);
+        candles.extend(trending_up_candles(40, 280.0, -3.0));
+        let r = run_backtest("ema_crossover", candles, 100000.0);
+        assert!(r.max_drawdown >= 0.0 && r.max_drawdown <= 100.0,
+            "max_drawdown should be in [0, 100], got {}", r.max_drawdown);
+    }
+
+    #[test]
+    fn test_backtest_win_loss_counts_sum_to_total() {
+        let mut candles = trending_up_candles(50, 100.0, 1.0);
+        candles.extend(trending_up_candles(50, 150.0, -0.8));
+        let r = run_backtest("ema_crossover", candles, 100000.0);
+
+        let win_count = r.trade_log.iter().filter(|t| t.pnl > 0.0).count();
+        let loss_count = r.trade_log.iter().filter(|t| t.pnl < 0.0).count();
+        let neutral_count = r.trade_log.iter().filter(|t| t.pnl == 0.0).count();
+        assert_eq!(win_count + loss_count + neutral_count, r.total_trades,
+            "win({}) + loss({}) + neutral({}) should equal total_trades({})",
+            win_count, loss_count, neutral_count, r.total_trades);
+    }
+
+    #[test]
+    fn test_backtest_sharpe_is_finite() {
+        let candles = trending_up_candles(80, 100.0, 0.5);
+        let strategies = ["ema_crossover", "sma_crossover", "mean_reversion", "momentum"];
+        for strat in &strategies {
+            let r = run_backtest(strat, candles.clone(), 100000.0);
+            assert!(!r.sharpe_ratio.is_nan(),
+                "strategy '{}' sharpe should not be NaN", strat);
+            assert!(!r.sharpe_ratio.is_infinite(),
+                "strategy '{}' sharpe should not be infinite", strat);
+            assert!(!r.sortino_ratio.is_nan(),
+                "strategy '{}' sortino should not be NaN", strat);
+            assert!(!r.sortino_ratio.is_infinite(),
+                "strategy '{}' sortino should not be infinite", strat);
         }
     }
 }

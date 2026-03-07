@@ -2,7 +2,9 @@ use std::f64::consts::{PI, SQRT_2};
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub struct Candle {
+    #[serde(default)]
     pub timestamp: String,
+    #[serde(default)]
     pub open: f64,
     pub high: f64,
     pub low: f64,
@@ -314,6 +316,15 @@ pub fn generate_combinations(params: &[Vec<serde_json::Value>]) -> Vec<Vec<serde
     result
 }
 
+/// Extract f64 from a JSON indicator object at a given array index
+pub fn get_f64(indicators: &serde_json::Value, key: &str, idx: usize) -> f64 {
+    indicators
+        .get(key)
+        .and_then(|arr| arr.get(idx))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
+}
+
 /// Transaction cost model for realistic backtesting
 #[derive(Clone, Debug)]
 pub struct TransactionCosts {
@@ -574,5 +585,100 @@ mod tests {
         ];
         let combos = generate_combinations(&params);
         assert_eq!(combos.len(), 4);
+    }
+
+    #[test]
+    fn test_ema_single_value() {
+        let data = vec![42.0];
+        let series = calc_ema_series(&data, 9);
+        assert_eq!(series.len(), 1);
+        assert!((series[0] - 0.0).abs() < f64::EPSILON, "single value with period>len returns 0-padded");
+
+        let last = calc_ema_last(&data, 9);
+        assert!((last - 42.0).abs() < f64::EPSILON, "calc_ema_last of single element should return that element");
+    }
+
+    #[test]
+    fn test_sma_single_value() {
+        let data = vec![77.5];
+        let sma = calc_sma(&data, 1);
+        assert_eq!(sma.len(), 1);
+        assert!((sma[0] - 77.5).abs() < f64::EPSILON, "SMA(1) of single element should be that element");
+    }
+
+    #[test]
+    fn test_atr_flat_candles() {
+        let n = 20;
+        let price = 100.0;
+        let highs = vec![price; n];
+        let lows = vec![price; n];
+        let closes = vec![price; n];
+        let atr = calc_atr_series(&highs, &lows, &closes, 14);
+        assert!((atr[n - 1]).abs() < f64::EPSILON, "ATR of flat candles (no range) should be 0, got {}", atr[n - 1]);
+    }
+
+    #[test]
+    fn test_rsi_all_up() {
+        let data: Vec<f64> = (0..30).map(|i| 100.0 + i as f64 * 2.0).collect();
+        let rsi = calc_rsi_series(&data, 14);
+        assert!(rsi[29] > 95.0, "RSI of consistently rising prices should be near 100, got {}", rsi[29]);
+    }
+
+    #[test]
+    fn test_rsi_all_down() {
+        let data: Vec<f64> = (0..30).map(|i| 200.0 - i as f64 * 2.0).collect();
+        let rsi = calc_rsi_series(&data, 14);
+        assert!(rsi[29] < 5.0, "RSI of consistently falling prices should be near 0, got {}", rsi[29]);
+    }
+
+    #[test]
+    fn test_supertrend_basic() {
+        let closes: Vec<f64> = (0..40).map(|i| 100.0 + i as f64 * 0.5).collect();
+        let candles: Vec<serde_json::Value> = closes.iter().map(|&c| {
+            serde_json::json!({
+                "close": c,
+                "high": c + 1.0,
+                "low": c - 1.0,
+                "volume": 10000.0
+            })
+        }).collect();
+
+        let result = crate::signals::compute(serde_json::json!({ "candles": candles }));
+        assert!(result.is_ok(), "supertrend computation should not panic");
+        let out = result.unwrap();
+        let st = out.get("supertrend").expect("missing supertrend field");
+        let arr = st.as_array().unwrap();
+        assert_eq!(arr.len(), 40);
+    }
+
+    #[test]
+    fn test_transaction_costs_zero_qty() {
+        let costs = TransactionCosts::default();
+        let cost = costs.total_cost(0.0, false);
+        let brokerage = costs.commission_per_trade;
+        let gst = brokerage * costs.gst_pct / 100.0;
+        let expected_fixed = brokerage + gst;
+        assert!(
+            (cost - expected_fixed).abs() < 0.01,
+            "zero trade value should only incur fixed brokerage+GST, got {} vs expected {}",
+            cost, expected_fixed
+        );
+    }
+
+    #[test]
+    fn test_norm_cdf_extremes() {
+        let big = norm_cdf(10.0);
+        assert!((big - 1.0).abs() < 1e-6, "norm_cdf(10) should be ~1.0, got {}", big);
+
+        let small = norm_cdf(-10.0);
+        assert!(small.abs() < 1e-6, "norm_cdf(-10) should be ~0.0, got {}", small);
+
+        let huge = norm_cdf(100.0);
+        assert!(huge.is_finite(), "norm_cdf(100) should be finite");
+        assert!((huge - 1.0).abs() < 1e-10, "norm_cdf(100) should be ~1.0");
+
+        let neg_huge = norm_cdf(-100.0);
+        assert!(neg_huge.is_finite(), "norm_cdf(-100) should be finite");
+        assert!(neg_huge.abs() < 1e-10, "norm_cdf(-100) should be ~0.0");
     }
 }

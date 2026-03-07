@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::utils::{norm_cdf, erf, bs_price};
+use crate::utils::{bs_price, round4};
 #[derive(Deserialize)]
 struct IVSurfaceConfig {
     spot: f64,
@@ -119,8 +119,8 @@ pub fn compute(data: Value) -> Result<Value, String> {
         else if skew.current_skew > 0.0 { "PUT_SKEW" } else { "CALL_SKEW" };
 
     let ts_shape = if term_structure.len() >= 2 {
-        let first = term_structure.first().unwrap().atm_iv;
-        let last = term_structure.last().unwrap().atm_iv;
+        let first = term_structure.first().map(|t| t.atm_iv).unwrap_or(0.0);
+        let last = term_structure.last().map(|t| t.atm_iv).unwrap_or(0.0);
         if last > first * 1.05 { "CONTANGO" }
         else if last < first * 0.95 { "BACKWARDATION" }
         else { "FLAT" }
@@ -270,8 +270,6 @@ fn implied_vol(option_price: f64, spot: f64, strike: f64, r: f64, t: f64, is_cal
     }
     (lo + hi) / 2.0
 }
-
-fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
 
 #[cfg(test)]
 mod tests {

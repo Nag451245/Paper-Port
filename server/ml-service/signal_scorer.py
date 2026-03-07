@@ -139,8 +139,15 @@ class SignalScorer:
             top_idx = np.argsort(imp)[-20:][::-1]
             importance = {all_names[i]: round(float(imp[i]), 4) for i in top_idx if imp[i] > 0}
 
-        # Save model
-        self.store.save(f"scorer_{model_type}", model)
+        # Save model with versioning metadata
+        self.store.save(
+            f"scorer_{model_type}",
+            model,
+            accuracy=round(accuracy, 4),
+            feature_count=X_train.shape[1] if hasattr(X_train, 'shape') else len(FEATURE_COLUMNS),
+            dataset_size=len(X_train) + len(X_val),
+            extra_meta={"auc_roc": round(auc, 4), "model_type": model_type},
+        )
 
         log.info(
             f"Trained {model_type}: accuracy={accuracy:.3f}, AUC={auc:.3f}, "

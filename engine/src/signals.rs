@@ -1,18 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::utils::{calc_ema_series as calc_ema, calc_rsi_series as calc_rsi, calc_atr_series as calc_atr};
+use crate::utils::{Candle, calc_ema_series as calc_ema, calc_rsi_series as calc_rsi, calc_atr_series as calc_atr};
 
 #[derive(Deserialize)]
 struct SignalInput {
     candles: Vec<Candle>,
-}
-
-#[derive(Deserialize)]
-struct Candle {
-    close: f64,
-    high: f64,
-    low: f64,
-    volume: f64,
 }
 
 #[derive(Serialize, Deserialize)]

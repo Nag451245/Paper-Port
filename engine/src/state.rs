@@ -75,6 +75,8 @@ pub struct AppState {
     pub cash: std::sync::atomic::AtomicU64,
     pub realized_pnl: std::sync::atomic::AtomicU64,
     pub daily_trade_count: std::sync::atomic::AtomicUsize,
+    /// Stores the day-of-year * 1000 + year for automatic daily reset
+    last_reset_day: std::sync::atomic::AtomicU32,
     pub started_at: std::time::Instant,
 }
 
@@ -89,6 +91,7 @@ impl AppState {
             cash: f64_to_atomic(initial_capital),
             realized_pnl: f64_to_atomic(0.0),
             daily_trade_count: std::sync::atomic::AtomicUsize::new(0),
+            last_reset_day: std::sync::atomic::AtomicU32::new(current_day_key()),
             started_at: std::time::Instant::now(),
         })
     }
@@ -127,11 +130,23 @@ impl AppState {
     }
 
     pub fn increment_trades(&self) -> usize {
+        self.check_daily_reset();
         self.daily_trade_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
     }
 
     pub fn reset_daily_trades(&self) {
         self.daily_trade_count.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.last_reset_day.store(current_day_key(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Auto-reset trade count if the day has changed
+    fn check_daily_reset(&self) {
+        let today = current_day_key();
+        let last = self.last_reset_day.load(std::sync::atomic::Ordering::Relaxed);
+        if today != last {
+            self.daily_trade_count.store(0, std::sync::atomic::Ordering::Relaxed);
+            self.last_reset_day.store(today, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     pub fn snapshot(&self) -> PortfolioSnapshot {
@@ -174,8 +189,10 @@ impl AppState {
             ));
         }
 
-        let trades_today = self.increment_trades();
-        if trades_today > self.config.risk.max_daily_trades {
+        // Check trade count BEFORE incrementing so rejections don't inflate the counter
+        self.check_daily_reset();
+        let current_count = self.daily_trade_count.load(std::sync::atomic::Ordering::Relaxed);
+        if current_count >= self.config.risk.max_daily_trades {
             return Err(format!("Max daily trades ({}) reached", self.config.risk.max_daily_trades));
         }
 
@@ -186,6 +203,9 @@ impl AppState {
                 "Drawdown {:.1}% exceeds circuit breaker {:.1}%", dd, self.config.risk.max_drawdown_pct
             ));
         }
+
+        // All risk checks passed — NOW increment
+        self.increment_trades();
 
         let cost = position_value * self.config.costs.slippage_bps / 10_000.0
             + self.config.costs.commission_per_trade;
@@ -249,6 +269,16 @@ fn f64_to_atomic(v: f64) -> std::sync::atomic::AtomicU64 {
 
 fn atomic_to_f64(a: &std::sync::atomic::AtomicU64) -> f64 {
     f64::from_bits(a.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Returns a u32 key encoding the current calendar day (year * 1000 + day_of_year)
+fn current_day_key() -> u32 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days_since_epoch = (now / 86400) as u32;
+    days_since_epoch
 }
 
 #[cfg(test)]

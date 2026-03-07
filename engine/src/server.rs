@@ -20,6 +20,7 @@ pub async fn run(state: SharedState) {
     let app = Router::new()
         // Health & meta
         .route("/health", get(health))
+        .route("/metrics", get(metrics))
         .route("/config", get(get_config))
 
         // Generic JSON-RPC pass-through (backward-compatible)
@@ -64,8 +65,16 @@ pub async fn run(state: SharedState) {
     let addr = format!("{}:{}", state.config.server.host, state.config.server.port);
     info!("Listening on http://{}", addr);
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("Failed to bind to {}: {}", addr, e);
+            return;
+        }
+    };
+    if let Err(e) = axum::serve(listener, app).await {
+        tracing::error!("Server error: {}", e);
+    }
 }
 
 // ─── Health ───────────────────────────────────────────────────────────
@@ -78,6 +87,34 @@ async fn health(State(state): State<SharedState>) -> impl IntoResponse {
         "positions": state.positions.len(),
         "nav": state.get_nav(),
     }))
+}
+
+async fn metrics(State(state): State<SharedState>) -> impl IntoResponse {
+    let positions = state.positions.len();
+    let nav = state.get_nav();
+    let uptime = state.uptime_seconds();
+    let daily_trades = state.daily_trade_count.load(std::sync::atomic::Ordering::Relaxed);
+
+    let body = format!(
+        "# HELP cg_rust_uptime_seconds Engine uptime in seconds\n\
+         # TYPE cg_rust_uptime_seconds gauge\n\
+         cg_rust_uptime_seconds {uptime}\n\
+         # HELP cg_rust_open_positions Number of open positions\n\
+         # TYPE cg_rust_open_positions gauge\n\
+         cg_rust_open_positions {positions}\n\
+         # HELP cg_rust_portfolio_nav Portfolio NAV\n\
+         # TYPE cg_rust_portfolio_nav gauge\n\
+         cg_rust_portfolio_nav {nav}\n\
+         # HELP cg_rust_daily_trades Daily trade count\n\
+         # TYPE cg_rust_daily_trades counter\n\
+         cg_rust_daily_trades {daily_trades}\n"
+    );
+
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
 }
 
 async fn get_config(State(state): State<SharedState>) -> impl IntoResponse {

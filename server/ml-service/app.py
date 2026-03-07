@@ -194,6 +194,38 @@ async def allocate_strategies(req: AllocateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/models")
+async def list_models():
+    """List all models with version metadata."""
+    metadata = store.list_all_metadata()
+    return {
+        "models": metadata,
+        "total": len(metadata),
+    }
+
+
+@app.post("/models/{name}/rollback")
+async def rollback_model(name: str):
+    """Rollback a model to its previous version."""
+    restored_version = store.rollback(name)
+    if restored_version is None:
+        raise HTTPException(status_code=404, detail=f"Cannot rollback '{name}': insufficient versions")
+    return {
+        "name": name,
+        "restored_version": restored_version,
+        "status": "rolled_back",
+    }
+
+
+@app.get("/models/{name}/metadata")
+async def model_metadata(name: str):
+    """Get metadata for a specific model."""
+    meta = store.get_metadata(name)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"Model '{name}' not found")
+    return meta
+
+
 if __name__ == "__main__":
     import uvicorn
 

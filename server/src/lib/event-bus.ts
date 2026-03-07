@@ -10,7 +10,8 @@ const log = createChildLogger('EventBus');
 export type MarketDataEvent =
   | { type: 'TICK_RECEIVED'; symbol: string; ltp: number; change: number; volume: number; timestamp: string }
   | { type: 'CANDLE_CLOSED'; symbol: string; interval: string; open: number; high: number; low: number; close: number; volume: number }
-  | { type: 'DATA_GAP_DETECTED'; symbol: string; interval: string; gapMinutes: number; lastTimestamp: string };
+  | { type: 'DATA_GAP_DETECTED'; symbol: string; interval: string; gapMinutes: number; lastTimestamp: string }
+  | { type: 'DATA_QUALITY_REPORT'; symbol: string; interval: string; issues: string[]; barCount: number; lastTimestamp: string };
 
 export type SignalEvent =
   | { type: 'SIGNAL_GENERATED'; userId: string; botId?: string; symbol: string; direction: string; confidence: number; entry: number; stopLoss: number; target: number; source: string }
@@ -21,7 +22,7 @@ export type ExecutionEvent =
   | { type: 'ORDER_PLACED'; userId: string; orderId: string; symbol: string; side: string; qty: number; orderType: string }
   | { type: 'ORDER_FILLED'; userId: string; orderId: string; symbol: string; fillPrice: number; qty: number; slippageBps: number }
   | { type: 'POSITION_OPENED'; userId: string; positionId: string; symbol: string; side: string; qty: number; entryPrice: number }
-  | { type: 'POSITION_CLOSED'; userId: string; positionId: string; symbol: string; pnl: number; exitPrice: number }
+  | { type: 'POSITION_CLOSED'; userId: string; positionId: string; symbol: string; pnl: number; exitPrice: number; strategyTag?: string }
   | { type: 'ORDER_STATE_CHANGE'; orderId: string; symbol: string; fromState: string; toState: string; filledQty?: number; avgFillPrice?: number };
 
 export type RiskEvent =

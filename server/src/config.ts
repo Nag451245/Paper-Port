@@ -27,6 +27,11 @@ const envSchema = z.object({
   NODE_ENV: z.string().default('development'),
   NEWS_API_KEY: z.string().default(''),
   GNEWS_API_KEY: z.string().default(''),
+  ML_SERVICE_URL: z.string().url().default('http://localhost:8500'),
+  BREEZE_BRIDGE_URL: z.string().url().default('http://localhost:5000'),
+  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  TRADING_MODE: z.enum(['PAPER', 'LIVE']).default('PAPER'),
+  RUST_ENGINE_URL: z.string().default('http://127.0.0.1:8400'),
 });
 
 export type Env = z.infer<typeof envSchema>;

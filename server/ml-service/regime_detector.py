@@ -22,9 +22,16 @@ REGIME_LABELS = {
 
 
 class RegimeDetector:
-    def __init__(self):
+    def __init__(self, cache_ttl_seconds: int = 300):
         self._model = None
         self._fitted = False
+        self._cache: dict = {}
+        self._cache_ttl = cache_ttl_seconds
+
+    def _data_hash(self, returns, volatility, correlations, n_states) -> str:
+        import hashlib
+        raw = f"{returns[-5:]}{volatility[-5:]}{len(returns)}{n_states}"
+        return hashlib.md5(raw.encode()).hexdigest()
 
     def detect(
         self,
@@ -33,6 +40,13 @@ class RegimeDetector:
         correlations: list[float],
         n_states: int = 4,
     ) -> dict:
+        # Check cache: return cached result if same data shape within TTL
+        import time
+        cache_key = self._data_hash(returns, volatility, correlations, n_states)
+        cached = self._cache.get(cache_key)
+        if cached and (time.time() - cached["ts"]) < self._cache_ttl:
+            log.info("Returning cached HMM regime result")
+            return cached["result"]
         """Detect current market regime using Gaussian HMM."""
         if len(returns) < 10:
             raise ValueError(f"Need at least 10 data points, got {len(returns)}")
@@ -93,13 +107,15 @@ class RegimeDetector:
             log.warning(f"HMM fitting failed ({e}) — using rule-based fallback")
             return self._rule_based_regime(ret_arr, vol_arr)
 
-        return {
+        result = {
             "current_regime": regime_name,
             "regime_id": current_state,
             "regime_probabilities": prob_dict,
             "transition_matrix": transition_matrix,
             "regime_labels": regime_map,
         }
+        self._cache[cache_key] = {"result": result, "ts": time.time()}
+        return result
 
     def _assign_regime_labels(
         self, state_means: np.ndarray, state_vols: np.ndarray, n_states: int

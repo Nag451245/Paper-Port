@@ -1,21 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::utils::round2;
+use crate::utils::{Candle, round2};
 
 #[derive(Deserialize)]
 struct AdvancedSignalConfig {
     candles: Vec<Candle>,
     compute: Vec<String>,
-}
-
-#[derive(Deserialize, Clone)]
-struct Candle {
-    timestamp: String,
-    open: f64,
-    high: f64,
-    low: f64,
-    close: f64,
-    volume: f64,
 }
 
 #[derive(Serialize)]
@@ -369,7 +359,14 @@ fn compute_market_profile(candles: &[Candle]) -> MarketProfileResult {
     let va_high = min_p + (va_h as f64 + 1.0) * tick;
     let va_low = min_p + va_l as f64 * tick;
 
-    let last = candles.last().unwrap().close;
+    let last = match candles.last() {
+        Some(c) => c.close,
+        None => return MarketProfileResult {
+            poc: 0.0, initial_balance_high: 0.0, initial_balance_low: 0.0,
+            value_area_high: 0.0, value_area_low: 0.0,
+            profile_type: "unknown".into(), tpo_count: 0, signal: "NEUTRAL".into(),
+        },
+    };
     let profile_type = if (va_high - va_low) / range < 0.4 { "narrow" }
         else if poc_idx as f64 / num_ticks as f64 > 0.6 { "p_shaped" }
         else if (poc_idx as f64 / num_ticks as f64) < 0.4 { "b_shaped" }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::utils::Candle;
 
 #[derive(Deserialize)]
 struct Config {
@@ -6,16 +7,6 @@ struct Config {
     candles: Option<Vec<Candle>>,
     features: Option<Vec<Vec<f64>>>,
     lookback: Option<usize>,
-}
-
-#[derive(Deserialize)]
-struct Candle {
-    timestamp: String,
-    open: f64,
-    high: f64,
-    low: f64,
-    close: f64,
-    volume: f64,
 }
 
 #[derive(Serialize)]
@@ -260,8 +251,8 @@ fn extract_features(config: Config) -> Result<serde_json::Value, String> {
         // Aroon
         let (aroon_up, aroon_down) = if idx >= 25 {
             let window = &closes[idx-24..=idx];
-            let max_idx = window.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, _)| i).unwrap_or(0);
-            let min_idx = window.iter().enumerate().min_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, _)| i).unwrap_or(0);
+            let max_idx = window.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)).map(|(i, _)| i).unwrap_or(0);
+            let min_idx = window.iter().enumerate().min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)).map(|(i, _)| i).unwrap_or(0);
             (max_idx as f64 / 25.0 * 100.0, min_idx as f64 / 25.0 * 100.0)
         } else { (50.0, 50.0) };
 
@@ -922,5 +913,66 @@ mod tests {
             t == "PRICE_SPIKE_UP" || t == "GAP_UP"
         });
         assert!(has_spike, "expected a spike anomaly, got: {:?}", anomalies);
+    }
+
+    #[test]
+    fn test_feature_count_is_76() {
+        let candles = make_candles(50, 100.0, 0.3);
+        let input = json!({ "command": "extract_features", "candles": candles });
+        let result = compute(input).expect("feature extraction should succeed");
+
+        let features = result.get("features").unwrap();
+        let columns = features.get("columns").unwrap().as_array().unwrap();
+        assert_eq!(columns.len(), 76, "expected exactly 76 feature columns, got {}", columns.len());
+
+        let data = features.get("data").unwrap().as_array().unwrap();
+        for (row_idx, row) in data.iter().enumerate() {
+            let vals = row.as_array().unwrap();
+            assert_eq!(vals.len(), 76, "row {} has {} features, expected 76", row_idx, vals.len());
+        }
+    }
+
+    #[test]
+    fn test_features_no_nan() {
+        let candles = make_candles(50, 100.0, 0.5);
+        let input = json!({ "command": "extract_features", "candles": candles });
+        let result = compute(input).expect("feature extraction should succeed");
+
+        let data = result.get("features").unwrap().get("data").unwrap().as_array().unwrap();
+        for (row_idx, row) in data.iter().enumerate() {
+            for (col_idx, val) in row.as_array().unwrap().iter().enumerate() {
+                let v = val.as_f64().unwrap();
+                assert!(!v.is_nan(), "NaN found at row {}, col {}", row_idx, col_idx);
+            }
+        }
+    }
+
+    #[test]
+    fn test_features_on_constant_prices() {
+        let n = 50;
+        let candles: Vec<serde_json::Value> = (0..n)
+            .map(|i| {
+                json!({
+                    "timestamp": format!("2024-02-{:02}", (i % 28) + 1),
+                    "open": 100.0,
+                    "high": 100.0,
+                    "low": 100.0,
+                    "close": 100.0,
+                    "volume": 10000.0
+                })
+            })
+            .collect();
+
+        let input = json!({ "command": "extract_features", "candles": candles });
+        let result = compute(input).expect("constant prices should not error");
+
+        let data = result.get("features").unwrap().get("data").unwrap().as_array().unwrap();
+        assert!(!data.is_empty(), "should produce feature rows");
+        for (row_idx, row) in data.iter().enumerate() {
+            for (col_idx, val) in row.as_array().unwrap().iter().enumerate() {
+                let v = val.as_f64().unwrap();
+                assert!(v.is_finite(), "non-finite value at row {}, col {}: {}", row_idx, col_idx, v);
+            }
+        }
     }
 }

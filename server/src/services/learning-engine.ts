@@ -8,7 +8,11 @@ import { createChildLogger } from '../lib/logger.js';
 
 const log = createChildLogger('LearningEngine');
 
-const STRATEGIES = ['ema-crossover', 'supertrend', 'sma_crossover', 'mean_reversion', 'momentum', 'rsi_reversal', 'orb'];
+const STRATEGIES = [
+  'ema-crossover', 'supertrend', 'sma_crossover', 'mean_reversion', 'momentum', 'rsi_reversal', 'orb',
+  'gap_trading', 'vwap_reversion', 'volatility_breakout', 'sector_rotation', 'pairs_trading',
+  'expiry_theta', 'calendar_spread', 'trend_following',
+];
 
 const DEFAULT_PARAM_GRIDS: Record<string, Record<string, number[]>> = {
   'ema-crossover': { ema_short: [5, 9, 13], ema_long: [15, 21, 30] },
@@ -941,6 +945,86 @@ Top losers: ${JSON.stringify(topLosers)}`,
     } catch (err) {
       log.error({ err, userId }, 'Strategy allocation optimization failed');
     }
+  }
+
+  // Track consecutive losses per strategy for intraday deallocation
+  private consecutiveLosses = new Map<string, number>();
+
+  /**
+   * Intraday Bayesian update — called on each POSITION_CLOSED event during trading hours.
+   * Updates per-strategy Thompson sampling alpha/beta and adjusts confidence multiplier.
+   */
+  async runIntradayUpdate(trade: {
+    strategyTag: string;
+    netPnl: number;
+    userId: string;
+    symbol: string;
+  }): Promise<void> {
+    const { strategyTag, netPnl, userId } = trade;
+    if (!strategyTag) return;
+
+    const won = netPnl > 0;
+    const key = `${userId}:${strategyTag}`;
+
+    // Update consecutive loss tracker
+    if (won) {
+      this.consecutiveLosses.set(key, 0);
+    } else {
+      const prev = this.consecutiveLosses.get(key) ?? 0;
+      this.consecutiveLosses.set(key, prev + 1);
+    }
+
+    const consecutiveLossCount = this.consecutiveLosses.get(key) ?? 0;
+
+    // Update StrategyParam confidence in DB
+    try {
+      const activeParam = await this.prisma.strategyParam.findFirst({
+        where: { userId, strategyId: strategyTag, isActive: true },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      if (activeParam) {
+        const currentParams = typeof activeParam.params === 'string'
+          ? JSON.parse(activeParam.params) : (activeParam.params ?? {});
+
+        // Bayesian confidence update: shift confidence toward actual outcomes
+        const priorConfidence = currentParams.confidence ?? 1.0;
+        const learningRate = 0.1;
+        const newConfidence = priorConfidence * (1 - learningRate) + (won ? 1.0 : 0.0) * learningRate;
+
+        // Apply penalty for 3+ consecutive losses: reduce allocation by 50%
+        const confidenceMultiplier = consecutiveLossCount >= 3 ? 0.5 : 1.0;
+
+        currentParams.confidence = Math.round(newConfidence * confidenceMultiplier * 1000) / 1000;
+        currentParams.intradayWins = (currentParams.intradayWins ?? 0) + (won ? 1 : 0);
+        currentParams.intradayLosses = (currentParams.intradayLosses ?? 0) + (won ? 0 : 1);
+        currentParams.consecutiveLosses = consecutiveLossCount;
+        currentParams.lastUpdateTime = new Date().toISOString();
+
+        await this.prisma.strategyParam.update({
+          where: { id: activeParam.id },
+          data: { params: JSON.stringify(currentParams) },
+        });
+
+        if (consecutiveLossCount >= 3) {
+          log.warn({
+            userId, strategyTag, consecutiveLossCount,
+            reducedConfidence: currentParams.confidence,
+          }, 'Strategy throttled: 3+ consecutive losses, allocation reduced 50%');
+        }
+      }
+    } catch (err) {
+      log.warn({ err, strategyTag, userId }, 'Intraday Bayesian update failed');
+    }
+  }
+
+  /**
+   * Reset intraday learning state at market open.
+   * Called by the server orchestrator at 9:15 IST.
+   */
+  resetIntradayState(): void {
+    this.consecutiveLosses.clear();
+    log.info('Intraday learning state reset for new trading day');
   }
 }
 

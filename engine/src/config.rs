@@ -137,6 +137,13 @@ pub struct BacktestConfig {
     pub momentum_hold_days: usize,
     pub mean_reversion_period: usize,
     pub mean_reversion_threshold: f64,
+    pub vwap_deviation_threshold: f64,
+    pub bb_period: usize,
+    pub bb_std_mult: f64,
+    pub adx_period: usize,
+    pub adx_trend_threshold: f64,
+    pub gap_min_pct: f64,
+    pub sector_ema_period: usize,
 }
 
 impl Default for BacktestConfig {
@@ -155,6 +162,13 @@ impl Default for BacktestConfig {
             momentum_hold_days: 10,
             mean_reversion_period: 20,
             mean_reversion_threshold: 2.0,
+            vwap_deviation_threshold: 1.5,
+            bb_period: 20,
+            bb_std_mult: 2.0,
+            adx_period: 14,
+            adx_trend_threshold: 25.0,
+            gap_min_pct: 1.0,
+            sector_ema_period: 21,
         }
     }
 }

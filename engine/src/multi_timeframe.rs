@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use crate::utils::{Candle, get_f64};
 use crate::signals;
 
 #[derive(Deserialize)]
@@ -22,14 +23,6 @@ struct MTFSymbolData {
     candles_1h: Vec<Candle>,
     #[serde(default)]
     candles_daily: Vec<Candle>,
-}
-
-#[derive(Deserialize, Serialize, Clone)]
-struct Candle {
-    close: f64,
-    high: f64,
-    low: f64,
-    volume: f64,
 }
 
 fn default_aggressiveness() -> String {
@@ -69,9 +62,12 @@ fn analyze_trend(candles: &[Candle]) -> (String, f64) {
         return ("neutral".to_string(), 0.0);
     }
 
-    let candles_json = serde_json::to_value(
+    let candles_json = match serde_json::to_value(
         &serde_json::json!({ "candles": candles })
-    ).unwrap();
+    ) {
+        Ok(v) => v,
+        Err(_) => return ("neutral".to_string(), 0.0),
+    };
 
     let indicators = match signals::compute(candles_json) {
         Ok(v) => v,
@@ -117,14 +113,6 @@ fn analyze_trend(candles: &[Candle]) -> (String, f64) {
     } else {
         ("neutral".to_string(), 0.0)
     }
-}
-
-fn get_f64(val: &Value, key: &str, idx: usize) -> f64 {
-    val.get(key)
-        .and_then(|arr| arr.as_array())
-        .and_then(|arr| arr.get(idx))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0)
 }
 
 pub fn compute(data: Value) -> Result<Value, String> {
@@ -201,7 +189,10 @@ pub fn compute(data: Value) -> Result<Value, String> {
 
         if ref_candles.is_empty() { continue; }
 
-        let close = ref_candles.last().unwrap().close;
+        let close = match ref_candles.last() {
+            Some(c) => c.close,
+            None => continue,
+        };
         let atr = calc_atr(ref_candles, 14);
 
         let (entry, stop_loss, target) = if direction == "LONG" {
@@ -259,4 +250,86 @@ fn calc_atr(candles: &[Candle], period: usize) -> f64 {
         sum += tr;
     }
     sum / period as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_trending_candles(n: usize, base: f64, step: f64) -> Vec<serde_json::Value> {
+        (0..n)
+            .map(|i| {
+                let close = base + step * i as f64;
+                json!({
+                    "timestamp": format!("2024-01-{:02}T09:{:02}:00", (i % 28) + 1, i % 60),
+                    "open": close - step.abs() * 0.3,
+                    "high": close + step.abs() * 0.5 + 0.5,
+                    "low": close - step.abs() * 0.5 - 0.5,
+                    "close": close,
+                    "volume": 50000.0 + (i as f64 * 200.0)
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_multi_timeframe_basic() {
+        let candles_1m = make_trending_candles(40, 2400.0, 1.0);
+        let candles_5m = make_trending_candles(40, 2400.0, 2.0);
+
+        let input = json!({
+            "symbols": [{
+                "symbol": "RELIANCE",
+                "candles_1m": candles_1m,
+                "candles_5m": candles_5m
+            }]
+        });
+
+        let result = compute(input).expect("basic MTF compute should not fail");
+        let signals = result.get("signals").expect("missing signals key");
+        assert!(signals.is_array(), "signals should be an array");
+    }
+
+    #[test]
+    fn test_multi_timeframe_empty_symbols() {
+        let input = json!({ "symbols": [] });
+        let result = compute(input).expect("empty symbols should succeed");
+        let signals = result.get("signals").unwrap().as_array().unwrap();
+        assert!(signals.is_empty(), "no symbols means no signals");
+    }
+
+    #[test]
+    fn test_multi_timeframe_insufficient_data() {
+        let short_candles = make_trending_candles(5, 100.0, 0.5);
+        let input = json!({
+            "symbols": [{
+                "symbol": "INFY",
+                "candles_1m": short_candles.clone(),
+                "candles_5m": short_candles
+            }]
+        });
+
+        let result = compute(input).expect("insufficient data should not error, just produce neutral");
+        let signals = result.get("signals").unwrap().as_array().unwrap();
+        assert!(
+            signals.is_empty(),
+            "too few candles should yield neutral trends and no signals"
+        );
+    }
+
+    #[test]
+    fn test_multi_timeframe_single_timeframe() {
+        let candles_5m = make_trending_candles(40, 1800.0, 1.5);
+        let input = json!({
+            "symbols": [{
+                "symbol": "TCS",
+                "candles_5m": candles_5m
+            }]
+        });
+
+        let result = compute(input).expect("single timeframe should not fail");
+        let signals = result.get("signals").expect("missing signals");
+        assert!(signals.is_array());
+    }
 }

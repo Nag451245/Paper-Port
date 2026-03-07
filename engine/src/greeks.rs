@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::f64::consts::E;
 
-use crate::utils::{norm_cdf, norm_pdf};
+use crate::utils::{norm_cdf, norm_pdf, round4};
 
 #[derive(Deserialize)]
 struct GreeksInput {
@@ -39,12 +39,12 @@ pub fn compute(data: Value) -> Result<Value, String> {
 
     if t <= 0.0 {
         let intrinsic = if is_call { (s - k).max(0.0) } else { (k - s).max(0.0) };
-        return Ok(serde_json::to_value(GreeksOutput {
+        return serde_json::to_value(GreeksOutput {
             price: round4(intrinsic),
             delta: if is_call { if s > k { 1.0 } else { 0.0 } } else { if s < k { -1.0 } else { 0.0 } },
             gamma: 0.0, theta: 0.0, vega: 0.0, rho: 0.0,
             implied_volatility: sigma,
-        }).unwrap());
+        }).map_err(|e| e.to_string());
     }
 
     let d1 = ((s / k).ln() + (r + sigma * sigma / 2.0) * t) / (sigma * t.sqrt());
@@ -88,8 +88,6 @@ pub fn compute(data: Value) -> Result<Value, String> {
 
     serde_json::to_value(output).map_err(|e| format!("Serialization error: {}", e))
 }
-
-fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
 
 #[cfg(test)]
 mod tests {

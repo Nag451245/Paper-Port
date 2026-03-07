@@ -42,6 +42,7 @@ import { UptimeMonitorService } from './services/uptime-monitor.service.js';
 import { DataPipelineService } from './services/data-pipeline.service.js';
 import { OrderManagementService } from './services/oms.service.js';
 import { registerAllWorkers } from './services/event-workers.js';
+import { register as metricsRegister, apiRequestDuration } from './lib/metrics.js';
 
 export interface BuildAppOptions {
   logger?: boolean;
@@ -126,7 +127,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   // Start uptime monitoring, event bus workers, and data pipeline
   uptimeMonitor.start();
-  registerAllWorkers(getPrisma());
+  registerAllWorkers(getPrisma(), learningEngine, botEngine);
   dataPipeline.initialize().then(ok => {
     if (ok) dataPipeline.startConsumer();
   }).catch(() => {});
@@ -136,6 +137,24 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const latencyMs = reply.elapsedTime;
     if (latencyMs > 0) uptimeMonitor.recordLatency(latencyMs);
     if (reply.statusCode >= 500) uptimeMonitor.recordError();
+  });
+
+  // Prometheus metrics endpoint
+  app.get('/metrics', async (_req, reply) => {
+    reply.header('Content-Type', metricsRegister.contentType);
+    return metricsRegister.metrics();
+  });
+
+  // Request duration instrumentation
+  app.addHook('onResponse', (request, reply, done) => {
+    const route = request.routeOptions?.url ?? request.url;
+    if (route !== '/metrics' && route !== '/health') {
+      const durationSec = reply.elapsedTime / 1000;
+      apiRequestDuration
+        .labels(request.method, route, String(reply.statusCode))
+        .observe(durationSec);
+    }
+    done();
   });
 
   app.get('/health', async () => {
@@ -589,9 +608,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const { AIAgentService } = await import('./services/ai-agent.service.js');
     const agentService = new AIAgentService(prisma);
 
-    // During market hours (9:15 AM - 3:30 PM IST): every 20 min
-    // IST = UTC+5:30, so 9:15 IST = 3:45 UTC, 3:30 PM IST = 10:00 UTC
-    orchestrator.scheduleMarketDay('*/20 9-15 * * 1-5', async () => {
+    // During market hours (9:15 AM - 3:30 PM IST = UTC 3:45 - 10:00)
+    // Cron runs every 20 min from UTC 4-10 (covers 9:30 IST to 15:30 IST)
+    orchestrator.scheduleMarketDay('*/20 4-10 * * 1-5', async () => {
       app.log.info('[Briefing] Refreshing market briefing (market hours)');
       await agentService.regenerateBriefing();
     });

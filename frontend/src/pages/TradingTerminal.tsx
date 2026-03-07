@@ -1,21 +1,22 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Search,
-  ArrowUpCircle,
-  ArrowDownCircle,
-  ChevronDown,
-  X,
   RefreshCw,
   AlertCircle,
   CheckCircle2,
   Loader2,
+  X,
 } from 'lucide-react';
 import { portfolioApi, tradingApi, marketApi } from '@/services/api';
-import { fireProfitConfetti } from '@/hooks/useTradeAnimation';
 import { createChart, ColorType, CandlestickSeries, type IChartApi, type ISeriesApi, type CandlestickData, type Time } from 'lightweight-charts';
+import { useLivePrice } from '@/hooks/useLivePrice';
+import { useTradeUpdates } from '@/hooks/useTradeUpdates';
+import OrderForm from '@/components/trading/OrderForm';
+import PositionTable from '@/components/trading/PositionTable';
+import OrderTable from '@/components/trading/OrderTable';
+import TradeTable from '@/components/trading/TradeTable';
+import { ExchangeBadge } from '@/components/trading/StatusBadge';
 
-type OrderSide = 'BUY' | 'SELL';
-type OrderType = 'MARKET' | 'LIMIT';
 type Tab = 'positions' | 'orders' | 'trades';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -23,20 +24,6 @@ type Tab = 'positions' | 'orders' | 'trades';
 function num(v: any): number {
   if (v == null) return 0;
   return typeof v === 'string' ? parseFloat(v) || 0 : Number(v);
-}
-
-function fmtTime(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  try {
-    return new Date(iso).toLocaleString('en-IN', {
-      day: '2-digit',
-      month: 'short',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch {
-    return String(iso);
-  }
 }
 
 interface SearchResult {
@@ -48,29 +35,16 @@ interface SearchResult {
 
 const EXCHANGES = [
   { value: '', label: 'All Markets' },
-  { value: 'NSE', label: 'NSE', color: 'text-blue-600 bg-blue-50' },
-  { value: 'BSE', label: 'BSE', color: 'text-violet-600 bg-violet-50' },
-  { value: 'MCX', label: 'MCX', color: 'text-amber-600 bg-amber-50' },
-  { value: 'CDS', label: 'Forex', color: 'text-teal-600 bg-teal-50' },
+  { value: 'NSE', label: 'NSE' },
+  { value: 'BSE', label: 'BSE' },
+  { value: 'MCX', label: 'MCX' },
+  { value: 'CDS', label: 'Forex' },
 ] as const;
-
-function exchangeBadgeColor(exchange: string): string {
-  switch (exchange) {
-    case 'MCX': return 'text-amber-700 bg-amber-50 border-amber-200';
-    case 'CDS': return 'text-teal-700 bg-teal-50 border-teal-200';
-    case 'BSE': return 'text-violet-700 bg-violet-50 border-violet-200';
-    default: return 'text-blue-700 bg-blue-50 border-blue-200';
-  }
-}
 
 export default function TradingTerminal() {
   const [symbol, setSymbol] = useState('');
   const [selectedExchange, setSelectedExchange] = useState('NSE');
   const [searchExchangeFilter, setSearchExchangeFilter] = useState('');
-  const [orderSide, setOrderSide] = useState<OrderSide>('BUY');
-  const [orderType, setOrderType] = useState<OrderType>('MARKET');
-  const [quantity, setQuantity] = useState('');
-  const [price, setPrice] = useState('');
 
   const [portfolioId, setPortfolioId] = useState<string | null>(null);
   const [portfolios, setPortfolios] = useState<any[]>([]);
@@ -80,7 +54,6 @@ export default function TradingTerminal() {
   const [activeTab, setActiveTab] = useState<Tab>('positions');
 
   const [isLoading, setIsLoading] = useState(true);
-  const [isPlacing, setIsPlacing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
@@ -97,6 +70,9 @@ export default function TradingTerminal() {
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
 
+  // Real-time live price via WebSocket
+  const livePrice = useLivePrice(symbol || null);
+
   const fetchAll = useCallback(async () => {
     setIsLoading(true);
     const errors: string[] = [];
@@ -110,9 +86,7 @@ export default function TradingTerminal() {
 
       const pList = Array.isArray(pRes.data) ? pRes.data : [];
       setPortfolios(pList);
-      if (pList.length > 0) {
-        setPortfolioId((prev) => prev ?? pList[0].id);
-      }
+      if (pList.length > 0) setPortfolioId((prev) => prev ?? pList[0].id);
 
       const oData = oRes.data;
       setOrders(Array.isArray(oData) ? oData : (oData as any)?.orders ?? []);
@@ -120,9 +94,7 @@ export default function TradingTerminal() {
       const tData = tRes.data;
       setTrades(Array.isArray(tData) ? tData : (tData as any)?.trades ?? []);
 
-      if (errors.length > 0) {
-        setError('Some data failed to load: ' + errors.join('; '));
-      }
+      if (errors.length > 0) setError('Some data failed to load: ' + errors.join('; '));
     } catch (e: any) {
       setError('Failed to load trading data: ' + (e?.message ?? 'Unknown error'));
     } finally {
@@ -130,22 +102,49 @@ export default function TradingTerminal() {
     }
   }, []);
 
-  useEffect(() => {
-    fetchAll();
-  }, [fetchAll]);
+  useEffect(() => { fetchAll(); }, [fetchAll]);
 
+  // WebSocket-driven auto-refresh on order/position changes
+  useTradeUpdates(fetchAll);
+
+  // Auto-dismiss alerts
   useEffect(() => {
     if (!success && !error) return;
     const t = setTimeout(() => { setSuccess(null); setError(null); }, 5000);
     return () => clearTimeout(t);
   }, [success, error]);
 
+  // Update quote from live WebSocket price
+  useEffect(() => {
+    if (livePrice && symbol) {
+      setQuote((prev: any) => ({
+        ...prev,
+        ltp: livePrice.ltp,
+        change: livePrice.change,
+        change_pct: livePrice.changePercent,
+        timestamp: livePrice.timestamp,
+      }));
+    }
+  }, [livePrice, symbol]);
+
+  // Update position LTPs via WebSocket live prices
+  useEffect(() => {
+    if (!livePrice) return;
+    for (const pos of positions) {
+      if (pos.symbol === symbol && livePrice.ltp > 0) {
+        setPosLtpMap((prev) => ({ ...prev, [symbol]: livePrice.ltp }));
+      }
+    }
+  }, [livePrice, positions, symbol]);
+
+  // Fallback: poll position prices for symbols without active WebSocket subscription
   useEffect(() => {
     if (positions.length === 0) return;
     const posEntries = positions.map((p: any) => ({ sym: p.symbol as string, exch: (p.exchange ?? 'NSE') as string }));
     const unique = [...new Map(posEntries.map(e => [e.sym, e])).values()];
     const fetchPositionPrices = () => {
       unique.forEach(({ sym, exch }) => {
+        if (posLtpMap[sym] && sym === symbol) return; // already getting via WebSocket
         marketApi.quote(sym, exch)
           .then(({ data }) => {
             const ltp = num((data as any)?.ltp ?? (data as any)?.last_price);
@@ -157,10 +156,12 @@ export default function TradingTerminal() {
     fetchPositionPrices();
     const interval = setInterval(fetchPositionPrices, 30_000);
     return () => clearInterval(interval);
-  }, [positions]);
+  }, [positions, symbol, posLtpMap]);
 
+  // Fallback: poll quote if no WebSocket data for 15s
   useEffect(() => {
     if (!symbol) return;
+    if (livePrice) return; // WebSocket is providing data, skip polling
     const poll = () => {
       marketApi.quote(symbol, selectedExchange)
         .then(({ data }) => setQuote(data))
@@ -168,7 +169,7 @@ export default function TradingTerminal() {
     };
     const interval = setInterval(poll, 10_000);
     return () => clearInterval(interval);
-  }, [symbol, selectedExchange]);
+  }, [symbol, selectedExchange, livePrice]);
 
   // Symbol search with debounce
   useEffect(() => {
@@ -184,9 +185,7 @@ export default function TradingTerminal() {
         const results = Array.isArray(data) ? data : [];
         setSearchResults(results.slice(0, 10));
         setShowDropdown(results.length > 0);
-      } catch {
-        setSearchResults([]);
-      }
+      } catch { setSearchResults([]); }
     }, 300);
     return () => { if (searchTimeout.current) clearTimeout(searchTimeout.current); };
   }, [searchQuery, searchExchangeFilter]);
@@ -201,11 +200,7 @@ export default function TradingTerminal() {
     try {
       const { data } = await marketApi.quote(sym, exch);
       setQuote(data);
-    } catch {
-      setQuote(null);
-    } finally {
-      setQuoteLoading(false);
-    }
+    } catch { setQuote(null); } finally { setQuoteLoading(false); }
 
     const to = new Date().toISOString().slice(0, 10);
     const fromDate = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
@@ -222,7 +217,7 @@ export default function TradingTerminal() {
             low: num(c.low),
             close: num(c.close),
           }))
-          .sort((a: CandlestickData<Time>, b: CandlestickData<Time>) => 
+          .sort((a: CandlestickData<Time>, b: CandlestickData<Time>) =>
             (a.time as string).localeCompare(b.time as string)
           );
         seriesRef.current.setData(chartData);
@@ -230,25 +225,15 @@ export default function TradingTerminal() {
       } else if (seriesRef.current) {
         seriesRef.current.setData([]);
       }
-    } catch {
-      // chart data unavailable
-    }
+    } catch { /* chart data unavailable */ }
   }, [selectedExchange]);
 
-  // Initialize lightweight-charts
+  // Initialize chart
   useEffect(() => {
     if (!chartContainerRef.current) return;
-
     const chart = createChart(chartContainerRef.current, {
-      layout: {
-        background: { type: ColorType.Solid, color: '#ffffff' },
-        textColor: '#64748b',
-        fontSize: 11,
-      },
-      grid: {
-        vertLines: { color: '#f1f5f9' },
-        horzLines: { color: '#f1f5f9' },
-      },
+      layout: { background: { type: ColorType.Solid, color: '#ffffff' }, textColor: '#64748b', fontSize: 11 },
+      grid: { vertLines: { color: '#f1f5f9' }, horzLines: { color: '#f1f5f9' } },
       crosshair: {
         vertLine: { color: '#94a3b8', width: 1, style: 3, labelBackgroundColor: '#4f46e5' },
         horzLine: { color: '#94a3b8', width: 1, style: 3, labelBackgroundColor: '#4f46e5' },
@@ -258,89 +243,15 @@ export default function TradingTerminal() {
       width: chartContainerRef.current.clientWidth,
       height: 360,
     });
-
     const series = chart.addSeries(CandlestickSeries, {
-      upColor: '#22c55e',
-      downColor: '#ef4444',
-      borderUpColor: '#16a34a',
-      borderDownColor: '#dc2626',
-      wickUpColor: '#16a34a',
-      wickDownColor: '#dc2626',
+      upColor: '#22c55e', downColor: '#ef4444', borderUpColor: '#16a34a', borderDownColor: '#dc2626', wickUpColor: '#16a34a', wickDownColor: '#dc2626',
     });
-
     chartRef.current = chart;
     seriesRef.current = series;
-
-    const handleResize = () => {
-      if (chartContainerRef.current) {
-        chart.applyOptions({ width: chartContainerRef.current.clientWidth });
-      }
-    };
+    const handleResize = () => { if (chartContainerRef.current) chart.applyOptions({ width: chartContainerRef.current.clientWidth }); };
     window.addEventListener('resize', handleResize);
-
-    return () => {
-      window.removeEventListener('resize', handleResize);
-      chart.remove();
-      chartRef.current = null;
-      seriesRef.current = null;
-    };
+    return () => { window.removeEventListener('resize', handleResize); chart.remove(); chartRef.current = null; seriesRef.current = null; };
   }, []);
-
-  const handlePlaceOrder = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
-    setSuccess(null);
-
-    if (!portfolioId) {
-      setError('No portfolio found. Create one in Settings first.');
-      return;
-    }
-    const sym = symbol.trim().toUpperCase();
-    if (!sym) {
-      setError('Enter a symbol');
-      return;
-    }
-    const qty = parseInt(quantity, 10);
-    if (!qty || qty <= 0) {
-      setError('Enter a valid quantity');
-      return;
-    }
-    if (orderType === 'LIMIT') {
-      const p = parseFloat(price);
-      if (!p || p <= 0) {
-        setError('Enter a valid price for limit order');
-        return;
-      }
-    }
-
-    setIsPlacing(true);
-    try {
-      const result = await tradingApi.placeOrder({
-        portfolio_id: portfolioId,
-        symbol: sym,
-        side: orderSide,
-        order_type: orderType,
-        qty,
-        price: orderType === 'LIMIT' ? parseFloat(price) : undefined,
-        instrument_token: `${sym}-${selectedExchange}`,
-        exchange: selectedExchange,
-      });
-      const order = (result as any)?.data;
-      if (order?._pendingReason || order?.status === 'PENDING') {
-        setSuccess(`${orderSide} order queued as PENDING: ${qty} × ${sym}. Will execute when market opens and price matches.`);
-      } else {
-        setSuccess(`${orderSide} order placed: ${qty} × ${sym}`);
-        if (orderSide === 'SELL') fireProfitConfetti();
-      }
-      setQuantity('');
-      setPrice('');
-      await fetchAll();
-    } catch (err: any) {
-      setError(err?.response?.data?.error || err?.response?.data?.detail || err?.message || 'Failed to place order');
-    } finally {
-      setIsPlacing(false);
-    }
-  };
 
   const handleCancelOrder = async (orderId: string) => {
     try {
@@ -352,7 +263,7 @@ export default function TradingTerminal() {
     }
   };
 
-  const pendingOrders = orders.filter((o) => o.status === 'PENDING' || o.status === 'OPEN');
+  const pendingOrders = orders.filter((o) => o.status === 'PENDING' || o.status === 'OPEN' || o.status === 'SUBMITTED');
   const ltp = num(quote?.ltp ?? quote?.last_price);
   const change = num(quote?.change);
   const changePct = num(quote?.change_pct ?? quote?.changePercent);
@@ -436,9 +347,7 @@ export default function TradingTerminal() {
                     <span className="font-semibold text-sm text-slate-800">{r.symbol}</span>
                     <span className="ml-2 text-xs text-slate-400">{r.name}</span>
                   </div>
-                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${exchangeBadgeColor(r.exchange)}`}>
-                    {r.exchange === 'CDS' ? 'FOREX' : r.exchange}
-                  </span>
+                  <ExchangeBadge exchange={r.exchange} />
                 </button>
               ))}
             </div>
@@ -452,31 +361,26 @@ export default function TradingTerminal() {
           <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
             <div className="flex items-center gap-3">
               <h2 className="font-semibold text-slate-900">{symbol || 'Select a Symbol'}</h2>
-              {symbol && (
-                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${exchangeBadgeColor(selectedExchange)}`}>
-                  {selectedExchange === 'CDS' ? 'FOREX' : selectedExchange}
-                </span>
-              )}
+              {symbol && <ExchangeBadge exchange={selectedExchange} />}
               {symbol && ltp > 0 && (
                 <div className="flex items-center gap-2 ml-3">
                   <span className="text-lg font-bold font-mono text-slate-900">₹{ltp.toFixed(2)}</span>
                   <span className={`text-sm font-mono ${change >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                     {change >= 0 ? '+' : ''}{change.toFixed(2)} ({changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%)
                   </span>
+                  {livePrice && (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-600 font-medium">LIVE</span>
+                  )}
                   {quote?.timestamp && (
                     <span className="text-[10px] text-slate-400 ml-1">
-                      {new Date(quote.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 })}
+                      {new Date(quote.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                     </span>
                   )}
                 </div>
               )}
               {quoteLoading && <Loader2 className="w-4 h-4 animate-spin text-slate-400" />}
             </div>
-            <button
-              onClick={fetchAll}
-              className="p-1.5 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
-              title="Refresh data"
-            >
+            <button onClick={fetchAll} className="p-1.5 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors" title="Refresh data">
               <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
             </button>
           </div>
@@ -494,153 +398,19 @@ export default function TradingTerminal() {
           </div>
         </div>
 
-        {/* Order form */}
-        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Place Order</h3>
-            {portfolios.length > 1 && (
-              <select
-                value={portfolioId ?? ''}
-                onChange={(e) => setPortfolioId(e.target.value)}
-                className="text-xs px-2 py-1 bg-slate-50 border border-slate-200 rounded text-slate-600"
-              >
-                {portfolios.map((p: any) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
-            )}
-          </div>
-
-          {/* Current price display */}
-          {symbol && ltp > 0 && (
-            <div className="mb-4 p-3 bg-slate-50 rounded-lg">
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-slate-500">Current Price</span>
-                <span className="text-sm font-bold font-mono text-slate-800">₹{selectedExchange === 'CDS' ? ltp.toFixed(4) : ltp.toFixed(2)}</span>
-              </div>
-              {quantity && parseInt(quantity) > 0 && (
-                <div className="flex items-center justify-between mt-1">
-                  <span className="text-xs text-slate-500">Est. Value</span>
-                  <span className="text-xs font-mono text-slate-600">
-                    ₹{(ltp * parseInt(quantity)).toLocaleString('en-IN', { maximumFractionDigits: selectedExchange === 'CDS' ? 4 : 0 })}
-                  </span>
-                </div>
-              )}
-              {selectedExchange !== 'NSE' && selectedExchange !== 'BSE' && (
-                <div className="flex items-center justify-between mt-1">
-                  <span className="text-xs text-slate-500">Market</span>
-                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${exchangeBadgeColor(selectedExchange)}`}>
-                    {selectedExchange === 'MCX' ? 'Commodity' : 'Currency'}
-                  </span>
-                </div>
-              )}
-            </div>
-          )}
-
-          <form onSubmit={handlePlaceOrder} className="space-y-4">
-            <div className="grid grid-cols-2 gap-1 bg-slate-100 rounded-lg p-1">
-              <button
-                type="button"
-                onClick={() => setOrderSide('BUY')}
-                className={`py-2 text-sm font-semibold rounded-md transition-all ${
-                  orderSide === 'BUY'
-                    ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
-                    : 'text-slate-500 hover:text-slate-700'
-                }`}
-              >
-                <ArrowUpCircle className="w-4 h-4 inline mr-1.5" />BUY
-              </button>
-              <button
-                type="button"
-                onClick={() => setOrderSide('SELL')}
-                className={`py-2 text-sm font-semibold rounded-md transition-all ${
-                  orderSide === 'SELL'
-                    ? 'bg-red-600 text-white shadow-lg shadow-red-500/20'
-                    : 'text-slate-500 hover:text-slate-700'
-                }`}
-              >
-                <ArrowDownCircle className="w-4 h-4 inline mr-1.5" />SELL
-              </button>
-            </div>
-
-            <div>
-              <label className="text-xs text-slate-500 mb-1 block">Order Type</label>
-              <div className="relative">
-                <select
-                  value={orderType}
-                  onChange={(e) => setOrderType(e.target.value as OrderType)}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-800 appearance-none focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-                >
-                  <option value="MARKET">Market</option>
-                  <option value="LIMIT">Limit</option>
-                </select>
-                <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-              </div>
-            </div>
-
-            <div>
-              <label className="text-xs text-slate-500 mb-1 block">Quantity</label>
-              <input
-                type="number"
-                min="1"
-                value={quantity}
-                onChange={(e) => setQuantity(e.target.value)}
-                placeholder="Enter quantity"
-                className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-              />
-            </div>
-
-            {orderType === 'LIMIT' && (
-              <div>
-                <label className="text-xs text-slate-500 mb-1 block">Price</label>
-                <input
-                  type="number"
-                  step="0.05"
-                  min="0"
-                  value={price}
-                  onChange={(e) => setPrice(e.target.value)}
-                  placeholder="0.00"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-                />
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={isPlacing || !symbol.trim()}
-              className={`w-full py-2.5 rounded-lg text-sm font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
-                orderSide === 'BUY'
-                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/20'
-                  : 'bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-600/20'
-              }`}
-            >
-              {isPlacing && <Loader2 className="w-4 h-4 inline animate-spin mr-1.5" />}
-              {isPlacing ? 'Placing...' : `${orderSide} ${symbol || 'SYMBOL'}`}
-            </button>
-          </form>
-
-          {pendingOrders.length > 0 && (
-            <div className="mt-4 pt-4 border-t border-slate-200">
-              <h4 className="text-xs font-semibold text-slate-500 uppercase mb-2">
-                Pending ({pendingOrders.length})
-              </h4>
-              <div className="space-y-1.5 max-h-36 overflow-y-auto">
-                {pendingOrders.map((o: any) => (
-                  <div key={o.id} className="flex items-center justify-between text-xs px-2 py-1.5 bg-slate-50 rounded">
-                    <div className="flex items-center gap-2">
-                      <span className={`font-bold ${o.side === 'BUY' ? 'text-emerald-600' : 'text-red-600'}`}>{o.side}</span>
-                      <span className="text-slate-700">{o.symbol}</span>
-                      <span className="text-slate-400">×{o.qty}</span>
-                    </div>
-                    <button onClick={() => handleCancelOrder(o.id)} className="text-red-500 hover:text-red-600" title="Cancel">
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
+        {/* Order form (extracted component) */}
+        <OrderForm
+          symbol={symbol}
+          exchange={selectedExchange}
+          ltp={ltp}
+          portfolioId={portfolioId}
+          portfolios={portfolios}
+          pendingOrders={pendingOrders}
+          onPortfolioChange={setPortfolioId}
+          onSuccess={setSuccess}
+          onError={setError}
+          onRefresh={fetchAll}
+        />
       </div>
 
       {/* Tabbed data panel */}
@@ -666,208 +436,22 @@ export default function TradingTerminal() {
 
         <div className="p-4 min-h-[200px]">
           {isLoading && positions.length === 0 && orders.length === 0 && trades.length === 0 ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="w-6 h-6 animate-spin text-slate-400" />
-            </div>
+            <div className="flex items-center justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>
           ) : (
             <>
               {activeTab === 'positions' && (
-                <div className="overflow-x-auto">
-                  {positions.length === 0 ? (
-                    <p className="text-center text-slate-400 text-sm py-8">No open positions</p>
-                  ) : (
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="text-slate-400 border-b border-slate-200">
-                          <th className="text-left pb-2 font-medium">Symbol</th>
-                          <th className="text-center pb-2 font-medium">Side</th>
-                          <th className="text-right pb-2 font-medium">Qty</th>
-                          <th className="text-right pb-2 font-medium">Avg Price</th>
-                          <th className="text-right pb-2 font-medium">LTP</th>
-                          <th className="text-right pb-2 font-medium">Unrealized P&L</th>
-                          <th className="text-right pb-2 font-medium">Realized P&L</th>
-                          <th className="text-left pb-2 font-medium hidden md:table-cell">Strategy</th>
-                          <th className="text-right pb-2 font-medium hidden sm:table-cell">Opened</th>
-                          <th className="text-center pb-2 font-medium">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {positions.map((pos: any) => {
-                          const avgPrice = num(pos.avgEntryPrice ?? pos.avg_entry_price);
-                          const qty = num(pos.qty);
-                          const liveLtp = posLtpMap[pos.symbol] || 0;
-                          const uPnl = liveLtp > 0 && avgPrice > 0
-                            ? (liveLtp - avgPrice) * qty * (pos.side === 'SHORT' ? -1 : 1)
-                            : num(pos.unrealizedPnl ?? pos.unrealized_pnl);
-                          const rPnl = num(pos.realizedPnl ?? pos.realized_pnl);
-                          return (
-                            <tr key={pos.id} className="border-b border-slate-100 hover:bg-slate-50/50">
-                              <td className="py-2.5 text-slate-800 font-medium">
-                                {pos.symbol}<span className="text-slate-400 ml-1 text-[10px]">{pos.exchange}</span>
-                              </td>
-                              <td className="py-2.5 text-center">
-                                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${pos.side === 'LONG' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}`}>{pos.side}</span>
-                              </td>
-                              <td className="py-2.5 text-right font-mono text-slate-600">{qty}</td>
-                              <td className="py-2.5 text-right font-mono text-slate-600">₹{avgPrice.toFixed(2)}</td>
-                              <td className="py-2.5 text-right font-mono text-slate-600">
-                                {liveLtp > 0 ? `₹${liveLtp.toFixed(2)}` : '...'}
-                              </td>
-                              <td className={`py-2.5 text-right font-mono ${uPnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                                {uPnl >= 0 ? '+' : ''}₹{uPnl.toFixed(2)}
-                              </td>
-                              <td className={`py-2.5 text-right font-mono ${rPnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                                {rPnl >= 0 ? '+' : ''}₹{rPnl.toFixed(2)}
-                              </td>
-                              <td className="py-2.5 text-left hidden md:table-cell">
-                                {(pos.strategyTag ?? pos.strategy_tag) ? (
-                                  <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-violet-50 text-violet-600 border border-violet-100">
-                                    {(pos.strategyTag ?? pos.strategy_tag)?.replace('STRAT:', '').replace('BOT:', '')}
-                                  </span>
-                                ) : (
-                                  <span className="text-slate-300">—</span>
-                                )}
-                              </td>
-                              <td className="py-2.5 text-right text-slate-400 hidden sm:table-cell">{fmtTime(pos.openedAt ?? pos.opened_at)}</td>
-                              <td className="py-2.5 text-center">
-                                <button
-                                  onClick={async () => {
-                                    if (!liveLtp || liveLtp <= 0) { setError('No live price available to close position'); return; }
-                                    try {
-                                      await tradingApi.closePosition(pos.id, liveLtp);
-                                      setSuccess(`${pos.side === 'SHORT' ? 'Covered' : 'Sold'} ${qty} ${pos.symbol} @ ₹${liveLtp.toFixed(2)}`);
-                                      await fetchAll();
-                                    } catch (err: any) {
-                                      setError(err?.response?.data?.error || 'Failed to close position');
-                                    }
-                                  }}
-                                  className={`text-[10px] font-bold px-2 py-1 rounded transition ${
-                                    pos.side === 'SHORT'
-                                      ? 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'
-                                      : 'bg-red-50 text-red-600 hover:bg-red-100'
-                                  }`}
-                                >
-                                  {pos.side === 'SHORT' ? 'COVER' : 'EXIT'}
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
+                <PositionTable positions={positions} posLtpMap={posLtpMap} onSuccess={setSuccess} onError={setError} onRefresh={fetchAll} />
               )}
-
               {activeTab === 'orders' && (
-                <div className="overflow-x-auto">
-                  {orders.length === 0 ? (
-                    <p className="text-center text-slate-400 text-sm py-8">No orders yet</p>
-                  ) : (
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="text-slate-400 border-b border-slate-200">
-                          <th className="text-left pb-2 font-medium">Time</th>
-                          <th className="text-left pb-2 font-medium">Symbol</th>
-                          <th className="text-center pb-2 font-medium">Side</th>
-                          <th className="text-center pb-2 font-medium">Type</th>
-                          <th className="text-right pb-2 font-medium">Qty</th>
-                          <th className="text-right pb-2 font-medium">Price</th>
-                          <th className="text-center pb-2 font-medium">Status</th>
-                          <th className="text-center pb-2 font-medium">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {orders.map((order: any) => (
-                          <tr key={order.id} className="border-b border-slate-100 hover:bg-slate-50/50">
-                            <td className="py-2.5 text-slate-400 whitespace-nowrap">{fmtTime(order.createdAt ?? order.created_at)}</td>
-                            <td className="py-2.5 text-slate-800 font-medium">{order.symbol}</td>
-                            <td className="py-2.5 text-center">
-                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${order.side === 'BUY' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}`}>{order.side}</span>
-                            </td>
-                            <td className="py-2.5 text-center text-slate-500">{order.orderType ?? order.order_type}</td>
-                            <td className="py-2.5 text-right font-mono text-slate-600">{order.filledQty ?? order.filled_qty}/{order.qty}</td>
-                            <td className="py-2.5 text-right font-mono text-slate-600">{order.price ? `₹${num(order.price).toFixed(2)}` : 'MKT'}</td>
-                            <td className="py-2.5 text-center"><OrderStatusBadge status={order.status} /></td>
-                            <td className="py-2.5 text-center">
-                              {order.status === 'PENDING' && (
-                                <button onClick={() => handleCancelOrder(order.id)} className="text-red-500 hover:text-red-600" title="Cancel order">
-                                  <X className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
+                <OrderTable orders={orders} onCancelOrder={handleCancelOrder} />
               )}
-
               {activeTab === 'trades' && (
-                <div className="overflow-x-auto">
-                  {trades.length === 0 ? (
-                    <p className="text-center text-slate-400 text-sm py-8">No completed trades yet</p>
-                  ) : (
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="text-slate-400 border-b border-slate-200">
-                          <th className="text-left pb-2 font-medium">Symbol</th>
-                          <th className="text-center pb-2 font-medium">Side</th>
-                          <th className="text-right pb-2 font-medium">Qty</th>
-                          <th className="text-right pb-2 font-medium">Entry</th>
-                          <th className="text-right pb-2 font-medium">Exit</th>
-                          <th className="text-right pb-2 font-medium">Net P&L</th>
-                          <th className="text-right pb-2 font-medium hidden sm:table-cell">Duration</th>
-                          <th className="text-right pb-2 font-medium hidden sm:table-cell">Closed</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {trades.map((trade: any) => {
-                          const netPnl = num(trade.netPnl ?? trade.net_pnl);
-                          return (
-                            <tr key={trade.id} className="border-b border-slate-100 hover:bg-slate-50/50">
-                              <td className="py-2.5 text-slate-800 font-medium">
-                                {trade.symbol}<span className="text-slate-400 ml-1 text-[10px]">{trade.exchange}</span>
-                              </td>
-                              <td className="py-2.5 text-center">
-                                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${trade.side === 'BUY' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}`}>{trade.side}</span>
-                              </td>
-                              <td className="py-2.5 text-right font-mono text-slate-600">{trade.qty}</td>
-                              <td className="py-2.5 text-right font-mono text-slate-600">₹{num(trade.entryPrice ?? trade.entry_price).toFixed(2)}</td>
-                              <td className="py-2.5 text-right font-mono text-slate-600">₹{num(trade.exitPrice ?? trade.exit_price).toFixed(2)}</td>
-                              <td className={`py-2.5 text-right font-mono font-semibold ${netPnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                                {netPnl >= 0 ? '+' : ''}₹{netPnl.toFixed(2)}
-                              </td>
-                              <td className="py-2.5 text-right text-slate-400 hidden sm:table-cell">{trade.holdDuration ?? trade.hold_duration ?? '—'}</td>
-                              <td className="py-2.5 text-right text-slate-400 hidden sm:table-cell">{fmtTime(trade.exitTime ?? trade.exit_time)}</td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
+                <TradeTable trades={trades} />
               )}
             </>
           )}
         </div>
       </div>
     </div>
-  );
-}
-
-function OrderStatusBadge({ status }: { status: string }) {
-  const styles: Record<string, string> = {
-    FILLED: 'bg-emerald-50 text-emerald-600',
-    PENDING: 'bg-amber-50 text-amber-600',
-    PARTIALLY_FILLED: 'bg-blue-50 text-blue-600',
-    CANCELLED: 'bg-slate-100 text-slate-500',
-    REJECTED: 'bg-red-50 text-red-600',
-  };
-  return (
-    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${styles[status] ?? 'bg-slate-100 text-slate-500'}`}>
-      {status}
-    </span>
   );
 }

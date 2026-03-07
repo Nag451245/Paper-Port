@@ -300,3 +300,95 @@ fn generate_combinations(grid: &std::collections::HashMap<String, Vec<f64>>) -> 
     }
     combos
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn trending_candles_json(n: usize, start: f64, step: f64) -> Vec<serde_json::Value> {
+        (0..n).map(|i| {
+            let close = start + i as f64 * step;
+            json!({
+                "timestamp": format!("2025-{:02}-{:02}", (i / 28) % 12 + 1, (i % 28) + 1),
+                "open": close - step * 0.3,
+                "high": close + step.abs() * 0.5,
+                "low": close - step.abs() * 0.5,
+                "close": close,
+                "volume": 10000.0,
+            })
+        }).collect()
+    }
+
+    fn make_wf_input(n_candles: usize) -> serde_json::Value {
+        let candles = trending_candles_json(n_candles, 100.0, 0.5);
+        let mut grid = std::collections::HashMap::new();
+        grid.insert("shortPeriod".to_string(), vec![5.0, 10.0]);
+        grid.insert("longPeriod".to_string(), vec![20.0, 30.0]);
+
+        json!({
+            "strategy": "ema_crossover",
+            "symbol": "TEST",
+            "initial_capital": 100000.0,
+            "candles": candles,
+            "param_grid": grid,
+            "in_sample_ratio": 0.7,
+            "num_folds": 3,
+        })
+    }
+
+    #[test]
+    fn test_walk_forward_basic_runs() {
+        let input = make_wf_input(120);
+        let result = compute(input);
+        assert!(result.is_ok(), "walk-forward with 120 candles should succeed: {:?}", result.err());
+        let val = result.unwrap();
+        assert!(val.get("folds").is_some(), "result should contain 'folds'");
+        assert!(val.get("aggregate").is_some(), "result should contain 'aggregate'");
+        assert!(val.get("overfitting_score").is_some(), "result should contain 'overfitting_score'");
+    }
+
+    #[test]
+    fn test_walk_forward_too_few_candles() {
+        let input = make_wf_input(20);
+        let result = compute(input);
+        assert!(result.is_err(), "walk-forward with only 20 candles should return an error");
+        let err = result.unwrap_err();
+        assert!(err.contains("at least 60") || err.contains("Not enough"),
+            "error message should mention insufficient data, got: {}", err);
+    }
+
+    #[test]
+    fn test_walk_forward_results_structure() {
+        let input = make_wf_input(150);
+        let result = compute(input).expect("walk-forward with 150 candles should succeed");
+
+        let folds = result.get("folds").and_then(|v| v.as_array())
+            .expect("'folds' should be an array");
+        assert!(!folds.is_empty(), "should have at least one fold");
+
+        for fold in folds {
+            assert!(fold.get("fold").is_some(), "each fold should have 'fold' index");
+            assert!(fold.get("in_sample_sharpe").is_some(), "each fold should have 'in_sample_sharpe'");
+            assert!(fold.get("out_sample_sharpe").is_some(), "each fold should have 'out_sample_sharpe'");
+            assert!(fold.get("best_params").is_some(), "each fold should have 'best_params'");
+            assert!(fold.get("degradation").is_some(), "each fold should have 'degradation'");
+
+            let is_sharpe = fold["in_sample_sharpe"].as_f64().unwrap();
+            let oos_sharpe = fold["out_sample_sharpe"].as_f64().unwrap();
+            assert!(is_sharpe.is_finite(), "in_sample_sharpe should be finite");
+            assert!(oos_sharpe.is_finite(), "out_sample_sharpe should be finite");
+        }
+
+        let agg = result.get("aggregate").expect("should have 'aggregate'");
+        assert!(agg.get("avg_in_sample_sharpe").is_some());
+        assert!(agg.get("avg_out_sample_sharpe").is_some());
+        assert!(agg.get("consistency_score").is_some());
+
+        let overfit = result["overfitting_score"].as_f64().unwrap();
+        assert!(overfit >= 0.0 && overfit <= 1.0,
+            "overfitting_score should be in [0, 1], got {}", overfit);
+
+        assert!(result.get("window_mode").is_some(), "should have 'window_mode'");
+    }
+}

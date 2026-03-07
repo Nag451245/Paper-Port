@@ -7,11 +7,17 @@ import { getBrokerAdapter, type BrokerAdapter, type BrokerOrderInput as BrokerIn
 import { wsHub } from '../lib/websocket.js';
 import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
+import { TWAPExecutor, selectOrderType, type TWAPConfig } from './twap-executor.service.js';
 type OrderSide = string;
 type OrderType = string;
 type Exchange = string;
 
 const log = createChildLogger('TradeService');
+
+const TWAP_AUTO_ROUTE_QTY_THRESHOLD = Number(process.env.TWAP_QTY_THRESHOLD ?? 500);
+const TWAP_DEFAULT_SLICES = 5;
+const TWAP_DEFAULT_DURATION_MIN = 10;
+const TWAP_MAX_DEVIATION_PCT = 1.0;
 
 const TRADING_MODE: 'PAPER' | 'LIVE' = (process.env.TRADING_MODE ?? 'PAPER').toUpperCase() as any;
 
@@ -185,12 +191,14 @@ export class TradeService {
   private riskService: RiskService;
   private broker: BrokerAdapter | null = null;
   private oms: OrderManagementService | null = null;
+  private twapExecutor: TWAPExecutor;
 
   constructor(private prisma: PrismaClient, oms?: OrderManagementService) {
     this.marketData = new MarketDataService();
     this.calendar = new MarketCalendar();
     this.riskService = new RiskService(prisma);
     this.oms = oms ?? null;
+    this.twapExecutor = new TWAPExecutor(prisma);
 
     if (TRADING_MODE === 'LIVE') {
       this.broker = getBrokerAdapter('breeze');
@@ -366,6 +374,52 @@ export class TradeService {
     } catch (err) {
       if (err instanceof TradeError) throw err;
       log.warn({ err }, 'Risk check error (non-blocking)');
+    }
+
+    // Auto-route large orders through TWAP to minimize market impact
+    if (input.qty >= TWAP_AUTO_ROUTE_QTY_THRESHOLD && input.orderType === 'MARKET') {
+      try {
+        const quote = await this.marketData.getQuote(input.symbol, exchange);
+        if (quote.ltp > 0) {
+          const routing = selectOrderType({
+            qty: input.qty,
+            ltp: quote.ltp,
+            avgDailyVolume: quote.volume ?? 500_000,
+            confidence: 0.5,
+            spreadPct: 0.05,
+          });
+          if (routing.orderType === 'TWAP') {
+            log.info({
+              symbol: input.symbol, qty: input.qty, reason: routing.reason,
+            }, 'Auto-routing large order through TWAP');
+
+            const twapConfig: TWAPConfig = {
+              totalQty: input.qty,
+              numSlices: TWAP_DEFAULT_SLICES,
+              durationMinutes: TWAP_DEFAULT_DURATION_MIN,
+              maxDeviationPct: TWAP_MAX_DEVIATION_PCT,
+              symbol: input.symbol,
+              side: input.side as 'BUY' | 'SELL',
+              exchange,
+              portfolioId: input.portfolioId,
+              userId,
+              strategyTag: input.strategyTag,
+            };
+            const twapResult = await this.twapExecutor.executeTWAP(twapConfig);
+            if (twapResult.totalFilled > 0) {
+              log.info({
+                symbol: input.symbol,
+                totalFilled: twapResult.totalFilled,
+                avgPrice: twapResult.avgFillPrice,
+                slippageBps: twapResult.slippageBps,
+              }, 'TWAP execution completed — returning first slice order');
+            }
+            return twapResult as any;
+          }
+        }
+      } catch (err) {
+        log.warn({ err, symbol: input.symbol }, 'TWAP auto-routing check failed, falling back to normal execution');
+      }
     }
 
     let fillPrice = input.price ?? 0;

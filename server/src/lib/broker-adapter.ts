@@ -1,5 +1,76 @@
 const BREEZE_BRIDGE_URL = process.env.BREEZE_BRIDGE_URL || 'http://127.0.0.1:8001';
 const FETCH_TIMEOUT = 15_000;
+const RETRY_DELAYS = [1000, 2000, 4000]; // exponential backoff: 1s, 2s, 4s
+const CB_FAILURE_THRESHOLD = 5;
+const CB_RESET_MS = 30_000;
+
+type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+
+class CircuitBreaker {
+  private state: CircuitState = 'CLOSED';
+  private failures = 0;
+  private lastFailureTime = 0;
+
+  isAllowed(): boolean {
+    if (this.state === 'CLOSED') return true;
+    if (this.state === 'OPEN') {
+      if (Date.now() - this.lastFailureTime >= CB_RESET_MS) {
+        this.state = 'HALF_OPEN';
+        console.log('[CircuitBreaker] Transitioning to HALF_OPEN');
+        return true;
+      }
+      return false;
+    }
+    return true; // HALF_OPEN allows one request
+  }
+
+  recordSuccess(): void {
+    if (this.state === 'HALF_OPEN') {
+      console.log('[CircuitBreaker] HALF_OPEN → CLOSED (success)');
+    }
+    this.state = 'CLOSED';
+    this.failures = 0;
+  }
+
+  recordFailure(): void {
+    this.failures++;
+    this.lastFailureTime = Date.now();
+    if (this.failures >= CB_FAILURE_THRESHOLD) {
+      this.state = 'OPEN';
+      console.log(`[CircuitBreaker] OPEN after ${this.failures} consecutive failures (reset in ${CB_RESET_MS / 1000}s)`);
+    }
+  }
+
+  getState(): CircuitState { return this.state; }
+}
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  cb: CircuitBreaker,
+  label: string,
+): Promise<T> {
+  if (!cb.isAllowed()) {
+    throw new Error(`Circuit breaker OPEN for ${label} — rejecting request`);
+  }
+
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
+    try {
+      const result = await fn();
+      cb.recordSuccess();
+      return result;
+    } catch (err) {
+      lastErr = err as Error;
+      if (attempt < RETRY_DELAYS.length) {
+        const delay = RETRY_DELAYS[attempt];
+        console.log(`[Broker] ${label} attempt ${attempt + 1} failed: ${lastErr.message}, retrying in ${delay}ms`);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+  cb.recordFailure();
+  throw lastErr!;
+}
 
 export interface BrokerQuote {
   symbol: string;
@@ -86,6 +157,7 @@ class BreezeAdapter implements BrokerAdapter {
   name = 'ICICI Breeze';
   private connected = false;
   private credentials: Record<string, string> = {};
+  private cb = new CircuitBreaker();
 
   isConnected(): boolean { return this.connected; }
 
@@ -213,36 +285,40 @@ class BreezeAdapter implements BrokerAdapter {
   }
 
   private async bridgeFetch(path: string): Promise<unknown> {
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT);
-    try {
-      const res = await fetch(`${BREEZE_BRIDGE_URL}${path}`, { signal: ac.signal });
-      clearTimeout(timer);
-      if (!res.ok) throw new Error(`Bridge returned ${res.status}`);
-      return await res.json();
-    } catch (err) {
-      clearTimeout(timer);
-      throw err;
-    }
+    return withRetry(async () => {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT);
+      try {
+        const res = await fetch(`${BREEZE_BRIDGE_URL}${path}`, { signal: ac.signal });
+        clearTimeout(timer);
+        if (!res.ok) throw new Error(`Bridge returned ${res.status}`);
+        return await res.json();
+      } catch (err) {
+        clearTimeout(timer);
+        throw err;
+      }
+    }, this.cb, `GET ${path}`);
   }
 
   private async bridgePost(path: string, body: unknown): Promise<any> {
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT);
-    try {
-      const res = await fetch(`${BREEZE_BRIDGE_URL}${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: ac.signal,
-      });
-      clearTimeout(timer);
-      if (!res.ok) throw new Error(`Bridge returned ${res.status}`);
-      return await res.json();
-    } catch (err) {
-      clearTimeout(timer);
-      throw err;
-    }
+    return withRetry(async () => {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT);
+      try {
+        const res = await fetch(`${BREEZE_BRIDGE_URL}${path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: ac.signal,
+        });
+        clearTimeout(timer);
+        if (!res.ok) throw new Error(`Bridge returned ${res.status}`);
+        return await res.json();
+      } catch (err) {
+        clearTimeout(timer);
+        throw err;
+      }
+    }, this.cb, `POST ${path}`);
   }
 }
 

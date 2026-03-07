@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useAuthStore } from '@/stores/auth';
 import AppShell from '@/components/layout/AppShell';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import NotificationToaster from '@/components/ui/NotificationToaster';
 import { liveSocket } from '@/services/websocket';
 
 import Login from '@/pages/Login';
@@ -25,6 +26,7 @@ const FnOAnalytics = lazy(() => import('@/pages/FnOAnalytics'));
 const LearningIntelligence = lazy(() => import('@/pages/LearningIntelligence'));
 const EdgeLab = lazy(() => import('@/pages/EdgeLab'));
 const CommandCenter = lazy(() => import('@/pages/CommandCenter'));
+const RiskDashboard = lazy(() => import('@/pages/RiskDashboard'));
 const Onboarding = lazy(() => import('@/pages/Onboarding'));
 
 const queryClient = new QueryClient({
@@ -76,7 +78,12 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return <Navigate to="/login" replace />;
   }
 
-  return <>{children}</>;
+  return (
+    <>
+      <NotificationToaster />
+      {children}
+    </>
+  );
 }
 
 function PublicRoute({ children }: { children: React.ReactNode }) {
@@ -124,6 +131,7 @@ export default function App() {
             <Route path="/learning" element={<Suspense fallback={<PageLoader />}><LearningIntelligence /></Suspense>} />
             <Route path="/edge-lab" element={<Suspense fallback={<PageLoader />}><EdgeLab /></Suspense>} />
             <Route path="/command-center" element={<Suspense fallback={<PageLoader />}><CommandCenter /></Suspense>} />
+            <Route path="/risk-dashboard" element={<Suspense fallback={<PageLoader />}><RiskDashboard /></Suspense>} />
           </Route>
 
           <Route path="*" element={<Navigate to="/dashboard" replace />} />

@@ -98,7 +98,7 @@ fn predict_one(features: &[f64], weights: &[f64], bias: f64) -> f64 {
     sigmoid(z)
 }
 
-fn train_logistic(data: &[TrainingRow], lr: f64, epochs: usize) -> (Vec<f64>, f64, f64) {
+fn train_logistic(data: &[TrainingRow], lr: f64, epochs: usize) -> (Vec<f64>, f64, f64, f64) {
     let n_features = feature_vec(&data[0].features).len();
     let mut w = vec![0.0f64; n_features];
     let mut bias = 0.0f64;
@@ -126,7 +126,7 @@ fn train_logistic(data: &[TrainingRow], lr: f64, epochs: usize) -> (Vec<f64>, f6
     }
 
     // Compute final loss and accuracy
-    let mut total_loss = 0.0;
+    let mut total_loss = 0.0_f64;
     let mut correct = 0usize;
     for row in data {
         let x = feature_vec(&row.features);
@@ -136,9 +136,10 @@ fn train_logistic(data: &[TrainingRow], lr: f64, epochs: usize) -> (Vec<f64>, f6
         let predicted_class = if pred >= 0.5 { 1.0 } else { 0.0 };
         if (predicted_class - y).abs() < 0.01 { correct += 1; }
     }
+    let avg_loss = total_loss / data.len() as f64;
     let accuracy = correct as f64 / data.len() as f64;
 
-    (w, bias, accuracy)
+    (w, bias, accuracy, avg_loss)
 }
 
 pub fn compute(data: Value) -> Result<Value, String> {
@@ -149,6 +150,14 @@ pub fn compute(data: Value) -> Result<Value, String> {
         "predict" => {
             let features = input.features.ok_or("features required for predict")?;
             let weights = input.weights.ok_or("weights required for predict")?;
+
+            if features.is_empty() {
+                return Ok(serde_json::json!({
+                    "scores": [],
+                    "threshold": 0.55,
+                    "model_accuracy": weights.training_accuracy,
+                }));
+            }
 
             let expected_dim = feature_vec(&features[0]).len();
             if weights.w.len() != expected_dim {
@@ -179,7 +188,7 @@ pub fn compute(data: Value) -> Result<Value, String> {
             let lr = input.learning_rate.unwrap_or(0.01);
             let epochs = input.epochs.unwrap_or(500).min(5000);
 
-            let (w, bias, accuracy) = train_logistic(&training_data, lr, epochs);
+            let (w, bias, accuracy, avg_loss) = train_logistic(&training_data, lr, epochs);
 
             let base_names = vec![
                 "ema_vote", "rsi_vote", "macd_vote", "supertrend_vote",
@@ -200,7 +209,7 @@ pub fn compute(data: Value) -> Result<Value, String> {
                     training_samples: training_data.len(),
                     training_accuracy: (accuracy * 1000.0).round() / 1000.0,
                 },
-                training_loss: 0.0,
+                training_loss: (avg_loss * 10000.0).round() / 10000.0,
                 training_accuracy: (accuracy * 1000.0).round() / 1000.0,
                 samples_used: training_data.len(),
             };
@@ -322,6 +331,8 @@ mod tests {
         let result = compute(input).unwrap();
         let acc = result.get("training_accuracy").unwrap().as_f64().unwrap();
         assert!(acc > 0.6, "should learn separable data, got accuracy {}", acc);
+        let loss = result.get("training_loss").unwrap().as_f64().unwrap();
+        assert!(loss > 0.0, "training_loss should be non-zero, got {}", loss);
     }
 
     #[test]
@@ -329,5 +340,58 @@ mod tests {
         assert!((sigmoid(0.0) - 0.5).abs() < 1e-10);
         assert!(sigmoid(10.0) > 0.99);
         assert!(sigmoid(-10.0) < 0.01);
+    }
+
+    #[test]
+    fn test_predict_positive_weights_high_composite() {
+        let features = vec![make_feature(0.9, 0.8)];
+        let weights = ModelWeights {
+            w: vec![1.0; 12], bias: 0.0,
+            feature_names: vec![], training_samples: 100, training_accuracy: 0.8,
+        };
+        let input = json!({
+            "command": "predict",
+            "features": serde_json::to_value(&features).unwrap(),
+            "weights": serde_json::to_value(&weights).unwrap(),
+        });
+        let result = compute(input).unwrap();
+        let scores = result.get("scores").unwrap().as_array().unwrap();
+        assert!(scores[0].as_f64().unwrap() > 0.5, "high composite + positive weights should predict >0.5");
+    }
+
+    #[test]
+    fn test_train_returns_weights() {
+        let mut data = Vec::new();
+        for i in 0..30 {
+            let v = (i as f64) / 30.0;
+            data.push(TrainingRow {
+                features: make_feature(v, v),
+                outcome: if v > 0.5 { 1.0 } else { 0.0 },
+            });
+        }
+        let input = json!({
+            "command": "train",
+            "training_data": serde_json::to_value(&data).unwrap(),
+            "epochs": 100,
+        });
+        let result = compute(input).unwrap();
+        assert!(result.get("weights").is_some(), "train should return weights");
+        assert!(result.get("training_accuracy").is_some(), "train should return accuracy");
+    }
+
+    #[test]
+    fn test_predict_empty_features() {
+        let weights = ModelWeights {
+            w: vec![0.0; 12], bias: 0.0,
+            feature_names: vec![], training_samples: 0, training_accuracy: 0.0,
+        };
+        let input = json!({
+            "command": "predict",
+            "features": [],
+            "weights": serde_json::to_value(&weights).unwrap(),
+        });
+        let result = compute(input).unwrap();
+        let scores = result.get("scores").unwrap().as_array().unwrap();
+        assert_eq!(scores.len(), 0, "empty features should produce empty scores");
     }
 }
