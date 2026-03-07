@@ -204,7 +204,7 @@ fn adf_score(spread: &[f64]) -> f64 {
     }
     let beta = ols_slope(&lag, &dy);
     let n = dy.len() as f64;
-    let mean_dy = dy.iter().sum::<f64>() / n;
+    let _mean_dy = dy.iter().sum::<f64>() / n;
     let residuals: Vec<f64> = (0..dy.len()).map(|i| dy[i] - beta * lag[i]).collect();
     let sse = residuals.iter().map(|r| r * r).sum::<f64>();
     let se = (sse / (n - 1.0)).sqrt();

@@ -1,3 +1,8 @@
+pub mod utils;
+pub mod config;
+pub mod strategy;
+pub mod state;
+pub mod server;
 pub mod backtest;
 pub mod signals;
 mod risk;
@@ -14,41 +19,90 @@ mod correlation;
 mod feature_store;
 mod multi_timeframe;
 
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
-use std::io::{self, BufRead, Read};
+use tracing::{info, warn, error};
+
+use crate::config::EngineConfig;
+use crate::state::AppState;
 
 #[derive(Deserialize)]
-struct Request {
-    id: Option<String>,
-    command: String,
-    data: serde_json::Value,
+pub struct Request {
+    pub id: Option<String>,
+    pub command: String,
+    pub data: serde_json::Value,
 }
 
 #[derive(Serialize)]
-struct Response {
-    id: Option<String>,
-    success: bool,
-    data: serde_json::Value,
-    error: Option<String>,
+pub struct Response {
+    pub id: Option<String>,
+    pub success: bool,
+    pub data: serde_json::Value,
+    pub error: Option<String>,
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let daemon_mode = args.iter().any(|a| a == "--daemon");
+#[tokio::main]
+async fn main() {
+    let config = EngineConfig::load("engine.toml");
 
-    if daemon_mode {
-        run_daemon();
+    init_tracing(&config);
+
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "Capital Guard Engine starting"
+    );
+
+    let args: Vec<String> = std::env::args().collect();
+    let mode = if args.iter().any(|a| a == "--http" || a == "--server") {
+        "http"
+    } else if args.iter().any(|a| a == "--daemon") {
+        "daemon"
     } else {
-        run_single_shot();
+        "single"
+    };
+
+    let state = AppState::new(config.clone(), 1_000_000.0);
+
+    match mode {
+        "http" => {
+            info!(host = %config.server.host, port = config.server.port, "Starting HTTP server");
+            server::run(state).await;
+        }
+        "daemon" => {
+            info!("Starting daemon mode (stdin/stdout JSON-RPC)");
+            run_daemon(state);
+        }
+        _ => {
+            run_single_shot(state);
+        }
     }
 }
 
-fn run_single_shot() {
+fn init_tracing(config: &EngineConfig) {
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&config.logging.level));
+
+    let subscriber = fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_writer(std::io::stderr);
+
+    match config.logging.format.as_str() {
+        "json" => { subscriber.json().init(); }
+        "compact" => { subscriber.compact().init(); }
+        _ => { subscriber.init(); }
+    }
+}
+
+fn run_single_shot(state: Arc<AppState>) {
+    use std::io::Read;
     let mut input = String::new();
-    io::stdin().read_to_string(&mut input).unwrap_or_default();
+    std::io::stdin().read_to_string(&mut input).unwrap_or_default();
 
     let response = match serde_json::from_str::<Request>(&input) {
-        Ok(req) => handle_request(req),
+        Ok(req) => handle_request(req, &state),
         Err(e) => Response {
             id: None,
             success: false,
@@ -57,12 +111,16 @@ fn run_single_shot() {
         },
     };
 
-    println!("{}", serde_json::to_string(&response).unwrap());
+    match serde_json::to_string(&response) {
+        Ok(json) => println!("{}", json),
+        Err(e) => error!("Failed to serialize response: {}", e),
+    }
 }
 
-fn run_daemon() {
-    eprintln!("[engine] Daemon mode started, reading newline-delimited JSON from stdin");
-    let stdin = io::stdin();
+fn run_daemon(state: Arc<AppState>) {
+    use std::io::BufRead;
+    info!("Daemon mode started, reading newline-delimited JSON from stdin");
+    let stdin = std::io::stdin();
     let reader = stdin.lock();
 
     for line in reader.lines() {
@@ -74,7 +132,7 @@ fn run_daemon() {
         if trimmed.is_empty() { continue; }
 
         let response = match serde_json::from_str::<Request>(trimmed) {
-            Ok(req) => handle_request(req),
+            Ok(req) => handle_request(req, &state),
             Err(e) => Response {
                 id: None,
                 success: false,
@@ -83,15 +141,21 @@ fn run_daemon() {
             },
         };
 
-        let out = serde_json::to_string(&response).unwrap();
-        println!("{}", out);
+        match serde_json::to_string(&response) {
+            Ok(out) => println!("{}", out),
+            Err(e) => error!("Failed to serialize response: {}", e),
+        }
     }
-    eprintln!("[engine] Daemon shutting down");
+    info!("Daemon shutting down");
 }
 
-fn handle_request(req: Request) -> Response {
+pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
     let id = req.id.clone();
-    let result = match req.command.as_str() {
+    let cmd = req.command.as_str();
+
+    info!(command = cmd, id = ?id, "Handling request");
+
+    let result = match cmd {
         "backtest" => backtest::run(req.data),
         "signals" => signals::compute(req.data),
         "risk" => risk::compute(req.data),
@@ -107,8 +171,38 @@ fn handle_request(req: Request) -> Response {
         "correlation" => correlation::compute(req.data),
         "feature_store" => feature_store::compute(req.data),
         "multi_timeframe_scan" => multi_timeframe::compute(req.data),
-        _ => Err(format!("Unknown command: {}", req.command)),
+
+        "portfolio_snapshot" => {
+            Ok(serde_json::to_value(state.snapshot()).unwrap_or_default())
+        }
+        "list_positions" => {
+            let positions: Vec<_> = state.positions.iter()
+                .map(|entry| entry.value().clone())
+                .collect();
+            Ok(serde_json::to_value(positions).unwrap_or_default())
+        }
+        "list_strategies" => {
+            Ok(serde_json::json!({
+                "strategies": strategy::available_strategies()
+            }))
+        }
+        "health" => {
+            Ok(serde_json::json!({
+                "status": "healthy",
+                "uptime_seconds": state.uptime_seconds(),
+                "version": env!("CARGO_PKG_VERSION"),
+                "positions": state.positions.len(),
+            }))
+        }
+
+        _ => Err(format!("Unknown command: {}", cmd)),
     };
+
+    match &result {
+        Ok(_) => info!(command = cmd, "Request completed successfully"),
+        Err(e) => warn!(command = cmd, error = %e, "Request failed"),
+    }
+
     match result {
         Ok(data) => Response { id, success: true, data, error: None },
         Err(e) => Response { id, success: false, data: serde_json::Value::Null, error: Some(e) },
@@ -120,12 +214,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn make_state() -> Arc<AppState> {
+        AppState::new(EngineConfig::default(), 1_000_000.0)
+    }
+
     fn req(command: &str, data: serde_json::Value) -> Response {
+        let state = make_state();
         handle_request(Request {
             id: Some("test".to_string()),
             command: command.to_string(),
             data,
-        })
+        }, &state)
     }
 
     fn sample_candles() -> Vec<serde_json::Value> {
@@ -222,6 +321,7 @@ mod tests {
 
     #[test]
     fn test_request_id_preserved() {
+        let state = make_state();
         let resp = handle_request(Request {
             id: Some("my-unique-id-42".to_string()),
             command: "greeks".to_string(),
@@ -233,7 +333,29 @@ mod tests {
                 "risk_free_rate": 0.05,
                 "option_type": "call"
             }),
-        });
+        }, &state);
         assert_eq!(resp.id, Some("my-unique-id-42".to_string()));
+    }
+
+    #[test]
+    fn test_health_endpoint() {
+        let resp = req("health", json!({}));
+        assert!(resp.success);
+        assert_eq!(resp.data["status"], "healthy");
+    }
+
+    #[test]
+    fn test_portfolio_snapshot() {
+        let resp = req("portfolio_snapshot", json!({}));
+        assert!(resp.success);
+        assert_eq!(resp.data["nav"], 1_000_000.0);
+    }
+
+    #[test]
+    fn test_list_strategies() {
+        let resp = req("list_strategies", json!({}));
+        assert!(resp.success);
+        let strats = resp.data["strategies"].as_array().unwrap();
+        assert!(strats.len() >= 6);
     }
 }

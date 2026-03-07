@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::utils::{round4 as r4, Xorshift64};
 
 #[derive(Deserialize)]
 struct Config {
@@ -98,9 +99,10 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
     let mut best_sharpe = PortfolioPoint { weights: vec![1.0 / n as f64; n], expected_return: 0.0, volatility: 1.0, sharpe_ratio: -999.0 };
     let mut min_var = PortfolioPoint { weights: vec![1.0 / n as f64; n], expected_return: 0.0, volatility: 999.0, sharpe_ratio: 0.0 };
     let mut frontier: Vec<PortfolioPoint> = Vec::new();
+    let mut rng = Xorshift64::new(42);
 
-    for sim in 0..num_ports {
-        let w = random_weights(n, sim);
+    for _sim in 0..num_ports {
+        let w = random_weights(n, &mut rng);
         let ret = portfolio_return(&w, &adj_means);
         let vol = portfolio_vol(&w, &cov);
         let sharpe = if vol > 0.0 { (ret - rf) / vol } else { 0.0 };
@@ -153,13 +155,13 @@ fn apply_black_litterman(prior_means: &[f64], cov: &[Vec<f64>], views: &[View], 
     adjusted
 }
 
-fn random_weights(n: usize, seed: usize) -> Vec<f64> {
+fn random_weights(n: usize, rng: &mut Xorshift64) -> Vec<f64> {
     let mut w = Vec::with_capacity(n);
     let mut sum = 0.0;
-    for i in 0..n {
-        let v = ((seed.wrapping_mul(2654435761).wrapping_add(i.wrapping_mul(40503))) as f64 / usize::MAX as f64).abs();
-        w.push(v + 0.001);
-        sum += v + 0.001;
+    for _ in 0..n {
+        let v = rng.next_f64() + 0.001;
+        w.push(v);
+        sum += v;
     }
     for x in w.iter_mut() { *x /= sum; }
     w
@@ -180,7 +182,7 @@ fn portfolio_vol(w: &[f64], cov: &[Vec<f64>]) -> f64 {
     var.max(0.0).sqrt()
 }
 
-fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
+fn round4(v: f64) -> f64 { r4(v) }
 
 #[cfg(test)]
 mod tests {
@@ -206,21 +208,21 @@ mod tests {
             "assets": [{ "symbol": "A", "returns": vec![0.01; 20] }],
             "risk_free_rate": 0.05
         });
-        let result = compute(serde_json::from_value(data).unwrap());
+        let result = compute(data);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("at least 2"));
     }
 
     #[test]
     fn test_two_assets_basic() {
-        let result = compute(serde_json::from_value(two_asset_data()).unwrap()).unwrap();
+        let result = compute(two_asset_data()).unwrap();
         assert!(result.get("min_variance").is_some());
         assert!(result.get("max_sharpe").is_some());
     }
 
     #[test]
     fn test_weights_sum_to_one() {
-        let result = compute(serde_json::from_value(two_asset_data()).unwrap()).unwrap();
+        let result = compute(two_asset_data()).unwrap();
         let weights = result.get("min_variance")
             .and_then(|mv| mv.get("weights"))
             .and_then(|w| w.as_array())
@@ -231,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_efficient_frontier_exists() {
-        let result = compute(serde_json::from_value(two_asset_data()).unwrap()).unwrap();
+        let result = compute(two_asset_data()).unwrap();
         let frontier = result.get("efficient_frontier").and_then(|f| f.as_array());
         assert!(frontier.is_some());
         assert!(frontier.unwrap().len() > 0, "efficient frontier should have points");
@@ -239,7 +241,7 @@ mod tests {
 
     #[test]
     fn test_correlation_matrix_diagonal() {
-        let result = compute(serde_json::from_value(two_asset_data()).unwrap()).unwrap();
+        let result = compute(two_asset_data()).unwrap();
         let corr = result.get("correlation_matrix").and_then(|c| c.as_array()).unwrap();
         for (i, row) in corr.iter().enumerate() {
             let diag = row.as_array().unwrap()[i].as_f64().unwrap();

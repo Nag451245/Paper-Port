@@ -22,6 +22,7 @@ import { learningRoutes } from './routes/learning.js';
 import { edgeRoutes } from './routes/edge.js';
 import { riskRoutes } from './routes/risk.js';
 import commandCenterRoutes from './routes/command-center.js';
+import { engineRoutes } from './routes/engine.js';
 import { disconnectPrisma, getPrisma } from './lib/prisma.js';
 import { AuthService } from './services/auth.service.js';
 import { BotEngine } from './services/bot-engine.js';
@@ -121,12 +122,21 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       checks.database = 'error';
     }
 
-    const overall = checks.database === 'ok' ? 'ok' : 'degraded';
+    try {
+      const { isEngineAvailable } = await import('./lib/rust-engine.js');
+      checks.engine = isEngineAvailable() ? 'ok' : 'not_installed';
+    } catch {
+      checks.engine = 'error';
+    }
+
+    const overall = checks.database === 'ok' && checks.engine === 'ok' ? 'ok'
+      : checks.database === 'ok' ? 'degraded' : 'error';
 
     return {
       status: overall,
       timestamp: new Date().toISOString(),
       uptime: Math.round(process.uptime()),
+      checks,
     };
   });
 
@@ -147,6 +157,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(edgeRoutes, { prefix: '/api/edge' });
   await app.register(riskRoutes, { prefix: '/api/risk' });
   await app.register(commandCenterRoutes, { prefix: '/api/command' });
+  await app.register(engineRoutes, { prefix: '/api/engine' });
 
   await registerWebSocket(app);
   app.decorate('wsHub', wsHub);

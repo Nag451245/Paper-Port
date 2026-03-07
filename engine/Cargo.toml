@@ -1,14 +1,39 @@
 [package]
 name = "capital-guard-engine"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "High-performance computation engine for Capital Guard (backtesting, signals, risk metrics, Greeks)"
+description = "High-performance algorithmic trading engine for Capital Guard"
 
 [dependencies]
+# Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
+
+# Async runtime + networking
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Logging & diagnostics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Parallelism
+rayon = "1.10"
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+dashmap = "6"
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 4
+
+[profile.dev]
+opt-level = 1

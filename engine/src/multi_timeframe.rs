@@ -157,8 +157,6 @@ pub fn compute(data: Value) -> Result<Value, String> {
         let mut bull_weighted = 0.0;
         let mut bear_weighted = 0.0;
         let mut confirmation_count = 0i32;
-        let mut dominant_direction = "neutral";
-
         for (trend, conf, weight) in &trends {
             match trend.as_str() {
                 "bullish" => {
@@ -179,11 +177,9 @@ pub fn compute(data: Value) -> Result<Value, String> {
         if bull_weighted > bear_weighted && confirmation_count >= 2 {
             direction = "LONG";
             alignment_score = bull_weighted;
-            dominant_direction = "bullish";
         } else if bear_weighted > bull_weighted && confirmation_count <= -2 {
             direction = "SHORT";
             alignment_score = bear_weighted;
-            dominant_direction = "bearish";
         } else {
             continue;
         }

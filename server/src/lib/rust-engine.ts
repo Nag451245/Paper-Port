@@ -683,3 +683,44 @@ export async function engineFeatureStore(data: {
   if (!res.success) throw new Error(res.error ?? 'Feature store operation failed');
   return res.data;
 }
+
+// ── Multi-Timeframe Scan ──
+
+export async function engineMultiTimeframeScan(data: unknown): Promise<unknown> {
+  const res = await runEngine('multi_timeframe_scan', data);
+  if (!res.success) throw new Error(res.error ?? 'Multi-timeframe scan failed');
+  return res.data;
+}
+
+// ── Engine Health / Meta ──
+
+export interface EngineHealthResult {
+  status: string;
+  uptime_seconds: number;
+  version: string;
+  positions: number;
+}
+
+export async function engineHealth(): Promise<EngineHealthResult> {
+  const res = await runEngine('health', {});
+  if (!res.success) throw new Error(res.error ?? 'Health check failed');
+  return res.data as EngineHealthResult;
+}
+
+export async function engineListStrategies(): Promise<{ strategies: string[] }> {
+  const res = await runEngine('list_strategies', {});
+  if (!res.success) throw new Error(res.error ?? 'List strategies failed');
+  return res.data as { strategies: string[] };
+}
+
+export async function enginePortfolioSnapshot(): Promise<unknown> {
+  const res = await runEngine('portfolio_snapshot', {});
+  if (!res.success) throw new Error(res.error ?? 'Portfolio snapshot failed');
+  return res.data;
+}
+
+export async function engineListPositions(): Promise<unknown> {
+  const res = await runEngine('list_positions', {});
+  if (!res.success) throw new Error(res.error ?? 'List positions failed');
+  return res.data;
+}

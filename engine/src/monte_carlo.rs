@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::utils::{round2, round4, Xorshift64};
 
 #[derive(Deserialize)]
 struct Config {
@@ -7,6 +8,7 @@ struct Config {
     num_simulations: Option<usize>,
     time_horizon: Option<usize>,
     confidence_levels: Option<Vec<f64>>,
+    seed: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -24,6 +26,10 @@ struct SimResult {
     max_drawdown_95: f64,
     optimal_position_size: f64,
     kelly_fraction: f64,
+    expected_shortfall: f64,
+    median_final_nav: f64,
+    skewness: f64,
+    kurtosis: f64,
 }
 
 pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -37,34 +43,25 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
         return Err("Need at least 5 historical returns".into());
     }
 
-    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
-    let var = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
-    let std = var.sqrt();
-
     let n_ret = returns.len();
+    let mut rng = Xorshift64::new(config.seed.unwrap_or(42));
+
     let mut final_navs = Vec::with_capacity(n_sims);
     let mut max_drawdowns = Vec::with_capacity(n_sims);
-
-    let mut paths_p5 = vec![0.0f64; horizon];
-    let mut paths_p25 = vec![0.0f64; horizon];
-    let mut paths_p50 = vec![0.0f64; horizon];
-    let mut paths_p75 = vec![0.0f64; horizon];
-    let mut paths_p95 = vec![0.0f64; horizon];
-
     let mut all_paths: Vec<Vec<f64>> = Vec::with_capacity(n_sims);
 
-    for sim in 0..n_sims {
+    for _ in 0..n_sims {
         let mut nav = config.initial_capital;
         let mut peak = nav;
         let mut max_dd = 0.0f64;
         let mut path = Vec::with_capacity(horizon);
 
-        for t in 0..horizon {
-            let idx = simple_hash(sim, t) % n_ret;
+        for _ in 0..horizon {
+            let idx = rng.next_usize(n_ret);
             let r = returns[idx];
             nav *= 1.0 + r;
             if nav > peak { peak = nav; }
-            let dd = (peak - nav) / peak;
+            let dd = if peak > 0.0 { (peak - nav) / peak } else { 0.0 };
             if dd > max_dd { max_dd = dd; }
             path.push(nav);
         }
@@ -73,6 +70,12 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
         max_drawdowns.push(max_dd);
         all_paths.push(path);
     }
+
+    let mut paths_p5 = vec![0.0f64; horizon];
+    let mut paths_p25 = vec![0.0f64; horizon];
+    let mut paths_p50 = vec![0.0f64; horizon];
+    let mut paths_p75 = vec![0.0f64; horizon];
+    let mut paths_p95 = vec![0.0f64; horizon];
 
     for t in 0..horizon {
         let mut vals: Vec<f64> = all_paths.iter().map(|p| p[t]).collect();
@@ -101,9 +104,27 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
         var_95
     };
 
+    let idx_1 = (0.01 * n as f64) as usize;
+    let expected_shortfall = if idx_1 > 0 {
+        config.initial_capital - final_navs[..idx_1].iter().sum::<f64>() / idx_1 as f64
+    } else {
+        var_99
+    };
+
     let expected = final_navs.iter().sum::<f64>() / n as f64;
+    let median = final_navs[n / 2];
     let prob_loss = final_navs.iter().filter(|&&v| v < config.initial_capital).count() as f64 / n as f64;
     let max_dd_95 = max_drawdowns[((0.95 * n as f64) as usize).min(n - 1)];
+
+    let mean_nav = expected;
+    let var_nav = final_navs.iter().map(|v| (v - mean_nav).powi(2)).sum::<f64>() / n as f64;
+    let std_nav = var_nav.sqrt();
+    let skewness = if std_nav > 0.0 {
+        final_navs.iter().map(|v| ((v - mean_nav) / std_nav).powi(3)).sum::<f64>() / n as f64
+    } else { 0.0 };
+    let kurtosis = if std_nav > 0.0 {
+        final_navs.iter().map(|v| ((v - mean_nav) / std_nav).powi(4)).sum::<f64>() / n as f64 - 3.0
+    } else { 0.0 };
 
     let wins = returns.iter().filter(|&&r| r > 0.0).count() as f64;
     let win_rate = wins / returns.len() as f64;
@@ -111,7 +132,7 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
     let losses = returns.iter().filter(|&&r| r < 0.0).count() as f64;
     let avg_loss = returns.iter().filter(|&&r| r < 0.0).map(|r| r.abs()).sum::<f64>() / losses.max(1.0);
     let kelly = if avg_loss > 0.0 { win_rate - (1.0 - win_rate) / (avg_win / avg_loss) } else { 0.0 };
-    let optimal_size = (kelly * 0.5).max(0.0).min(0.25); // Half-Kelly, capped at 25%
+    let optimal_size = (kelly * 0.5).max(0.0).min(0.25);
 
     let result = SimResult {
         percentile_5: decimate(&paths_p5, 50),
@@ -127,15 +148,13 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
         max_drawdown_95: round4(max_dd_95),
         optimal_position_size: round4(optimal_size),
         kelly_fraction: round4(kelly),
+        expected_shortfall: round2(expected_shortfall),
+        median_final_nav: round2(median),
+        skewness: round4(skewness),
+        kurtosis: round4(kurtosis),
     };
 
     serde_json::to_value(result).map_err(|e| e.to_string())
-}
-
-fn simple_hash(sim: usize, t: usize) -> usize {
-    let mut h = sim.wrapping_mul(2654435761) ^ t.wrapping_mul(40503);
-    h = h.wrapping_mul(h.wrapping_add(1));
-    h
 }
 
 fn decimate(data: &[f64], target: usize) -> Vec<f64> {
@@ -143,9 +162,6 @@ fn decimate(data: &[f64], target: usize) -> Vec<f64> {
     let step = data.len() as f64 / target as f64;
     (0..target).map(|i| round2(data[(i as f64 * step) as usize])).collect()
 }
-
-fn round2(v: f64) -> f64 { (v * 100.0).round() / 100.0 }
-fn round4(v: f64) -> f64 { (v * 10000.0).round() / 10000.0 }
 
 #[cfg(test)]
 mod tests {
@@ -158,6 +174,7 @@ mod tests {
             "initial_capital": capital,
             "num_simulations": sims,
             "time_horizon": 20,
+            "seed": 42,
         })).unwrap();
         serde_json::from_value(result).unwrap()
     }
@@ -190,7 +207,7 @@ mod tests {
     #[test]
     fn test_var_positive() {
         let r = run_sim(sample_returns(), 100000.0, 500);
-        assert!(r.var_95 >= 0.0 || r.var_95 < 0.0, "VaR should be a valid number");
+        assert!(r.var_95.is_finite(), "VaR should be a valid number");
     }
 
     #[test]
@@ -217,10 +234,8 @@ mod tests {
     fn test_percentile_ordering() {
         let r = run_sim(sample_returns(), 100000.0, 500);
         let last_idx = r.percentile_5.len() - 1;
-        assert!(r.percentile_5[last_idx] <= r.percentile_50[last_idx],
-            "p5 should <= p50");
-        assert!(r.percentile_50[last_idx] <= r.percentile_95[last_idx],
-            "p50 should <= p95");
+        assert!(r.percentile_5[last_idx] <= r.percentile_50[last_idx], "p5 should <= p50");
+        assert!(r.percentile_50[last_idx] <= r.percentile_95[last_idx], "p50 should <= p95");
     }
 
     #[test]
@@ -237,5 +252,20 @@ mod tests {
         let r = run_sim(sample_returns(), 100000.0, 1000);
         assert!(r.cvar_95 >= r.var_95 - 1.0,
             "CVaR should be >= VaR: cvar={}, var={}", r.cvar_95, r.var_95);
+    }
+
+    #[test]
+    fn test_deterministic_with_seed() {
+        let r1 = run_sim(sample_returns(), 100000.0, 100);
+        let r2 = run_sim(sample_returns(), 100000.0, 100);
+        assert_eq!(r1.expected_final_nav, r2.expected_final_nav,
+            "same seed should produce same result");
+    }
+
+    #[test]
+    fn test_skewness_and_kurtosis_finite() {
+        let r = run_sim(sample_returns(), 100000.0, 500);
+        assert!(r.skewness.is_finite());
+        assert!(r.kurtosis.is_finite());
     }
 }
