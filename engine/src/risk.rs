@@ -98,7 +98,7 @@ pub fn compute(data: Value) -> Result<Value, String> {
         max_dd_duration = current_dd_duration;
     }
 
-    let calmar = if max_dd > 0.0 { annualized_return / (max_dd * 100.0) } else { 0.0 };
+    let calmar = if max_dd > 0.0 { annualized_return / max_dd } else { 0.0 };
 
     let mut sorted = input.returns.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));

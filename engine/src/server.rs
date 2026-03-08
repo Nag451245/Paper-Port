@@ -5,28 +5,66 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
     http::StatusCode,
+    middleware::{self, Next},
 };
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{CorsLayer, AllowOrigin};
 use tower_http::trace::TraceLayer;
+use axum::http::{HeaderValue, Request as HttpRequest};
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::{info, warn, error};
 
 use crate::state::{AppState, Position};
 use crate::{Request, Response, handle_request};
+use crate::config::TlsConfig;
 
 type SharedState = Arc<AppState>;
 
+/// Auth middleware: checks X-API-Key header when auth is enabled
+async fn auth_layer(
+    State(state): State<SharedState>,
+    req: HttpRequest<axum::body::Body>,
+    next: Next,
+) -> impl IntoResponse {
+    if !state.config.auth.enabled {
+        return next.run(req).await;
+    }
+
+    let path = req.uri().path();
+    if path == "/health" || path == "/metrics" {
+        return next.run(req).await;
+    }
+
+    let key = req.headers()
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if key == state.config.auth.api_key {
+        next.run(req).await
+    } else {
+        (StatusCode::UNAUTHORIZED, Json(json!({ "error": "Invalid or missing API key" }))).into_response()
+    }
+}
+
 pub async fn run(state: SharedState) {
+    let cors = if state.config.auth.allowed_origins.is_empty() {
+        CorsLayer::permissive()
+    } else {
+        let origins: Vec<HeaderValue> = state.config.auth.allowed_origins.iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any)
+    };
+
     let app = Router::new()
-        // Health & meta
         .route("/health", get(health))
         .route("/metrics", get(metrics))
-        .route("/config", get(get_config))
 
-        // Generic JSON-RPC pass-through (backward-compatible)
         .route("/rpc", post(rpc_handler))
 
-        // RESTful command endpoints
         .route("/api/backtest", post(cmd_backtest))
         .route("/api/signals", post(cmd_signals))
         .route("/api/risk", post(cmd_risk))
@@ -43,37 +81,216 @@ pub async fn run(state: SharedState) {
         .route("/api/feature_store", post(cmd_feature_store))
         .route("/api/multi_timeframe", post(cmd_multi_timeframe))
 
-        // Portfolio state
         .route("/api/portfolio/snapshot", get(portfolio_snapshot))
         .route("/api/portfolio/positions", get(list_positions))
         .route("/api/portfolio/positions", post(open_position))
         .route("/api/portfolio/positions/{symbol}", axum::routing::delete(close_position))
 
-        // Strategies
+        .route("/api/kill_switch", post(kill_switch_on))
+        .route("/api/kill_switch/off", post(kill_switch_off))
+        .route("/api/audit_log", get(audit_log))
+
+        .route("/api/oms/orders", get(oms_orders))
+        .route("/api/oms/orders", post(oms_submit_order))
+        .route("/api/oms/orders/{order_id}/cancel", post(oms_cancel_order))
+        .route("/api/oms/cancel_all", post(oms_cancel_all))
+        .route("/api/oms/reconcile", post(oms_reconcile))
+
+        .route("/api/alerts", get(alerts_list))
+        .route("/api/alerts/counts", get(alert_counts))
+        .route("/api/alerts/{alert_id}/acknowledge", post(alert_acknowledge))
+
+        .route("/api/broker/status", get(broker_status))
+        .route("/api/broker/init_session", post(broker_init_session))
+        .route("/api/broker/quote/{symbol}", get(broker_quote))
+        .route("/api/broker/historical/{symbol}", get(broker_historical))
+        .route("/api/market_data/prices", get(market_data_prices))
+        .route("/api/market_data/price/{symbol}", get(market_data_price))
+
         .route("/api/strategies", get(list_strategies))
-
-        // Signals cache
         .route("/api/signals/cache/{symbol}", get(cached_signals))
-
-        // WebSocket for live streaming
         .route("/ws", get(ws_handler))
 
-        .layer(CorsLayer::permissive())
+        .layer(middleware::from_fn_with_state(state.clone(), auth_layer))
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
+        .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(state.clone());
 
     let addr = format!("{}:{}", state.config.server.host, state.config.server.port);
-    info!("Listening on http://{}", addr);
+    let tls_config = state.config.tls.clone();
 
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
+    if tls_config.enabled {
+        info!("Listening on https://{} (TLS)", addr);
+        run_tls_server(app, &addr, &tls_config, state).await;
+    } else {
+        info!("Listening on http://{}", addr);
+        run_plain_server(app, &addr, state).await;
+    }
+}
+
+async fn run_plain_server(app: Router, addr: &str, state: SharedState) {
+    let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::error!("Failed to bind to {}: {}", addr, e);
-            return;
+            error!("Failed to bind to {}: {}", addr, e);
+            std::process::exit(1);
         }
     };
-    if let Err(e) = axum::serve(listener, app).await {
-        tracing::error!("Server error: {}", e);
+
+    let shutdown_state = state.clone();
+    let shutdown = async move {
+        tokio::signal::ctrl_c().await.ok();
+        info!("Shutting down gracefully...");
+        save_final_snapshot(&shutdown_state);
+    };
+
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+    {
+        error!("Server error: {}", e);
+        std::process::exit(1);
+    }
+}
+
+async fn run_tls_server(app: Router, addr: &str, tls: &TlsConfig, state: SharedState) {
+    use rustls::ServerConfig;
+    use tokio_rustls::TlsAcceptor;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use hyper_util::server::conn::auto::Builder;
+    use hyper_util::rt::TokioExecutor;
+    use tower::Service;
+
+    let certs = load_certs(&tls.cert_path);
+    let key = load_private_key(&tls.key_path);
+
+    let tls_config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .unwrap_or_else(|e| {
+            error!("Invalid TLS configuration: {}", e);
+            std::process::exit(1);
+        });
+
+    let acceptor = TlsAcceptor::from(Arc::new(tls_config));
+
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!("Failed to bind TLS to {}: {}", addr, e);
+            std::process::exit(1);
+        }
+    };
+
+    let shutdown_state = state;
+    let shutdown_token = tokio::sync::watch::channel(false);
+    let (tx, mut rx) = shutdown_token;
+
+    let tx_clone = tx.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        info!("Shutting down TLS server gracefully...");
+        save_final_snapshot(&shutdown_state);
+        let _ = tx_clone.send(true);
+    });
+
+    loop {
+        tokio::select! {
+            accept = listener.accept() => {
+                let (stream, peer_addr) = match accept {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!("TCP accept error: {}", e);
+                        continue;
+                    }
+                };
+
+                let acceptor = acceptor.clone();
+                let app = app.clone();
+                let mut shutdown_rx = rx.clone();
+
+                tokio::spawn(async move {
+                    let tls_stream = match acceptor.accept(stream).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            warn!("TLS handshake failed from {}: {}", peer_addr, e);
+                            return;
+                        }
+                    };
+
+                    let io = TokioIo::new(tls_stream);
+                    let service = app;
+                    let hyper_service = service_fn(move |req| {
+                        let mut svc = service.clone();
+                        async move { svc.call(req).await }
+                    });
+
+                    let builder = Builder::new(TokioExecutor::new());
+                    let conn = builder.serve_connection(io, hyper_service);
+
+                    tokio::pin!(conn);
+                    tokio::select! {
+                        result = &mut conn => {
+                            if let Err(e) = result {
+                                warn!("Connection error: {}", e);
+                            }
+                        }
+                        _ = shutdown_rx.changed() => {
+                            info!("Connection closed by shutdown");
+                        }
+                    }
+                });
+            }
+            _ = rx.changed() => {
+                info!("TLS server stopped");
+                break;
+            }
+        }
+    }
+}
+
+fn load_certs(path: &str) -> Vec<rustls::pki_types::CertificateDer<'static>> {
+    let file = std::fs::File::open(path)
+        .unwrap_or_else(|e| {
+            error!("Cannot open TLS cert {}: {}", path, e);
+            std::process::exit(1);
+        });
+    let mut reader = std::io::BufReader::new(file);
+    rustls_pemfile::certs(&mut reader)
+        .map(|result| result.unwrap_or_else(|e| {
+            error!("Invalid cert in {}: {}", path, e);
+            std::process::exit(1);
+        }))
+        .collect()
+}
+
+fn load_private_key(path: &str) -> rustls::pki_types::PrivateKeyDer<'static> {
+    let file = std::fs::File::open(path)
+        .unwrap_or_else(|e| {
+            error!("Cannot open TLS key {}: {}", path, e);
+            std::process::exit(1);
+        });
+    let mut reader = std::io::BufReader::new(file);
+    rustls_pemfile::private_key(&mut reader)
+        .unwrap_or_else(|e| {
+            error!("Invalid key in {}: {}", path, e);
+            std::process::exit(1);
+        })
+        .unwrap_or_else(|| {
+            error!("No private key found in {}", path);
+            std::process::exit(1);
+        })
+}
+
+fn save_final_snapshot(state: &SharedState) {
+    if state.config.persistence.enabled {
+        if let Err(e) = state.save_snapshot(&state.config.persistence.snapshot_path) {
+            error!("Final snapshot save failed: {}", e);
+        } else {
+            info!("Final state snapshot saved");
+        }
     }
 }
 
@@ -117,8 +334,20 @@ async fn metrics(State(state): State<SharedState>) -> impl IntoResponse {
     )
 }
 
-async fn get_config(State(state): State<SharedState>) -> impl IntoResponse {
-    Json(serde_json::to_value(&state.config).unwrap_or_default())
+// ─── Kill Switch ──────────────────────────────────────────────────────
+
+async fn kill_switch_on(State(state): State<SharedState>) -> impl IntoResponse {
+    state.activate_kill_switch();
+    (StatusCode::OK, Json(json!({ "killed": true, "message": "Kill switch activated — all new orders rejected" })))
+}
+
+async fn kill_switch_off(State(state): State<SharedState>) -> impl IntoResponse {
+    state.deactivate_kill_switch();
+    (StatusCode::OK, Json(json!({ "killed": false, "message": "Kill switch deactivated" })))
+}
+
+async fn audit_log(State(state): State<SharedState>) -> impl IntoResponse {
+    Json(state.get_audit_log())
 }
 
 // ─── JSON-RPC pass-through ────────────────────────────────────────────
@@ -227,6 +456,161 @@ async fn close_position(
     match state.close_position(&symbol, query.price) {
         Ok(pnl) => (StatusCode::OK, Json(json!({ "success": true, "realized_pnl": pnl }))),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "success": false, "error": e }))),
+    }
+}
+
+// ─── OMS endpoints ────────────────────────────────────────────────────
+
+cmd_handler!(oms_submit_order, "oms_submit_order");
+cmd_handler!(oms_cancel_all, "oms_cancel_all");
+cmd_handler!(oms_reconcile, "oms_reconcile");
+
+async fn oms_orders(
+    State(state): State<SharedState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let data = match params.get("strategy_id") {
+        Some(sid) => serde_json::json!({ "strategy_id": sid }),
+        None => serde_json::json!({}),
+    };
+    let req = Request { id: None, command: "oms_orders".to_string(), data };
+    let response = handle_request(req, &state);
+    let status = if response.success { StatusCode::OK } else { StatusCode::BAD_REQUEST };
+    (status, Json(response))
+}
+
+async fn oms_cancel_order(
+    State(state): State<SharedState>,
+    Path(order_id): Path<String>,
+) -> impl IntoResponse {
+    let req = Request {
+        id: None,
+        command: "oms_cancel_order".to_string(),
+        data: serde_json::json!({ "order_id": order_id }),
+    };
+    let response = handle_request(req, &state);
+    let status = if response.success { StatusCode::OK } else { StatusCode::BAD_REQUEST };
+    (status, Json(response))
+}
+
+// ─── Alert endpoints ──────────────────────────────────────────────────
+
+async fn alerts_list(
+    State(state): State<SharedState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let mut data = serde_json::json!({});
+    if let Some(sev) = params.get("min_severity") {
+        data["min_severity"] = serde_json::json!(sev);
+    }
+    if let Some(limit) = params.get("limit") {
+        if let Ok(n) = limit.parse::<u64>() {
+            data["limit"] = serde_json::json!(n);
+        }
+    }
+    let req = Request { id: None, command: "alerts".to_string(), data };
+    let response = handle_request(req, &state);
+    (StatusCode::OK, Json(response))
+}
+
+async fn alert_counts(State(state): State<SharedState>) -> impl IntoResponse {
+    let req = Request { id: None, command: "alert_counts".to_string(), data: serde_json::json!({}) };
+    let response = handle_request(req, &state);
+    (StatusCode::OK, Json(response))
+}
+
+async fn alert_acknowledge(
+    State(state): State<SharedState>,
+    Path(alert_id): Path<String>,
+) -> impl IntoResponse {
+    let req = Request {
+        id: None,
+        command: "alert_acknowledge".to_string(),
+        data: serde_json::json!({ "alert_id": alert_id }),
+    };
+    let response = handle_request(req, &state);
+    let status = if response.success { StatusCode::OK } else { StatusCode::NOT_FOUND };
+    (status, Json(response))
+}
+
+// ─── Broker & Market Data ─────────────────────────────────────────────
+
+async fn broker_status(State(state): State<SharedState>) -> impl IntoResponse {
+    use crate::broker_icici::IciciBreezeBroker;
+
+    let broker_name = state.config.broker.adapter.clone();
+    let connected = if let Some(icici) = state.broker_adapter.as_any().downcast_ref::<IciciBreezeBroker>() {
+        icici.refresh_status()
+    } else {
+        state.broker_adapter.is_connected()
+    };
+
+    Json(json!({
+        "broker": broker_name,
+        "connected": connected,
+        "bridge_url": state.config.broker.icici.bridge_url,
+    }))
+}
+
+async fn broker_init_session(State(state): State<SharedState>) -> impl IntoResponse {
+    use crate::broker_icici::IciciBreezeBroker;
+
+    if let Some(icici) = state.broker_adapter.as_any().downcast_ref::<IciciBreezeBroker>() {
+        match icici.init_session() {
+            Ok(()) => {
+                state.log_audit("BROKER_SESSION_INIT", None, "ICICI Breeze session initialized via bridge");
+                (StatusCode::OK, Json(json!({ "success": true, "message": "Session initialized" })))
+            }
+            Err(e) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "error": e })))
+            }
+        }
+    } else {
+        (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "error": "Session init only supported for ICICI Breeze" })))
+    }
+}
+
+async fn broker_quote(
+    State(state): State<SharedState>,
+    Path(symbol): Path<String>,
+) -> impl IntoResponse {
+    let bridge_url = &state.config.broker.icici.bridge_url;
+    match crate::broker_icici::bridge_get_quote(bridge_url, &symbol) {
+        Ok(data) => Json(data),
+        Err(e) => Json(json!({ "error": e })),
+    }
+}
+
+async fn broker_historical(
+    State(state): State<SharedState>,
+    Path(symbol): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let bridge_url = &state.config.broker.icici.bridge_url;
+    let interval = params.get("interval").map(|s| s.as_str()).unwrap_or("5minute");
+    let from = params.get("from").map(|s| s.as_str()).unwrap_or("");
+    let to = params.get("to").map(|s| s.as_str()).unwrap_or("");
+    match crate::broker_icici::bridge_get_historical(bridge_url, &symbol, interval, from, to) {
+        Ok(data) => Json(data),
+        Err(e) => Json(json!({ "error": e })),
+    }
+}
+
+async fn market_data_prices(State(state): State<SharedState>) -> impl IntoResponse {
+    let prices = state.live_prices.all_prices();
+    Json(json!({
+        "count": prices.len(),
+        "prices": prices,
+    }))
+}
+
+async fn market_data_price(
+    State(state): State<SharedState>,
+    Path(symbol): Path<String>,
+) -> impl IntoResponse {
+    match state.live_prices.get_tick(&symbol) {
+        Some(tick) => (StatusCode::OK, Json(json!(tick))),
+        None => (StatusCode::NOT_FOUND, Json(json!({ "error": format!("No data for {}", symbol) }))),
     }
 }
 

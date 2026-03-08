@@ -121,18 +121,45 @@ let daemonRL: ReadlineInterface | null = null;
 const pendingRequests = new Map<string, { resolve: (v: EngineResponse) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 let daemonReady = false;
 
+// Circuit breaker: stop respawning if daemon crashes too often
+let crashCount = 0;
+let lastCrashTime = 0;
+const MAX_CRASHES = 5;
+const CRASH_WINDOW_MS = 60_000;
+
+function checkCircuitBreaker(): boolean {
+  const now = Date.now();
+  if (now - lastCrashTime > CRASH_WINDOW_MS) {
+    crashCount = 0;
+  }
+  if (crashCount >= MAX_CRASHES) {
+    console.error(`[rust-engine] Circuit breaker open: ${crashCount} crashes in ${CRASH_WINDOW_MS / 1000}s. Not respawning.`);
+    return false;
+  }
+  return true;
+}
+
+function recordCrash(): void {
+  crashCount++;
+  lastCrashTime = Date.now();
+  console.warn(`[rust-engine] Crash count: ${crashCount}/${MAX_CRASHES}`);
+}
+
 function spawnDaemon(): boolean {
   const binary = getBinary();
   if (!binary) return false;
+  if (!checkCircuitBreaker()) return false;
 
   try {
     const proc = spawn(binary, ['--daemon'], { stdio: ['pipe', 'pipe', 'pipe'] });
     proc.on('error', (err) => {
       console.error(`[rust-engine] Daemon error: ${err.message}`);
+      recordCrash();
       teardownDaemon();
     });
     proc.on('exit', (code) => {
       console.warn(`[rust-engine] Daemon exited with code ${code}`);
+      if (code !== 0) recordCrash();
       teardownDaemon();
     });
 
@@ -760,5 +787,106 @@ export async function enginePortfolioSnapshot(): Promise<unknown> {
 export async function engineListPositions(): Promise<unknown> {
   const res = await runEngine('list_positions', {});
   if (!res.success) throw new Error(res.error ?? 'List positions failed');
+  return res.data;
+}
+
+// ── Kill Switch ──
+
+export async function engineKillSwitch(activate: boolean): Promise<unknown> {
+  const cmd = activate ? 'kill_switch' : 'kill_switch_off';
+  const res = await runEngine(cmd, {});
+  if (!res.success) throw new Error(res.error ?? 'Kill switch operation failed');
+  return res.data;
+}
+
+// ── Audit Log ──
+
+export async function engineAuditLog(): Promise<unknown> {
+  const res = await runEngine('audit_log', {});
+  if (!res.success) throw new Error(res.error ?? 'Audit log retrieval failed');
+  return res.data;
+}
+
+// ── OMS (Order Management System) ──
+
+export interface OMSOrderInput {
+  symbol: string;
+  exchange?: string;
+  side: 'buy' | 'sell';
+  order_type?: 'market' | 'limit' | 'stop_loss' | 'stop_loss_market';
+  quantity: number;
+  price?: number;
+  trigger_price?: number;
+  product?: 'intraday' | 'delivery';
+  strategy_id?: string;
+  reference_price?: number;
+  tag?: string;
+}
+
+export async function engineOMSSubmitOrder(data: OMSOrderInput): Promise<unknown> {
+  const res = await runEngine('oms_submit_order', data);
+  if (!res.success) throw new Error(res.error ?? 'OMS order submission failed');
+  return res.data;
+}
+
+export async function engineOMSCancelOrder(orderId: string): Promise<unknown> {
+  const res = await runEngine('oms_cancel_order', { order_id: orderId });
+  if (!res.success) throw new Error(res.error ?? 'OMS cancel failed');
+  return res.data;
+}
+
+export async function engineOMSCancelAll(): Promise<unknown> {
+  const res = await runEngine('oms_cancel_all', {});
+  if (!res.success) throw new Error(res.error ?? 'OMS cancel all failed');
+  return res.data;
+}
+
+export async function engineOMSOrders(strategyId?: string): Promise<unknown> {
+  const data = strategyId ? { strategy_id: strategyId } : {};
+  const res = await runEngine('oms_orders', data);
+  if (!res.success) throw new Error(res.error ?? 'OMS orders retrieval failed');
+  return res.data;
+}
+
+export async function engineOMSReconcile(): Promise<unknown> {
+  const res = await runEngine('oms_reconcile', {});
+  if (!res.success) throw new Error(res.error ?? 'OMS reconciliation failed');
+  return res.data;
+}
+
+// ── Alerts ──
+
+export async function engineAlerts(minSeverity?: string, limit?: number): Promise<unknown> {
+  const data: Record<string, unknown> = {};
+  if (minSeverity) data.min_severity = minSeverity;
+  if (limit) data.limit = limit;
+  const res = await runEngine('alerts', data);
+  if (!res.success) throw new Error(res.error ?? 'Alerts retrieval failed');
+  return res.data;
+}
+
+export async function engineAlertCounts(): Promise<unknown> {
+  const res = await runEngine('alert_counts', {});
+  if (!res.success) throw new Error(res.error ?? 'Alert counts retrieval failed');
+  return res.data;
+}
+
+export async function engineAlertAcknowledge(alertId: string): Promise<unknown> {
+  const res = await runEngine('alert_acknowledge', { alert_id: alertId });
+  if (!res.success) throw new Error(res.error ?? 'Alert acknowledge failed');
+  return res.data;
+}
+
+// ── Broker ──
+
+export async function engineBrokerStatus(): Promise<{ broker: string; connected: boolean }> {
+  const res = await runEngine('broker_refresh_status', {});
+  if (!res.success) throw new Error(res.error ?? 'Broker status failed');
+  return res.data as { broker: string; connected: boolean };
+}
+
+export async function engineBrokerInitSession(): Promise<unknown> {
+  const res = await runEngine('broker_init_session', {});
+  if (!res.success) throw new Error(res.error ?? 'Broker session init failed');
   return res.data;
 }

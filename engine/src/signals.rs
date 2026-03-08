@@ -31,34 +31,46 @@ pub fn compute(data: Value) -> Result<Value, String> {
     let lows: Vec<f64> = input.candles.iter().map(|c| c.low).collect();
     let volumes: Vec<f64> = input.candles.iter().map(|c| c.volume).collect();
 
+    let macd_result = calc_macd(&closes);
+    let bb_result = calc_bollinger(&closes, 20);
     let output = SignalOutput {
-        ema_9: calc_ema(&closes, 9),
-        ema_21: calc_ema(&closes, 21),
+        ema_9: nan_to_zero(&calc_ema(&closes, 9)),
+        ema_21: nan_to_zero(&calc_ema(&closes, 21)),
         rsi_14: calc_rsi(&closes, 14),
-        macd: calc_macd(&closes).0,
-        macd_signal: calc_macd(&closes).1,
-        macd_histogram: calc_macd(&closes).2,
-        bollinger_upper: calc_bollinger(&closes, 20).0,
-        bollinger_lower: calc_bollinger(&closes, 20).1,
-        bollinger_middle: calc_bollinger(&closes, 20).2,
-        vwap: calc_vwap(&closes, &volumes),
+        macd: nan_to_zero(&macd_result.0),
+        macd_signal: nan_to_zero(&macd_result.1),
+        macd_histogram: nan_to_zero(&macd_result.2),
+        bollinger_upper: bb_result.0,
+        bollinger_lower: bb_result.1,
+        bollinger_middle: bb_result.2,
+        vwap: calc_vwap(&highs, &lows, &closes, &volumes),
         supertrend: calc_supertrend(&highs, &lows, &closes, 10, 3.0),
     };
 
     serde_json::to_value(output).map_err(|e| format!("Serialization error: {}", e))
 }
 
+/// Replace NaN with 0.0 for JSON serialization (NaN is not valid JSON)
+fn nan_to_zero(data: &[f64]) -> Vec<f64> {
+    data.iter().map(|&v| if v.is_nan() { 0.0 } else { v }).collect()
+}
+
 fn calc_macd(data: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let ema12 = calc_ema(data, 12);
     let ema26 = calc_ema(data, 26);
-    let mut macd_line = vec![0.0; data.len()];
+    let mut macd_line = vec![f64::NAN; data.len()];
     for i in 0..data.len() {
-        macd_line[i] = ema12[i] - ema26[i];
+        let a = ema12[i];
+        let b = ema26[i];
+        macd_line[i] = if a.is_nan() || b.is_nan() { f64::NAN } else { a - b };
     }
-    let signal = calc_ema(&macd_line, 9);
-    let mut histogram = vec![0.0; data.len()];
+    let clean_macd: Vec<f64> = macd_line.iter().map(|&v| if v.is_nan() { 0.0 } else { v }).collect();
+    let signal = calc_ema(&clean_macd, 9);
+    let mut histogram = vec![f64::NAN; data.len()];
     for i in 0..data.len() {
-        histogram[i] = macd_line[i] - signal[i];
+        let m = macd_line[i];
+        let s = signal[i];
+        histogram[i] = if m.is_nan() || s.is_nan() { f64::NAN } else { m - s };
     }
     (macd_line, signal, histogram)
 }
@@ -80,12 +92,14 @@ fn calc_bollinger(data: &[f64], period: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>)
     (upper, lower, middle)
 }
 
-fn calc_vwap(closes: &[f64], volumes: &[f64]) -> Vec<f64> {
+/// VWAP using typical price = (high + low + close) / 3
+fn calc_vwap(highs: &[f64], lows: &[f64], closes: &[f64], volumes: &[f64]) -> Vec<f64> {
     let mut result = vec![0.0; closes.len()];
     let mut cum_vol = 0.0;
     let mut cum_pv = 0.0;
     for i in 0..closes.len() {
-        cum_pv += closes[i] * volumes[i];
+        let typical = (highs[i] + lows[i] + closes[i]) / 3.0;
+        cum_pv += typical * volumes[i];
         cum_vol += volumes[i];
         result[i] = if cum_vol > 0.0 { cum_pv / cum_vol } else { closes[i] };
     }
@@ -186,12 +200,15 @@ mod tests {
     }
 
     #[test]
-    fn test_vwap_equals_close_with_equal_volume() {
+    fn test_vwap_typical_price_with_equal_volume() {
+        let highs = vec![101.0, 103.0, 102.0, 104.0, 105.0];
+        let lows = vec![99.0, 101.0, 100.0, 102.0, 103.0];
         let closes = vec![100.0, 102.0, 101.0, 103.0, 104.0];
         let volumes = vec![1000.0; 5];
-        let vwap = calc_vwap(&closes, &volumes);
-        let expected_last = (100.0 + 102.0 + 101.0 + 103.0 + 104.0) / 5.0;
-        assert!((vwap[4] - expected_last).abs() < 0.01, "VWAP with equal volume = SMA");
+        let vwap = calc_vwap(&highs, &lows, &closes, &volumes);
+        let tp: Vec<f64> = (0..5).map(|i| (highs[i] + lows[i] + closes[i]) / 3.0).collect();
+        let expected_last = tp.iter().sum::<f64>() / 5.0;
+        assert!((vwap[4] - expected_last).abs() < 0.01, "VWAP should use typical price (H+L+C)/3");
     }
 
     #[test]
@@ -208,11 +225,11 @@ mod tests {
     }
 
     #[test]
-    fn test_insufficient_data_returns_zeros() {
+    fn test_insufficient_data_returns_nan() {
         let data = vec![100.0; 5];
         let ema = calc_ema(&data, 9);
         assert_eq!(ema.len(), 5);
-        assert!(ema.iter().all(|&v| v == 0.0 || (v - 100.0).abs() < 0.01),
-            "EMA with insufficient data should be zero-padded");
+        assert!(ema.iter().all(|v| v.is_nan()),
+            "EMA with insufficient data should be NaN");
     }
 }

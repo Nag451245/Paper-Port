@@ -15,6 +15,20 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1"] }
+
+# TLS
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+
+# HTTP client for broker API calls (sync, no runtime conflict with tokio)
+ureq = { version = "2", features = ["json"] }
+
+# WebSocket client for market data feeds
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
 # Logging & diagnostics
 tracing = "0.1"

@@ -362,6 +362,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     dataPipeline.stopConsumer();
     orchestrator.stop();
     uptimeMonitor.stop();
+    try {
+      const { stopDaemon } = await import('./lib/rust-engine.js');
+      stopDaemon();
+      console.log('[shutdown] Rust engine daemon stopped');
+    } catch { /* engine not loaded */ }
     await shutdownEventBus();
     await disconnectPrisma();
   });

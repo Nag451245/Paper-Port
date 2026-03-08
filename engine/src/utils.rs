@@ -152,9 +152,9 @@ pub fn rolling_std(data: &[f64]) -> f64 {
 
 pub fn calc_ema_series(data: &[f64], period: usize) -> Vec<f64> {
     if data.len() < period {
-        return vec![0.0; data.len()];
+        return vec![f64::NAN; data.len()];
     }
-    let mut result = vec![0.0; data.len()];
+    let mut result = vec![f64::NAN; data.len()];
     let mult = 2.0 / (period as f64 + 1.0);
     result[period - 1] = data[..period].iter().sum::<f64>() / period as f64;
     for i in period..data.len() {
@@ -294,6 +294,22 @@ pub fn ols_slope(x: &[f64], y: &[f64]) -> f64 {
     }
 }
 
+/// OLS regression returning (slope, intercept)
+pub fn ols_regression(x: &[f64], y: &[f64]) -> (f64, f64) {
+    let n = x.len() as f64;
+    let mx = x.iter().sum::<f64>() / n;
+    let my = y.iter().sum::<f64>() / n;
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for i in 0..x.len() {
+        num += (x[i] - mx) * (y[i] - my);
+        den += (x[i] - mx).powi(2);
+    }
+    let slope = if den > 0.0 { num / den } else { 0.0 };
+    let intercept = my - slope * mx;
+    (slope, intercept)
+}
+
 /// Generate Cartesian product of parameter ranges for optimization
 pub fn generate_combinations(params: &[Vec<serde_json::Value>]) -> Vec<Vec<serde_json::Value>> {
     if params.is_empty() {
@@ -417,8 +433,9 @@ impl Default for TransactionCosts {
 }
 
 impl TransactionCosts {
+    /// Regulatory + brokerage cost only. Slippage is handled separately via
+    /// `slippage_adjusted_price()` to avoid double-counting.
     pub fn total_cost(&self, trade_value: f64, is_sell: bool) -> f64 {
-        let slippage = trade_value * self.slippage_bps / 10_000.0;
         let stt = if is_sell {
             trade_value * self.stt_pct / 100.0
         } else {
@@ -429,7 +446,7 @@ impl TransactionCosts {
         let brokerage = self.commission_per_trade;
         let gst = (brokerage + exchange_fee) * self.gst_pct / 100.0;
 
-        slippage + stt + exchange_fee + stamp_duty + brokerage + gst
+        stt + exchange_fee + stamp_duty + brokerage + gst
     }
 
     pub fn slippage_adjusted_price(&self, price: f64, is_buy: bool) -> f64 {
@@ -659,7 +676,7 @@ mod tests {
         let data = vec![42.0];
         let series = calc_ema_series(&data, 9);
         assert_eq!(series.len(), 1);
-        assert!((series[0] - 0.0).abs() < f64::EPSILON, "single value with period>len returns 0-padded");
+        assert!(series[0].is_nan(), "single value with period>len returns NaN");
 
         let last = calc_ema_last(&data, 9);
         assert!((last - 42.0).abs() < f64::EPSILON, "calc_ema_last of single element should return that element");
@@ -727,7 +744,7 @@ mod tests {
         let expected_fixed = brokerage + gst;
         assert!(
             (cost - expected_fixed).abs() < 0.01,
-            "zero trade value should only incur fixed brokerage+GST, got {} vs expected {}",
+            "zero trade value should only incur fixed brokerage+GST (no slippage in total_cost), got {} vs expected {}",
             cost, expected_fixed
         );
     }

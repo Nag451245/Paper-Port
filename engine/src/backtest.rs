@@ -13,6 +13,9 @@ struct BacktestConfig {
     params: Option<Value>,
     transaction_costs: Option<CostConfig>,
     risk_limits: Option<RiskLimitConfig>,
+    /// How many candle bars correspond to one trading day. Default: 1 (daily bars).
+    /// For 5-min bars on a 6.25h trading day, use 75.
+    bars_per_day: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -239,7 +242,7 @@ pub fn run(data: Value) -> Result<Value, String> {
                         cash += exit_value - exit_cost;
                         total_costs += exit_cost;
                         trades.push(TradeEntry {
-                            symbol: config.symbol.clone(), side: "BUY".into(),
+                            symbol: config.symbol.clone(), side: "LONG".into(),
                             entry_price: round2(ep), exit_price: round2(exit_price),
                             qty, pnl: round2(net_pnl), gross_pnl: round2(gross_pnl),
                             costs: round2(exit_cost),
@@ -322,22 +325,31 @@ pub fn run(data: Value) -> Result<Value, String> {
     let avg_win = if wins.is_empty() { 0.0 } else { total_wins / wins.len() as f64 };
     let avg_loss = if losses.is_empty() { 0.0 } else { total_losses / losses.len() as f64 };
 
-    let returns: Vec<f64> = trades.iter().map(|t| t.pnl / config.initial_capital).collect();
-    let mean_ret = if returns.is_empty() { 0.0 } else { returns.iter().sum::<f64>() / returns.len() as f64 };
-    let variance = if returns.len() < 2 { 0.0 } else {
-        returns.iter().map(|r| (r - mean_ret).powi(2)).sum::<f64>() / returns.len() as f64
+    // Compute Sharpe/Sortino from per-bar equity returns (not per-trade returns)
+    let bars_per_day = config.bars_per_day.unwrap_or(1.0).max(1.0);
+    let bar_returns: Vec<f64> = equity_curve.windows(2)
+        .map(|w| if w[0].nav > 0.0 { w[1].nav / w[0].nav - 1.0 } else { 0.0 })
+        .collect();
+    let trading_days = 252.0;
+    let annualization = (trading_days * bars_per_day).sqrt();
+
+    let mean_ret = if bar_returns.is_empty() { 0.0 } else {
+        bar_returns.iter().sum::<f64>() / bar_returns.len() as f64
+    };
+    let variance = if bar_returns.len() < 2 { 0.0 } else {
+        bar_returns.iter().map(|r| (r - mean_ret).powi(2)).sum::<f64>() / (bar_returns.len() as f64 - 1.0)
     };
     let std_dev = variance.sqrt();
-    let sharpe = if std_dev > 0.0 { mean_ret / std_dev * (252.0_f64).sqrt() } else { 0.0 };
+    let sharpe = if std_dev > 0.0 { mean_ret / std_dev * annualization } else { 0.0 };
 
-    let neg_returns: Vec<f64> = returns.iter().filter(|&&r| r < 0.0).copied().collect();
+    let neg_returns: Vec<f64> = bar_returns.iter().filter(|&&r| r < 0.0).copied().collect();
     let down_var = if neg_returns.is_empty() { 0.0 } else {
         neg_returns.iter().map(|r| r.powi(2)).sum::<f64>() / neg_returns.len() as f64
     };
-    let sortino = if down_var > 0.0 { mean_ret / down_var.sqrt() * (252.0_f64).sqrt() } else { 0.0 };
+    let sortino = if down_var > 0.0 { mean_ret / down_var.sqrt() * annualization } else { 0.0 };
 
     let total_return = (nav - config.initial_capital) / config.initial_capital;
-    let years = config.candles.len() as f64 / 252.0;
+    let years = config.candles.len() as f64 / (trading_days * bars_per_day);
     let cagr = if years > 0.0 { ((1.0 + total_return).powf(1.0 / years) - 1.0) * 100.0 } else { 0.0 };
 
     let cost_drag = if config.initial_capital > 0.0 {
@@ -798,7 +810,7 @@ mod tests {
         if !r.trade_log.is_empty() {
             let last_trade = r.trade_log.last().unwrap();
             let is_eod = last_trade.side.contains("EOD_EXIT") ||
-                         last_trade.side == "BUY" || last_trade.side == "SHORT";
+                         last_trade.side == "LONG" || last_trade.side == "SHORT";
             assert!(is_eod || r.trade_log.len() >= 1,
                 "open position at end of data should be force-closed");
         }

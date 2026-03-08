@@ -21,7 +21,21 @@ pub struct EngineConfig {
     pub options: OptionsConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
+    #[serde(default)]
+    pub persistence: PersistenceConfig,
+    #[serde(default)]
+    pub tls: TlsConfig,
+    #[serde(default)]
+    pub broker: BrokerConfig,
+    #[serde(default)]
+    pub market_data: MarketDataConfig,
+    #[serde(default = "default_initial_capital")]
+    pub initial_capital: f64,
 }
+
+fn default_initial_capital() -> f64 { 1_000_000.0 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -243,6 +257,177 @@ impl Default for LoggingConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    pub enabled: bool,
+    pub api_key: String,
+    pub allowed_origins: Vec<String>,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key: String::new(),
+            allowed_origins: vec!["http://localhost:3000".into(), "http://localhost:5173".into()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PersistenceConfig {
+    pub enabled: bool,
+    pub snapshot_path: String,
+    pub snapshot_interval_secs: u64,
+}
+
+impl Default for PersistenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            snapshot_path: "engine_state.json".into(),
+            snapshot_interval_secs: 60,
+        }
+    }
+}
+
+// ─── TLS ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TlsConfig {
+    pub enabled: bool,
+    pub cert_path: String,
+    pub key_path: String,
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cert_path: "certs/server.crt".into(),
+            key_path: "certs/server.key".into(),
+        }
+    }
+}
+
+// ─── Broker ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrokerConfig {
+    /// Which broker adapter to use: "paper", "icici_breeze", "zerodha", "upstox"
+    pub adapter: String,
+    #[serde(default)]
+    pub icici: IciciBreezeConfig,
+    #[serde(default)]
+    pub zerodha: ZerodhaConfig,
+    #[serde(default)]
+    pub upstox: UpstoxConfig,
+}
+
+impl Default for BrokerConfig {
+    fn default() -> Self {
+        Self {
+            adapter: "paper".into(),
+            icici: IciciBreezeConfig::default(),
+            zerodha: ZerodhaConfig::default(),
+            upstox: UpstoxConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IciciBreezeConfig {
+    pub api_key: String,
+    pub secret_key: String,
+    pub session_token: String,
+    /// URL of the Python Breeze Bridge microservice (server/breeze-bridge/app.py).
+    /// All broker calls are routed through this bridge, which wraps the breeze_connect SDK.
+    pub bridge_url: String,
+    /// Direct API URL — only used as fallback reference, bridge handles actual calls
+    pub base_url: String,
+    pub ws_url: String,
+}
+
+impl Default for IciciBreezeConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            secret_key: String::new(),
+            session_token: String::new(),
+            bridge_url: "http://127.0.0.1:8001".into(),
+            base_url: "https://api.icicidirect.com/breezeapi/api/v2".into(),
+            ws_url: "wss://breezeapi.icicidirect.com".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ZerodhaConfig {
+    pub api_key: String,
+    pub api_secret: String,
+    pub access_token: String,
+    pub base_url: String,
+}
+
+impl Default for ZerodhaConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            api_secret: String::new(),
+            access_token: String::new(),
+            base_url: "https://api.kite.trade".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpstoxConfig {
+    pub api_key: String,
+    pub api_secret: String,
+    pub access_token: String,
+    pub base_url: String,
+}
+
+impl Default for UpstoxConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            api_secret: String::new(),
+            access_token: String::new(),
+            base_url: "https://api.upstox.com/v2".into(),
+        }
+    }
+}
+
+// ─── Market Data ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MarketDataConfig {
+    pub enabled: bool,
+    /// Symbols to subscribe for live price feed
+    pub symbols: Vec<String>,
+    /// Reconnect delay in seconds on disconnect
+    pub reconnect_delay_secs: u64,
+}
+
+impl Default for MarketDataConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            symbols: Vec::new(),
+            reconnect_delay_secs: 5,
+        }
+    }
+}
+
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
@@ -254,40 +439,86 @@ impl Default for EngineConfig {
             scan: ScanConfig::default(),
             options: OptionsConfig::default(),
             logging: LoggingConfig::default(),
+            auth: AuthConfig::default(),
+            persistence: PersistenceConfig::default(),
+            tls: TlsConfig::default(),
+            broker: BrokerConfig::default(),
+            market_data: MarketDataConfig::default(),
+            initial_capital: 1_000_000.0,
         }
     }
 }
 
 impl EngineConfig {
     /// Load config from a TOML file, falling back to defaults for missing fields.
-    pub fn load(path: &str) -> Self {
+    /// Returns an error if the file exists but cannot be parsed (fail-fast, not silent).
+    pub fn load(path: &str) -> Result<Self, String> {
         let path = Path::new(path);
         if !path.exists() {
             tracing::info!("No config file at {}, using defaults", path.display());
-            return Self::default();
+            return Ok(Self::default());
         }
-        match std::fs::read_to_string(path) {
-            Ok(contents) => match toml::from_str::<EngineConfig>(&contents) {
-                Ok(config) => {
-                    tracing::info!("Loaded config from {}", path.display());
-                    config
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to parse {}: {}, using defaults", path.display(), e);
-                    Self::default()
-                }
-            },
-            Err(e) => {
-                tracing::warn!("Failed to read {}: {}, using defaults", path.display(), e);
-                Self::default()
-            }
-        }
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+        let config: EngineConfig = toml::from_str(&contents)
+            .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+        config.validate()?;
+        tracing::info!("Loaded and validated config from {}", path.display());
+        Ok(config)
     }
 
     /// Write the current config as a TOML file (for generating defaults).
     pub fn save(&self, path: &str) -> Result<(), String> {
         let toml_str = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
         std::fs::write(path, toml_str).map_err(|e| e.to_string())
+    }
+
+    /// Validate all config values. Returns Err with a description of what's wrong.
+    pub fn validate(&self) -> Result<(), String> {
+        let mut errors: Vec<String> = Vec::new();
+
+        if self.market.trading_days_per_year <= 0.0 {
+            errors.push("market.trading_days_per_year must be > 0".to_string());
+        }
+        if self.market.risk_free_rate < 0.0 || self.market.risk_free_rate > 1.0 {
+            errors.push("market.risk_free_rate must be in [0, 1]".to_string());
+        }
+        if self.risk.max_position_size_pct <= 0.0 || self.risk.max_position_size_pct > 100.0 {
+            errors.push("risk.max_position_size_pct must be in (0, 100]".to_string());
+        }
+        if self.risk.max_drawdown_pct <= 0.0 || self.risk.max_drawdown_pct > 100.0 {
+            errors.push("risk.max_drawdown_pct must be in (0, 100]".to_string());
+        }
+        if self.risk.max_single_loss_pct <= 0.0 || self.risk.max_single_loss_pct > 100.0 {
+            errors.push("risk.max_single_loss_pct must be in (0, 100]".to_string());
+        }
+        if self.risk.var_confidence <= 0.0 || self.risk.var_confidence >= 1.0 {
+            errors.push("risk.var_confidence must be in (0, 1)".to_string());
+        }
+        if self.costs.commission_per_trade < 0.0 {
+            errors.push("costs.commission_per_trade must be >= 0".to_string());
+        }
+        if self.costs.slippage_bps < 0.0 {
+            errors.push("costs.slippage_bps must be >= 0".to_string());
+        }
+        if self.backtest.ema_short_period == 0 {
+            errors.push("backtest.ema_short_period must be > 0".to_string());
+        }
+        if self.backtest.ema_long_period == 0 {
+            errors.push("backtest.ema_long_period must be > 0".to_string());
+        }
+        if self.backtest.ema_short_period >= self.backtest.ema_long_period {
+            errors.push("backtest.ema_short_period must be < ema_long_period".to_string());
+        }
+        if self.initial_capital <= 0.0 {
+            errors.push("initial_capital must be > 0".to_string());
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("Config validation failed:\n  - {}", errors.join("\n  - ")))
+        }
     }
 }
 
@@ -342,7 +573,28 @@ risk_free_rate = 0.05
 
     #[test]
     fn test_missing_file_returns_defaults() {
-        let config = EngineConfig::load("nonexistent_file_xyz.toml");
+        let config = EngineConfig::load("nonexistent_file_xyz.toml").unwrap();
         assert_eq!(config.server.port, 8400);
+    }
+
+    #[test]
+    fn test_validation_catches_bad_values() {
+        let mut config = EngineConfig::default();
+        config.market.trading_days_per_year = 0.0;
+        assert!(config.validate().is_err());
+
+        let mut config = EngineConfig::default();
+        config.risk.var_confidence = 2.0;
+        assert!(config.validate().is_err());
+
+        let mut config = EngineConfig::default();
+        config.backtest.ema_short_period = 50;
+        config.backtest.ema_long_period = 21;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_default_config_validates() {
+        assert!(EngineConfig::default().validate().is_ok());
     }
 }

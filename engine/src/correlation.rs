@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::utils::{round2, round4, pearson_correlation, ols_slope};
+use crate::utils::{round2, round4, pearson_correlation, ols_slope, ols_regression};
 
 #[derive(Deserialize)]
 struct Config {
@@ -165,6 +165,7 @@ fn compute_hurst(data: &[f64]) -> f64 {
     ols_slope(&log_lags, &log_rs)
 }
 
+/// ADF test with constant term (intercept) for valid unit root testing
 fn adf_score(spread: &[f64]) -> f64 {
     if spread.len() < 5 { return 0.0; }
     let mut dy = Vec::new();
@@ -173,13 +174,15 @@ fn adf_score(spread: &[f64]) -> f64 {
         dy.push(spread[i] - spread[i - 1]);
         lag.push(spread[i - 1]);
     }
-    let beta = ols_slope(&lag, &dy);
+    let (beta, _intercept) = ols_regression(&lag, &dy);
     let n = dy.len() as f64;
-    let _mean_dy = dy.iter().sum::<f64>() / n;
-    let residuals: Vec<f64> = (0..dy.len()).map(|i| dy[i] - beta * lag[i]).collect();
+    let residuals: Vec<f64> = (0..dy.len()).map(|i| {
+        dy[i] - (_intercept + beta * lag[i])
+    }).collect();
     let sse = residuals.iter().map(|r| r * r).sum::<f64>();
-    let se = (sse / (n - 1.0)).sqrt();
-    let var_lag = lag.iter().map(|l| (l - lag.iter().sum::<f64>() / n).powi(2)).sum::<f64>();
+    let se = (sse / (n - 2.0).max(1.0)).sqrt();
+    let lag_mean = lag.iter().sum::<f64>() / n;
+    let var_lag = lag.iter().map(|l| (l - lag_mean).powi(2)).sum::<f64>();
     let se_beta = if var_lag > 0.0 { se / var_lag.sqrt() } else { 1.0 };
     if se_beta > 0.0 { beta / se_beta } else { 0.0 }
 }
