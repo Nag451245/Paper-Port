@@ -7,7 +7,6 @@ import { getBrokerAdapter, type BrokerAdapter, type BrokerOrderInput as BrokerIn
 import { wsHub } from '../lib/websocket.js';
 import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
-import { TWAPExecutor, selectOrderType, type TWAPConfig } from './twap-executor.service.js';
 import { ExitCoordinator } from './exit-coordinator.service.js';
 import { DecisionAuditService } from './decision-audit.service.js';
 type OrderSide = string;
@@ -193,15 +192,13 @@ export class TradeService {
   private riskService: RiskService;
   private broker: BrokerAdapter | null = null;
   private oms: OrderManagementService | null = null;
-  private twapExecutor: TWAPExecutor;
+  private _twapExecutor: any = null;
 
   constructor(private prisma: PrismaClient, oms?: OrderManagementService) {
     this.marketData = new MarketDataService();
     this.calendar = new MarketCalendar();
     this.riskService = new RiskService(prisma);
     this.oms = oms ?? new OrderManagementService(prisma);
-    this.twapExecutor = new TWAPExecutor(prisma);
-    this.twapExecutor.setTradeService(this);
 
     if (TRADING_MODE === 'LIVE') {
       this.broker = getBrokerAdapter('breeze');
@@ -209,6 +206,15 @@ export class TradeService {
         this.broker.connect({}).catch(err => log.error({ err }, 'Broker connection failed'));
       }
     }
+  }
+
+  private async getTwapExecutor() {
+    if (!this._twapExecutor) {
+      const { TWAPExecutor } = await import('./twap-executor.service.js');
+      this._twapExecutor = new TWAPExecutor(this.prisma);
+      this._twapExecutor.setTradeService(this);
+    }
+    return this._twapExecutor;
   }
 
   isLiveMode(): boolean { return TRADING_MODE === 'LIVE' && !!this.broker; }
@@ -396,6 +402,7 @@ export class TradeService {
       try {
         const quote = await this.marketData.getQuote(input.symbol, exchange);
         if (quote.ltp > 0) {
+          const { selectOrderType } = await import('./twap-executor.service.js');
           const routing = selectOrderType({
             qty: input.qty,
             ltp: quote.ltp,
@@ -410,7 +417,7 @@ export class TradeService {
               executionType: routing.orderType,
             }, `Auto-routing large order through ${routing.orderType}`);
 
-            const twapConfig: TWAPConfig = {
+            const twapConfig = {
               totalQty: input.qty,
               numSlices: TWAP_DEFAULT_SLICES,
               durationMinutes: TWAP_DEFAULT_DURATION_MIN,
@@ -423,9 +430,10 @@ export class TradeService {
               strategyTag: input.strategyTag,
             };
 
+            const twapExecutor = await this.getTwapExecutor();
             const twapResult = routing.orderType === 'VWAP'
-              ? await this.twapExecutor.executeVWAP(twapConfig)
-              : await this.twapExecutor.executeTWAP(twapConfig);
+              ? await twapExecutor.executeVWAP(twapConfig)
+              : await twapExecutor.executeTWAP(twapConfig);
             if (twapResult.totalFilled > 0) {
               log.info({
                 symbol: input.symbol,
