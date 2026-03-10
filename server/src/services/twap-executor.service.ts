@@ -1,11 +1,27 @@
 import type { PrismaClient } from '@prisma/client';
-import type { TradeService, PlaceOrderInput } from './trade.service.js';
 import { MarketDataService } from './market-data.service.js';
 import { MarketCalendar } from './market-calendar.js';
 import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
 
 const log = createChildLogger('TWAPExecutor');
+
+export interface TWAPPlaceOrderInput {
+  portfolioId: string;
+  symbol: string;
+  side: string;
+  orderType: string;
+  qty: number;
+  price?: number;
+  triggerPrice?: number;
+  instrumentToken: string;
+  exchange?: string;
+  strategyTag?: string;
+}
+
+interface OrderExecutor {
+  placeOrder(userId: string, input: TWAPPlaceOrderInput): Promise<any>;
+}
 
 export interface TWAPConfig {
   totalQty: number;
@@ -33,18 +49,17 @@ interface SliceResult {
 }
 
 export class TWAPExecutor {
-  private tradeService: TradeService;
+  private tradeService!: OrderExecutor;
   private marketData: MarketDataService;
   private calendar: MarketCalendar;
   private activeExecutions = new Map<string, { config: TWAPConfig; slices: SliceResult[]; cancelled: boolean }>();
 
-  constructor(private prisma: PrismaClient, tradeService?: TradeService) {
-    this.tradeService = tradeService as TradeService;
+  constructor(private prisma: PrismaClient) {
     this.marketData = new MarketDataService();
     this.calendar = new MarketCalendar();
   }
 
-  setTradeService(ts: TradeService): void {
+  setTradeService(ts: OrderExecutor): void {
     this.tradeService = ts;
   }
 
@@ -97,7 +112,7 @@ export class TWAPExecutor {
           ? currentPrice * (1 + 0.001)
           : currentPrice * (1 - 0.001);
 
-        const orderInput: PlaceOrderInput = {
+        const orderInput: TWAPPlaceOrderInput = {
           portfolioId: config.portfolioId,
           symbol: config.symbol,
           side: config.side,

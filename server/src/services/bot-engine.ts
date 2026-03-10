@@ -186,6 +186,7 @@ export class BotEngine {
     this.calendar = new MarketCalendar();
     this.riskService = new RiskService(prisma);
     this.twapExecutor = new TWAPExecutor(prisma);
+    this.twapExecutor.setTradeService(this.tradeService);
     this._rustAvailable = isEngineAvailable();
     console.log(`[BotEngine] Initialized — Rust engine: ${this._rustAvailable ? 'AVAILABLE' : 'NOT FOUND (using Gemini AI only)'}`);
 
