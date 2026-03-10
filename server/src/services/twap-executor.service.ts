@@ -1,5 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
-import { TradeService, type PlaceOrderInput } from './trade.service.js';
+import type { TradeService, PlaceOrderInput } from './trade.service.js';
 import { MarketDataService } from './market-data.service.js';
 import { MarketCalendar } from './market-calendar.js';
 import { createChildLogger } from '../lib/logger.js';
@@ -38,10 +38,14 @@ export class TWAPExecutor {
   private calendar: MarketCalendar;
   private activeExecutions = new Map<string, { config: TWAPConfig; slices: SliceResult[]; cancelled: boolean }>();
 
-  constructor(private prisma: PrismaClient) {
-    this.tradeService = new TradeService(prisma);
+  constructor(private prisma: PrismaClient, tradeService?: TradeService) {
+    this.tradeService = tradeService as TradeService;
     this.marketData = new MarketDataService();
     this.calendar = new MarketCalendar();
+  }
+
+  setTradeService(ts: TradeService): void {
+    this.tradeService = ts;
   }
 
   async executeTWAP(config: TWAPConfig): Promise<{

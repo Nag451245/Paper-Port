@@ -201,6 +201,7 @@ export class TradeService {
     this.riskService = new RiskService(prisma);
     this.oms = oms ?? new OrderManagementService(prisma);
     this.twapExecutor = new TWAPExecutor(prisma);
+    this.twapExecutor.setTradeService(this);
 
     if (TRADING_MODE === 'LIVE') {
       this.broker = getBrokerAdapter('breeze');
