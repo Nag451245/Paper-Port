@@ -62,7 +62,7 @@ impl IciciBreezeBroker {
 
     fn check_bridge_health(bridge_url: &str) -> bool {
         let url = format!("{}/health", bridge_url.trim_end_matches('/'));
-        match ureq::get(&url).call() {
+        match ureq::get(&url).timeout(std::time::Duration::from_secs(5)).call() {
             Ok(resp) => {
                 if let Ok(body) = resp.into_json::<serde_json::Value>() {
                     body.get("session_active")
@@ -83,6 +83,7 @@ impl IciciBreezeBroker {
     fn bridge_get(&self, path: &str) -> Result<serde_json::Value, String> {
         let url = self.bridge_url(path);
         let resp = ureq::get(&url)
+            .timeout(std::time::Duration::from_secs(10))
             .call()
             .map_err(|e| {
                 if matches!(e, ureq::Error::Status(503, _)) {
@@ -99,6 +100,7 @@ impl IciciBreezeBroker {
     fn bridge_post(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
         let url = self.bridge_url(path);
         let resp = ureq::post(&url)
+            .timeout(std::time::Duration::from_secs(10))
             .set("Content-Type", "application/json")
             .send_json(body)
             .map_err(|e| {

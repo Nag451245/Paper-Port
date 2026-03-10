@@ -143,8 +143,8 @@ pub fn run(data: Value) -> Result<Value, String> {
     let mut max_dd = 0.0_f64;
     let mut trades: Vec<TradeEntry> = Vec::new();
     let mut equity_curve: Vec<EquityPoint> = Vec::new();
-    // (entry_price, qty, entry_time, is_short)
-    let mut position: Option<(f64, i64, String, bool)> = None;
+    // (entry_price, qty, entry_time, is_short, stop_loss, take_profit)
+    let mut position: Option<(f64, i64, String, bool, Option<f64>, Option<f64>)> = None;
     let mut total_costs = 0.0_f64;
     let mut risk_rejections = 0usize;
     let mut circuit_breaks = 0usize;
@@ -152,9 +152,8 @@ pub fn run(data: Value) -> Result<Value, String> {
     for (i, candle) in config.candles.iter().enumerate() {
         // Recalculate NAV = cash + open position market value
         nav = cash;
-        if let Some((ep, qty, _, is_short)) = &position {
+        if let Some((ep, qty, _, is_short, _, _)) = &position {
             if *is_short {
-                // Short P&L: profit when price falls
                 nav += (*ep - candle.close) * (*qty) as f64 + *ep * (*qty) as f64;
             } else {
                 nav += candle.close * (*qty) as f64;
@@ -162,9 +161,55 @@ pub fn run(data: Value) -> Result<Value, String> {
         }
         equity_curve.push(EquityPoint { date: candle.timestamp.clone(), nav: round2(nav) });
 
+        // Check SL/TP before drawdown and strategy signals
+        if let Some((ep, qty, ref et, is_short, sl, tp)) = position {
+            let hit_sl = match sl {
+                Some(stop) if !is_short => candle.low <= stop,
+                Some(stop) if is_short => candle.high >= stop,
+                _ => false,
+            };
+            let hit_tp = match tp {
+                Some(target) if !is_short => candle.high >= target,
+                Some(target) if is_short => candle.low <= target,
+                _ => false,
+            };
+
+            if hit_sl || hit_tp {
+                let raw_exit = if hit_sl { sl.unwrap() } else { tp.unwrap() };
+                let exit_price = costs.slippage_adjusted_price(raw_exit, is_short);
+                let gross_pnl = if is_short {
+                    (ep - exit_price) * qty as f64
+                } else {
+                    (exit_price - ep) * qty as f64
+                };
+                let exit_value = exit_price * qty as f64;
+                let exit_cost = costs.total_cost(exit_value, true);
+                let net_pnl = gross_pnl - exit_cost;
+                if is_short {
+                    cash += ep * qty as f64 + gross_pnl - exit_cost;
+                } else {
+                    cash += exit_value - exit_cost;
+                }
+                total_costs += exit_cost;
+                let side_label = if hit_sl {
+                    if is_short { "SHORT_SL" } else { "LONG_SL" }
+                } else if is_short { "SHORT_TP" } else { "LONG_TP" };
+                trades.push(TradeEntry {
+                    symbol: config.symbol.clone(), side: side_label.into(),
+                    entry_price: round2(ep), exit_price: round2(exit_price),
+                    qty, pnl: round2(net_pnl), gross_pnl: round2(gross_pnl),
+                    costs: round2(exit_cost),
+                    entry_time: et.clone(), exit_time: candle.timestamp.clone(),
+                });
+                position = None;
+                strategy.reset();
+                continue;
+            }
+        }
+
         let dd_check = risk.check_drawdown(nav, peak);
         if !dd_check.approved {
-            if let Some((ep, qty, et, is_short)) = position.take() {
+            if let Some((ep, qty, et, is_short, _, _)) = position.take() {
                 let exit_price = costs.slippage_adjusted_price(candle.close, is_short);
                 let gross_pnl = if is_short {
                     (ep - exit_price) * qty as f64
@@ -196,8 +241,7 @@ pub fn run(data: Value) -> Result<Value, String> {
         if let Some(signal) = strategy.on_candle(i, candle, &indicators) {
             match signal.side {
                 Side::Buy => {
-                    if let Some((ep, qty, et, true)) = position.take() {
-                        // Close existing short position
+                    if let Some((ep, qty, et, true, _, _)) = position.take() {
                         let exit_price = costs.slippage_adjusted_price(signal.price, true);
                         let gross_pnl = (ep - exit_price) * qty as f64;
                         let exit_value = exit_price * qty as f64;
@@ -214,7 +258,6 @@ pub fn run(data: Value) -> Result<Value, String> {
                         });
                     }
                     if position.is_none() {
-                        // Open new long position
                         let qty = calc_qty(cash, candle.close, &risk);
                         let check = risk.check_position_size(nav, candle.close, qty, None);
                         if !check.approved {
@@ -227,13 +270,12 @@ pub fn run(data: Value) -> Result<Value, String> {
                             let entry_cost = costs.total_cost(position_value, false);
                             cash -= position_value + entry_cost;
                             total_costs += entry_cost;
-                            position = Some((entry_price, qty, candle.timestamp.clone(), false));
+                            position = Some((entry_price, qty, candle.timestamp.clone(), false, signal.stop_loss, signal.take_profit));
                         }
                     }
                 }
                 Side::Sell => {
-                    if let Some((ep, qty, et, false)) = position.take() {
-                        // Close existing long position
+                    if let Some((ep, qty, et, false, _, _)) = position.take() {
                         let exit_price = costs.slippage_adjusted_price(signal.price, false);
                         let exit_value = exit_price * qty as f64;
                         let gross_pnl = (exit_price - ep) * qty as f64;
@@ -250,7 +292,6 @@ pub fn run(data: Value) -> Result<Value, String> {
                         });
                     }
                     if position.is_none() {
-                        // Open new short position
                         let qty = calc_qty(cash, candle.close, &risk);
                         let check = risk.check_position_size(nav, candle.close, qty, None);
                         if !check.approved {
@@ -264,7 +305,7 @@ pub fn run(data: Value) -> Result<Value, String> {
                             // Short: we receive proceeds but must post margin (simplified: deduct cost only)
                             cash -= entry_cost;
                             total_costs += entry_cost;
-                            position = Some((entry_price, qty, candle.timestamp.clone(), true));
+                            position = Some((entry_price, qty, candle.timestamp.clone(), true, signal.stop_loss, signal.take_profit));
                         }
                     }
                 }
@@ -273,7 +314,7 @@ pub fn run(data: Value) -> Result<Value, String> {
 
         // Final NAV recalculation
         nav = cash;
-        if let Some((ep, qty, _, is_short)) = &position {
+        if let Some((ep, qty, _, is_short, _, _)) = &position {
             if *is_short {
                 nav += (*ep - candle.close) * (*qty) as f64 + *ep * (*qty) as f64;
             } else {
@@ -286,7 +327,7 @@ pub fn run(data: Value) -> Result<Value, String> {
     }
 
     // Close any remaining open position at the last candle price
-    if let Some((ep, qty, et, is_short)) = position.take() {
+    if let Some((ep, qty, et, is_short, _, _)) = position.take() {
         if let Some(last_candle) = config.candles.last() {
             let exit_price = costs.slippage_adjusted_price(last_candle.close, is_short);
             let gross_pnl = if is_short {

@@ -36,39 +36,39 @@ impl BrokerAdapter for UpstoxBroker {
     fn name(&self) -> &str { "upstox" }
 
     fn place_order(&self, _req: &OrderRequest) -> Result<OrderResponse, String> {
-        Err("Upstox adapter not yet implemented — see broker_upstox.rs for instructions".into())
+        Err("Upstox adapter is a stub — not implemented. Use 'paper' or 'icici_breeze' broker.adapter in engine.toml".into())
     }
 
     fn cancel_order(&self, _broker_order_id: &str) -> Result<OrderResponse, String> {
-        Err("Upstox adapter not yet implemented".into())
+        Err("Upstox adapter is a stub — not implemented. Use 'paper' or 'icici_breeze'".into())
     }
 
     fn modify_order(&self, _broker_order_id: &str, _req: &OrderRequest) -> Result<OrderResponse, String> {
-        Err("Upstox adapter not yet implemented".into())
+        Err("Upstox adapter is a stub — not implemented. Use 'paper' or 'icici_breeze'".into())
     }
 
     fn order_status(&self, _broker_order_id: &str) -> Result<OrderResponse, String> {
-        Err("Upstox adapter not yet implemented".into())
+        Err("Upstox adapter is a stub — not implemented. Use 'paper' or 'icici_breeze'".into())
     }
 
     fn positions(&self) -> Result<Vec<BrokerPosition>, String> {
-        Err("Upstox adapter not yet implemented".into())
+        Err("Upstox adapter is a stub — not implemented. Use 'paper' or 'icici_breeze'".into())
     }
 
     fn holdings(&self) -> Result<Vec<BrokerHolding>, String> {
-        Err("Upstox adapter not yet implemented".into())
+        Err("Upstox adapter is a stub — not implemented. Use 'paper' or 'icici_breeze'".into())
     }
 
     fn margins(&self) -> Result<MarginInfo, String> {
-        Err("Upstox adapter not yet implemented".into())
+        Err("Upstox adapter is a stub — not implemented. Use 'paper' or 'icici_breeze'".into())
     }
 
     fn cancel_all_orders(&self) -> Result<usize, String> {
-        Err("Upstox adapter not yet implemented".into())
+        Err("Upstox adapter is a stub — not implemented. Use 'paper' or 'icici_breeze'".into())
     }
 
     fn is_connected(&self) -> bool {
-        !self.config.api_key.is_empty() && !self.config.access_token.is_empty()
+        false
     }
 
     fn as_any(&self) -> &dyn std::any::Any { self }

@@ -136,13 +136,15 @@ async fn bridge_polling_loop(
 
     loop {
         for symbol in symbols {
-            match poll_bridge_quote(&base_url, symbol) {
-                Ok(tick) => {
-                    store.update(tick);
-                }
-                Err(e) => {
-                    warn!(symbol = %symbol, error = %e, "Bridge quote poll failed");
-                }
+            let url = base_url.clone();
+            let sym = symbol.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                poll_bridge_quote(&url, &sym)
+            }).await;
+            match result {
+                Ok(Ok(tick)) => { store.update(tick); }
+                Ok(Err(e)) => { warn!(symbol = %symbol, error = %e, "Bridge quote poll failed"); }
+                Err(e) => { warn!(symbol = %symbol, error = %e, "Bridge poll task panicked"); }
             }
         }
         tokio::time::sleep(interval).await;
@@ -153,6 +155,7 @@ async fn bridge_polling_loop(
 fn poll_bridge_quote(bridge_url: &str, symbol: &str) -> Result<Tick, String> {
     let url = format!("{}/quote/{}", bridge_url, symbol);
     let resp = ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(5))
         .call()
         .map_err(|e| format!("Bridge quote request failed: {}", e))?;
 

@@ -164,6 +164,44 @@ impl OMS {
         Ok(order)
     }
 
+    /// Poll the broker for fill updates on all submitted (non-terminal) orders.
+    /// Call periodically to keep engine positions in sync with broker.
+    pub fn sync_pending_fills(&self) -> Vec<Order> {
+        let mut updated = Vec::new();
+        let mut orders = match self.orders.lock() {
+            Ok(o) => o,
+            Err(_) => return updated,
+        };
+
+        for order in orders.iter_mut() {
+            let needs_sync = matches!(order.status,
+                OrderStatus::Submitted | OrderStatus::PartialFill
+            );
+            if !needs_sync { continue; }
+
+            let broker_id = match &order.broker_order_id {
+                Some(id) => id.clone(),
+                None => continue,
+            };
+
+            match self.broker.order_status(&broker_id) {
+                Ok(resp) => {
+                    let changed = resp.status != order.status || resp.filled_qty != order.filled_qty;
+                    if changed {
+                        order.status = resp.status;
+                        order.filled_qty = resp.filled_qty;
+                        order.avg_fill_price = resp.avg_price;
+                        order.updated_at = resp.timestamp;
+                        updated.push(order.clone());
+                    }
+                }
+                Err(_) => { /* broker unreachable, will retry next cycle */ }
+            }
+        }
+
+        updated
+    }
+
     /// Cancel an order by internal ID
     pub fn cancel_order(&self, internal_id: &str) -> Result<Order, String> {
         let mut orders = self.orders.lock().map_err(|_| "Lock poisoned".to_string())?;

@@ -319,7 +319,8 @@ export class AuthService {
     // Send it to the Python Breeze Bridge FIRST (it calls generate_session internally).
     // Only if the bridge is unavailable, fall back to the Node.js exchange.
     let bridgeConsumedToken = false;
-    const bridgePort = parseInt(process.env.BREEZE_BRIDGE_PORT || '8001', 10);
+    const bridgeUrlEnv = process.env.BREEZE_BRIDGE_URL || 'http://127.0.0.1:8001';
+    const bridgePort = parseInt(new URL(bridgeUrlEnv).port || '8001', 10);
     try {
       const bridgeBody = JSON.stringify({ api_key: apiKey, api_secret: secretKey, session_token: apiSession });
       const bridgeResult = await new Promise<{ success: boolean; error?: string }>((resolve) => {

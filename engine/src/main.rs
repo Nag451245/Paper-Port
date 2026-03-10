@@ -104,6 +104,31 @@ async fn main() {
         AppState::new(config.clone(), config.initial_capital)
     };
 
+    AppState::start_price_update_loop(state.clone());
+
+    // Periodic OMS fill sync — polls broker for fill updates every 5s
+    let fill_sync_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let st = fill_sync_state.clone();
+            let updated = tokio::task::spawn_blocking(move || {
+                st.oms.sync_pending_fills()
+            }).await;
+            if let Ok(fills) = updated {
+                for order in &fills {
+                    info!(
+                        order_id = %order.internal_id,
+                        status = ?order.status,
+                        filled = order.filled_qty,
+                        avg_price = order.avg_fill_price,
+                        "OMS fill sync: order updated"
+                    );
+                }
+            }
+        }
+    });
+
     match mode {
         "http" => {
             info!(host = %config.server.host, port = config.server.port, "Starting HTTP server");

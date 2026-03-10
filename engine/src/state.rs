@@ -128,7 +128,7 @@ impl AppState {
         let fat_finger = FatFingerLimits::default();
         let oms = OMS::new(broker.clone(), fat_finger);
         let alert_manager = AlertManager::new(NotificationConfig::default());
-        let (live_prices, _rx) = LivePriceStore::new();
+        let (live_prices, _price_rx) = LivePriceStore::new();
 
         Arc::new(Self {
             config,
@@ -149,6 +149,30 @@ impl AppState {
             broker_adapter: broker,
             live_prices,
         })
+    }
+
+    /// Spawn a background task that reads live price updates and updates position P&L.
+    /// Must be called from an async (Tokio) context.
+    pub fn start_price_update_loop(state: Arc<Self>) {
+        let mut rx = state.live_prices.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(tick) => {
+                        if let Some(mut pos) = state.positions.get_mut(&tick.symbol) {
+                            pos.update_price(tick.ltp);
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(lagged = n, "Price update loop lagged, skipping ticks");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::info!("Price broadcast channel closed, stopping update loop");
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     pub fn get_nav(&self) -> f64 {
@@ -289,6 +313,8 @@ impl AppState {
         let snap: PersistenceSnapshot = serde_json::from_str(&json).map_err(|e| e.to_string())?;
         let state = Self::new(config, snap.nav);
         state.set_cash(snap.cash);
+        // Restore peak_nav BEFORE set_nav, so the CAS in set_nav preserves whichever is higher
+        state.peak_nav.store(snap.peak_nav.to_bits(), Ordering::Release);
         state.set_nav(snap.nav);
         for pos in snap.positions {
             state.positions.insert(pos.symbol.clone(), pos);
