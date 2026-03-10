@@ -18,9 +18,8 @@ import {
   ArrowDown,
   ShieldAlert,
 } from 'lucide-react';
-import { riskApi, portfolioApi } from '@/services/api';
+import { riskApi } from '@/services/api';
 import { useRiskAlerts } from '@/hooks/useTradeUpdates';
-import { useLivePrices } from '@/hooks/useLivePrice';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -99,7 +98,7 @@ export default function RiskDashboard() {
   const [stopLossPositions, setStopLossPositions] = useState<StopLossPosition[]>([]);
   const [killSwitch, setKillSwitch] = useState<KillSwitchStatus>({ active: false, activatedAt: null, reason: null });
   const [circuitBreaker, setCircuitBreaker] = useState<any>(null);
-  const [comprehensive, setComprehensive] = useState<any>(null);
+  const [, setComprehensive] = useState<any>(null);
   const [killLoading, setKillLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

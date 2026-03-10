@@ -9,11 +9,6 @@ import { ExchangeBadge } from './StatusBadge';
 type OrderSide = 'BUY' | 'SELL';
 type OrderType = 'MARKET' | 'LIMIT';
 
-function num(v: any): number {
-  if (v == null) return 0;
-  return typeof v === 'string' ? parseFloat(v) || 0 : Number(v);
-}
-
 interface PendingOrder {
   id: string;
   side: string;

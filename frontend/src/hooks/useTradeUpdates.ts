@@ -46,10 +46,10 @@ export function useTradeUpdates(onRefresh: () => void) {
 
 export interface RiskAlert {
   id: string;
-  type: 'risk_violation' | 'circuit_breaker' | 'kill_switch' | 'signal';
+  type: 'risk_violation' | 'circuit_breaker' | 'kill_switch' | 'signal_generated';
   title: string;
   message: string;
-  severity: 'info' | 'warning' | 'critical';
+  severity: string;
   timestamp: number;
 }
 
@@ -73,50 +73,54 @@ export function useRiskAlerts(maxAlerts = 20) {
     const unsubs = [
       liveSocket.on('risk_violation', (msg: any) => {
         const d = msg.data ?? msg;
-        setAlerts(prev => [{
+        const alert: RiskAlert = {
           id: `rv-${++counter}`,
           type: 'risk_violation',
           title: 'Risk Violation',
           message: d.reason ?? d.message ?? `${d.ruleType ?? 'Risk'} limit breached`,
           severity: 'warning',
           timestamp: Date.now(),
-        }, ...prev].slice(0, maxAlerts));
+        };
+        setAlerts(prev => [alert, ...prev].slice(0, maxAlerts));
       }),
 
       liveSocket.on('circuit_breaker', (msg: any) => {
         const d = msg.data ?? msg;
-        setAlerts(prev => [{
+        const alert: RiskAlert = {
           id: `cb-${++counter}`,
           type: 'circuit_breaker',
           title: 'Circuit Breaker Triggered',
           message: d.reason ?? 'Trading halted due to risk limits',
           severity: 'critical',
           timestamp: Date.now(),
-        }, ...prev].slice(0, maxAlerts));
+        };
+        setAlerts(prev => [alert, ...prev].slice(0, maxAlerts));
       }),
 
       liveSocket.on('kill_switch', (msg: any) => {
         const d = msg.data ?? msg;
-        setAlerts(prev => [{
+        const alert: RiskAlert = {
           id: `ks-${++counter}`,
           type: 'kill_switch',
           title: d.active ? 'Kill Switch ACTIVATED' : 'Kill Switch Deactivated',
           message: d.reason ?? (d.active ? 'All trading halted immediately' : 'Trading resumed'),
           severity: d.active ? 'critical' : 'info',
           timestamp: Date.now(),
-        }, ...prev].slice(0, maxAlerts));
+        };
+        setAlerts(prev => [alert, ...prev].slice(0, maxAlerts));
       }),
 
       liveSocket.on('signal_generated', (msg: any) => {
         const d = msg.data ?? msg;
-        setAlerts(prev => [{
+        const alert: RiskAlert = {
           id: `sig-${++counter}`,
-          type: 'signal',
+          type: 'signal_generated',
           title: 'Signal Generated',
           message: `${d.symbol ?? ''} ${d.direction ?? ''} — confidence ${((d.confidence ?? 0) * 100).toFixed(0)}%`,
           severity: 'info',
           timestamp: Date.now(),
-        }, ...prev].slice(0, maxAlerts));
+        };
+        setAlerts(prev => [alert, ...prev].slice(0, maxAlerts));
       }),
     ];
 

@@ -304,7 +304,7 @@ export function buildRatioCallSpread(atm: number, qty: number, chain: Strike[]):
 
 // ─── Margin Estimation ───────────────────────────────────────────────────────
 
-const INDEX_SET = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX']);
+export const INDEX_SET = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX']);
 
 export function estimateMargin(legs: StrategyLeg[], spot: number, maxLoss: number, sym = 'NIFTY'): number {
   if (legs.length === 0 || spot <= 0) return 0;
