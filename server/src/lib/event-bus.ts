@@ -68,7 +68,7 @@ function getOrCreateQueue(category: QueueCategory): Queue | null {
   if (!redis) return null;
 
   const q = new Queue(name, {
-    connection: redis.duplicate(),
+    connection: redis.duplicate({ maxRetriesPerRequest: null }),
     defaultJobOptions: {
       removeOnComplete: { age: 1800, count: 500 },
       removeOnFail: { age: 7200, count: 200 },
@@ -129,7 +129,7 @@ export function registerWorker(
     name,
     async (job) => { await handler(job); },
     {
-      connection: redis.duplicate(),
+      connection: redis.duplicate({ maxRetriesPerRequest: null }),
       concurrency: opts?.concurrency ?? 5,
     },
   );
