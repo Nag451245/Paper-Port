@@ -26,8 +26,10 @@ import csv
 import io
 
 import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 breeze_instance = None
+_api_executor = ThreadPoolExecutor(max_workers=4)
 session_expiry = None
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_FILE = os.path.join(SCRIPT_DIR, ".breeze_session.json")
@@ -177,6 +179,22 @@ def _cache_set(key, data):
         if len(_response_cache) > 50:
             oldest = min(_response_cache, key=lambda k: _response_cache[k]["at"])
             del _response_cache[oldest]
+
+BREEZE_API_TIMEOUT = 15  # seconds — max wait for a single Breeze SDK call
+
+
+def _call_with_timeout(fn, *args, timeout=BREEZE_API_TIMEOUT, **kwargs):
+    """Run a blocking Breeze SDK call with a timeout. Returns None on timeout."""
+    future = _api_executor.submit(fn, *args, **kwargs)
+    try:
+        return future.result(timeout=timeout)
+    except FuturesTimeoutError:
+        print(f"[Breeze Bridge] API call timed out after {timeout}s")
+        return None
+    except Exception as e:
+        print(f"[Breeze Bridge] API call exception: {e}")
+        return None
+
 
 PI = 3.141592653589793
 RISK_FREE_RATE = 0.07
@@ -418,9 +436,10 @@ def restore_session_from_disk():
         b.get_stock_script_list()
         b.api_handler = ApificationBreeze(b)
 
-        test = b.get_option_chain_quotes(
+        test = _call_with_timeout(b.get_option_chain_quotes,
             stock_code="NIFTY", exchange_code="NFO",
             product_type="options", right="call", strike_price="24000",
+            timeout=10,
         )
         if test and test.get("Status") == 200:
             breeze_instance = b
@@ -444,9 +463,10 @@ def restore_session_from_disk():
 def _test_breeze_instance(b):
     """Make a test API call to verify the Breeze session works."""
     try:
-        test = b.get_option_chain_quotes(
+        test = _call_with_timeout(b.get_option_chain_quotes,
             stock_code="NIFTY", exchange_code="NFO",
             product_type="options", right="call", strike_price="24000",
+            timeout=10,
         )
         return test and test.get("Status") == 200, test
     except Exception as e:
@@ -570,7 +590,7 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
                 params["strike_price"] = _guess_strike(symbol)
 
             print(f"[Breeze Bridge] {symbol}({breeze_code}) {r}: calling API with params={params}")
-            result = breeze_instance.get_option_chain_quotes(**params)
+            result = _call_with_timeout(breeze_instance.get_option_chain_quotes, **params)
 
             _has_data = (
                 result and result.get("Status") == 200
@@ -587,7 +607,7 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
                     step = _get_strike_step(symbol.upper())
                     params["strike_price"] = str(base)
                     print(f"[Breeze Bridge] {symbol} {r}: retry with ATM strike {base}")
-                    result = breeze_instance.get_option_chain_quotes(**params)
+                    result = _call_with_timeout(breeze_instance.get_option_chain_quotes, **params)
                     _has_data = (
                         result and result.get("Status") == 200
                         and isinstance(result.get("Success"), list)
@@ -597,7 +617,7 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
                         for offset_mult in [-5, 5, -10, 10]:
                             alt_strike = str(base + offset_mult * step)
                             params["strike_price"] = alt_strike
-                            result = breeze_instance.get_option_chain_quotes(**params)
+                            result = _call_with_timeout(breeze_instance.get_option_chain_quotes, **params)
                             if result and result.get("Status") == 200 and result.get("Success"):
                                 print(f"[Breeze Bridge] {symbol} {r}: found data at strike {alt_strike}")
                                 break
@@ -822,8 +842,9 @@ def _fetch_spot_from_breeze(symbol):
         return None
     breeze_code = _resolve_stock_code(symbol)
     try:
-        result = breeze_instance.get_quotes(
+        result = _call_with_timeout(breeze_instance.get_quotes,
             stock_code=breeze_code, exchange_code="NSE", product_type="cash",
+            timeout=10,
         )
         if result and result.get("Status") == 200 and isinstance(result.get("Success"), list):
             records = result["Success"]
@@ -921,7 +942,7 @@ def get_expiries(symbol):
         sym = symbol.upper()
         breeze_code = _resolve_stock_code(sym)
         strike = _guess_strike(sym)
-        result = breeze_instance.get_option_chain_quotes(
+        result = _call_with_timeout(breeze_instance.get_option_chain_quotes,
             stock_code=breeze_code, exchange_code="NFO",
             product_type="options", right="call", strike_price=strike,
         )
@@ -930,9 +951,9 @@ def get_expiries(symbol):
         if not result or result.get("Status") != 200 or not result.get("Success"):
             base = int(strike) if strike else 0
             step = _get_strike_step(sym)
-            for offset_mult in [-5, 5, -10, 10, -20, 20, -30, 30, -50, 50]:
+            for offset_mult in [-5, 5, -10, 10]:
                 alt_strike = str(base + offset_mult * step)
-                result = breeze_instance.get_option_chain_quotes(
+                result = _call_with_timeout(breeze_instance.get_option_chain_quotes,
                     stock_code=breeze_code, exchange_code="NFO",
                     product_type="options", right="call", strike_price=alt_strike,
                 )
