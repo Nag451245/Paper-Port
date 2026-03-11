@@ -3,7 +3,6 @@ import { PrismaClient, type User } from '@prisma/client';
 type RiskAppetite = string;
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import https from 'https';
-import http from 'http';
 import * as OTPAuth from 'otpauth';
 import { env } from '../config.js';
 
@@ -319,36 +318,21 @@ export class AuthService {
     // Send it to the Python Breeze Bridge FIRST (it calls generate_session internally).
     // Only if the bridge is unavailable, fall back to the Node.js exchange.
     let bridgeConsumedToken = false;
-    const bridgeUrlEnv = env.BREEZE_BRIDGE_URL;
-    const bridgeUrlParsed = new URL(bridgeUrlEnv);
-    const bridgeHost = bridgeUrlParsed.hostname || '127.0.0.1';
-    const bridgePort = parseInt(bridgeUrlParsed.port || '8001', 10);
+    const bridgeUrl = env.BREEZE_BRIDGE_URL.replace(/\/$/, '');
     try {
       const bridgeBody = JSON.stringify({ api_key: apiKey, api_secret: secretKey, session_token: apiSession });
-      const bridgeResult = await new Promise<{ success: boolean; error?: string }>((resolve) => {
-        try {
-          const bridgeReq = http.request({ hostname: bridgeHost, port: bridgePort, path: '/init', method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(bridgeBody)) },
-          }, (res) => {
-            const chunks: Buffer[] = [];
-            res.on('data', (c: Buffer) => chunks.push(c));
-            res.on('end', () => {
-              try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
-              catch { resolve({ success: false, error: 'Invalid JSON' }); }
-            });
-            res.on('error', () => resolve({ success: false, error: 'Response error' }));
-          });
-          bridgeReq.on('error', () => resolve({ success: false, error: 'Bridge unreachable' }));
-          bridgeReq.setTimeout(20_000, () => { bridgeReq.destroy(); resolve({ success: false, error: 'Timeout' }); });
-          bridgeReq.write(bridgeBody);
-          bridgeReq.end();
-        } catch { resolve({ success: false, error: 'Request setup error' }); }
+      console.log(`[Breeze Bridge] Attempting init at ${bridgeUrl}/init`);
+      const bridgeRes = await fetch(`${bridgeUrl}/init`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: bridgeBody,
+        signal: AbortSignal.timeout(20_000),
       });
-
+      const bridgeResult = await bridgeRes.json() as { success: boolean; error?: string };
       console.log(`[Breeze Bridge] Init result: ${JSON.stringify(bridgeResult)}`);
       bridgeConsumedToken = bridgeResult.success === true;
-    } catch {
-      console.log('[Breeze Bridge] Init failed unexpectedly');
+    } catch (err) {
+      console.log(`[Breeze Bridge] Init failed: ${err instanceof Error ? err.message : err}`);
     }
 
     // Exchange token via CustomerDetails API only if bridge didn't consume it
