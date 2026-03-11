@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
+import { env } from '../config.js';
 import { RiskService } from '../services/risk.service.js';
 import { OptionsPositionService } from '../services/options-position.service.js';
 import { IntradayManager } from '../services/intraday-manager.service.js';
@@ -17,9 +18,10 @@ const log = createChildLogger('RiskRoutes');
 
 export async function riskRoutes(app: FastifyInstance): Promise<void> {
   const prisma = getPrisma();
+  const oms = (app as any).oms;
   const riskService = new RiskService(prisma);
   const optionsService = new OptionsPositionService(prisma);
-  const intradayManager = new IntradayManager(prisma);
+  const intradayManager = new IntradayManager(prisma, oms);
   const auditService = new DecisionAuditService(prisma);
 
   app.addHook('preHandler', authenticate);
@@ -246,7 +248,7 @@ export async function riskRoutes(app: FastifyInstance): Promise<void> {
 
     let breezeOk = false;
     try {
-      const res = await fetch('http://localhost:8001/health');
+      const res = await fetch(`${env.BREEZE_BRIDGE_URL}/health`);
       breezeOk = res.ok;
     } catch { /* breeze bridge down */ }
 

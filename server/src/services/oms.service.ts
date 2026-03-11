@@ -52,7 +52,7 @@ export class OrderManagementService {
   async transition(
     orderId: string,
     toState: OrderState,
-    details?: { filledQty?: number; avgFillPrice?: number; reason?: string },
+    details?: { filledQty?: number; avgFillPrice?: number; reason?: string; slippageBps?: number },
   ): Promise<OrderTransition> {
     const order = await this.prisma.order.findUnique({ where: { id: orderId } });
     if (!order) throw new Error(`Order ${orderId} not found`);
@@ -73,6 +73,9 @@ export class OrderManagementService {
     }
     if (details?.avgFillPrice !== undefined) {
       updateData.avgFillPrice = details.avgFillPrice;
+    }
+    if (details?.slippageBps !== undefined) {
+      updateData.slippageBps = details.slippageBps;
     }
     if (toState === 'FILLED' || toState === 'PARTIALLY_FILLED') {
       updateData.filledAt = new Date();
@@ -154,19 +157,14 @@ export class OrderManagementService {
       slippageBps = Math.abs(blendedAvg - idealPrice) / idealPrice * 10000;
     }
 
-    const updateDetails: Record<string, unknown> = {
-      filledQty: totalFilled,
-      avgFillPrice: Math.round(blendedAvg * 100) / 100,
-    };
-
-    if (slippageBps !== undefined) {
-      updateDetails.slippageBps = Math.round(slippageBps * 100) / 100;
-    }
-
     return this.transition(
       orderId,
       isComplete ? 'FILLED' : 'PARTIALLY_FILLED',
-      { filledQty: totalFilled, avgFillPrice: blendedAvg },
+      {
+        filledQty: totalFilled,
+        avgFillPrice: Math.round(blendedAvg * 100) / 100,
+        slippageBps: slippageBps !== undefined ? Math.round(slippageBps * 100) / 100 : undefined,
+      },
     );
   }
 

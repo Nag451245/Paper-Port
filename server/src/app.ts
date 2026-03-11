@@ -330,9 +330,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   // ── Stop-Loss Monitor, Price Feed & Intraday Manager ──
-  const stopLossMonitor = new StopLossMonitor(getPrisma());
+  const stopLossMonitor = new StopLossMonitor(getPrisma(), oms);
   const priceFeedService = new PriceFeedService(getPrisma(), dataPipeline);
-  const intradayManager = new IntradayManager(getPrisma());
+  const intradayManager = new IntradayManager(getPrisma(), oms);
   const optionsPositionService = new OptionsPositionService(getPrisma());
   app.decorate('stopLossMonitor', stopLossMonitor);
   app.decorate('priceFeedService', priceFeedService);
@@ -620,7 +620,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.addHook('onReady', async () => {
     const prisma = getPrisma();
     const { AIAgentService } = await import('./services/ai-agent.service.js');
-    const agentService = new AIAgentService(prisma);
+    const agentService = new AIAgentService(prisma, oms);
 
     // During market hours (9:15 AM - 3:30 PM IST = UTC 3:45 - 10:00)
     // Cron runs every 20 min from UTC 4-10 (covers 9:30 IST to 15:30 IST)

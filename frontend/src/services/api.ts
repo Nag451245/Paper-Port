@@ -177,7 +177,7 @@ export const marketApi = {
   fiiDii: () => api.get<FIIDIIData>('/market/fii-dii'),
 
   search: (query: string, exchange?: string) =>
-    api.get<{ symbol: string; name: string; exchange: string; segment?: string }[]>('/market/search', { params: { q: query, exchange } }),
+    api.get<{ symbol: string; name: string; exchange: string; segment?: string }[]>('/market/search', { params: { q: query, exchange, limit: 20 } }),
 
   lotSizes: () =>
     api.get<{ lotSizes: Record<string, number>; source: string }>('/market/lot-sizes'),
@@ -457,12 +457,16 @@ export const riskApi = {
   stopLossStatus: () => api.get('/risk/stop-loss/status'),
   updateStopLoss: (positionId: string, newStopPrice: number) =>
     api.post('/risk/stop-loss/update', { positionId, newStopPrice }),
-};
-
-// ─── Portfolio Consolidated ────────────────────────────────────────
-export const portfolioConsolidatedApi = {
-  summary: () => api.get('/portfolios/consolidated/summary'),
-  setDefault: (portfolioId: string) => api.post(`/portfolios/${portfolioId}/set-default`),
+  killSwitchStatus: () => api.get('/risk/kill-switch/status'),
+  killSwitchActivate: () => api.post('/risk/kill-switch'),
+  killSwitchDeactivate: () => api.post('/risk/kill-switch/deactivate'),
+  healthDetailed: () => api.get('/risk/health/detailed'),
+  executionQuality: () => api.get('/risk/execution-quality'),
+  metricsDaily: () => api.get('/risk/metrics/daily'),
+  metricsSummary: () => api.get('/risk/metrics/summary'),
+  targetProgress: () => api.get('/risk/metrics/target-progress'),
+  positionSizing: (params?: Record<string, unknown>) => api.get('/risk/position-sizing', { params }),
+  systemStatus: () => api.get('/risk/system/status'),
 };
 
 export default api;

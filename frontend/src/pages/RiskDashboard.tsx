@@ -114,7 +114,7 @@ export default function RiskDashboard() {
         riskApi.var(0.95, 1),
         riskApi.margin(),
         riskApi.stopLossStatus(),
-        (riskApi as any).killSwitchStatus?.() ?? Promise.resolve({ data: { active: false } }),
+        riskApi.killSwitchStatus(),
       ]);
 
       if (compRes.status === 'fulfilled') setComprehensive(compRes.value.data);
@@ -159,7 +159,7 @@ export default function RiskDashboard() {
       if (ksRes.status === 'fulfilled') {
         const ks = ksRes.value.data;
         setKillSwitch({
-          active: !!ks.active,
+          active: !!(ks.killSwitchActive ?? ks.active),
           activatedAt: ks.activatedAt ?? null,
           reason: ks.reason ?? null,
         });
@@ -181,7 +181,7 @@ export default function RiskDashboard() {
     setKillLoading(true);
     try {
       if (killSwitch.active) {
-        await (riskApi as any).killSwitchDeactivate?.() ?? riskApi.squareOffAll();
+        await riskApi.killSwitchDeactivate();
         setKillSwitch({ active: false, activatedAt: null, reason: null });
       } else {
         const confirmed = window.confirm('ACTIVATE KILL SWITCH?\n\nThis will:\n• Halt ALL trading immediately\n• Square off ALL open positions\n• Cancel ALL pending orders\n\nAre you sure?');

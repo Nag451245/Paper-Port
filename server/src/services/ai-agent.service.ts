@@ -4,6 +4,7 @@ type SignalStatus = string;
 import { chatCompletion, chatCompletionJSON } from '../lib/openai.js';
 import { TradeService } from './trade.service.js';
 import { MarketDataService } from './market-data.service.js';
+import { OrderManagementService } from './oms.service.js';
 import { engineRisk, isEngineAvailable } from '../lib/rust-engine.js';
 import { OptionsService, calculateMaxPain, calculateIVPercentile } from './options.service.js';
 import { ExitCoordinator } from './exit-coordinator.service.js';
@@ -22,9 +23,11 @@ export interface SignalAnalysis {
 export class AIAgentService {
   private marketData = new MarketDataService();
   private optionsService: OptionsService;
+  private oms?: OrderManagementService;
 
-  constructor(private prisma: PrismaClient) {
+  constructor(private prisma: PrismaClient, oms?: OrderManagementService) {
     this.optionsService = new OptionsService(prisma);
+    this.oms = oms;
   }
 
   async analyzeOptionsOpportunity(userId: string, symbol: string): Promise<{
@@ -212,7 +215,7 @@ Respond in JSON:
     const portfolio = await this.prisma.portfolio.findFirst({ where: { userId } });
     if (!portfolio) throw new AIAgentError('No portfolio found', 404);
 
-    const tradeService = new TradeService(this.prisma);
+    const tradeService = new TradeService(this.prisma, this.oms);
     const marketData = new MarketDataService();
     const direction = signal.signalType as 'BUY' | 'SELL';
 

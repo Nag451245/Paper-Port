@@ -13,6 +13,7 @@ import { getRedis } from '../lib/redis.js';
 import { isEngineAvailable } from '../lib/rust-engine.js';
 import { isMLServiceAvailable } from '../lib/ml-service-client.js';
 import { createChildLogger } from '../lib/logger.js';
+import { env } from '../config.js';
 
 const log = createChildLogger('UptimeMonitor');
 
@@ -32,7 +33,7 @@ interface HealthSnapshot {
 
 const HEARTBEAT_INTERVAL_MS = 60_000; // 1 minute
 const HISTORY_MAX = 1440; // 24 hours at 1-min resolution
-const BREEZE_BRIDGE_URL = process.env.BREEZE_BRIDGE_URL || 'http://localhost:8001';
+const BREEZE_BRIDGE_URL = env.BREEZE_BRIDGE_URL;
 
 export class UptimeMonitorService {
   private history: HealthSnapshot[] = [];

@@ -60,6 +60,38 @@ span_margin_index_pct = 15.0
 span_margin_stock_pct = 20.0
 default_expiry_days = 30.0
 
+[broker]
+adapter = "icici_breeze"
+
+[broker.icici]
+bridge_url = "http://127.0.0.1:8001"
+base_url = "https://api.icicidirect.com/breezeapi/api/v2"
+ws_url = "wss://breezeapi.icicidirect.com"
+
+[market_data]
+enabled = true
+reconnect_delay_secs = 5
+symbols = [
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
+    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
+    "HINDUNILVR", "SBIN", "BHARTIARTL", "KOTAKBANK", "ITC",
+    "LT", "AXISBANK", "BAJFINANCE", "TATAMOTORS", "MARUTI",
+    "SUNPHARMA", "TITAN", "NTPC", "WIPRO", "ASIANPAINT",
+    "HCLTECH", "ULTRACEMCO", "POWERGRID", "NESTLEIND",
+    "TATASTEEL", "JSWSTEEL", "ADANIENT", "ADANIPORTS",
+    "BAJAJFINSV", "GRASIM", "TECHM", "DRREDDY", "CIPLA",
+    "BRITANNIA", "HINDALCO", "M&M", "EICHERMOT", "DIVISLAB",
+    "COALINDIA", "TATACONSUM", "HEROMOTOCO", "SBILIFE",
+    "HDFCLIFE", "INDUSINDBK", "APOLLOHOSP", "BAJAJ-AUTO",
+    "ONGC", "BPCL", "TATAPOWER", "HAL", "BEL", "ZOMATO",
+    "DLF", "TRENT", "SHRIRAMFIN", "VEDL", "PNB",
+]
+
+[persistence]
+enabled = true
+snapshot_path = "engine_state.json"
+snapshot_interval_secs = 60
+
 [logging]
 level = "info"             # "trace", "debug", "info", "warn", "error"
 format = "pretty"          # "pretty", "json", "compact"

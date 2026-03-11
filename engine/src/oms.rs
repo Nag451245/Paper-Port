@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use crate::broker::{
-    BrokerAdapter, OrderRequest, OrderResponse, OrderSide, OrderType,
-    OrderStatus, ProductType, BrokerPosition,
+    BrokerAdapter, OrderRequest, OrderSide, OrderType,
+    OrderStatus, ProductType,
 };
 
 /// Internal order with full lifecycle tracking
@@ -81,7 +81,9 @@ impl OMS {
             ));
         }
 
-        if let Some(price) = req.price {
+        let check_price = req.price.or(reference_price);
+
+        if let Some(price) = check_price {
             let value = price * req.quantity as f64;
             if value > self.fat_finger.max_order_value {
                 return Err(format!(
@@ -91,12 +93,13 @@ impl OMS {
             }
 
             if let Some(ref_price) = reference_price {
-                if ref_price > 0.0 {
-                    let deviation_pct = ((price - ref_price) / ref_price * 100.0).abs();
+                if ref_price > 0.0 && req.price.is_some() {
+                    let order_price = req.price.unwrap();
+                    let deviation_pct = ((order_price - ref_price) / ref_price * 100.0).abs();
                     if deviation_pct > self.fat_finger.max_price_deviation_pct {
                         return Err(format!(
                             "Price {:.2} deviates {:.1}% from reference {:.2} (limit: {:.1}%)",
-                            price, deviation_pct, ref_price, self.fat_finger.max_price_deviation_pct
+                            order_price, deviation_pct, ref_price, self.fat_finger.max_price_deviation_pct
                         ));
                     }
                 }
@@ -184,6 +187,8 @@ impl OMS {
                 None => continue,
             };
 
+            if broker_id.is_empty() { continue; }
+
             match self.broker.order_status(&broker_id) {
                 Ok(resp) => {
                     let changed = resp.status != order.status || resp.filled_qty != order.filled_qty;
@@ -195,7 +200,9 @@ impl OMS {
                         updated.push(order.clone());
                     }
                 }
-                Err(_) => { /* broker unreachable, will retry next cycle */ }
+                Err(e) => {
+                    tracing::warn!(broker_id = %broker_id, error = %e, "Failed to poll broker for fill status");
+                }
             }
         }
 
@@ -208,17 +215,24 @@ impl OMS {
         let order = orders.iter_mut().find(|o| o.internal_id == internal_id)
             .ok_or_else(|| format!("Order {} not found", internal_id))?;
 
-        if order.status == OrderStatus::Filled || order.status == OrderStatus::Cancelled {
-            return Err(format!("Cannot cancel order in {:?} state", order.status));
+        if matches!(order.status,
+            OrderStatus::Filled | OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired
+        ) {
+            return Err(format!("Cannot cancel order in {:?} state (terminal)", order.status));
         }
 
         if let Some(ref broker_id) = order.broker_order_id {
-            match self.broker.cancel_order(broker_id) {
-                Ok(resp) => {
-                    order.status = resp.status;
-                    order.updated_at = chrono::Utc::now().to_rfc3339();
+            if !broker_id.is_empty() {
+                match self.broker.cancel_order(broker_id) {
+                    Ok(resp) => {
+                        order.status = resp.status;
+                        order.updated_at = chrono::Utc::now().to_rfc3339();
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
+            } else {
+                order.status = OrderStatus::Cancelled;
+                order.updated_at = chrono::Utc::now().to_rfc3339();
             }
         } else {
             order.status = OrderStatus::Cancelled;
@@ -228,14 +242,64 @@ impl OMS {
         Ok(order.clone())
     }
 
-    /// Cancel all pending/submitted orders (emergency use)
+    /// Modify a live order by internal ID
+    pub fn modify_order(
+        &self,
+        internal_id: &str,
+        new_qty: Option<i64>,
+        new_price: Option<f64>,
+        new_trigger_price: Option<f64>,
+    ) -> Result<Order, String> {
+        let mut orders = self.orders.lock().map_err(|_| "Lock poisoned".to_string())?;
+        let order = orders.iter_mut().find(|o| o.internal_id == internal_id)
+            .ok_or_else(|| format!("Order {} not found", internal_id))?;
+
+        if !matches!(order.status, OrderStatus::Pending | OrderStatus::Submitted) {
+            return Err(format!("Cannot modify order in {:?} state", order.status));
+        }
+
+        let broker_id = match &order.broker_order_id {
+            Some(id) if !id.is_empty() => id.clone(),
+            _ => return Err("Order has no broker ID — cannot modify".into()),
+        };
+
+        let modify_req = OrderRequest {
+            symbol: order.symbol.clone(),
+            exchange: order.exchange.clone(),
+            side: order.side,
+            order_type: order.order_type,
+            quantity: new_qty.unwrap_or(order.requested_qty),
+            price: new_price.or(order.price),
+            trigger_price: new_trigger_price.or(order.trigger_price),
+            product: order.product,
+            tag: order.tag.clone(),
+        };
+
+        match self.broker.modify_order(&broker_id, &modify_req) {
+            Ok(resp) => {
+                order.status = resp.status;
+                if let Some(q) = new_qty { order.requested_qty = q; }
+                if new_price.is_some() { order.price = new_price; }
+                if new_trigger_price.is_some() { order.trigger_price = new_trigger_price; }
+                order.updated_at = chrono::Utc::now().to_rfc3339();
+                Ok(order.clone())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Cancel all active (non-terminal) orders (emergency use)
     pub fn cancel_all(&self) -> Vec<String> {
         let mut cancelled = Vec::new();
         if let Ok(mut orders) = self.orders.lock() {
             for order in orders.iter_mut() {
-                if order.status == OrderStatus::Pending || order.status == OrderStatus::Submitted {
+                if matches!(order.status,
+                    OrderStatus::Pending | OrderStatus::Submitted | OrderStatus::PartialFill
+                ) {
                     if let Some(ref broker_id) = order.broker_order_id {
-                        let _ = self.broker.cancel_order(broker_id);
+                        if !broker_id.is_empty() {
+                            let _ = self.broker.cancel_order(broker_id);
+                        }
                     }
                     order.status = OrderStatus::Cancelled;
                     order.updated_at = chrono::Utc::now().to_rfc3339();
@@ -273,8 +337,12 @@ impl OMS {
             let broker_pos = broker_positions.iter().find(|p| p.symbol == *symbol);
             match broker_pos {
                 Some(bp) => {
-                    let qty_match = bp.quantity == engine_qty.unsigned_abs() as i64;
-                    let price_close = (bp.avg_price - engine_price).abs() / engine_price.max(1.0) < 0.01;
+                    let engine_abs = engine_qty.unsigned_abs() as i64;
+                    let engine_is_sell = *engine_qty < 0;
+                    let broker_is_sell = bp.side == OrderSide::Sell;
+                    let side_match = engine_is_sell == broker_is_sell;
+                    let qty_match = side_match && bp.quantity == engine_abs;
+                    let price_close = (bp.avg_price - engine_price).abs() / engine_price.max(0.01) < 0.01;
                     if qty_match && price_close {
                         matched += 1;
                     } else {

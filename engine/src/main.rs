@@ -366,12 +366,16 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
             };
 
             let order_req = OrderRequest {
-                symbol: d.symbol, exchange: d.exchange.unwrap_or_else(|| "NSE".into()),
+                symbol: d.symbol.clone(), exchange: d.exchange.unwrap_or_else(|| "NSE".into()),
                 side, order_type, quantity: d.quantity, price: d.price,
                 trigger_price: d.trigger_price, product, tag: d.tag,
             };
 
-            match state.oms.submit_order(order_req, d.strategy_id, d.reference_price) {
+            let ref_price = d.reference_price.or_else(|| {
+                state.live_prices.get_tick(&d.symbol).map(|t| t.ltp)
+            });
+
+            match state.oms.submit_order(order_req, d.strategy_id, ref_price) {
                 Ok(order) => {
                     state.log_audit("OMS_ORDER_SUBMITTED", Some(&order.symbol),
                         &format!("id={} side={:?} qty={}", order.internal_id, order.side, order.requested_qty));
@@ -397,6 +401,25 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
                 Ok(order) => {
                     state.log_audit("OMS_ORDER_CANCELLED", Some(&order.symbol),
                         &format!("id={}", order.internal_id));
+                    Ok(serde_json::to_value(order).unwrap_or_default())
+                }
+                Err(e) => Err(e),
+            }
+        }
+
+        "oms_modify_order" => {
+            let order_id = match req.data.get("order_id").and_then(|v| v.as_str()) {
+                Some(id) => id,
+                None => return Response { id, success: false, data: serde_json::Value::Null,
+                    error: Some("Missing order_id".into()) },
+            };
+            let new_qty = req.data.get("quantity").and_then(|v| v.as_i64());
+            let new_price = req.data.get("price").and_then(|v| v.as_f64());
+            let new_trigger = req.data.get("trigger_price").and_then(|v| v.as_f64());
+            match state.oms.modify_order(order_id, new_qty, new_price, new_trigger) {
+                Ok(order) => {
+                    state.log_audit("OMS_ORDER_MODIFIED", Some(&order.symbol),
+                        &format!("id={} qty={} price={:?}", order.internal_id, order.requested_qty, order.price));
                     Ok(serde_json::to_value(order).unwrap_or_default())
                 }
                 Err(e) => Err(e),

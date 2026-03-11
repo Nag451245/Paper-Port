@@ -14,6 +14,7 @@ import { TWAPExecutor, selectOrderType } from './twap-executor.service.js';
 import { ExitCoordinator } from './exit-coordinator.service.js';
 import { emit } from '../lib/event-bus.js';
 import { createChildLogger } from '../lib/logger.js';
+import { env } from '../config.js';
 
 const log = createChildLogger('BotEngine');
 
@@ -1228,7 +1229,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
 
   private async getLotSizeForSymbol(symbol: string): Promise<number> {
     try {
-      const res = await fetch(`http://127.0.0.1:8001/lot-size/${encodeURIComponent(symbol)}`, {
+      const res = await fetch(`${env.BREEZE_BRIDGE_URL}/lot-size/${encodeURIComponent(symbol)}`, {
         signal: AbortSignal.timeout(5_000),
       });
       if (res.ok) {

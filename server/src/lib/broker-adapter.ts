@@ -1,7 +1,6 @@
-// CANONICAL BROKER PATH: Node.js TradeService → this adapter → Breeze Bridge (port 8001)
-// The Rust engine has its own broker adapter for market data/signal generation only.
-// All live order execution flows through this Node.js adapter.
-const BREEZE_BRIDGE_URL = process.env.BREEZE_BRIDGE_URL || 'http://127.0.0.1:8001';
+import { env } from '../config.js';
+
+const BREEZE_BRIDGE_URL = env.BREEZE_BRIDGE_URL;
 const FETCH_TIMEOUT = 15_000;
 const RETRY_DELAYS = [1000, 2000, 4000]; // exponential backoff: 1s, 2s, 4s
 const CB_FAILURE_THRESHOLD = 5;

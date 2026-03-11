@@ -32,7 +32,7 @@ const CACHE_TTL_SEARCH = 3600;
 const CACHE_TTL_INDICES = 60;
 const FETCH_TIMEOUT_MS = 10_000;
 const BREEZE_TIMEOUT_MS = 20_000;
-const BREEZE_BRIDGE_URL = process.env.BREEZE_BRIDGE_URL || 'http://127.0.0.1:8001';
+const BREEZE_BRIDGE_URL = env.BREEZE_BRIDGE_URL;
 
 // Parse F&O option symbol like NIFTY20260310248000CE → { underlying: 'NIFTY', expiry: '2026-03-10', strike: 24800, type: 'CE' }
 const FNO_SYMBOL_REGEX = /^([A-Z]+?)(\d{4})(\d{2})(\d{2})(\d+)(CE|PE)$/;
@@ -55,6 +55,7 @@ let breezeInstanceExpiry = 0;
 let breezeInitPromise: Promise<any> | null = null;
 
 const POPULAR_NSE_STOCKS: [string, string][] = [
+  // NIFTY 50
   ['RELIANCE', 'Reliance Industries Ltd'],
   ['TCS', 'Tata Consultancy Services Ltd'],
   ['HDFCBANK', 'HDFC Bank Ltd'],
@@ -85,6 +86,140 @@ const POPULAR_NSE_STOCKS: [string, string][] = [
   ['BAJAJFINSV', 'Bajaj Finserv Ltd'],
   ['ULTRACEMCO', 'UltraTech Cement Ltd'],
   ['NESTLEIND', 'Nestle India Ltd'],
+  ['HDFC', 'HDFC Ltd'],
+  ['DRREDDY', 'Dr. Reddys Laboratories Ltd'],
+  ['DIVISLAB', 'Divis Laboratories Ltd'],
+  ['CIPLA', 'Cipla Ltd'],
+  ['TECHM', 'Tech Mahindra Ltd'],
+  ['EICHERMOT', 'Eicher Motors Ltd'],
+  ['APOLLOHOSP', 'Apollo Hospitals Enterprise Ltd'],
+  ['BPCL', 'Bharat Petroleum Corporation Ltd'],
+  ['GRASIM', 'Grasim Industries Ltd'],
+  ['HEROMOTOCO', 'Hero MotoCorp Ltd'],
+  ['INDUSINDBK', 'IndusInd Bank Ltd'],
+  ['COALINDIA', 'Coal India Ltd'],
+  ['BRITANNIA', 'Britannia Industries Ltd'],
+  ['SHRIRAMFIN', 'Shriram Finance Ltd'],
+  ['TATACONSUM', 'Tata Consumer Products Ltd'],
+  ['HINDALCO', 'Hindalco Industries Ltd'],
+  ['ADANIPORTS', 'Adani Ports and Special Economic Zone Ltd'],
+  ['SBILIFE', 'SBI Life Insurance Company Ltd'],
+  ['HDFCLIFE', 'HDFC Life Insurance Company Ltd'],
+  ['BAJAJ-AUTO', 'Bajaj Auto Ltd'],
+  // NIFTY Next 50 / Mid-cap
+  ['BANKBARODA', 'Bank of Baroda'],
+  ['PNB', 'Punjab National Bank'],
+  ['CANBK', 'Canara Bank'],
+  ['IDFCFIRSTB', 'IDFC First Bank Ltd'],
+  ['FEDERALBNK', 'Federal Bank Ltd'],
+  ['BANDHANBNK', 'Bandhan Bank Ltd'],
+  ['AUBANK', 'AU Small Finance Bank'],
+  ['TRENT', 'Trent Ltd'],
+  ['ZOMATO', 'Zomato Ltd'],
+  ['JIOFIN', 'Jio Financial Services Ltd'],
+  ['DMART', 'Avenue Supermarts Ltd (DMart)'],
+  ['PIDILITIND', 'Pidilite Industries Ltd'],
+  ['GODREJCP', 'Godrej Consumer Products Ltd'],
+  ['DABUR', 'Dabur India Ltd'],
+  ['MARICO', 'Marico Ltd'],
+  ['COLPAL', 'Colgate-Palmolive India Ltd'],
+  ['HAVELLS', 'Havells India Ltd'],
+  ['VOLTAS', 'Voltas Ltd'],
+  ['SIEMENS', 'Siemens Ltd'],
+  ['ABB', 'ABB India Ltd'],
+  ['BHEL', 'Bharat Heavy Electricals Ltd'],
+  ['HAL', 'Hindustan Aeronautics Ltd'],
+  ['BEL', 'Bharat Electronics Ltd'],
+  ['IRCTC', 'Indian Railway Catering and Tourism Corporation'],
+  ['INDIANB', 'Indian Bank'],
+  ['IOC', 'Indian Oil Corporation Ltd'],
+  ['GAIL', 'GAIL India Ltd'],
+  ['SAIL', 'Steel Authority of India Ltd'],
+  ['VEDL', 'Vedanta Ltd'],
+  ['JINDALSTEL', 'Jindal Steel & Power Ltd'],
+  ['NMDC', 'NMDC Ltd'],
+  ['TATAPOWER', 'Tata Power Company Ltd'],
+  ['ADANIGREEN', 'Adani Green Energy Ltd'],
+  ['ADANIENSOL', 'Adani Energy Solutions Ltd'],
+  ['DLF', 'DLF Ltd'],
+  ['GODREJPROP', 'Godrej Properties Ltd'],
+  ['OBEROIRLTY', 'Oberoi Realty Ltd'],
+  ['PRESTIGE', 'Prestige Estates Projects Ltd'],
+  ['LODHA', 'Macrotech Developers Ltd (Lodha)'],
+  ['PIIND', 'PI Industries Ltd'],
+  ['UPL', 'UPL Ltd'],
+  ['SRF', 'SRF Ltd'],
+  ['BERGEPAINT', 'Berger Paints India Ltd'],
+  ['ICICIGI', 'ICICI Lombard General Insurance'],
+  ['ICICIPRULI', 'ICICI Prudential Life Insurance'],
+  ['MAXHEALTH', 'Max Healthcare Institute Ltd'],
+  ['LICI', 'Life Insurance Corporation of India'],
+  ['MUTHOOTFIN', 'Muthoot Finance Ltd'],
+  ['CHOLAFIN', 'Cholamandalam Investment and Finance'],
+  ['MANAPPURAM', 'Manappuram Finance Ltd'],
+  ['LTIM', 'LTIMindtree Ltd'],
+  ['PERSISTENT', 'Persistent Systems Ltd'],
+  ['COFORGE', 'Coforge Ltd'],
+  ['MPHASIS', 'Mphasis Ltd'],
+  ['LTTS', 'L&T Technology Services Ltd'],
+  ['TATAELXSI', 'Tata Elxsi Ltd'],
+  ['POLYCAB', 'Polycab India Ltd'],
+  ['PAGEIND', 'Page Industries Ltd'],
+  ['TORNTPHARM', 'Torrent Pharmaceuticals Ltd'],
+  ['LUPIN', 'Lupin Ltd'],
+  ['AUROPHARMA', 'Aurobindo Pharma Ltd'],
+  ['BIOCON', 'Biocon Ltd'],
+  ['ALKEM', 'Alkem Laboratories Ltd'],
+  ['LAURUSLABS', 'Laurus Labs Ltd'],
+  ['IPCALAB', 'IPCA Laboratories Ltd'],
+  // Small-cap popular
+  ['DEEPAKNTR', 'Deepak Nitrite Ltd'],
+  ['ATUL', 'Atul Ltd'],
+  ['TATACOMM', 'Tata Communications Ltd'],
+  ['CUMMINSIND', 'Cummins India Ltd'],
+  ['CROMPTON', 'Crompton Greaves Consumer Electricals'],
+  ['BATAINDIA', 'Bata India Ltd'],
+  ['JUBLFOOD', 'Jubilant Foodworks Ltd'],
+  ['MFSL', 'Max Financial Services Ltd'],
+  ['INDHOTEL', 'Indian Hotels Company Ltd'],
+  ['MOTHERSON', 'Samvardhana Motherson International'],
+  ['EXIDEIND', 'Exide Industries Ltd'],
+  ['ESCORTS', 'Escorts Kubota Ltd'],
+  ['MRF', 'MRF Ltd'],
+  ['BALKRISIND', 'Balkrishna Industries Ltd'],
+  ['SYNGENE', 'Syngene International Ltd'],
+  ['AFFLE', 'Affle India Ltd'],
+  ['ROUTE', 'Route Mobile Ltd'],
+  ['KPITTECH', 'KPIT Technologies Ltd'],
+  ['SONACOMS', 'Sona BLW Precision Forgings Ltd'],
+  ['PVRINOX', 'PVR INOX Ltd'],
+  ['ZYDUSLIFE', 'Zydus Lifesciences Ltd'],
+  ['ABCAPITAL', 'Aditya Birla Capital Ltd'],
+  ['CANFINHOME', 'Can Fin Homes Ltd'],
+  ['RBLBANK', 'RBL Bank Ltd'],
+  ['ASTRAL', 'Astral Ltd'],
+  ['SUPREMEIND', 'Supreme Industries Ltd'],
+  ['CLEAN', 'Clean Science and Technology Ltd'],
+  ['NAUKRI', 'Info Edge India Ltd (Naukri)'],
+  ['PAYTM', 'One97 Communications Ltd (Paytm)'],
+  ['POLICYBZR', 'PB Fintech Ltd (PolicyBazaar)'],
+  ['DELHIVERY', 'Delhivery Ltd'],
+  ['KAYNES', 'Kaynes Technology India Ltd'],
+  ['CDSL', 'Central Depository Services India Ltd'],
+  ['BSE', 'BSE Ltd'],
+  ['MCX', 'Multi Commodity Exchange of India Ltd'],
+  ['IDEA', 'Vodafone Idea Ltd'],
+  ['YESBANK', 'Yes Bank Ltd'],
+  ['TATACHEM', 'Tata Chemicals Ltd'],
+  ['PETRONET', 'Petronet LNG Ltd'],
+  ['IGL', 'Indraprastha Gas Ltd'],
+  ['MGL', 'Mahanagar Gas Ltd'],
+  ['CONCOR', 'Container Corporation of India Ltd'],
+  ['IRFC', 'Indian Railway Finance Corporation Ltd'],
+  ['PFC', 'Power Finance Corporation Ltd'],
+  ['RECLTD', 'REC Ltd'],
+  ['NHPC', 'NHPC Ltd'],
+  ['SJVN', 'SJVN Ltd'],
 ];
 
 const POPULAR_MCX_COMMODITIES: [string, string, number][] = [
@@ -447,7 +582,7 @@ export class MarketDataService {
     // Fallback: Try Breeze bridge
     if (bids.length === 0 && asks.length === 0) {
       try {
-        const bridgeUrl = process.env.BREEZE_BRIDGE_URL || 'http://127.0.0.1:8001';
+        const bridgeUrl = BREEZE_BRIDGE_URL;
         const res = await fetch(`${bridgeUrl}/quote/${encodeURIComponent(symbol)}?exchange=${exchange}`, {
           signal: AbortSignal.timeout(5000),
         });
@@ -1008,7 +1143,7 @@ export class MarketDataService {
         const dd = String(d.getDate()).padStart(2, '0');
         return `${y}-${m}-${dd}`;
       };
-      const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50'].includes(symbol.toUpperCase());
+      const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX'].includes(symbol.toUpperCase());
       const nseUrl = isIndex
         ? `https://www.nseindia.com/api/option-chain-indices?symbol=${encodeURIComponent(symbol.toUpperCase())}`
         : `https://www.nseindia.com/api/option-chain-equities?symbol=${encodeURIComponent(symbol.toUpperCase())}`;
@@ -1066,7 +1201,7 @@ export class MarketDataService {
 
     // Fallback: NSE India
     try {
-      const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50'].includes(symbol.toUpperCase());
+      const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX'].includes(symbol.toUpperCase());
       const url = isIndex
         ? `https://www.nseindia.com/api/option-chain-indices?symbol=${encodeURIComponent(symbol.toUpperCase())}`
         : `https://www.nseindia.com/api/option-chain-equities?symbol=${encodeURIComponent(symbol.toUpperCase())}`;
@@ -1191,33 +1326,53 @@ export class MarketDataService {
     }
 
     const q = query.toLowerCase();
+    const qNorm = q.replace(/[-\s]/g, '');
+    const existingSymbols = new Set<string>();
     const results: any[] = [];
 
-    if (!exchange || exchange === 'NSE' || exchange === 'BSE') {
-      const nseResults = POPULAR_NSE_STOCKS
-        .filter(([code, name]) => code.toLowerCase().includes(q) || name.toLowerCase().includes(q))
-        .map(([code, name]) => ({
-          stock_code: code, symbol: code, name, exchange: 'NSE', segment: 'equity', token: '',
-        }));
-      results.push(...nseResults);
-    }
+    const fuzzyMatch = (code: string, name: string) => {
+      const cNorm = code.toLowerCase().replace(/[-\s]/g, '');
+      const nNorm = name.toLowerCase().replace(/[-\s]/g, '');
+      return cNorm.includes(qNorm) || nNorm.includes(qNorm)
+        || code.toLowerCase().includes(q) || name.toLowerCase().includes(q);
+    };
 
+    const addResult = (r: any) => {
+      if (!existingSymbols.has(r.symbol)) {
+        results.push(r);
+        existingSymbols.add(r.symbol);
+      }
+    };
+
+    // MCX and CDS only come from local lists
     if (!exchange || exchange === 'MCX') {
-      const mcxResults = POPULAR_MCX_COMMODITIES
-        .filter(([code, name]) => code.toLowerCase().includes(q) || name.toLowerCase().includes(q))
-        .map(([code, name]) => ({
+      POPULAR_MCX_COMMODITIES
+        .filter(([code, name]) => fuzzyMatch(code, name))
+        .forEach(([code, name]) => addResult({
           stock_code: code, symbol: code, name, exchange: 'MCX', segment: 'commodity', token: '',
         }));
-      results.push(...mcxResults);
     }
 
     if (!exchange || exchange === 'CDS') {
-      const cdsResults = POPULAR_CDS_CURRENCIES
-        .filter(([code, name]) => code.toLowerCase().includes(q) || name.toLowerCase().includes(q))
-        .map(([code, name]) => ({
+      POPULAR_CDS_CURRENCIES
+        .filter(([code, name]) => fuzzyMatch(code, name))
+        .forEach(([code, name]) => addResult({
           stock_code: code, symbol: code, name, exchange: 'CDS', segment: 'currency', token: '',
         }));
-      results.push(...cdsResults);
+    }
+
+    // For NSE/BSE: instant local results + parallel dynamic search for ALL listed stocks
+    if (!exchange || exchange === 'NSE' || exchange === 'BSE') {
+      // Instant: check the popular list for sub-millisecond response
+      POPULAR_NSE_STOCKS
+        .filter(([code, name]) => fuzzyMatch(code, name))
+        .forEach(([code, name]) => addResult({
+          stock_code: code, symbol: code, name, exchange: 'NSE', segment: 'equity', token: '',
+        }));
+
+      // Dynamic: query Yahoo Finance + NSE for ALL 2000+ NSE / 5000+ BSE stocks
+      const dynamicResults = await this.searchAllExchanges(query, limit);
+      for (const dr of dynamicResults) addResult(dr);
     }
 
     const sliced = results.slice(0, limit);
@@ -1227,6 +1382,99 @@ export class MarketDataService {
     }
 
     return sliced;
+  }
+
+  private async searchAllExchanges(query: string, limit: number): Promise<any[]> {
+    // Run Yahoo Finance and NSE search in parallel for speed
+    const [yahooResults, nseResults] = await Promise.all([
+      this.searchViaYahoo(query, limit),
+      this.searchViaNSE(query, limit),
+    ]);
+
+    // Merge: prefer NSE results (authoritative symbol names), then Yahoo
+    const merged: any[] = [];
+    const seen = new Set<string>();
+
+    for (const r of nseResults) {
+      if (!seen.has(r.symbol)) { merged.push(r); seen.add(r.symbol); }
+    }
+    for (const r of yahooResults) {
+      if (!seen.has(r.symbol)) { merged.push(r); seen.add(r.symbol); }
+    }
+
+    return merged.slice(0, limit);
+  }
+
+  private async searchViaYahoo(query: string, limit: number): Promise<any[]> {
+    try {
+      const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=${Math.min(limit + 5, 20)}&newsCount=0&listsCount=0&quotesQueryId=tss_match_phrase_query`;
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 5000);
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+        signal: ac.signal,
+      });
+      clearTimeout(timer);
+
+      if (!res.ok) return [];
+      const data = await res.json() as any;
+      const quotes = data?.quotes ?? [];
+
+      return quotes
+        .filter((q: any) => {
+          const exch = (q.exchange ?? '').toUpperCase();
+          return exch === 'NSI' || exch === 'NSE' || exch === 'BSE' || exch === 'BOM'
+            || (q.symbol ?? '').endsWith('.NS') || (q.symbol ?? '').endsWith('.BO');
+        })
+        .map((q: any) => {
+          let symbol = q.symbol ?? '';
+          symbol = symbol.replace(/\.(NS|BO)$/, '');
+          const exchange = (q.exchange ?? '').toUpperCase() === 'BOM' || (q.symbol ?? '').endsWith('.BO') ? 'BSE' : 'NSE';
+          return {
+            stock_code: symbol,
+            symbol,
+            name: q.longname ?? q.shortname ?? symbol,
+            exchange,
+            segment: q.quoteType === 'EQUITY' ? 'equity' : (q.quoteType ?? 'equity').toLowerCase(),
+            token: '',
+          };
+        })
+        .slice(0, limit);
+    } catch {
+      return [];
+    }
+  }
+
+  private async searchViaNSE(query: string, limit: number): Promise<any[]> {
+    try {
+      const url = `https://www.nseindia.com/api/search/autocomplete?q=${encodeURIComponent(query)}`;
+      const res = await this.nseFetch(url);
+      if (!res.ok) {
+        await res.text().catch(() => {});
+        return [];
+      }
+
+      const data = await res.json() as any;
+      const results: any[] = [];
+
+      for (const item of (data?.symbols ?? [])) {
+        const symbol = (item.symbol ?? '').toUpperCase();
+        if (!symbol) continue;
+        results.push({
+          stock_code: symbol,
+          symbol,
+          name: item.symbol_info ?? item.company_name ?? symbol,
+          exchange: 'NSE',
+          segment: 'equity',
+          token: '',
+        });
+        if (results.length >= limit) break;
+      }
+
+      return results;
+    } catch {
+      return [];
+    }
   }
 
   async getIndicesForExchange(exchange: string): Promise<{ name: string; value: number; change: number; changePercent: number }[]> {
@@ -1613,8 +1861,65 @@ export class MarketDataService {
       const hRes = await fetch(`${BREEZE_BRIDGE_URL}/health`, { signal: AbortSignal.timeout(3_000) });
       if (!hRes.ok) return false;
       const health = await hRes.json() as any;
-      return health.session_active === true;
+      if (health.session_active === true) return true;
+
+      // Bridge is running but has no session — try to auto-initialize from DB credentials
+      return this.autoInitBreezeBridge();
     } catch {
+      return false;
+    }
+  }
+
+  private _bridgeInitPromise: Promise<boolean> | null = null;
+
+  private async autoInitBreezeBridge(): Promise<boolean> {
+    if (this._bridgeInitPromise) return this._bridgeInitPromise;
+
+    this._bridgeInitPromise = this._doAutoInitBreezeBridge();
+    try {
+      return await this._bridgeInitPromise;
+    } finally {
+      this._bridgeInitPromise = null;
+    }
+  }
+
+  private async _doAutoInitBreezeBridge(): Promise<boolean> {
+    try {
+      const creds = await this.getAnyBreezeCredentials();
+      if (!creds) {
+        log.info('Bridge has no session and no credentials in DB');
+        return false;
+      }
+
+      log.info('Bridge running but no session — auto-initializing from DB credentials');
+      const body = JSON.stringify({
+        api_key: creds.apiKey,
+        api_secret: creds.secretKey,
+        session_token: creds.sessionToken,
+      });
+
+      const res = await fetch(`${BREEZE_BRIDGE_URL}/init`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        signal: AbortSignal.timeout(25_000),
+      });
+
+      if (!res.ok) {
+        log.warn({ status: res.status }, 'Bridge auto-init failed');
+        return false;
+      }
+
+      const result = await res.json() as any;
+      if (result.success) {
+        log.info('Bridge auto-initialized successfully from DB credentials');
+        return true;
+      }
+
+      log.warn({ error: result.error }, 'Bridge auto-init returned failure');
+      return false;
+    } catch (err) {
+      log.warn({ err }, 'Bridge auto-init exception');
       return false;
     }
   }

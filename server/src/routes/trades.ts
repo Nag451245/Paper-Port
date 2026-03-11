@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { TradeService, TradeError } from '../services/trade.service.js';
 import { ExitCoordinator } from '../services/exit-coordinator.service.js';
 import { DecisionAuditService } from '../services/decision-audit.service.js';
+import { OrderManagementService } from '../services/oms.service.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
 
@@ -24,7 +25,8 @@ const closePositionSchema = z.object({
 });
 
 export async function tradeRoutes(app: FastifyInstance): Promise<void> {
-  const service = new TradeService(getPrisma());
+  const oms = (app as any).oms as OrderManagementService | undefined;
+  const service = new TradeService(getPrisma(), oms ?? undefined);
 
   app.addHook('preHandler', authenticate);
 

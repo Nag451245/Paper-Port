@@ -183,7 +183,7 @@ export default function TradingTerminal() {
       try {
         const { data } = await marketApi.search(searchQuery, searchExchangeFilter || undefined);
         const results = Array.isArray(data) ? data : [];
-        setSearchResults(results.slice(0, 10));
+        setSearchResults(results.slice(0, 15));
         setShowDropdown(results.length > 0);
       } catch { setSearchResults([]); }
     }, 300);

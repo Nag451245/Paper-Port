@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
 import { TradeService } from './trade.service.js';
 import { ExitCoordinator } from './exit-coordinator.service.js';
+import { OrderManagementService } from './oms.service.js';
 import { wsHub } from '../lib/websocket.js';
 import { DecisionAuditService } from './decision-audit.service.js';
 import { createChildLogger } from '../lib/logger.js';
@@ -41,9 +42,9 @@ export class StopLossMonitor {
   private decisionAudit: DecisionAuditService;
   private checkIntervalMs = 3_000;
 
-  constructor(private prisma: PrismaClient) {
+  constructor(private prisma: PrismaClient, oms?: OrderManagementService) {
     this.marketData = new MarketDataService();
-    this.tradeService = new TradeService(prisma);
+    this.tradeService = new TradeService(prisma, oms);
     this.decisionAudit = new DecisionAuditService(prisma);
   }
 

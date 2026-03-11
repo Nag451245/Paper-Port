@@ -835,6 +835,15 @@ export async function engineOMSCancelOrder(orderId: string): Promise<unknown> {
   return res.data;
 }
 
+export async function engineOMSModifyOrder(
+  orderId: string,
+  updates: { quantity?: number; price?: number; trigger_price?: number },
+): Promise<unknown> {
+  const res = await runEngine('oms_modify_order', { order_id: orderId, ...updates });
+  if (!res.success) throw new Error(res.error ?? 'OMS modify failed');
+  return res.data;
+}
+
 export async function engineOMSCancelAll(): Promise<unknown> {
   const res = await runEngine('oms_cancel_all', {});
   if (!res.success) throw new Error(res.error ?? 'OMS cancel all failed');
@@ -889,4 +898,48 @@ export async function engineBrokerInitSession(): Promise<unknown> {
   const res = await runEngine('broker_init_session', {});
   if (!res.success) throw new Error(res.error ?? 'Broker session init failed');
   return res.data;
+}
+
+// ── Broker Market Data (via Rust Engine HTTP API → Breeze Bridge) ──
+
+async function engineHttpGet(path: string, timeoutMs = 30_000): Promise<unknown> {
+  const { env } = await import('../config.js');
+  const baseUrl = env.RUST_ENGINE_URL;
+  const url = `${baseUrl}${path}`;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ac.signal });
+    clearTimeout(timer);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`Engine HTTP ${res.status}: ${body}`);
+    }
+    return res.json();
+  } catch (err: any) {
+    clearTimeout(timer);
+    if (err.name === 'AbortError') throw new Error(`Engine request timed out: ${path}`);
+    throw err;
+  }
+}
+
+export async function engineBrokerOptionChain(symbol: string, expiry?: string): Promise<unknown> {
+  const qs = expiry ? `?expiry=${encodeURIComponent(expiry)}` : '';
+  return engineHttpGet(`/api/broker/option_chain/${encodeURIComponent(symbol)}${qs}`, 30_000);
+}
+
+export async function engineBrokerExpiries(symbol: string): Promise<unknown> {
+  return engineHttpGet(`/api/broker/expiries/${encodeURIComponent(symbol)}`, 20_000);
+}
+
+export async function engineBrokerLotSizes(): Promise<unknown> {
+  return engineHttpGet('/api/broker/lot_sizes', 20_000);
+}
+
+export async function engineBrokerQuote(symbol: string): Promise<unknown> {
+  return engineHttpGet(`/api/broker/quote/${encodeURIComponent(symbol)}`, 10_000);
+}
+
+export async function engineMarketDataPrices(): Promise<unknown> {
+  return engineHttpGet('/api/market_data/prices', 10_000);
 }

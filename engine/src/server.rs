@@ -92,6 +92,7 @@ pub async fn run(state: SharedState) {
 
         .route("/api/oms/orders", get(oms_orders))
         .route("/api/oms/orders", post(oms_submit_order))
+        .route("/api/oms/orders/{order_id}/modify", post(oms_modify_order))
         .route("/api/oms/orders/{order_id}/cancel", post(oms_cancel_order))
         .route("/api/oms/cancel_all", post(oms_cancel_all))
         .route("/api/oms/reconcile", post(oms_reconcile))
@@ -104,6 +105,9 @@ pub async fn run(state: SharedState) {
         .route("/api/broker/init_session", post(broker_init_session))
         .route("/api/broker/quote/{symbol}", get(broker_quote))
         .route("/api/broker/historical/{symbol}", get(broker_historical))
+        .route("/api/broker/option_chain/{symbol}", get(broker_option_chain))
+        .route("/api/broker/expiries/{symbol}", get(broker_expiries))
+        .route("/api/broker/lot_sizes", get(broker_lot_sizes))
         .route("/api/market_data/prices", get(market_data_prices))
         .route("/api/market_data/price/{symbol}", get(market_data_price))
 
@@ -479,6 +483,23 @@ async fn oms_orders(
     (status, Json(response))
 }
 
+async fn oms_modify_order(
+    State(state): State<SharedState>,
+    Path(order_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let mut data = body;
+    data["order_id"] = serde_json::json!(order_id);
+    let req = Request {
+        id: None,
+        command: "oms_modify_order".to_string(),
+        data,
+    };
+    let response = handle_request(req, &state);
+    let status = if response.success { StatusCode::OK } else { StatusCode::BAD_REQUEST };
+    (status, Json(response))
+}
+
 async fn oms_cancel_order(
     State(state): State<SharedState>,
     Path(order_id): Path<String>,
@@ -593,6 +614,38 @@ async fn broker_historical(
     match crate::broker_icici::bridge_get_historical(bridge_url, &symbol, interval, from, to) {
         Ok(data) => Json(data),
         Err(e) => Json(json!({ "error": e })),
+    }
+}
+
+async fn broker_option_chain(
+    State(state): State<SharedState>,
+    Path(symbol): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let bridge_url = &state.config.broker.icici.bridge_url;
+    let expiry = params.get("expiry").map(|s| s.as_str());
+    match crate::broker_icici::bridge_get_option_chain(bridge_url, &symbol, expiry) {
+        Ok(data) => (StatusCode::OK, Json(data)),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": e, "symbol": symbol, "strikes": [] }))),
+    }
+}
+
+async fn broker_expiries(
+    State(state): State<SharedState>,
+    Path(symbol): Path<String>,
+) -> impl IntoResponse {
+    let bridge_url = &state.config.broker.icici.bridge_url;
+    match crate::broker_icici::bridge_get_expiries(bridge_url, &symbol) {
+        Ok(data) => (StatusCode::OK, Json(data)),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": e, "symbol": symbol, "expiries": [] }))),
+    }
+}
+
+async fn broker_lot_sizes(State(state): State<SharedState>) -> impl IntoResponse {
+    let bridge_url = &state.config.broker.icici.bridge_url;
+    match crate::broker_icici::bridge_get_lot_sizes(bridge_url) {
+        Ok(data) => (StatusCode::OK, Json(data)),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": e, "lotSizes": {} }))),
     }
 }
 

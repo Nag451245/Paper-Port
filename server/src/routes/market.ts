@@ -47,7 +47,7 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/search', async (request, reply) => {
     const query = request.query as { q?: string; limit?: string; exchange?: string };
-    const q = (query.q ?? '').replace(/[^a-zA-Z0-9& ]/g, '').slice(0, 30);
+    const q = (query.q ?? '').replace(/[^a-zA-Z0-9&\- ]/g, '').slice(0, 30);
     const limit = Math.min(Math.max(Number(query.limit) || 10, 1), 50);
     const results = await service.search(q, limit, query.exchange);
     return reply.send(results);

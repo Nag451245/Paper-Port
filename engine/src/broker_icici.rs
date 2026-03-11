@@ -163,12 +163,14 @@ impl BrokerAdapter for IciciBreezeBroker {
 
         let resp = self.bridge_post("/order/place", &body)?;
 
-        let order_id = resp.get("order_id")
+        let raw_order_id = resp.get("order_id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
-        let status = if !order_id.is_empty() {
+        let has_valid_id = !raw_order_id.is_empty();
+
+        let status = if has_valid_id {
             OrderStatus::Submitted
         } else {
             OrderStatus::Rejected
@@ -178,8 +180,10 @@ impl BrokerAdapter for IciciBreezeBroker {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        let broker_order_id = if has_valid_id { raw_order_id } else { format!("REJECTED-{}", chrono::Utc::now().timestamp_millis()) };
+
         Ok(OrderResponse {
-            broker_order_id: order_id,
+            broker_order_id,
             status,
             filled_qty: 0,
             avg_price: req.price.unwrap_or(0.0),
@@ -193,9 +197,15 @@ impl BrokerAdapter for IciciBreezeBroker {
             return Err("Breeze Bridge not connected".into());
         }
 
+        let exchange = if broker_order_id.contains("NFO") || broker_order_id.contains("FO") {
+            "NFO"
+        } else {
+            "NSE"
+        };
+
         let body = serde_json::json!({
             "order_id": broker_order_id,
-            "exchange_code": "NSE",
+            "exchange_code": exchange,
         });
 
         let resp = self.bridge_post("/order/cancel", &body)?;
@@ -382,6 +392,7 @@ impl BrokerAdapter for IciciBreezeBroker {
 pub fn bridge_get_quote(bridge_url: &str, symbol: &str) -> Result<serde_json::Value, String> {
     let url = format!("{}/quote/{}", bridge_url.trim_end_matches('/'), symbol);
     let resp = ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(10))
         .call()
         .map_err(|e| format!("Bridge quote fetch failed: {}", e))?;
     resp.into_json::<serde_json::Value>()
@@ -402,10 +413,55 @@ pub fn bridge_get_historical(
         symbol, interval, from, to,
     );
     let resp = ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(15))
         .call()
         .map_err(|e| format!("Bridge historical fetch failed: {}", e))?;
     resp.into_json::<serde_json::Value>()
         .map_err(|e| format!("Failed to parse historical response: {}", e))
+}
+
+/// Fetch option chain data for a symbol (NIFTY, BANKNIFTY, FINNIFTY, etc.) via the bridge
+pub fn bridge_get_option_chain(
+    bridge_url: &str,
+    symbol: &str,
+    expiry: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let base = bridge_url.trim_end_matches('/');
+    let url = match expiry {
+        Some(exp) => format!("{}/option-chain/{}?expiry={}", base, symbol, exp),
+        None => format!("{}/option-chain/{}", base, symbol),
+    };
+    let resp = ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(25))
+        .call()
+        .map_err(|e| format!("Bridge option chain fetch failed for {}: {}", symbol, e))?;
+    resp.into_json::<serde_json::Value>()
+        .map_err(|e| format!("Failed to parse option chain response: {}", e))
+}
+
+/// Fetch available expiry dates for a symbol via the bridge
+pub fn bridge_get_expiries(
+    bridge_url: &str,
+    symbol: &str,
+) -> Result<serde_json::Value, String> {
+    let url = format!("{}/expiries/{}", bridge_url.trim_end_matches('/'), symbol);
+    let resp = ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(15))
+        .call()
+        .map_err(|e| format!("Bridge expiries fetch failed for {}: {}", symbol, e))?;
+    resp.into_json::<serde_json::Value>()
+        .map_err(|e| format!("Failed to parse expiries response: {}", e))
+}
+
+/// Fetch lot sizes for all F&O symbols via the bridge
+pub fn bridge_get_lot_sizes(bridge_url: &str) -> Result<serde_json::Value, String> {
+    let url = format!("{}/lot-sizes", bridge_url.trim_end_matches('/'));
+    let resp = ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(15))
+        .call()
+        .map_err(|e| format!("Bridge lot sizes fetch failed: {}", e))?;
+    resp.into_json::<serde_json::Value>()
+        .map_err(|e| format!("Failed to parse lot sizes response: {}", e))
 }
 
 #[cfg(test)]

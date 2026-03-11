@@ -13,6 +13,7 @@ import {
   engineKillSwitch,
   engineAuditLog,
   engineOMSSubmitOrder,
+  engineOMSModifyOrder,
   engineOMSCancelOrder,
   engineOMSCancelAll,
   engineOMSOrders,
@@ -22,6 +23,11 @@ import {
   engineAlertAcknowledge,
   engineBrokerStatus,
   engineBrokerInitSession,
+  engineBrokerOptionChain,
+  engineBrokerExpiries,
+  engineBrokerLotSizes,
+  engineBrokerQuote,
+  engineMarketDataPrices,
 } from '../lib/rust-engine.js';
 
 export async function engineRoutes(app: FastifyInstance) {
@@ -163,6 +169,15 @@ export async function engineRoutes(app: FastifyInstance) {
     return engineOMSOrders(query.strategy_id);
   });
 
+  app.post('/oms/orders/:orderId/modify', async (req) => {
+    if (!isEngineAvailable()) {
+      throw app.httpErrors.serviceUnavailable('Engine not available');
+    }
+    const { orderId } = req.params as { orderId: string };
+    const body = req.body as { quantity?: number; price?: number; trigger_price?: number } | undefined;
+    return engineOMSModifyOrder(orderId, body ?? {});
+  });
+
   app.post('/oms/orders/:orderId/cancel', async (req) => {
     if (!isEngineAvailable()) {
       throw app.httpErrors.serviceUnavailable('Engine not available');
@@ -224,5 +239,46 @@ export async function engineRoutes(app: FastifyInstance) {
       throw app.httpErrors.serviceUnavailable('Engine not available');
     }
     return engineBrokerInitSession();
+  });
+
+  // ── Market Data via Engine (direct Breeze Bridge access) ──
+
+  app.get('/broker/option-chain/:symbol', async (req) => {
+    if (!isEngineAvailable()) {
+      throw app.httpErrors.serviceUnavailable('Engine not available');
+    }
+    const { symbol } = req.params as { symbol: string };
+    const query = req.query as Record<string, string>;
+    return engineBrokerOptionChain(symbol, query.expiry);
+  });
+
+  app.get('/broker/expiries/:symbol', async (req) => {
+    if (!isEngineAvailable()) {
+      throw app.httpErrors.serviceUnavailable('Engine not available');
+    }
+    const { symbol } = req.params as { symbol: string };
+    return engineBrokerExpiries(symbol);
+  });
+
+  app.get('/broker/lot-sizes', async () => {
+    if (!isEngineAvailable()) {
+      throw app.httpErrors.serviceUnavailable('Engine not available');
+    }
+    return engineBrokerLotSizes();
+  });
+
+  app.get('/broker/quote/:symbol', async (req) => {
+    if (!isEngineAvailable()) {
+      throw app.httpErrors.serviceUnavailable('Engine not available');
+    }
+    const { symbol } = req.params as { symbol: string };
+    return engineBrokerQuote(symbol);
+  });
+
+  app.get('/market-data/prices', async () => {
+    if (!isEngineAvailable()) {
+      throw app.httpErrors.serviceUnavailable('Engine not available');
+    }
+    return engineMarketDataPrices();
   });
 }

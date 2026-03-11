@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AIAgentService, AIAgentError } from '../services/ai-agent.service.js';
+import type { OrderManagementService } from '../services/oms.service.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
 
@@ -14,7 +15,8 @@ const configSchema = z.object({
 });
 
 export async function aiRoutes(app: FastifyInstance): Promise<void> {
-  const service = new AIAgentService(getPrisma());
+  const oms = (app as any).oms as OrderManagementService | undefined;
+  const service = new AIAgentService(getPrisma(), oms ?? undefined);
 
   app.addHook('preHandler', authenticate);
 
