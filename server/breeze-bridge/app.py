@@ -320,10 +320,9 @@ def init_breeze(api_key, api_secret, session_token):
 
     try:
         b = BreezeConnect(api_key=api_key)
-        b.session_key = session_token
-        b.secret_key = api_secret
-        b.api_util()
-        b.api_handler = ApificationBreeze(b)
+        print(f"[Breeze Bridge] Calling generate_session with token length={len(session_token)}")
+        b.generate_session(api_secret=api_secret, session_token=session_token)
+        print(f"[Breeze Bridge] generate_session succeeded, user_id={b.user_id}, session_key length={len(b.session_key or '')}")
 
         test = b.get_option_chain_quotes(
             stock_code="NIFTY", exchange_code="NFO",
@@ -334,7 +333,7 @@ def init_breeze(api_key, api_secret, session_token):
             session_expiry = datetime.now() + timedelta(hours=23)
             save_session_to_disk(api_key, api_secret, b.user_id, b.session_key)
             print(f"[Breeze Bridge] Session initialized, user_id={b.user_id}")
-            return {"success": True, "message": "Session initialized"}
+            return {"success": True, "message": "Session initialized", "session_key": b.session_key}
 
         print(f"[Breeze Bridge] Test call returned: {test}")
         breeze_instance = None

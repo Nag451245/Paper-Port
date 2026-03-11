@@ -314,10 +314,11 @@ export class AuthService {
     const apiKey = decrypt(credential.encryptedApiKey, this.encKey);
     const secretKey = decrypt(credential.encryptedSecret, this.encKey);
 
-    // IMPORTANT: The raw API session token is SINGLE-USE.
-    // Send it to the Python Breeze Bridge FIRST (it calls generate_session internally).
-    // Only if the bridge is unavailable, fall back to the Node.js exchange.
+    // Send the raw API session token to the Python Breeze Bridge.
+    // The bridge calls generate_session() which exchanges the single-use token.
+    // If the bridge succeeds, it returns the exchanged session_key for us to store.
     let bridgeConsumedToken = false;
+    let realSessionToken = apiSession;
     const bridgeUrl = env.BREEZE_BRIDGE_URL.replace(/\/$/, '');
     try {
       const bridgeBody = JSON.stringify({ api_key: apiKey, api_secret: secretKey, session_token: apiSession });
@@ -326,18 +327,22 @@ export class AuthService {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: bridgeBody,
-        signal: AbortSignal.timeout(20_000),
+        signal: AbortSignal.timeout(30_000),
       });
-      const bridgeResult = await bridgeRes.json() as { success: boolean; error?: string };
+      const bridgeResult = await bridgeRes.json() as { success: boolean; error?: string; session_key?: string };
       console.log(`[Breeze Bridge] Init result: ${JSON.stringify(bridgeResult)}`);
       bridgeConsumedToken = bridgeResult.success === true;
+      if (bridgeConsumedToken && bridgeResult.session_key) {
+        realSessionToken = bridgeResult.session_key;
+        console.log(`[Breeze] Using session_key from bridge (length: ${realSessionToken.length})`);
+      }
     } catch (err) {
       console.log(`[Breeze Bridge] Init failed: ${err instanceof Error ? err.message : err}`);
     }
 
-    // Exchange token via CustomerDetails API only if bridge didn't consume it
-    let realSessionToken = apiSession;
+    // Fall back to exchanging the token via ICICI CustomerDetails API
     if (!bridgeConsumedToken) {
+      console.log(`[Breeze] Bridge init failed, falling back to CustomerDetails exchange`);
       try {
         const exchangeBody = JSON.stringify({ SessionToken: apiSession, AppKey: apiKey });
         const exchangeResult = await new Promise<{ status: number; body: string }>((resolve, reject) => {
@@ -369,8 +374,6 @@ export class AuthService {
       } catch (err: any) {
         console.log(`[Breeze] CustomerDetails exchange failed: ${err.message} — storing raw token`);
       }
-    } else {
-      console.log(`[Breeze] Skipping CustomerDetails exchange — Python bridge consumed the token`);
     }
 
     await this.prisma.breezeCredential.update({
