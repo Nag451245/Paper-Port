@@ -150,6 +150,7 @@ model Order {
   fillLatencyMs   Int?     @map("fill_latency_ms")
   spreadCostBps   Decimal? @map("spread_cost_bps")
   impactCost      Decimal? @map("impact_cost")
+  brokerOrderId   String?  @map("broker_order_id")
   createdAt       DateTime @default(now()) @map("created_at")
   filledAt        DateTime? @map("filled_at")
 
@@ -157,6 +158,7 @@ model Order {
   position  Position?  @relation(fields: [positionId], references: [id])
 
   @@index([portfolioId, status])
+  @@index([brokerOrderId])
   @@index([symbol, createdAt])
   @@map("orders")
 }

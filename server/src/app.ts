@@ -329,36 +329,60 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     console.log('[Morning Boot] ML weights loaded into execution engine');
   });
 
-  // ── Stop-Loss Monitor, Price Feed & Intraday Manager ──
+  // ── Stop-Loss Monitor, Price Feed, Intraday Manager & Fill Reconciliation ──
   const stopLossMonitor = new StopLossMonitor(getPrisma(), oms);
   const priceFeedService = new PriceFeedService(getPrisma(), dataPipeline);
   const intradayManager = new IntradayManager(getPrisma(), oms);
   const optionsPositionService = new OptionsPositionService(getPrisma());
+
+  const { FillReconciliationService } = await import('./services/fill-reconciliation.service.js');
+  const fillReconciliation = new FillReconciliationService(getPrisma(), oms);
+
   app.decorate('stopLossMonitor', stopLossMonitor);
   app.decorate('priceFeedService', priceFeedService);
   app.decorate('intradayManager', intradayManager);
   app.decorate('optionsPositionService', optionsPositionService);
+  app.decorate('fillReconciliation', fillReconciliation);
 
-  // Start SL monitor, price feed, and intraday manager at market open
+  // Startup reconciliation: detect orphaned broker positions from crashes
+  app.addHook('onReady', async () => {
+    try {
+      const result = await fillReconciliation.startupReconciliation();
+      if (result.orphanedBrokerPositions > 0) {
+        console.error(`[CRITICAL] ${result.orphanedBrokerPositions} orphaned broker position(s) detected! Manual review required.`);
+      }
+      if (result.qtyMismatches > 0) {
+        console.warn(`[WARNING] ${result.qtyMismatches} position quantity mismatch(es) between broker and DB.`);
+      }
+      console.log(`[Startup Reconciliation] Complete: broker orphans=${result.orphanedBrokerPositions}, DB-only=${result.missingBrokerPositions}, qty mismatches=${result.qtyMismatches}`);
+    } catch (err) {
+      console.error('[Startup Reconciliation] Failed:', (err as Error).message);
+    }
+  });
+
+  // Start SL monitor, price feed, intraday manager, and fill reconciliation at market open
   orchestrator.scheduleMarketDay('45 3 * * 1-5', async () => {
-    console.log('[MarketOpen] Starting stop-loss monitor, price feed, and intraday manager');
+    console.log('[MarketOpen] Starting stop-loss monitor, price feed, intraday manager, and fill reconciliation');
     await stopLossMonitor.start();
     priceFeedService.start();
     intradayManager.startAutoSquareOff();
+    fillReconciliation.start();
   });
 
   // Stop all at market close
   orchestrator.scheduleMarketDay('0 10 * * 1-5', async () => {
-    console.log('[MarketClose] Stopping stop-loss monitor, price feed, and intraday manager');
+    console.log('[MarketClose] Stopping stop-loss monitor, price feed, intraday manager, and fill reconciliation');
     stopLossMonitor.stop();
     priceFeedService.stop();
     intradayManager.stopAutoSquareOff();
+    fillReconciliation.stop();
   });
 
   app.addHook('onClose', async () => {
     botEngine.stopAll();
     stopLossMonitor.stop();
     priceFeedService.stop();
+    fillReconciliation.stop();
     dataPipeline.stopConsumer();
     orchestrator.stop();
     uptimeMonitor.stop();

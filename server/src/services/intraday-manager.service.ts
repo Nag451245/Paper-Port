@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
 import { TradeService } from './trade.service.js';
+import { RiskService } from './risk.service.js';
 import { ExitCoordinator } from './exit-coordinator.service.js';
 import { OrderManagementService } from './oms.service.js';
 import { wsHub } from '../lib/websocket.js';
@@ -22,6 +23,7 @@ const CIRCUIT_BREAKER_CHECK_INTERVAL = 10_000;
 export class IntradayManager {
   private marketData: MarketDataService;
   private tradeService: TradeService;
+  private riskService: RiskService;
   private squareOffTime = '15:15';
   private squareOffHandle: ReturnType<typeof setInterval> | null = null;
   private circuitBreakerHandle: ReturnType<typeof setInterval> | null = null;
@@ -33,6 +35,7 @@ export class IntradayManager {
   constructor(private prisma: PrismaClient, oms?: OrderManagementService) {
     this.marketData = new MarketDataService();
     this.tradeService = new TradeService(prisma, oms);
+    this.riskService = new RiskService(prisma);
     this.decisionAudit = new DecisionAuditService(prisma);
   }
 
@@ -69,6 +72,7 @@ export class IntradayManager {
 
       try {
         await this.checkIntradayDrawdown();
+        await this.checkDailyLossLimitViaRisk();
       } catch (err) {
         console.error('[IntradayManager] Circuit breaker check error:', (err as Error).message);
       }
@@ -85,6 +89,29 @@ export class IntradayManager {
       this.circuitBreakerHandle = null;
     }
     this.circuitBreakerTriggered = false;
+  }
+
+  private async checkDailyLossLimitViaRisk(): Promise<void> {
+    if (this.circuitBreakerTriggered) return;
+
+    const portfolios = await this.prisma.portfolio.findMany({
+      select: { userId: true },
+    });
+    const userIds = [...new Set(portfolios.map(p => p.userId))];
+
+    for (const userId of userIds) {
+      const result = await this.riskService.forceCloseOnDailyLossLimit(
+        userId,
+        async (positionId: string, uid: string, exitPrice: number) => {
+          await this.squareOffPosition(positionId, `RISK: Daily loss limit breach`);
+        },
+      );
+      if (result.triggered) {
+        this.circuitBreakerTriggered = true;
+        log.warn({ userId, dayLossPct: result.dayLossPct, closedCount: result.closedCount },
+          'forceCloseOnDailyLossLimit triggered by RiskService');
+      }
+    }
   }
 
   private async checkIntradayDrawdown(): Promise<void> {

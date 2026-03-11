@@ -318,7 +318,44 @@ export class MarketDataService {
     }
   }
 
-  // ── Yahoo Finance: primary data source (works from any server, no auth) ──
+  // ── Breeze Bridge: live quote from broker (real-time LTP) ──
+
+  private async fetchLiveFromBreezeBridge(symbol: string, exchange = 'NSE'): Promise<MarketQuote | null> {
+    try {
+      const bridgeActive = await this.ensureBreezeBridgeSession();
+      if (!bridgeActive) return null;
+
+      const url = `${BREEZE_BRIDGE_URL}/quote/${encodeURIComponent(symbol)}?exchange=${encodeURIComponent(exchange)}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+      if (!res.ok) return null;
+
+      const data = await res.json() as any;
+      const ltp = Number(data.ltp ?? data.last_price ?? data.close ?? 0);
+      if (ltp <= 0) return null;
+
+      return {
+        symbol,
+        exchange,
+        ltp,
+        change: Number(data.change ?? 0),
+        changePercent: Number(data.change_percent ?? data.changePercent ?? 0),
+        open: Number(data.open ?? 0),
+        high: Number(data.high ?? 0),
+        low: Number(data.low ?? 0),
+        close: Number(data.close ?? ltp),
+        volume: Number(data.volume ?? 0),
+        bidPrice: Number(data.bid ?? data.best_bid ?? 0),
+        askPrice: Number(data.ask ?? data.best_ask ?? 0),
+        bidQty: Number(data.bid_qty ?? 0),
+        askQty: Number(data.ask_qty ?? 0),
+        timestamp: data.timestamp ?? new Date().toISOString(),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // ── Yahoo Finance: fallback data source ──
 
   private async fetchFromYahoo(symbol: string, exchange = 'NSE'): Promise<MarketQuote | null> {
     try {
@@ -480,28 +517,35 @@ export class MarketDataService {
       return quote;
     }
 
-    // Primary: Yahoo Finance (works from any server, no auth needed)
-    const yahooQuote = await this.fetchFromYahoo(symbol, exchange);
-    if (yahooQuote && yahooQuote.ltp > 0) {
-      if (this.cache) await this.cache.set(cacheKey, yahooQuote, CACHE_TTL_QUOTE);
-      return yahooQuote;
+    // PRIMARY: Breeze Bridge live quote (real-time LTP from broker)
+    const breezeQuote = await this.fetchLiveFromBreezeBridge(symbol, exchange);
+    if (breezeQuote && breezeQuote.ltp > 0) {
+      if (this.cache) await this.cache.set(cacheKey, breezeQuote, CACHE_TTL_QUOTE);
+      return breezeQuote;
     }
 
-    // Fallback 1: NSE direct scraping
+    // Fallback 1: NSE direct scraping (real-time during market hours)
     const nseQuote = await this.fetchFromNSE(symbol);
     if (nseQuote && nseQuote.ltp > 0) {
       if (this.cache) await this.cache.set(cacheKey, nseQuote, CACHE_TTL_QUOTE);
       return nseQuote;
     }
 
-    // Fallback 2: Breeze API
+    // Fallback 2: Yahoo Finance (may return daily close, not live LTP)
+    const yahooQuote = await this.fetchFromYahoo(symbol, exchange);
+    if (yahooQuote && yahooQuote.ltp > 0) {
+      if (this.cache) await this.cache.set(cacheKey, yahooQuote, CACHE_TTL_QUOTE);
+      return yahooQuote;
+    }
+
+    // Fallback 3: Breeze historical (last bar close)
     try {
       const today = new Date().toISOString().split('T')[0];
       const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
       const bars = await this.fetchFromBreeze(symbol, '1day', weekAgo, today);
       if (bars.length > 0) {
         const latest = bars[bars.length - 1];
-        const breezeQuote: MarketQuote = {
+        const historicalQuote: MarketQuote = {
           symbol,
           exchange,
           ltp: latest.close,
@@ -518,10 +562,10 @@ export class MarketDataService {
           askQty: 0,
           timestamp: latest.timestamp ?? new Date().toISOString(),
         };
-        if (this.cache) await this.cache.set(cacheKey, breezeQuote, CACHE_TTL_QUOTE);
-        return breezeQuote;
+        if (this.cache) await this.cache.set(cacheKey, historicalQuote, CACHE_TTL_QUOTE);
+        return historicalQuote;
       }
-    } catch { /* Breeze fallback failed */ }
+    } catch { /* Breeze historical fallback failed */ }
 
     return nseQuote ?? this.emptyQuote(symbol, exchange);
   }

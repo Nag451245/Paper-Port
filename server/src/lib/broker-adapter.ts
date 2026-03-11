@@ -124,7 +124,7 @@ export interface BrokerAdapter {
   placeOrder(input: BrokerOrderInput): Promise<BrokerOrderResult>;
   modifyOrder(orderId: string, changes: Partial<Pick<BrokerOrderInput, 'price' | 'qty' | 'triggerPrice'>>): Promise<BrokerOrderResult>;
   cancelOrder(orderId: string): Promise<BrokerOrderResult>;
-  getOrderStatus(orderId: string): Promise<{ status: string; filledQty: number; avgPrice: number }>;
+  getOrderStatus(orderId: string): Promise<{ status: string; filledQty: number; avgPrice: number; message?: string }>;
 
   getPositions(): Promise<Array<{
     symbol: string;
@@ -133,6 +133,17 @@ export interface BrokerAdapter {
     ltp: number;
     pnl: number;
     product: string;
+  }>>;
+
+  getOrders?(): Promise<Array<{
+    orderId: string;
+    symbol: string;
+    side: string;
+    qty: number;
+    filledQty: number;
+    avgPrice: number;
+    status: string;
+    timestamp: string;
   }>>;
 
   getMarginAvailable(): Promise<{ available: number; used: number; total: number }>;
@@ -246,13 +257,14 @@ class BreezeAdapter implements BrokerAdapter {
     }
   }
 
-  async getOrderStatus(orderId: string): Promise<{ status: string; filledQty: number; avgPrice: number }> {
+  async getOrderStatus(orderId: string): Promise<{ status: string; filledQty: number; avgPrice: number; message?: string }> {
     try {
       const res = await this.bridgeFetch(`/order/status/${orderId}`);
       return {
         status: (res as any).status ?? 'UNKNOWN',
         filledQty: Number((res as any).filled_qty ?? 0),
         avgPrice: Number((res as any).avg_price ?? 0),
+        message: (res as any).message ?? (res as any).rejection_reason,
       };
     } catch {
       return { status: 'UNKNOWN', filledQty: 0, avgPrice: 0 };
@@ -269,6 +281,22 @@ class BreezeAdapter implements BrokerAdapter {
         ltp: Number(p.ltp ?? 0),
         pnl: Number(p.pnl ?? 0),
         product: p.product ?? 'cash',
+      }));
+    } catch { return []; }
+  }
+
+  async getOrders(): Promise<Array<{ orderId: string; symbol: string; side: string; qty: number; filledQty: number; avgPrice: number; status: string; timestamp: string }>> {
+    try {
+      const res = await this.bridgeFetch('/orders');
+      return ((res as any).orders ?? []).map((o: any) => ({
+        orderId: String(o.order_id ?? ''),
+        symbol: o.stock_code ?? o.symbol ?? '',
+        side: (o.action ?? o.side ?? '').toUpperCase(),
+        qty: Number(o.quantity ?? o.qty ?? 0),
+        filledQty: Number(o.filled_qty ?? o.filledQty ?? 0),
+        avgPrice: Number(o.avg_price ?? o.average_price ?? 0),
+        status: (o.status ?? 'UNKNOWN').toUpperCase(),
+        timestamp: o.order_datetime ?? o.timestamp ?? '',
       }));
     } catch { return []; }
   }

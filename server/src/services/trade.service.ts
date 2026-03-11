@@ -9,6 +9,7 @@ import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
 import { ExitCoordinator } from './exit-coordinator.service.js';
 import { DecisionAuditService } from './decision-audit.service.js';
+import { getRedis } from '../lib/redis.js';
 type OrderSide = string;
 type OrderType = string;
 type Exchange = string;
@@ -376,7 +377,21 @@ export class TradeService {
     const currentNav = Number(portfolio.currentNav);
     const totalInvested = await this.getTotalInvestedValue(input.portfolioId);
 
-    // Risk gate: enforce target-aware and position limits before any order
+    // Per-symbol advisory lock: prevent concurrent orders from bypassing position limits
+    const lockKey = `order_lock:${input.portfolioId}:${input.symbol}`;
+    const redis = getRedis();
+    if (redis) {
+      const acquired = await redis.set(lockKey, '1', 'EX', 30, 'NX');
+      if (!acquired) {
+        throw new TradeError(
+          `Another order for ${input.symbol} is already being processed. Please wait.`,
+          429,
+        );
+      }
+    }
+
+    try {
+    // Risk gate: enforce target-aware and position limits before any order (now atomic with lock)
     try {
       const estPrice = input.price ?? 0;
       const orderValue = estPrice > 0 ? estPrice * input.qty : 0;
@@ -463,6 +478,19 @@ export class TradeService {
           400,
         );
       }
+
+      // Price staleness detection: reject trades on stale quotes
+      if (quote.timestamp) {
+        const quoteAge = Date.now() - new Date(quote.timestamp).getTime();
+        const MAX_QUOTE_AGE_MS = 5 * 60 * 1000; // 5 minutes
+        if (quoteAge > MAX_QUOTE_AGE_MS) {
+          throw new TradeError(
+            `Price for ${input.symbol} is stale (${Math.round(quoteAge / 1000)}s old). ` +
+            'Cannot place market order with outdated price data. Retry or use a limit order.',
+            400,
+          );
+        }
+      }
     }
 
     let brokerOrderId: string | undefined;
@@ -470,16 +498,33 @@ export class TradeService {
     let execSimResult: ExecutionSimulation | undefined;
 
     if (this.isLiveMode()) {
-      try {
-        const liveResult = await this.executeLiveOrder(input);
-        brokerOrderId = liveResult.brokerOrderId;
-        if (this.broker) {
+      const liveResult = await this.executeLiveOrder(input);
+      brokerOrderId = liveResult.brokerOrderId;
+
+      if (this.broker && liveResult.orderId) {
+        const terminalStates = new Set(['FILLED', 'REJECTED', 'CANCELLED', 'EXPIRED', 'FAILED']);
+        const POLL_INTERVAL_MS = 2000;
+        const MAX_POLLS = 15;
+
+        for (let poll = 0; poll < MAX_POLLS; poll++) {
           const status = await this.broker.getOrderStatus(liveResult.orderId);
           if (status.avgPrice > 0) fillPrice = status.avgPrice;
           if (status.filledQty > 0) effectiveQty = status.filledQty;
+
+          if (terminalStates.has(status.status)) {
+            if (status.status === 'REJECTED' || status.status === 'CANCELLED') {
+              throw new TradeError(
+                `Broker ${status.status.toLowerCase()} the order: ${status.message ?? 'Unknown reason'}`,
+                400,
+              );
+            }
+            break;
+          }
+
+          if (poll < MAX_POLLS - 1) {
+            await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+          }
         }
-      } catch (err) {
-        log.error({ err }, 'Live order failed, falling back to paper');
       }
     } else {
       const execSim = simulateExecution(fillPrice, input.qty, input.side as 'BUY' | 'SELL', exchange, input.orderType);
@@ -556,6 +601,7 @@ export class TradeService {
         fillLatencyMs: execSimResult ? Math.round(execSimResult.latencyMs) : null,
         spreadCostBps: execSimResult ? Math.round(execSimResult.spreadCost * 10000 / (execSimResult.idealPrice * input.qty || 1)) : null,
         impactCost: execSimResult?.impactCost,
+        brokerOrderId: brokerOrderId ?? null,
         filledAt: null,
       },
     });
@@ -602,6 +648,10 @@ export class TradeService {
     // Re-read order to get final state after OMS transitions
     const finalOrder = await this.prisma.order.findUnique({ where: { id: order.id } });
     return { ...(finalOrder ?? order), brokerOrderId, tradingMode: TRADING_MODE };
+
+    } finally {
+      if (redis) await redis.del(lockKey).catch(() => {});
+    }
   }
 
   private shortMarginRequired(price: number, qty: number, exchange: string): number {
@@ -614,6 +664,14 @@ export class TradeService {
     if (!isFinite(newNav) || isNaN(newNav)) {
       log.error({ currentNav, delta, newNav }, 'CRITICAL: NAV update would produce invalid value');
       throw new TradeError(`P&L calculation produced invalid NAV. Trade aborted.`, 500);
+    }
+    if (newNav < 0) {
+      log.error({ currentNav, delta, newNav, portfolioId }, 'CRITICAL: NAV would go negative — clamping to 0');
+      await this.prisma.portfolio.update({
+        where: { id: portfolioId },
+        data: { currentNav: 0 },
+      });
+      return;
     }
     await this.prisma.portfolio.update({
       where: { id: portfolioId },
