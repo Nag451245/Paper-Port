@@ -171,10 +171,10 @@ export class FillReconciliationService {
           }, 'CRITICAL: Broker has position NOT in DB — possible crash during order');
 
           emit('risk', {
-            type: 'ORPHANED_POSITION',
+            type: 'RISK_VIOLATION',
+            userId: 'SYSTEM',
             symbol: bp.symbol,
-            qty: bp.qty,
-            avgPrice: bp.avgPrice,
+            violations: [`Orphaned broker position: ${bp.symbol} qty=${bp.qty} avg=${bp.avgPrice} — not in DB`],
             severity: 'critical',
           }).catch(() => {});
         } else {
@@ -207,6 +207,7 @@ export class FillReconciliationService {
       if (orphanedBrokerPositions > 0) {
         emit('risk', {
           type: 'RISK_VIOLATION',
+          userId: 'SYSTEM',
           symbol: 'ALL',
           violations: [`${orphanedBrokerPositions} orphaned broker position(s) detected — manual intervention required`],
           severity: 'critical',
