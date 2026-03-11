@@ -12,6 +12,7 @@ pub mod broker_upstox;
 pub mod oms;
 pub mod alerts;
 pub mod market_data;
+pub mod options_data;
 mod risk;
 mod greeks;
 mod scan;
@@ -170,6 +171,26 @@ async fn main() {
                         market_data::start_feed(
                             feed_store, &ws_url, &symbols,
                             &api_key, &session_token, poll_interval,
+                        ).await;
+                    });
+                }
+            }
+
+            if config.options.feed_enabled {
+                let options_store = state.options_data.clone();
+                let signal_state = state.clone();
+                let oc_symbols = if config.options.feed_symbols.is_empty() {
+                    config.market_data.symbols.clone()
+                } else {
+                    config.options.feed_symbols.clone()
+                };
+                let bridge_url = config.broker.icici.bridge_url.clone();
+                let opts_config = config.options.clone();
+                if !bridge_url.is_empty() {
+                    info!("Starting options chain feed via Breeze Bridge at {}", bridge_url);
+                    tokio::spawn(async move {
+                        options_data::start_options_feed(
+                            options_store, signal_state, &bridge_url, &oc_symbols, &opts_config,
                         ).await;
                     });
                 }

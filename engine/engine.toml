@@ -59,6 +59,15 @@ volume_weight = 0.20
 span_margin_index_pct = 15.0
 span_margin_stock_pct = 20.0
 default_expiry_days = 30.0
+feed_enabled = false           # Set to true to start options chain polling
+feed_symbols = []              # Empty = use market_data.symbols
+poll_delay_ms = 600            # Delay between individual symbol polls (~100 calls/min)
+poll_cycle_pause_secs = 60     # Pause between full scan cycles
+pcr_high_threshold = 1.5       # PCR above this = contrarian bullish
+pcr_low_threshold = 0.5        # PCR below this = contrarian bearish
+oi_change_threshold_pct = 10.0 # OI change % to trigger buildup signal
+iv_crush_threshold_pct = 20.0  # IV change % to trigger crush/expansion signal
+max_pain_proximity_pct = 2.0   # Spot within this % of max pain triggers signal
 
 [broker]
 adapter = "icici_breeze"

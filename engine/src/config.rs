@@ -227,6 +227,15 @@ pub struct OptionsConfig {
     pub span_margin_index_pct: f64,
     pub span_margin_stock_pct: f64,
     pub default_expiry_days: f64,
+    pub feed_enabled: bool,
+    pub feed_symbols: Vec<String>,
+    pub poll_delay_ms: u64,
+    pub poll_cycle_pause_secs: u64,
+    pub pcr_high_threshold: f64,
+    pub pcr_low_threshold: f64,
+    pub oi_change_threshold_pct: f64,
+    pub iv_crush_threshold_pct: f64,
+    pub max_pain_proximity_pct: f64,
 }
 
 impl Default for OptionsConfig {
@@ -235,6 +244,15 @@ impl Default for OptionsConfig {
             span_margin_index_pct: 15.0,
             span_margin_stock_pct: 20.0,
             default_expiry_days: 30.0,
+            feed_enabled: false,
+            feed_symbols: Vec::new(),
+            poll_delay_ms: 600,
+            poll_cycle_pause_secs: 60,
+            pcr_high_threshold: 1.5,
+            pcr_low_threshold: 0.5,
+            oi_change_threshold_pct: 10.0,
+            iv_crush_threshold_pct: 20.0,
+            max_pain_proximity_pct: 2.0,
         }
     }
 }

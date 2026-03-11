@@ -111,6 +111,9 @@ pub async fn run(state: SharedState) {
         .route("/api/market_data/prices", get(market_data_prices))
         .route("/api/market_data/price/{symbol}", get(market_data_price))
 
+        .route("/api/options/data/{symbol}", get(options_data_handler))
+        .route("/api/options/signals", get(options_signals_handler))
+
         .route("/api/strategies", get(list_strategies))
         .route("/api/signals/cache/{symbol}", get(cached_signals))
         .route("/ws", get(ws_handler))
@@ -665,6 +668,43 @@ async fn market_data_price(
         Some(tick) => (StatusCode::OK, Json(json!(tick))),
         None => (StatusCode::NOT_FOUND, Json(json!({ "error": format!("No data for {}", symbol) }))),
     }
+}
+
+// ─── Options Data ─────────────────────────────────────────────────────
+
+async fn options_data_handler(
+    State(state): State<SharedState>,
+    Path(symbol): Path<String>,
+) -> impl IntoResponse {
+    match state.options_data.get(&symbol) {
+        Some(snap) => (StatusCode::OK, Json(json!(snap))),
+        None => (StatusCode::NOT_FOUND, Json(json!({
+            "error": format!("No options data for {}", symbol),
+            "symbol": symbol,
+        }))),
+    }
+}
+
+async fn options_signals_handler(
+    State(state): State<SharedState>,
+) -> impl IntoResponse {
+    let snapshots = state.options_data.all_snapshots();
+    let mut all_signals = Vec::new();
+    for snap in &snapshots {
+        let signals = state.get_cached_signals(&snap.symbol);
+        let options_signals: Vec<_> = signals.into_iter()
+            .filter(|s| matches!(
+                s.strategy.as_str(),
+                "oi_buildup" | "pcr_extremes" | "iv_crush" | "max_pain_convergence"
+            ))
+            .collect();
+        all_signals.extend(options_signals);
+    }
+    Json(json!({
+        "count": all_signals.len(),
+        "symbols_tracked": snapshots.len(),
+        "signals": all_signals,
+    }))
 }
 
 // ─── Strategies ───────────────────────────────────────────────────────

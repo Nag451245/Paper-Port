@@ -10,6 +10,7 @@ use crate::broker_upstox::UpstoxBroker;
 use crate::oms::{OMS, FatFingerLimits};
 use crate::alerts::{AlertManager, NotificationConfig};
 use crate::market_data::LivePriceStore;
+use crate::options_data::OptionsDataStore;
 
 // ─── Position Tracking ────────────────────────────────────────────────
 
@@ -120,6 +121,8 @@ pub struct AppState {
     pub broker_adapter: Arc<dyn BrokerAdapter>,
     /// Live market price store (populated by market data feed)
     pub live_prices: Arc<LivePriceStore>,
+    /// Options chain data store (populated by options feed)
+    pub options_data: Arc<OptionsDataStore>,
 }
 
 impl AppState {
@@ -129,6 +132,7 @@ impl AppState {
         let oms = OMS::new(broker.clone(), fat_finger);
         let alert_manager = AlertManager::new(NotificationConfig::default());
         let (live_prices, _price_rx) = LivePriceStore::new();
+        let options_data = OptionsDataStore::new();
 
         Arc::new(Self {
             config,
@@ -148,6 +152,7 @@ impl AppState {
             alert_manager,
             broker_adapter: broker,
             live_prices,
+            options_data,
         })
     }
 
