@@ -709,10 +709,10 @@ def _fetch_spot_from_breeze(symbol):
 
 
 def _guess_strike(symbol):
-    """Return ATM strike dynamically: Breeze API → cache → Yahoo → fallback."""
+    """Return ATM strike: cache → Breeze API → Yahoo → hardcoded fallback."""
     sym = symbol.upper()
 
-    # Check cache first (valid for 5 minutes)
+    # 1. Check cache (valid for 5 minutes)
     with _spot_price_cache_lock:
         cached = _spot_price_cache.get(sym)
         if cached and (datetime.now() - cached["at"]).total_seconds() < 300:
@@ -721,16 +721,35 @@ def _guess_strike(symbol):
             atm = round(spot / step) * step
             return str(int(atm))
 
-    # Try Breeze API (live session) first
+    # 2. Try Breeze API live quote
     spot = _fetch_spot_from_breeze(sym)
+
+    # 3. Try Yahoo Finance
     if not spot:
         spot = _fetch_spot_from_yahoo(sym)
+
     if spot:
         step = _get_strike_step(sym)
         atm = round(spot / step) * step
         return str(int(atm))
 
-    return ""
+    # 4. Hardcoded fallback — updated periodically, better than nothing
+    fallback = {
+        "NIFTY": "23800", "BANKNIFTY": "55700", "FINNIFTY": "25000",
+        "MIDCPNIFTY": "13000", "NIFTYNXT50": "24000", "SENSEX": "78000",
+        "RELIANCE": "1250", "TCS": "3400", "HDFCBANK": "1800", "INFY": "1550",
+        "ICICIBANK": "1350", "SBIN": "750", "BHARTIARTL": "1700", "KOTAKBANK": "1950",
+        "ITC": "420", "LT": "3300", "AXISBANK": "1100", "BAJFINANCE": "8500",
+        "WIPRO": "250", "HCLTECH": "1600", "MARUTI": "11500", "TATAMOTORS": "650",
+        "SUNPHARMA": "1700", "TITAN": "3100", "ADANIENT": "2300", "HINDUNILVR": "2300",
+        "TATASTEEL": "140", "NTPC": "340", "POWERGRID": "290", "ONGC": "250",
+        "JSWSTEEL": "1000", "M&M": "2700", "BAJAJFINSV": "1800",
+        "ULTRACEMCO": "11000", "NESTLEIND": "2300",
+    }
+    result = fallback.get(sym, "")
+    if result:
+        print(f"[Breeze Bridge] Using fallback strike {result} for {sym} (live sources unavailable)")
+    return result
 
 
 def _get_strike_step(symbol):
