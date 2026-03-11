@@ -38,6 +38,113 @@ _response_cache = {}
 _response_cache_lock = threading.Lock()
 CACHE_TTL_SECONDS = 3
 
+# ── Symbol translation: Standard NSE tickers → ICICI Breeze stock codes ──────
+# The Breeze API uses ICICI-internal short names, NOT standard NSE tickers.
+# e.g. Bank Nifty = "CNXBAN" (not "BANKNIFTY"), Reliance = "RELING" (not "RELIANCE")
+
+_HARDCODED_BREEZE_CODES = {
+    "NIFTY": "NIFTY",
+    "BANKNIFTY": "CNXBAN",
+    "FINNIFTY": "FNXFIN",
+    "MIDCPNIFTY": "MCDNTY",
+    "NIFTYNXT50": "NIFNXT",
+    "SENSEX": "SENSEX",
+}
+
+_dynamic_symbol_map = {}
+_dynamic_nfo_codes = set()
+_symbol_map_lock = threading.Lock()
+
+
+def _build_symbol_map():
+    """Build mapping from standard NSE tickers to ICICI Breeze NFO stock codes.
+    Must be called after get_stock_script_list() populates stock_script_dict_list."""
+    global _dynamic_symbol_map, _dynamic_nfo_codes
+
+    if not breeze_instance or not breeze_instance.stock_script_dict_list:
+        return
+
+    nfo_dict = breeze_instance.stock_script_dict_list[4]
+    nfo_codes = set()
+    for key in nfo_dict.keys():
+        parts = key.split("-")
+        if len(parts) >= 2:
+            nfo_codes.add(parts[1])
+
+    _dynamic_nfo_codes = nfo_codes
+    print(f"[Breeze Bridge] NFO underlying codes loaded: {len(nfo_codes)}")
+
+    nfo_code_to_company = {}
+    if hasattr(breeze_instance, 'token_script_dict_list') and len(breeze_instance.token_script_dict_list) > 4:
+        for token, info in breeze_instance.token_script_dict_list[4].items():
+            if isinstance(info, list) and len(info) >= 2:
+                contract = info[0]
+                company = (info[1] or "").strip().upper()
+                parts = contract.split("-")
+                if len(parts) >= 2 and parts[1] not in nfo_code_to_company and company:
+                    nfo_code_to_company[parts[1]] = company
+
+    mapping = {}
+    lot_sizes = get_lot_sizes()
+
+    for ticker in lot_sizes.keys():
+        t = ticker.upper()
+        if t in _HARDCODED_BREEZE_CODES:
+            continue
+        if t in nfo_codes:
+            continue
+
+        # Strategy 1: Company name contains the ticker
+        for code, company in nfo_code_to_company.items():
+            company_nospace = company.replace(" ", "").replace(".", "").replace("-", "")
+            ticker_clean = t.replace("-", "").replace("&", "")
+            if ticker_clean in company_nospace:
+                mapping[t] = code
+                break
+
+        if t in mapping:
+            continue
+
+        # Strategy 2: Longest common prefix (at least 3 chars)
+        best_match = None
+        best_prefix = 0
+        for code in nfo_codes:
+            common = 0
+            for i in range(min(len(t), len(code))):
+                if t[i] == code[i]:
+                    common += 1
+                else:
+                    break
+            if common > best_prefix and common >= 3:
+                best_prefix = common
+                best_match = code
+
+        if best_match:
+            mapping[t] = best_match
+
+    with _symbol_map_lock:
+        _dynamic_symbol_map = mapping
+
+    total = len(_HARDCODED_BREEZE_CODES) + len(mapping)
+    print(f"[Breeze Bridge] Symbol map built: {len(mapping)} dynamic + {len(_HARDCODED_BREEZE_CODES)} hardcoded = {total} total")
+    samples = list(mapping.items())[:20]
+    for k, v in samples:
+        print(f"[Breeze Bridge]   {k} → {v}")
+
+
+def _resolve_stock_code(symbol):
+    """Translate standard NSE ticker to ICICI Breeze stock_code for NFO."""
+    sym = symbol.upper()
+    if sym in _HARDCODED_BREEZE_CODES:
+        return _HARDCODED_BREEZE_CODES[sym]
+    with _symbol_map_lock:
+        if sym in _dynamic_symbol_map:
+            return _dynamic_symbol_map[sym]
+    if sym in _dynamic_nfo_codes:
+        return sym
+    print(f"[Breeze Bridge] WARNING: No Breeze code mapping for '{sym}', using as-is")
+    return sym
+
 
 def _cache_get(key):
     with _response_cache_lock:
@@ -291,6 +398,7 @@ def restore_session_from_disk():
         b.user_id = data["user_id"]
         b.session_key = data["session_key"]
         b.secret_key = data["api_secret"]
+        b.get_stock_script_list()
         b.api_handler = ApificationBreeze(b)
 
         test = b.get_option_chain_quotes(
@@ -300,6 +408,7 @@ def restore_session_from_disk():
         if test and test.get("Status") == 200:
             breeze_instance = b
             session_expiry = saved_at + timedelta(hours=23)
+            _build_symbol_map()
             print(f"[Breeze Bridge] Session restored from disk (user_id={data['user_id']})")
             return True
 
@@ -346,6 +455,7 @@ def init_breeze(api_key, api_secret, session_token):
         if ok:
             breeze_instance = b
             session_expiry = datetime.now() + timedelta(hours=23)
+            _build_symbol_map()
             save_session_to_disk(api_key, api_secret, b.user_id, b.session_key)
             print(f"[Breeze Bridge] Session initialized via generate_session, user_id={b.user_id}")
             return {"success": True, "message": "Session initialized", "session_key": b.session_key}
@@ -364,6 +474,7 @@ def init_breeze(api_key, api_secret, session_token):
         b2.session_key = session_token
         b2.secret_key = api_secret
         b2.api_util()
+        b2.get_stock_script_list()
         b2.api_handler = ApificationBreeze(b2)
         print(f"[Breeze Bridge] Strategy 2: direct session_key assignment")
 
@@ -371,6 +482,7 @@ def init_breeze(api_key, api_secret, session_token):
         if ok:
             breeze_instance = b2
             session_expiry = datetime.now() + timedelta(hours=23)
+            _build_symbol_map()
             save_session_to_disk(api_key, api_secret, b2.user_id, b2.session_key)
             print(f"[Breeze Bridge] Session initialized via direct assignment, user_id={b2.user_id}")
             return {"success": True, "message": "Session initialized (direct)", "session_key": b2.session_key}
@@ -424,11 +536,12 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
         logged_sample = False
         lot_sizes = get_lot_sizes()
 
+        breeze_code = _resolve_stock_code(symbol)
         sides = [right_filter] if right_filter else ["call", "put"]
 
         for r in sides:
             params = {
-                "stock_code": symbol.upper(),
+                "stock_code": breeze_code,
                 "exchange_code": "NFO",
                 "product_type": "options",
                 "right": r,
@@ -690,6 +803,10 @@ def _fetch_spot_from_breeze(symbol):
     """Fetch live spot price from Breeze API itself — most reliable source."""
     if not breeze_instance:
         return None
+    indices = {"NIFTY", "BANKNIFTY", "CNXBAN", "FINNIFTY", "FNXFIN",
+               "MIDCPNIFTY", "MCDNTY", "SENSEX", "NIFTYNXT50", "NIFNXT"}
+    if symbol.upper() in indices:
+        return None
     try:
         result = breeze_instance.get_quotes(
             stock_code=symbol, exchange_code="NSE", product_type="cash",
@@ -788,20 +905,21 @@ def get_expiries(symbol):
 
     try:
         sym = symbol.upper()
+        breeze_code = _resolve_stock_code(sym)
         strike = _guess_strike(sym)
         result = breeze_instance.get_option_chain_quotes(
-            stock_code=sym, exchange_code="NFO",
+            stock_code=breeze_code, exchange_code="NFO",
             product_type="options", right="call", strike_price=strike,
         )
 
         # Retry with alternative strikes if first attempt fails
         if not result or result.get("Status") != 200 or not result.get("Success"):
-            base = int(strike)
+            base = int(strike) if strike else 0
             step = _get_strike_step(sym)
             for offset_mult in [-5, 5, -10, 10, -20, 20, -30, 30, -50, 50]:
                 alt_strike = str(base + offset_mult * step)
                 result = breeze_instance.get_option_chain_quotes(
-                    stock_code=sym, exchange_code="NFO",
+                    stock_code=breeze_code, exchange_code="NFO",
                     product_type="options", right="call", strike_price=alt_strike,
                 )
                 if result and result.get("Status") == 200 and result.get("Success"):
@@ -1057,6 +1175,17 @@ class BreezeHandler(BaseHTTPRequestHandler):
                         self.send_json({"symbol": symbol, "ltp": 0, "change": 0, "changePercent": 0, "volume": 0, "timestamp": datetime.now().isoformat()})
                 except Exception as e:
                     self.send_json({"error": str(e)}, 500)
+
+            elif path == "/debug/symbol-map":
+                all_mappings = dict(_HARDCODED_BREEZE_CODES)
+                with _symbol_map_lock:
+                    all_mappings.update(_dynamic_symbol_map)
+                self.send_json({
+                    "hardcoded": len(_HARDCODED_BREEZE_CODES),
+                    "dynamic": len(_dynamic_symbol_map),
+                    "nfo_codes_count": len(_dynamic_nfo_codes),
+                    "mappings": all_mappings,
+                })
 
             elif path.startswith("/historical/"):
                 symbol = path.split("/")[-1].upper()
