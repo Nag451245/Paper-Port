@@ -816,13 +816,14 @@ def _fetch_spot_from_breeze(symbol):
     """Fetch live spot price from Breeze API itself — most reliable source."""
     if not breeze_instance:
         return None
-    indices = {"NIFTY", "BANKNIFTY", "CNXBAN", "FINNIFTY", "FNXFIN",
-               "MIDCPNIFTY", "MCDNTY", "SENSEX", "NIFTYNXT50", "NIFNXT"}
+    indices = {"NIFTY", "BANKNIFTY", "CNXBAN", "FINNIFTY", "FNXFIN", "NIFFIN",
+               "MIDCPNIFTY", "MCDNTY", "NIFSEL", "SENSEX", "NIFTYNXT50", "NIFNXT", "NIFNEX"}
     if symbol.upper() in indices:
         return None
+    breeze_code = _resolve_stock_code(symbol)
     try:
         result = breeze_instance.get_quotes(
-            stock_code=symbol, exchange_code="NSE", product_type="cash",
+            stock_code=breeze_code, exchange_code="NSE", product_type="cash",
         )
         if result and result.get("Status") == 200 and isinstance(result.get("Success"), list):
             records = result["Success"]
@@ -999,12 +1000,13 @@ def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None
     exchange_code = "MCX" if exchange == "MCX" else "NSE"
     product_type = "futures" if exchange == "MCX" else "cash"
 
+    breeze_code = _resolve_stock_code(symbol)
     try:
         result = breeze_instance.get_historical_data_v2(
             interval=breeze_interval,
             from_date=f"{from_date}T07:00:00.000Z",
             to_date=f"{to_date}T07:00:00.000Z",
-            stock_code=symbol,
+            stock_code=breeze_code,
             exchange_code=exchange_code,
             product_type=product_type,
         )
@@ -1167,9 +1169,10 @@ class BreezeHandler(BaseHTTPRequestHandler):
                 if breeze_instance is None:
                     self.send_json({"error": "Breeze session not active"}, 503)
                     return
+                breeze_code = _resolve_stock_code(symbol)
                 try:
                     result = breeze_instance.get_quotes(
-                        stock_code=symbol,
+                        stock_code=breeze_code,
                         exchange_code=exchange,
                         product_type="cash",
                     )
