@@ -1,10 +1,15 @@
 import type { PrismaClient } from '@prisma/client';
 import { wsHub } from '../lib/websocket.js';
+import { TelegramService } from './telegram.service.js';
 
 type NotificationType = 'info' | 'warning' | 'critical' | 'trade' | 'signal' | 'alert';
 
 export class NotificationService {
-  constructor(private prisma: PrismaClient) {}
+  private telegram: TelegramService;
+
+  constructor(private prisma: PrismaClient) {
+    this.telegram = new TelegramService(prisma);
+  }
 
   async create(
     userId: string,
@@ -28,6 +33,10 @@ export class NotificationService {
       message,
       notificationType: type,
     });
+
+    if (type === 'critical' || type === 'trade' || type === 'signal') {
+      this.telegram.notifyUser(userId, title, message).catch(() => {});
+    }
   }
 
   async getUnread(userId: string, limit = 50): Promise<any[]> {

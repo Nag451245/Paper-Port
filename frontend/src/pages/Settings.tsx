@@ -15,7 +15,7 @@ import {
   Shield,
   RefreshCw,
 } from 'lucide-react';
-import { breezeApi, portfolioApi } from '@/services/api';
+import { breezeApi, portfolioApi, telegramApi } from '@/services/api';
 import type { BreezeCredentialStatus } from '@/types';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -47,8 +47,24 @@ export default function Settings() {
   const [loginId, setLoginId] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
 
+  // Telegram state
+  const [telegramChatId, setTelegramChatId] = useState('');
+  const [telegramConnected, setTelegramConnected] = useState(false);
+  const [telegramEnabled, setTelegramEnabled] = useState(false);
+  const [telegramBotUsername, setTelegramBotUsername] = useState<string | null>(null);
+  const [telegramConnecting, setTelegramConnecting] = useState(false);
+  const [telegramError, setTelegramError] = useState('');
+  const [telegramSuccess, setTelegramSuccess] = useState('');
+  const [telegramTesting, setTelegramTesting] = useState(false);
+
   useEffect(() => {
     breezeApi.status().then(({ data }) => setBreezeStatus(data)).catch(() => {});
+
+    telegramApi.getStatus().then(({ data }) => {
+      setTelegramConnected(data.connected);
+      setTelegramEnabled(data.notificationsEnabled);
+      setTelegramBotUsername(data.botUsername);
+    }).catch(() => {});
 
     portfolioApi.list().then(({ data }) => {
       if (Array.isArray(data) && data.length > 0) {
@@ -208,6 +224,63 @@ export default function Settings() {
       }
     }
     setSaving(false);
+  };
+
+  const handleTelegramConnect = async () => {
+    if (!telegramChatId.trim()) {
+      setTelegramError('Enter your Telegram Chat ID');
+      return;
+    }
+    setTelegramConnecting(true);
+    setTelegramError('');
+    setTelegramSuccess('');
+    try {
+      await telegramApi.connect(telegramChatId.trim());
+      setTelegramConnected(true);
+      setTelegramEnabled(true);
+      setTelegramSuccess('Telegram connected! Check your chat for a confirmation message.');
+      setTimeout(() => setTelegramSuccess(''), 4000);
+    } catch (err: any) {
+      setTelegramError(err?.response?.data?.message || err?.response?.data?.error || 'Failed to connect. Make sure you sent /start to the bot first.');
+    }
+    setTelegramConnecting(false);
+  };
+
+  const handleTelegramDisconnect = async () => {
+    try {
+      await telegramApi.disconnect();
+      setTelegramConnected(false);
+      setTelegramEnabled(false);
+      setTelegramChatId('');
+      setTelegramSuccess('Telegram disconnected.');
+      setTimeout(() => setTelegramSuccess(''), 3000);
+    } catch { /* best-effort */ }
+  };
+
+  const handleTelegramToggle = async (enabled: boolean) => {
+    setTelegramEnabled(enabled);
+    try {
+      await telegramApi.updatePreferences({ notifyTelegram: enabled });
+    } catch {
+      setTelegramEnabled(!enabled);
+    }
+  };
+
+  const handleTelegramTest = async () => {
+    setTelegramTesting(true);
+    setTelegramError('');
+    try {
+      const { data } = await telegramApi.sendTest();
+      if (data.success) {
+        setTelegramSuccess('Test notification sent! Check your Telegram.');
+        setTimeout(() => setTelegramSuccess(''), 3000);
+      } else {
+        setTelegramError(data.message || 'Failed to send test message.');
+      }
+    } catch (err: any) {
+      setTelegramError(err?.response?.data?.message || 'Test failed.');
+    }
+    setTelegramTesting(false);
   };
 
   const tabs: { key: SettingsTab; label: string; icon: typeof Settings2 }[] = [
@@ -503,53 +576,100 @@ export default function Settings() {
               <h2 className="text-lg font-semibold text-slate-900">Telegram & Mobile</h2>
             </div>
 
+            <div className="flex items-center gap-2 mb-3">
+              {telegramConnected ? (
+                <>
+                  <CheckCircle className="w-4 h-4 text-emerald-600" />
+                  <span className="text-sm text-emerald-600">Telegram Connected</span>
+                </>
+              ) : (
+                <>
+                  <AlertCircle className="w-4 h-4 text-amber-500" />
+                  <span className="text-sm text-amber-600">Not Connected</span>
+                </>
+              )}
+            </div>
+
+            {telegramError && (
+              <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                {telegramError}
+              </div>
+            )}
+            {telegramSuccess && (
+              <div className="mb-3 p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-sm text-emerald-600 flex items-center gap-2">
+                <CheckCircle className="w-4 h-4 shrink-0" />
+                {telegramSuccess}
+              </div>
+            )}
+
             <div className="space-y-4">
               <div className="p-4 bg-blue-50 border border-blue-100 rounded-xl">
                 <h3 className="text-sm font-semibold text-blue-800 mb-2">How to Connect Telegram</h3>
                 <ol className="text-xs text-blue-700 space-y-1 list-decimal list-inside">
-                  <li>Search for <strong>@PaperPortBot</strong> on Telegram (or use the bot username shown below)</li>
+                  <li>Search for <strong>{telegramBotUsername ? `@${telegramBotUsername}` : '@PaperPortBot'}</strong> on Telegram</li>
                   <li>Start a conversation by sending <code>/start</code></li>
                   <li>The bot will reply with your <strong>Chat ID</strong></li>
                   <li>Paste the Chat ID below and click Connect</li>
                 </ol>
               </div>
 
-              <div>
-                <label className="text-xs text-slate-500 mb-1 block">Mobile Number (optional)</label>
-                <input
-                  type="tel"
-                  placeholder="+91 98765 43210"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
-                />
-                <p className="text-xs text-slate-400 mt-1">For future WhatsApp/SMS alerts</p>
-              </div>
-
-              <div>
-                <label className="text-xs text-slate-500 mb-1 block">Telegram Chat ID</label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    placeholder="e.g. 123456789"
-                    className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
-                  />
-                  <button className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-lg transition-colors">
-                    Connect
+              {!telegramConnected ? (
+                <div>
+                  <label className="text-xs text-slate-500 mb-1 block">Telegram Chat ID</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={telegramChatId}
+                      onChange={(e) => setTelegramChatId(e.target.value)}
+                      placeholder="e.g. 123456789"
+                      className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                    />
+                    <button
+                      onClick={handleTelegramConnect}
+                      disabled={telegramConnecting || !telegramChatId.trim()}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {telegramConnecting ? <Loader2 className="w-4 h-4 animate-spin inline mr-2" /> : null}
+                      Connect
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-slate-600">Telegram is connected and receiving alerts.</span>
+                  <button
+                    onClick={handleTelegramDisconnect}
+                    className="px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors"
+                  >
+                    Disconnect
                   </button>
                 </div>
-              </div>
+              )}
 
               <div className="flex items-center justify-between py-2 border-t border-slate-100 mt-2">
                 <div>
                   <p className="text-sm text-slate-800">Send Alerts via Telegram</p>
-                  <p className="text-xs text-slate-400">Receive trades, signals & daily reports on Telegram</p>
+                  <p className="text-xs text-slate-400">Receive trades, signals, risk alerts & daily reports on Telegram</p>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
-                  <input type="checkbox" className="sr-only peer" />
+                  <input
+                    type="checkbox"
+                    checked={telegramEnabled}
+                    onChange={(e) => handleTelegramToggle(e.target.checked)}
+                    disabled={!telegramConnected}
+                    className="sr-only peer"
+                  />
                   <div className="w-9 h-5 bg-slate-200 rounded-full peer peer-checked:bg-blue-600 transition-colors after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
                 </label>
               </div>
 
-              <button className="px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors">
+              <button
+                onClick={handleTelegramTest}
+                disabled={!telegramConnected || telegramTesting}
+                className="px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {telegramTesting ? <Loader2 className="w-3 h-3 animate-spin inline mr-1" /> : null}
                 Send Test Notification
               </button>
             </div>

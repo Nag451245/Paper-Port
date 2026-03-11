@@ -3,6 +3,7 @@ import { chatCompletionJSON } from '../lib/openai.js';
 import { TargetTracker } from './target-tracker.service.js';
 import { LearningStoreService } from './learning-store.service.js';
 import { MarketDataService } from './market-data.service.js';
+import { TelegramService } from './telegram.service.js';
 
 interface TradeReview {
   tradeId: string;
@@ -31,11 +32,13 @@ export class EODReviewService {
   private targetTracker: TargetTracker;
   private learningStore: LearningStoreService;
   private marketData = new MarketDataService();
+  private telegram: TelegramService;
   private running = false;
 
   constructor(private prisma: PrismaClient) {
     this.targetTracker = new TargetTracker(prisma);
     this.learningStore = new LearningStoreService();
+    this.telegram = new TelegramService(prisma);
   }
 
   async runReview(userId?: string): Promise<void> {
@@ -269,6 +272,23 @@ ${falsePositives.map(fp => `  ${fp.direction} ${fp.symbol} (${(fp.confidence * 1
     }
 
     console.log(`[EODReview] User ${userId}: report generated | P&L: ₹${totalPnl.toFixed(0)} | ${trades.length} trades | ${falsePositives.length} false positives`);
+
+    // Send Telegram daily report
+    const winRate = trades.length > 0 ? (wins.length / trades.length) * 100 : 0;
+    const topWinner = wins.length > 0
+      ? wins.reduce((a, b) => Number(a.netPnl) > Number(b.netPnl) ? a : b).symbol
+      : 'None';
+    const topLoser = losses.length > 0
+      ? losses.reduce((a, b) => Number(a.netPnl) < Number(b.netPnl) ? a : b).symbol
+      : 'None';
+    this.telegram.notifyDailyReport(userId, {
+      trades: trades.length,
+      pnl: totalPnl,
+      winRate,
+      topWinner,
+      topLoser,
+      regime: marketContext.niftyChange > 0.5 ? 'Bullish' : marketContext.niftyChange < -0.5 ? 'Bearish' : 'Sideways',
+    }).catch(err => console.error('[EODReview] Telegram daily report failed:', (err as Error).message));
   }
 
   private async triggerDeepReview(userId: string, lossDays: number): Promise<void> {

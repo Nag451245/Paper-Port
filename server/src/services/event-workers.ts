@@ -20,6 +20,7 @@ import { wsHub } from '../lib/websocket.js';
 import { createChildLogger } from '../lib/logger.js';
 import type { LearningEngine } from './learning-engine.js';
 import type { BotEngine } from './bot-engine.js';
+import { TelegramService } from './telegram.service.js';
 
 const log = createChildLogger('EventWorkers');
 
@@ -28,6 +29,7 @@ export function registerAllWorkers(
   learningEngine?: LearningEngine,
   botEngine?: BotEngine,
 ): void {
+  const telegram = new TelegramService(prisma);
   log.info('Registering event bus workers for all 5 categories');
 
   // ── Execution events: order fills, position changes, OMS state transitions ──
@@ -42,10 +44,18 @@ export function registerAllWorkers(
       case 'ORDER_FILLED':
         wsHub.broadcastToUser(event.userId, { type: 'order_filled', data: event });
         log.info({ orderId: event.orderId, symbol: event.symbol, fillPrice: event.fillPrice }, 'Order filled');
+        telegram.notifyTradeExecution(
+          event.userId, event.symbol, 'FILLED',
+          event.qty, event.fillPrice,
+        ).catch(err => log.warn({ err }, 'Telegram trade notification failed'));
         break;
 
       case 'POSITION_CLOSED': {
         wsHub.broadcastToUser(event.userId, { type: 'position_closed', data: event });
+        telegram.notifyTradeExecution(
+          event.userId, event.symbol, 'CLOSE',
+          0, event.exitPrice, event.pnl,
+        ).catch(err => log.warn({ err }, 'Telegram close notification failed'));
         // Persist to decision audit for learning loop
         try {
           await prisma.decisionAudit.create({
@@ -107,6 +117,10 @@ export function registerAllWorkers(
     switch (event.type) {
       case 'RISK_VIOLATION':
         wsHub.broadcastToUser(event.userId, { type: 'risk_violation', data: event });
+        telegram.notifyRiskAlert(
+          event.userId, `Risk Violation (${event.severity})`,
+          `Symbol: ${event.symbol}\nViolations: ${event.violations.join(', ')}`,
+        ).catch(err => log.warn({ err }, 'Telegram risk notification failed'));
 
         try {
           await prisma.riskEvent.create({
@@ -124,6 +138,10 @@ export function registerAllWorkers(
         wsHub.broadcastToUser(event.userId, { type: 'circuit_breaker', data: event });
         log.warn({ userId: event.userId, reason: event.reason, drawdownPct: event.drawdownPct },
           'Circuit breaker triggered');
+        telegram.notifyRiskAlert(
+          event.userId, 'CIRCUIT BREAKER',
+          `Drawdown: ${event.drawdownPct?.toFixed(1)}%\nReason: ${event.reason}\nAll trading halted until reset.`,
+        ).catch(err => log.warn({ err }, 'Telegram circuit breaker notification failed'));
 
         try {
           await prisma.riskEvent.create({
@@ -148,7 +166,13 @@ export function registerAllWorkers(
 
     switch (event.type) {
       case 'SIGNAL_GENERATED':
-        if ('userId' in event) wsHub.broadcastToUser(event.userId, { type: 'signal_generated', data: event });
+        if ('userId' in event) {
+          wsHub.broadcastToUser(event.userId, { type: 'signal_generated', data: event });
+          telegram.notifySignal(
+            event.userId, event.symbol, event.direction ?? 'LONG',
+            event.confidence ?? 0, event.entry ?? 0, event.target ?? 0, event.stopLoss ?? 0,
+          ).catch(err => log.warn({ err }, 'Telegram signal notification failed'));
+        }
         break;
 
       case 'SIGNAL_VALIDATED':
@@ -210,6 +234,10 @@ export function registerAllWorkers(
       case 'KILL_SWITCH_ACTIVATED':
         wsHub.broadcastToUser(event.userId, { type: 'kill_switch', data: { active: true, timestamp: event.timestamp } });
         log.warn({ userId: event.userId }, 'Kill switch activated');
+        telegram.notifyRiskAlert(
+          event.userId, 'KILL SWITCH ACTIVATED',
+          'Emergency kill switch activated. All new orders are blocked until you manually deactivate it.',
+        ).catch(err => log.warn({ err }, 'Telegram kill switch notification failed'));
         break;
 
       case 'KILL_SWITCH_DEACTIVATED':
