@@ -43,23 +43,80 @@ CACHE_TTL_SECONDS = 3
 # e.g. Bank Nifty = "CNXBAN" (not "BANKNIFTY"), Reliance = "RELING" (not "RELIANCE")
 
 _HARDCODED_BREEZE_CODES = {
-    "NIFTY": "NIFTY",
-    "BANKNIFTY": "CNXBAN",
-    "FINNIFTY": "FNXFIN",
-    "MIDCPNIFTY": "MCDNTY",
-    "NIFTYNXT50": "NIFNXT",
-    "SENSEX": "SENSEX",
+    # ─── Indices ───
+    "NIFTY": "NIFTY", "BANKNIFTY": "CNXBAN", "FINNIFTY": "NIFFIN",
+    "MIDCPNIFTY": "NIFSEL", "NIFTYNXT50": "NIFNEX", "SENSEX": "SENSEX",
+    # ─── Direct-match stocks (NSE ticker = Breeze NFO code) ───
+    "TCS": "TCS", "ITC": "ITC", "WIPRO": "WIPRO", "MARUTI": "MARUTI",
+    "NTPC": "NTPC", "ONGC": "ONGC", "CIPLA": "CIPLA", "GRASIM": "GRASIM",
+    "TRENT": "TRENT", "BHEL": "BHEL", "MCX": "MCX", "GAIL": "GAIL",
+    "SAIL": "SAIL", "SRF": "SRF", "BSE": "BSE", "CDSL": "CDSL",
+    "NBCC": "NBCC", "NHPC": "NHPC", "LUPIN": "LUPIN", "ABB": "ABB",
+    "BIOCON": "BIOCON", "COLPAL": "COLPAL", "CONCOR": "CONCOR",
+    "PIIND": "PIIND", "HUDCO": "HUDCO", "VOLTAS": "VOLTAS",
+    # ─── Major stocks (NSE ticker ≠ Breeze code) ───
+    "RELIANCE": "RELIND", "HDFCBANK": "HDFBAN", "ICICIBANK": "ICIBAN",
+    "INFY": "INFTEC", "SBIN": "STABAN", "HINDUNILVR": "HINLEV",
+    "BHARTIARTL": "BHAAIR", "KOTAKBANK": "KOTMAH", "LT": "LARTOU",
+    "AXISBANK": "AXIBAN", "BAJFINANCE": "BAJFI", "HCLTECH": "HCLTEC",
+    "TATAMOTORS": "TATMOT", "SUNPHARMA": "SUNPHA", "TITAN": "TITIND",
+    "ASIANPAINT": "ASIPAI", "ADANIENT": "ADAENT", "TATASTEEL": "TATSTE",
+    "POWERGRID": "POWGRI", "JSWSTEEL": "JSWSTE", "M&M": "MAHMAH",
+    "BAJAJFINSV": "BAFINS", "ULTRACEMCO": "ULTCEM", "NESTLEIND": "NESIND",
+    "DRREDDY": "DRREDD", "DIVISLAB": "DIVLAB", "HEROMOTOCO": "HERHON",
+    "HINDALCO": "HINDAL", "TATACONSUM": "TATGLO", "TATAPOWER": "TATPOW",
+    "EICHERMOT": "EICMOT", "INDIGO": "INTAVI", "DLF": "DLFLIM",
+    "APOLLOHOSP": "APOHOS", "BRITANNIA": "BRIIND", "COALINDIA": "COALIN",
+    "HAL": "HINAER", "HAVELLS": "HAVIND", "LICI": "LIC",
+    "PNB": "PUNBAN", "INDUSINDBK": "INDIBA", "SBILIFE": "SBILIF",
+    "TECHM": "TECMAH", "BAJAJ-AUTO": "BAAUTO", "BPCL": "BHAPET",
+    "HINDZINC": "HINZIN",
+    # ─── Extended F&O stocks ───
+    "ADANIGREEN": "ADAGRE", "ADANIPORTS": "ADAPOR",
+    "AMBUJACEM": "AMBCE", "AUROPHARMA": "AURPHA",
+    "ASHOKLEY": "ASHLEY", "BANKBARODA": "BANBAR",
+    "BANKINDIA": "BANIND", "BANDHANBNK": "BANBAN",
+    "BEL": "BHAELE", "BHARATFORG": "BHAFOR",
+    "CANBK": "CANBAN", "CHOLAFIN": "CHOINV",
+    "CROMPTON": "CROGR", "CUMMINSIND": "CUMIND",
+    "DABUR": "DABIND", "DELHIVERY": "DELLIM",
+    "DIXON": "DIXTEC", "EXIDEIND": "EXIIND",
+    "FEDERALBNK": "FEDBAN", "GLENMARK": "GLEPHA",
+    "GMRAIRPORT": "GMRINF", "GODREJCP": "GODCON",
+    "GODREJPROP": "GODPRO", "HDFCAMC": "HDFAMC",
+    "HDFCLIFE": "HDFSTA", "ICICIPRULI": "ICIPRU",
+    "IDFCFIRSTB": "IDFBAN", "INDHOTEL": "INDHOT",
+    "IOC": "INDOIL", "JINDALSTEL": "JINSP",
+    "JIOFIN": "JIOFIN", "JSWENERGY": "JSWENE",
+    "JUBLFOOD": "JUBFOO", "KALYANKJIL": "KALJEW",
+    "KPITTECH": "KPITE", "LICHSGFIN": "LICHF",
+    "LTIM": "LTINFO", "MANAPPURAM": "MANAFI",
+    "MAXHEALTH": "MAXHEA", "MUTHOOTFIN": "MUTFIN",
+    "NATIONALUM": "NATALU", "NMDC": "NATMIN",
+    "OBEROIRLTY": "OBEREA", "OFSS": "ORAFIN",
+    "PAGEIND": "PAGIND", "PERSISTENT": "PERSYS",
+    "PETRONET": "PETLNG", "PFC": "POWFIN",
+    "PIDILITIND": "PIDIND", "POLYCAB": "POLI",
+    "RBLBANK": "RBLBAN", "RECLTD": "RURELE",
+    "SBICARD": "SBICAR", "SHREECEM": "SHRCEM",
+    "SHRIRAMFIN": "SHRTRA", "SIEMENS": "SIEMEN",
+    "SONACOMS": "SONBLW", "TATAELXSI": "TATELX",
+    "TATATECH": "TATTEC", "TORNTPHARM": "TORPHA",
+    "TORNTPOWER": "TORPOW", "TVSMOTOR": "TVSMOT",
+    "UPL": "UNIP", "VEDL": "VEDLIM",
+    "YESBANK": "YESBAN", "ZOMATO": "ZOMLIM",
+    "ETERNAL": "ZOMLIM", "BDL": "BHADYN",
+    "FORTIS": "FORHEA", "HINDPETRO": "HINPET",
+    "KAYNES": "KAYTEC", "ABBPOWER": "ABBPOW",
 }
 
-_dynamic_symbol_map = {}
 _dynamic_nfo_codes = set()
 _symbol_map_lock = threading.Lock()
 
 
 def _build_symbol_map():
-    """Build mapping from standard NSE tickers to ICICI Breeze NFO stock codes.
-    Must be called after get_stock_script_list() populates stock_script_dict_list."""
-    global _dynamic_symbol_map, _dynamic_nfo_codes
+    """Extract valid NFO codes from loaded stock script data."""
+    global _dynamic_nfo_codes
 
     if not breeze_instance or not breeze_instance.stock_script_dict_list:
         return
@@ -74,62 +131,25 @@ def _build_symbol_map():
     _dynamic_nfo_codes = nfo_codes
     print(f"[Breeze Bridge] NFO underlying codes loaded: {len(nfo_codes)}")
 
-    nfo_code_to_company = {}
-    if hasattr(breeze_instance, 'token_script_dict_list') and len(breeze_instance.token_script_dict_list) > 4:
-        for token, info in breeze_instance.token_script_dict_list[4].items():
-            if isinstance(info, list) and len(info) >= 2:
-                contract = info[0]
-                company = (info[1] or "").strip().upper()
-                parts = contract.split("-")
-                if len(parts) >= 2 and parts[1] not in nfo_code_to_company and company:
-                    nfo_code_to_company[parts[1]] = company
-
-    mapping = {}
+    mapped = 0
+    unmapped = []
     lot_sizes = get_lot_sizes()
-
-    for ticker in lot_sizes.keys():
+    for ticker in sorted(lot_sizes.keys()):
         t = ticker.upper()
-        if t in _HARDCODED_BREEZE_CODES:
-            continue
-        if t in nfo_codes:
-            continue
+        code = _HARDCODED_BREEZE_CODES.get(t)
+        if code:
+            if code in nfo_codes or code == "SENSEX":
+                mapped += 1
+            else:
+                print(f"[Breeze Bridge] WARNING: hardcoded {t}→{code} but {code} not in NFO codes!")
+        elif t in nfo_codes:
+            mapped += 1
+        else:
+            unmapped.append(t)
 
-        # Strategy 1: Company name contains the ticker
-        for code, company in nfo_code_to_company.items():
-            company_nospace = company.replace(" ", "").replace(".", "").replace("-", "")
-            ticker_clean = t.replace("-", "").replace("&", "")
-            if ticker_clean in company_nospace:
-                mapping[t] = code
-                break
-
-        if t in mapping:
-            continue
-
-        # Strategy 2: Longest common prefix (at least 3 chars)
-        best_match = None
-        best_prefix = 0
-        for code in nfo_codes:
-            common = 0
-            for i in range(min(len(t), len(code))):
-                if t[i] == code[i]:
-                    common += 1
-                else:
-                    break
-            if common > best_prefix and common >= 3:
-                best_prefix = common
-                best_match = code
-
-        if best_match:
-            mapping[t] = best_match
-
-    with _symbol_map_lock:
-        _dynamic_symbol_map = mapping
-
-    total = len(_HARDCODED_BREEZE_CODES) + len(mapping)
-    print(f"[Breeze Bridge] Symbol map built: {len(mapping)} dynamic + {len(_HARDCODED_BREEZE_CODES)} hardcoded = {total} total")
-    samples = list(mapping.items())[:20]
-    for k, v in samples:
-        print(f"[Breeze Bridge]   {k} → {v}")
+    print(f"[Breeze Bridge] Symbol coverage: {mapped} mapped, {len(unmapped)} unmapped")
+    if unmapped:
+        print(f"[Breeze Bridge] Unmapped tickers: {', '.join(unmapped[:30])}")
 
 
 def _resolve_stock_code(symbol):
@@ -137,9 +157,6 @@ def _resolve_stock_code(symbol):
     sym = symbol.upper()
     if sym in _HARDCODED_BREEZE_CODES:
         return _HARDCODED_BREEZE_CODES[sym]
-    with _symbol_map_lock:
-        if sym in _dynamic_symbol_map:
-            return _dynamic_symbol_map[sym]
     if sym in _dynamic_nfo_codes:
         return sym
     print(f"[Breeze Bridge] WARNING: No Breeze code mapping for '{sym}', using as-is")
@@ -1177,14 +1194,10 @@ class BreezeHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": str(e)}, 500)
 
             elif path == "/debug/symbol-map":
-                all_mappings = dict(_HARDCODED_BREEZE_CODES)
-                with _symbol_map_lock:
-                    all_mappings.update(_dynamic_symbol_map)
                 self.send_json({
                     "hardcoded": len(_HARDCODED_BREEZE_CODES),
-                    "dynamic": len(_dynamic_symbol_map),
                     "nfo_codes_count": len(_dynamic_nfo_codes),
-                    "mappings": all_mappings,
+                    "mappings": _HARDCODED_BREEZE_CODES,
                 })
 
             elif path.startswith("/historical/"):
