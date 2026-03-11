@@ -569,42 +569,38 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
             else:
                 params["strike_price"] = _guess_strike(symbol)
 
+            print(f"[Breeze Bridge] {symbol}({breeze_code}) {r}: calling API with params={params}")
             result = breeze_instance.get_option_chain_quotes(**params)
 
-            # Check if we got valid data
             _has_data = (
                 result and result.get("Status") == 200
                 and isinstance(result.get("Success"), list)
                 and len(result.get("Success", [])) > 0
             )
+            n = len(result.get("Success", []) if result and isinstance(result.get("Success"), list) else [])
+            print(f"[Breeze Bridge] {symbol}({breeze_code}) {r}: Status={result.get('Status') if result else None}, Records={n}, Error={result.get('Error','') if result else 'None'}")
 
-            # Retry with dynamic ATM strike if initial attempt returned no data
-            if not _has_data:
+            if not _has_data and not expiry:
                 guess = _guess_strike(symbol)
                 if guess:
                     base = int(guess)
                     step = _get_strike_step(symbol.upper())
-                    if expiry:
-                        params["strike_price"] = str(base)
-                        print(f"[Breeze Bridge] {symbol} {r}: retrying with ATM strike {base}")
-                        result = breeze_instance.get_option_chain_quotes(**params)
-                        _has_data = (
-                            result and result.get("Status") == 200
-                            and isinstance(result.get("Success"), list)
-                            and len(result.get("Success", [])) > 0
-                        )
+                    params["strike_price"] = str(base)
+                    print(f"[Breeze Bridge] {symbol} {r}: retry with ATM strike {base}")
+                    result = breeze_instance.get_option_chain_quotes(**params)
+                    _has_data = (
+                        result and result.get("Status") == 200
+                        and isinstance(result.get("Success"), list)
+                        and len(result.get("Success", [])) > 0
+                    )
                     if not _has_data:
-                        for offset_mult in [-5, 5, -10, 10, -20, 20, -30, 30]:
+                        for offset_mult in [-5, 5, -10, 10]:
                             alt_strike = str(base + offset_mult * step)
                             params["strike_price"] = alt_strike
-                            if expiry:
-                                params["expiry_date"] = f"{expiry}T06:00:00.000Z"
                             result = breeze_instance.get_option_chain_quotes(**params)
                             if result and result.get("Status") == 200 and result.get("Success"):
                                 print(f"[Breeze Bridge] {symbol} {r}: found data at strike {alt_strike}")
                                 break
-                else:
-                    print(f"[Breeze Bridge] {symbol} {r}: could not determine ATM strike, skipping retries")
 
             if not result or result.get("Status") != 200 or result.get("Error"):
                 err_msg = result.get("Error") if result else "no result"
