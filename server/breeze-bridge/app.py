@@ -448,29 +448,33 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
                 and len(result.get("Success", [])) > 0
             )
 
-            # Retry with ATM strike if empty-strike or initial strike failed
+            # Retry with dynamic ATM strike if initial attempt returned no data
             if not _has_data:
-                base = int(_guess_strike(symbol))
-                step = _get_strike_step(symbol.upper())
-                if expiry:
-                    params["strike_price"] = str(base)
-                    print(f"[Breeze Bridge] {symbol} {r}: empty strike returned no data, retrying with ATM strike {base}")
-                    result = breeze_instance.get_option_chain_quotes(**params)
-                    _has_data = (
-                        result and result.get("Status") == 200
-                        and isinstance(result.get("Success"), list)
-                        and len(result.get("Success", [])) > 0
-                    )
-                if not _has_data:
-                    for offset_mult in [-2, 2, -5, 5, -10, 10]:
-                        alt_strike = str(base + offset_mult * step)
-                        params["strike_price"] = alt_strike
-                        if expiry:
-                            params["expiry_date"] = f"{expiry}T06:00:00.000Z"
+                guess = _guess_strike(symbol)
+                if guess:
+                    base = int(guess)
+                    step = _get_strike_step(symbol.upper())
+                    if expiry:
+                        params["strike_price"] = str(base)
+                        print(f"[Breeze Bridge] {symbol} {r}: retrying with ATM strike {base}")
                         result = breeze_instance.get_option_chain_quotes(**params)
-                        if result and result.get("Status") == 200 and result.get("Success"):
-                            print(f"[Breeze Bridge] {symbol} {r}: succeeded with alternate strike {alt_strike}")
-                            break
+                        _has_data = (
+                            result and result.get("Status") == 200
+                            and isinstance(result.get("Success"), list)
+                            and len(result.get("Success", [])) > 0
+                        )
+                    if not _has_data:
+                        for offset_mult in [-5, 5, -10, 10, -20, 20, -30, 30]:
+                            alt_strike = str(base + offset_mult * step)
+                            params["strike_price"] = alt_strike
+                            if expiry:
+                                params["expiry_date"] = f"{expiry}T06:00:00.000Z"
+                            result = breeze_instance.get_option_chain_quotes(**params)
+                            if result and result.get("Status") == 200 and result.get("Success"):
+                                print(f"[Breeze Bridge] {symbol} {r}: found data at strike {alt_strike}")
+                                break
+                else:
+                    print(f"[Breeze Bridge] {symbol} {r}: could not determine ATM strike, skipping retries")
 
             if not result or result.get("Status") != 200 or result.get("Error"):
                 err_msg = result.get("Error") if result else "no result"
@@ -682,10 +686,33 @@ def _fetch_spot_from_yahoo(symbol):
     return None
 
 
+def _fetch_spot_from_breeze(symbol):
+    """Fetch live spot price from Breeze API itself — most reliable source."""
+    if not breeze_instance:
+        return None
+    try:
+        result = breeze_instance.get_quotes(
+            stock_code=symbol, exchange_code="NSE", product_type="cash",
+        )
+        if result and result.get("Status") == 200 and isinstance(result.get("Success"), list):
+            records = result["Success"]
+            if records and len(records) > 0:
+                ltp = _safe_float(records[0].get("ltp"))
+                if ltp > 0:
+                    with _spot_price_cache_lock:
+                        _spot_price_cache[symbol.upper()] = {"price": ltp, "at": datetime.now()}
+                    print(f"[Breeze Bridge] Live spot for {symbol}: {ltp} (from Breeze API)")
+                    return ltp
+    except Exception as e:
+        print(f"[Breeze Bridge] Breeze spot fetch for {symbol}: {e}")
+    return None
+
+
 def _guess_strike(symbol):
-    """Return a reasonable ATM-ish strike. Tries Yahoo spot price first, falls back to hardcoded."""
+    """Return ATM strike dynamically: Breeze API → cache → Yahoo → fallback."""
     sym = symbol.upper()
 
+    # Check cache first (valid for 5 minutes)
     with _spot_price_cache_lock:
         cached = _spot_price_cache.get(sym)
         if cached and (datetime.now() - cached["at"]).total_seconds() < 300:
@@ -694,34 +721,41 @@ def _guess_strike(symbol):
             atm = round(spot / step) * step
             return str(int(atm))
 
-    spot = _fetch_spot_from_yahoo(sym)
+    # Try Breeze API (live session) first
+    spot = _fetch_spot_from_breeze(sym)
+    if not spot:
+        spot = _fetch_spot_from_yahoo(sym)
     if spot:
         step = _get_strike_step(sym)
         atm = round(spot / step) * step
         return str(int(atm))
 
-    known = {
-        "NIFTY": "23500", "BANKNIFTY": "50000", "FINNIFTY": "23000",
-        "MIDCPNIFTY": "12500", "NIFTYNXT50": "24000", "SENSEX": "78000",
-        "RELIANCE": "1300", "TCS": "3500", "HDFCBANK": "1800", "INFY": "1600",
-        "ICICIBANK": "1300", "SBIN": "750", "BHARTIARTL": "1700", "KOTAKBANK": "1900",
-        "ITC": "430", "LT": "3500", "AXISBANK": "1100", "BAJFINANCE": "9000",
-        "WIPRO": "250", "HCLTECH": "1700", "MARUTI": "12000", "TATAMOTORS": "650",
-        "SUNPHARMA": "1800", "TITAN": "3200", "ADANIENT": "2400", "HINDUNILVR": "2300",
-        "TATASTEEL": "140", "NTPC": "340", "POWERGRID": "290", "ONGC": "250",
-        "JSWSTEEL": "1000", "M&M": "2700", "BAJAJFINSV": "1800",
-        "ULTRACEMCO": "11000", "NESTLEIND": "2300",
-    }
-    return known.get(sym, "5000")
+    return ""
 
 
 def _get_strike_step(symbol):
-    """Return strike price step size for a symbol."""
-    steps = {
+    """Return strike price step size for a symbol. Uses spot price for stocks."""
+    index_steps = {
         "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "MIDCPNIFTY": 25,
         "NIFTYNXT50": 50, "SENSEX": 100,
     }
-    return steps.get(symbol.upper(), 50)
+    sym = symbol.upper()
+    if sym in index_steps:
+        return index_steps[sym]
+
+    # For stocks, step size depends on the price range
+    with _spot_price_cache_lock:
+        cached = _spot_price_cache.get(sym)
+    if cached:
+        price = cached["price"]
+        if price > 5000:
+            return 50
+        if price > 1000:
+            return 20
+        if price > 500:
+            return 10
+        return 5
+    return 50
 
 
 def get_expiries(symbol):
@@ -745,7 +779,7 @@ def get_expiries(symbol):
         if not result or result.get("Status") != 200 or not result.get("Success"):
             base = int(strike)
             step = _get_strike_step(sym)
-            for offset_mult in [-3, 3, -6, 6, -10, 10]:
+            for offset_mult in [-5, 5, -10, 10, -20, 20, -30, 30, -50, 50]:
                 alt_strike = str(base + offset_mult * step)
                 result = breeze_instance.get_option_chain_quotes(
                     stock_code=sym, exchange_code="NFO",
