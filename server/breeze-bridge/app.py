@@ -315,33 +315,78 @@ def restore_session_from_disk():
         return False
 
 
-def init_breeze(api_key, api_secret, session_token):
-    global breeze_instance, session_expiry
-
+def _test_breeze_instance(b):
+    """Make a test API call to verify the Breeze session works."""
     try:
-        b = BreezeConnect(api_key=api_key)
-        print(f"[Breeze Bridge] Calling generate_session with token length={len(session_token)}")
-        b.generate_session(api_secret=api_secret, session_token=session_token)
-        print(f"[Breeze Bridge] generate_session succeeded, user_id={b.user_id}, session_key length={len(b.session_key or '')}")
-
         test = b.get_option_chain_quotes(
             stock_code="NIFTY", exchange_code="NFO",
             product_type="options", right="call", strike_price="24000",
         )
-        if test and test.get("Status") == 200:
+        return test and test.get("Status") == 200, test
+    except Exception as e:
+        return False, {"error": str(e)}
+
+
+def init_breeze(api_key, api_secret, session_token):
+    """Initialize Breeze session. Tries two strategies:
+    1. generate_session() — for raw apisession tokens from the login popup
+    2. Direct session_key assignment — for already-exchanged tokens from DB
+    """
+    global breeze_instance, session_expiry
+    errors = []
+
+    # Strategy 1: generate_session() (raw one-time token from login popup)
+    try:
+        b = BreezeConnect(api_key=api_key)
+        print(f"[Breeze Bridge] Strategy 1: generate_session (token length={len(session_token)})")
+        b.generate_session(api_secret=api_secret, session_token=session_token)
+        print(f"[Breeze Bridge] generate_session OK, user_id={b.user_id}, key length={len(b.session_key or '')}")
+
+        ok, test_result = _test_breeze_instance(b)
+        if ok:
             breeze_instance = b
             session_expiry = datetime.now() + timedelta(hours=23)
             save_session_to_disk(api_key, api_secret, b.user_id, b.session_key)
-            print(f"[Breeze Bridge] Session initialized, user_id={b.user_id}")
+            print(f"[Breeze Bridge] Session initialized via generate_session, user_id={b.user_id}")
             return {"success": True, "message": "Session initialized", "session_key": b.session_key}
-
-        print(f"[Breeze Bridge] Test call returned: {test}")
-        breeze_instance = None
-        return {"success": False, "error": f"Test call failed: {test}"}
+        else:
+            msg = f"generate_session succeeded but test call failed: {test_result}"
+            print(f"[Breeze Bridge] {msg}")
+            errors.append(msg)
     except Exception as e:
-        breeze_instance = None
-        print(f"[Breeze Bridge] Init failed: {e}")
-        return {"success": False, "error": str(e)}
+        msg = f"generate_session failed: {e}"
+        print(f"[Breeze Bridge] {msg}")
+        errors.append(msg)
+
+    # Strategy 2: Direct assignment (already-exchanged token from DB)
+    try:
+        b2 = BreezeConnect(api_key=api_key)
+        b2.session_key = session_token
+        b2.secret_key = api_secret
+        b2.api_util()
+        b2.api_handler = ApificationBreeze(b2)
+        print(f"[Breeze Bridge] Strategy 2: direct session_key assignment")
+
+        ok, test_result = _test_breeze_instance(b2)
+        if ok:
+            breeze_instance = b2
+            session_expiry = datetime.now() + timedelta(hours=23)
+            save_session_to_disk(api_key, api_secret, b2.user_id, b2.session_key)
+            print(f"[Breeze Bridge] Session initialized via direct assignment, user_id={b2.user_id}")
+            return {"success": True, "message": "Session initialized (direct)", "session_key": b2.session_key}
+        else:
+            msg = f"Direct assignment test call failed: {test_result}"
+            print(f"[Breeze Bridge] {msg}")
+            errors.append(msg)
+    except Exception as e2:
+        msg = f"Direct assignment failed: {e2}"
+        print(f"[Breeze Bridge] {msg}")
+        errors.append(msg)
+
+    breeze_instance = None
+    combined = " | ".join(errors)
+    print(f"[Breeze Bridge] Both strategies failed: {combined}")
+    return {"success": False, "error": combined}
 
 
 def _safe_float(val, default=0.0):
@@ -1078,20 +1123,34 @@ if hasattr(signal, "SIGPIPE"):
 if __name__ == "__main__":
     port = int(os.environ.get("BREEZE_BRIDGE_PORT", 8001))
 
-    print(f"[Breeze Bridge] Starting on http://127.0.0.1:{port}")
-    restore_session_from_disk()
+    print(f"[Breeze Bridge] Starting on http://127.0.0.1:{port}", flush=True)
 
-    lot_sizes = get_lot_sizes()
-    print(f"[Breeze Bridge] Lot sizes loaded: {len(lot_sizes)} symbols")
+    try:
+        restore_session_from_disk()
+    except Exception as e:
+        print(f"[Breeze Bridge] Session restore failed (non-fatal): {e}", flush=True)
+
+    try:
+        lot_sizes = get_lot_sizes()
+        print(f"[Breeze Bridge] Lot sizes loaded: {len(lot_sizes)} symbols", flush=True)
+    except Exception as e:
+        print(f"[Breeze Bridge] Lot size fetch failed (non-fatal): {e}", flush=True)
 
     class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
         daemon_threads = True
         request_queue_size = 10
+        allow_reuse_address = True
 
-    server = ThreadedHTTPServer(("127.0.0.1", port), BreezeHandler)
-    print(f"[Breeze Bridge] Ready (threaded). Session active: {breeze_instance is not None}")
+    try:
+        server = ThreadedHTTPServer(("127.0.0.1", port), BreezeHandler)
+    except OSError as e:
+        print(f"[Breeze Bridge] FATAL: Cannot bind to port {port}: {e}", flush=True)
+        print(f"[Breeze Bridge] Try: sudo fuser -k {port}/tcp", flush=True)
+        sys.exit(1)
+
+    print(f"[Breeze Bridge] Ready (threaded). Session active: {breeze_instance is not None}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n[Breeze Bridge] Shutting down.")
+        print("\n[Breeze Bridge] Shutting down.", flush=True)
         server.server_close()
