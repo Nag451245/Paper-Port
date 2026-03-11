@@ -247,6 +247,9 @@ fn run_options_strategies(
                 reason: sig.reason.clone(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 ttl_seconds: config.poll_cycle_pause_secs + 30,
+                stop_loss: None,
+                take_profit: None,
+                suggested_qty: None,
             });
         }
     }

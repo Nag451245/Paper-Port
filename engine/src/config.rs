@@ -31,6 +31,8 @@ pub struct EngineConfig {
     pub broker: BrokerConfig,
     #[serde(default)]
     pub market_data: MarketDataConfig,
+    #[serde(default)]
+    pub live_executor: LiveExecutorConfig,
     #[serde(default = "default_initial_capital")]
     pub initial_capital: f64,
 }
@@ -462,6 +464,7 @@ impl Default for EngineConfig {
             tls: TlsConfig::default(),
             broker: BrokerConfig::default(),
             market_data: MarketDataConfig::default(),
+            live_executor: LiveExecutorConfig::default(),
             initial_capital: 1_000_000.0,
         }
     }
@@ -536,6 +539,34 @@ impl EngineConfig {
             Ok(())
         } else {
             Err(format!("Config validation failed:\n  - {}", errors.join("\n  - ")))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LiveExecutorConfig {
+    pub enabled: bool,
+    pub strategies: Vec<String>,
+    pub min_confidence: f64,
+    pub auto_execute: bool,
+    pub max_positions: usize,
+    pub default_qty: i64,
+    pub exchange: String,
+    pub product: String,
+}
+
+impl Default for LiveExecutorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            strategies: vec!["ema_crossover".into()],
+            min_confidence: 0.7,
+            auto_execute: false,
+            max_positions: 10,
+            default_qty: 1,
+            exchange: "NSE".into(),
+            product: "intraday".into(),
         }
     }
 }

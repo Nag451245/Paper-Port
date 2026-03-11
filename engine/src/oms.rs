@@ -242,7 +242,8 @@ impl OMS {
         Ok(order.clone())
     }
 
-    /// Modify a live order by internal ID
+    /// Modify a live order by internal ID.
+    /// Validates the modified order against fat-finger limits before sending to broker.
     pub fn modify_order(
         &self,
         internal_id: &str,
@@ -274,6 +275,12 @@ impl OMS {
             product: order.product,
             tag: order.tag.clone(),
         };
+
+        let reference_price = order.avg_fill_price.max(
+            order.price.unwrap_or(0.0)
+        );
+        let ref_price = if reference_price > 0.0 { Some(reference_price) } else { None };
+        self.validate_order(&modify_req, ref_price)?;
 
         match self.broker.modify_order(&broker_id, &modify_req) {
             Ok(resp) => {
@@ -543,5 +550,55 @@ mod tests {
         let report = oms.reconcile(&engine_positions);
         assert_eq!(report.matched, 0);
         assert!(report.mismatches.is_empty());
+    }
+
+    #[test]
+    fn test_modify_validates_fat_finger_via_validate_order() {
+        let broker = Arc::new(PaperBroker::new(1_000_000.0));
+        let limits = FatFingerLimits {
+            max_order_value: 10_000_000.0,
+            max_quantity: 100,
+            max_price_deviation_pct: 5.0,
+        };
+        let oms = OMS::new(broker, limits);
+        let req = OrderRequest {
+            symbol: "RELIANCE".into(),
+            exchange: "NSE".into(),
+            side: OrderSide::Buy,
+            order_type: OrderType::Limit,
+            quantity: 200,
+            price: Some(2500.0),
+            trigger_price: None,
+            product: ProductType::Delivery,
+            tag: None,
+        };
+        let result = oms.validate_order(&req, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("fat-finger"));
+    }
+
+    #[test]
+    fn test_modify_validates_price_deviation() {
+        let broker = Arc::new(PaperBroker::new(1_000_000.0));
+        let limits = FatFingerLimits {
+            max_order_value: 10_000_000.0,
+            max_quantity: 50_000,
+            max_price_deviation_pct: 5.0,
+        };
+        let oms = OMS::new(broker, limits);
+        let req = OrderRequest {
+            symbol: "RELIANCE".into(),
+            exchange: "NSE".into(),
+            side: OrderSide::Buy,
+            order_type: OrderType::Limit,
+            quantity: 10,
+            price: Some(3000.0),
+            trigger_price: None,
+            product: ProductType::Delivery,
+            tag: None,
+        };
+        let result = oms.validate_order(&req, Some(2500.0));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("deviates"));
     }
 }

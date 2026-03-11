@@ -27,6 +27,7 @@ mod correlation;
 mod feature_store;
 mod multi_timeframe;
 mod ml_scorer;
+pub mod live_executor;
 
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -196,6 +197,8 @@ async fn main() {
                 }
             }
 
+            live_executor::spawn(state.clone());
+
             server::run(state).await;
         }
         "daemon" => {
@@ -291,6 +294,87 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
         "risk" => risk::compute(req.data),
         "greeks" => greeks::compute(req.data),
         "scan" => scan::compute(req.data),
+
+        "live_scan" => {
+            #[derive(Deserialize)]
+            struct LiveScanInput {
+                symbols: Vec<String>,
+                #[serde(default = "default_interval")]
+                interval: String,
+                #[serde(default = "default_lookback_days")]
+                lookback_days: i64,
+                #[serde(default)]
+                aggressiveness: Option<String>,
+            }
+            fn default_interval() -> String { "1day".into() }
+            fn default_lookback_days() -> i64 { 60 }
+
+            let input: LiveScanInput = match serde_json::from_value(req.data) {
+                Ok(v) => v,
+                Err(e) => return Response { id, success: false, data: serde_json::Value::Null,
+                    error: Some(format!("Invalid live_scan input: {}", e)) },
+            };
+            if input.symbols.is_empty() {
+                return Response { id, success: true,
+                    data: serde_json::json!({ "signals": [] }), error: None };
+            }
+
+            let bridge_url = state.config.broker.icici.bridge_url.clone();
+            if bridge_url.is_empty() {
+                return Response { id, success: false, data: serde_json::Value::Null,
+                    error: Some("Bridge URL not configured — cannot fetch historical data".into()) };
+            }
+
+            let to_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            let from_date = (chrono::Utc::now() - chrono::Duration::days(input.lookback_days))
+                .format("%Y-%m-%d").to_string();
+
+            let mut sym_data_list = Vec::new();
+            for symbol in &input.symbols {
+                let hist = broker_icici::bridge_get_historical(
+                    &bridge_url, symbol, &input.interval, &from_date, &to_date,
+                );
+                let mut candles_json: Vec<serde_json::Value> = match hist {
+                    Ok(val) => {
+                        if let Some(arr) = val.get("data").and_then(|d| d.as_array()) {
+                            arr.clone()
+                        } else if let Some(arr) = val.as_array() {
+                            arr.clone()
+                        } else {
+                            warn!(symbol = %symbol, "No candle data from bridge");
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(symbol = %symbol, error = %e, "Failed to fetch historical from bridge");
+                        continue;
+                    }
+                };
+
+                if let Some(tick) = state.live_prices.get_tick(symbol) {
+                    candles_json.push(serde_json::json!({
+                        "timestamp": tick.timestamp,
+                        "open": tick.open,
+                        "high": tick.high,
+                        "low": tick.low,
+                        "close": tick.close,
+                        "volume": tick.volume,
+                    }));
+                }
+
+                sym_data_list.push(serde_json::json!({
+                    "symbol": symbol,
+                    "candles": candles_json,
+                }));
+            }
+
+            let mut scan_input = serde_json::json!({ "symbols": sym_data_list });
+            if let Some(agg) = &input.aggressiveness {
+                scan_input["aggressiveness"] = serde_json::json!(agg);
+            }
+            scan::compute(scan_input)
+        }
+
         "optimize" => optimize::compute(req.data),
         "walk_forward" => walk_forward::compute(req.data),
         "advanced_signals" => advanced_signals::compute(req.data),
@@ -337,6 +421,107 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
         }
         "audit_log" => {
             Ok(serde_json::to_value(state.get_audit_log()).unwrap_or_default())
+        }
+
+        "execute_signals" => {
+            if state.is_killed() {
+                return Response { id, success: false, data: serde_json::Value::Null,
+                    error: Some("Kill switch active — signal execution rejected".into()) };
+            }
+
+            #[derive(Deserialize)]
+            struct ExecInput {
+                #[serde(default)]
+                symbols: Vec<String>,
+                #[serde(default = "default_min_confidence")]
+                min_confidence: f64,
+                #[serde(default = "default_exec_exchange")]
+                exchange: String,
+                #[serde(default = "default_exec_product")]
+                product: String,
+                #[serde(default = "default_exec_qty")]
+                default_qty: i64,
+            }
+            fn default_min_confidence() -> f64 { 0.7 }
+            fn default_exec_exchange() -> String { "NSE".into() }
+            fn default_exec_product() -> String { "intraday".into() }
+            fn default_exec_qty() -> i64 { 1 }
+
+            let input: ExecInput = match serde_json::from_value(req.data) {
+                Ok(v) => v,
+                Err(e) => return Response { id, success: false, data: serde_json::Value::Null,
+                    error: Some(format!("Invalid execute_signals input: {}", e)) },
+            };
+
+            let all_signals: Vec<crate::state::CachedSignal> = if input.symbols.is_empty() {
+                state.signal_cache.iter()
+                    .map(|entry| entry.value().clone())
+                    .collect()
+            } else {
+                input.symbols.iter()
+                    .flat_map(|s| state.get_cached_signals(s))
+                    .collect()
+            };
+
+            let qualifying: Vec<_> = all_signals.into_iter()
+                .filter(|s| s.confidence >= input.min_confidence)
+                .collect();
+
+            let product = match input.product.to_lowercase().as_str() {
+                "delivery" | "cnc" => ProductType::Delivery,
+                _ => ProductType::Intraday,
+            };
+
+            let mut results = Vec::new();
+            for sig in &qualifying {
+                let side = match sig.side.to_lowercase().as_str() {
+                    "sell" | "short" => OrderSide::Sell,
+                    _ => OrderSide::Buy,
+                };
+                let qty = sig.suggested_qty.unwrap_or(input.default_qty);
+                let order_req = OrderRequest {
+                    symbol: sig.symbol.clone(),
+                    exchange: input.exchange.clone(),
+                    side,
+                    order_type: OrderType::Limit,
+                    quantity: qty,
+                    price: Some(sig.price),
+                    trigger_price: sig.stop_loss,
+                    product,
+                    tag: Some(format!("auto:{}", sig.strategy)),
+                };
+                let ref_price = state.live_prices.get_ltp(&sig.symbol);
+                match state.oms.submit_order(order_req, Some(sig.strategy.clone()), ref_price) {
+                    Ok(order) => {
+                        state.log_audit("SIGNAL_EXECUTED", Some(&sig.symbol),
+                            &format!("strategy={} side={} qty={} price={:.2} conf={:.2}",
+                                sig.strategy, sig.side, qty, sig.price, sig.confidence));
+                        results.push(serde_json::json!({
+                            "symbol": sig.symbol, "status": "submitted",
+                            "order_id": order.internal_id,
+                            "broker_order_id": order.broker_order_id,
+                        }));
+                    }
+                    Err(e) => {
+                        state.log_audit("SIGNAL_EXEC_FAILED", Some(&sig.symbol),
+                            &format!("strategy={} error={}", sig.strategy, e));
+                        state.alert_manager.fire(
+                            AlertType::OrderRejected, AlertSeverity::Warning,
+                            "Signal execution rejected",
+                            &format!("Signal exec rejected for {}: {}", sig.symbol, e),
+                            Some(&sig.symbol), Some(&sig.strategy),
+                        );
+                        results.push(serde_json::json!({
+                            "symbol": sig.symbol, "status": "rejected", "reason": e,
+                        }));
+                    }
+                }
+            }
+
+            Ok(serde_json::json!({
+                "signals_evaluated": qualifying.len(),
+                "orders": results,
+            }))
         }
 
         "oms_submit_order" => {
@@ -429,6 +614,10 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
         }
 
         "oms_modify_order" => {
+            if state.is_killed() {
+                return Response { id, success: false, data: serde_json::Value::Null,
+                    error: Some("Kill switch active — order modification rejected".into()) };
+            }
             let order_id = match req.data.get("order_id").and_then(|v| v.as_str()) {
                 Some(id) => id,
                 None => return Response { id, success: false, data: serde_json::Value::Null,
@@ -779,5 +968,23 @@ mod tests {
             id: None, command: "alert_counts".to_string(), data: json!({}),
         }, &state);
         assert!(counts_resp.data["warning"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn test_oms_modify_order_rejected_by_kill_switch() {
+        let state = make_state();
+        let submit_resp = handle_request(Request {
+            id: None, command: "oms_submit_order".to_string(),
+            data: json!({ "symbol": "INFY", "side": "buy", "quantity": 10, "price": 1500.0 }),
+        }, &state);
+        assert!(submit_resp.success, "Setup: submit should succeed");
+        let order_id = submit_resp.data["internal_id"].as_str().unwrap();
+        state.activate_kill_switch();
+        let modify_resp = handle_request(Request {
+            id: None, command: "oms_modify_order".to_string(),
+            data: json!({ "order_id": order_id, "quantity": 20 }),
+        }, &state);
+        assert!(!modify_resp.success);
+        assert!(modify_resp.error.as_ref().unwrap().contains("Kill switch"));
     }
 }

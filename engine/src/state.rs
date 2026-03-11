@@ -55,6 +55,12 @@ pub struct CachedSignal {
     pub reason: String,
     pub timestamp: String,
     pub ttl_seconds: u64,
+    #[serde(default)]
+    pub stop_loss: Option<f64>,
+    #[serde(default)]
+    pub take_profit: Option<f64>,
+    #[serde(default)]
+    pub suggested_qty: Option<i64>,
 }
 
 // ─── Portfolio Snapshot ───────────────────────────────────────────────
@@ -620,6 +626,9 @@ mod tests {
             reason: "EMA crossover".into(),
             timestamp: "2025-01-01T10:00:00".into(),
             ttl_seconds: 300,
+            stop_loss: Some(21800.0),
+            take_profit: Some(22200.0),
+            suggested_qty: Some(50),
         });
         let signals = state.get_cached_signals("NIFTY");
         assert_eq!(signals.len(), 1);

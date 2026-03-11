@@ -10,6 +10,7 @@ import { emit } from '../lib/event-bus.js';
 import { ExitCoordinator } from './exit-coordinator.service.js';
 import { DecisionAuditService } from './decision-audit.service.js';
 import { getRedis } from '../lib/redis.js';
+import { isKillSwitchActive } from '../lib/rust-engine.js';
 type OrderSide = string;
 type OrderType = string;
 type Exchange = string;
@@ -344,6 +345,16 @@ export class TradeService {
   }
 
   async placeOrder(userId: string, input: PlaceOrderInput, skipMarketCheck = false) {
+    try {
+      const killed = await isKillSwitchActive();
+      if (killed) {
+        throw new TradeError('Kill switch is active — all new orders are blocked', 503);
+      }
+    } catch (err) {
+      if (err instanceof TradeError) throw err;
+      log.warn({ err }, 'Kill switch check failed (engine unreachable) — proceeding');
+    }
+
     const portfolio = await this.prisma.portfolio.findUnique({
       where: { id: input.portfolioId },
     });

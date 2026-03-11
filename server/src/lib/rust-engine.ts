@@ -943,3 +943,19 @@ export async function engineBrokerQuote(symbol: string): Promise<unknown> {
 export async function engineMarketDataPrices(): Promise<unknown> {
   return engineHttpGet('/api/market_data/prices', 10_000);
 }
+
+/**
+ * Non-blocking check: returns true if the Rust engine kill switch is active.
+ * Returns false if the engine is unreachable (fail-open to avoid breaking existing flow).
+ */
+export async function isKillSwitchActive(): Promise<boolean> {
+  try {
+    const res = await runEngine('portfolio_snapshot', {});
+    if (res.success && res.data && typeof res.data === 'object') {
+      return (res.data as any).killed === true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}

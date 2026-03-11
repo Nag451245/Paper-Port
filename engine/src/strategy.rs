@@ -1298,6 +1298,7 @@ pub fn create_strategy(name: &str, config: &EngineConfig) -> Result<Box<dyn Stra
 pub fn available_strategies() -> Vec<&'static str> {
     vec![
         "ema_crossover",
+        "supertrend",
         "sma_crossover",
         "rsi_reversal",
         "mean_reversion",
@@ -1356,8 +1357,9 @@ mod tests {
     #[test]
     fn test_available_strategies() {
         let names = available_strategies();
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 15);
         assert!(names.contains(&"ema_crossover"));
+        assert!(names.contains(&"supertrend"));
         assert!(names.contains(&"gap_trading"));
         assert!(names.contains(&"trend_following"));
     }
