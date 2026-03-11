@@ -11,6 +11,10 @@ use crate::oms::{OMS, FatFingerLimits};
 use crate::alerts::{AlertManager, NotificationConfig};
 use crate::market_data::LivePriceStore;
 use crate::options_data::OptionsDataStore;
+use crate::universe::Universe;
+use crate::rate_limiter::RateLimiter;
+use crate::news_sentiment::NewsSentimentStore;
+use crate::continuous_scanner::ScanLedger;
 
 // ─── Position Tracking ────────────────────────────────────────────────
 
@@ -176,6 +180,14 @@ pub struct AppState {
     pub options_data: Arc<OptionsDataStore>,
     /// Dynamic watchlist from pre-market scanner (symbols to subscribe for live ticks)
     dynamic_watchlist: Mutex<Vec<String>>,
+    /// NSE stock universe with sector/cap classification
+    pub universe: Arc<Universe>,
+    /// Global rate limiter for Breeze API calls
+    pub rate_limiter: Arc<RateLimiter>,
+    /// News sentiment store (RSS scraping)
+    pub news_store: Arc<NewsSentimentStore>,
+    /// Continuous scan ledger (persists enriched signals across scan cycles)
+    pub scan_ledger: Arc<ScanLedger>,
 }
 
 impl AppState {
@@ -191,6 +203,14 @@ impl AppState {
         let alert_manager = AlertManager::new(NotificationConfig::default());
         let (live_prices, _price_rx) = LivePriceStore::new();
         let options_data = OptionsDataStore::new();
+
+        let universe = Arc::new(Universe::load_or_empty(&config.universe.file_path));
+        let rate_limiter = Arc::new(RateLimiter::new(
+            config.breeze_rate_limit.max_requests_per_sec,
+            config.breeze_rate_limit.burst_capacity,
+        ));
+        let news_store = Arc::new(NewsSentimentStore::new(config.news.cache_ttl_secs));
+        let scan_ledger = Arc::new(ScanLedger::new());
 
         Arc::new(Self {
             config,
@@ -212,6 +232,10 @@ impl AppState {
             live_prices,
             options_data,
             dynamic_watchlist: Mutex::new(Vec::new()),
+            universe,
+            rate_limiter,
+            news_store,
+            scan_ledger,
         })
     }
 

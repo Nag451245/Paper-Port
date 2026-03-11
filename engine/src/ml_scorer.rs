@@ -45,6 +45,14 @@ struct FeatureRow {
     #[serde(default)] hour_of_day: f64,
     #[serde(default)] day_of_week: f64,
     #[serde(default)] raw_features: Vec<f64>,
+    // Context features from continuous scanner enrichment
+    #[serde(default)] sector_score: f64,
+    #[serde(default)] cap_category: f64,
+    #[serde(default)] news_sentiment: f64,
+    #[serde(default)] options_pcr: f64,
+    #[serde(default)] options_iv_rank: f64,
+    #[serde(default)] futures_basis: f64,
+    #[serde(default)] scan_confirmation_count: f64,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -85,8 +93,15 @@ fn feature_vec(f: &FeatureRow) -> Vec<f64> {
         f.ema_vote, f.rsi_vote, f.macd_vote, f.supertrend_vote,
         f.bollinger_vote, f.vwap_vote, f.momentum_vote, f.volume_vote,
         f.composite_score, f.regime, f.hour_of_day / 24.0, f.day_of_week / 7.0,
+        // Context features from continuous scanner
+        f.sector_score,
+        f.cap_category,
+        f.news_sentiment,
+        f.options_pcr,
+        f.options_iv_rank,
+        f.futures_basis,
+        f.scan_confirmation_count,
     ];
-    // Append raw features from the expanded feature store if available
     for &rf in &f.raw_features {
         v.push(rf);
     }
@@ -194,6 +209,9 @@ pub fn compute(data: Value) -> Result<Value, String> {
                 "ema_vote", "rsi_vote", "macd_vote", "supertrend_vote",
                 "bollinger_vote", "vwap_vote", "momentum_vote", "volume_vote",
                 "composite_score", "regime", "hour_of_day", "day_of_week",
+                "sector_score", "cap_category", "news_sentiment",
+                "options_pcr", "options_iv_rank", "futures_basis",
+                "scan_confirmation_count",
             ];
             let n_raw = if !training_data.is_empty() { training_data[0].features.raw_features.len() } else { 0 };
             let mut feature_names: Vec<String> = base_names.into_iter().map(String::from).collect();
@@ -306,6 +324,9 @@ mod tests {
             volume_vote: 0.5, composite_score: composite,
             regime: 1.0, hour_of_day: 11.0, day_of_week: 2.0,
             raw_features: vec![],
+            sector_score: 0.0, cap_category: 0.0, news_sentiment: 0.0,
+            options_pcr: 0.0, options_iv_rank: 0.0, futures_basis: 0.0,
+            scan_confirmation_count: 0.0,
         }
     }
 
@@ -313,7 +334,7 @@ mod tests {
     fn test_predict_with_zero_weights() {
         let features = vec![make_feature(0.5, 0.7)];
         let weights = ModelWeights {
-            w: vec![0.0; 12], bias: 0.0,
+            w: vec![0.0; 19], bias: 0.0,
             feature_names: vec![], training_samples: 0, training_accuracy: 0.0,
         };
         let input = json!({
@@ -357,7 +378,7 @@ mod tests {
     fn test_predict_positive_weights_high_composite() {
         let features = vec![make_feature(0.9, 0.8)];
         let weights = ModelWeights {
-            w: vec![1.0; 12], bias: 0.0,
+            w: vec![1.0; 19], bias: 0.0,
             feature_names: vec![], training_samples: 100, training_accuracy: 0.8,
         };
         let input = json!({
@@ -393,7 +414,7 @@ mod tests {
     #[test]
     fn test_predict_empty_features() {
         let weights = ModelWeights {
-            w: vec![0.0; 12], bias: 0.0,
+            w: vec![0.0; 19], bias: 0.0,
             feature_names: vec![], training_samples: 0, training_accuracy: 0.0,
         };
         let input = json!({

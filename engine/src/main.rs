@@ -32,6 +32,11 @@ pub mod slippage;
 pub mod position_sizing;
 pub mod live_executor;
 pub mod premarket;
+pub mod universe;
+pub mod rate_limiter;
+pub mod news_sentiment;
+pub mod futures_scanner;
+pub mod continuous_scanner;
 
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -258,6 +263,15 @@ async fn main() {
                     premarket::start_dynamic_feed(dyn_state).await;
                 });
             }
+
+            // Start continuous scanner (sector rotation, futures, news, EOD analysis)
+            continuous_scanner::spawn(
+                state.clone(),
+                state.universe.clone(),
+                state.rate_limiter.clone(),
+                state.news_store.clone(),
+                state.scan_ledger.clone(),
+            );
 
             server::run(state).await;
         }
@@ -768,6 +782,69 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
                 "cached_signals": cached_signals.len(),
                 "signals": cached_signals,
             }))
+        }
+
+        "scan_sector" => {
+            let sector = req.data.get("sector").and_then(|v| v.as_str()).unwrap_or("");
+            let stocks = state.universe.by_sector(sector);
+            if stocks.is_empty() {
+                Ok(serde_json::json!({ "error": format!("No stocks found for sector '{}'", sector), "sectors_available": state.universe.sector_list() }))
+            } else {
+                let stock_refs: Vec<&crate::universe::StockInfo> = stocks.into_iter().collect();
+                let count = continuous_scanner::run_sector_scan(
+                    state, &state.universe, &state.rate_limiter,
+                    &state.news_store, &state.scan_ledger,
+                    sector, &stock_refs,
+                );
+                Ok(serde_json::json!({ "sector": sector, "stocks_scanned": stock_refs.len(), "signals_generated": count }))
+            }
+        }
+
+        "scan_futures" => {
+            let bridge_url = state.config.broker.icici.bridge_url.clone();
+            let results = futures_scanner::scan_futures(&state.rate_limiter, &bridge_url, &state.universe);
+            Ok(serde_json::to_value(&results).unwrap_or_default())
+        }
+
+        "scan_news" => {
+            state.news_store.fetch_and_update(&state.rate_limiter, &state.universe);
+            let limit = req.data.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+            let items = state.news_store.recent_items(limit);
+            Ok(serde_json::json!({ "items": items, "total": state.news_store.item_count() }))
+        }
+
+        "scan_status" => {
+            let limit = req.data.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+            let status = continuous_scanner::get_status(&state.scan_ledger, limit);
+            Ok(serde_json::to_value(&status).unwrap_or_default())
+        }
+
+        "ml_retrain" => {
+            let path = "data/ml_training_log.json";
+            let training_data: Vec<serde_json::Value> = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+
+            if training_data.len() < 10 {
+                Ok(serde_json::json!({ "error": "Not enough training data", "samples": training_data.len() }))
+            } else {
+                Ok(serde_json::json!({
+                    "status": "retrain_ready",
+                    "samples_available": training_data.len(),
+                    "message": "Use ml_scorer.train command with the training data"
+                }))
+            }
+        }
+
+        "universe_info" => {
+            let sectors = state.universe.sector_list();
+            let total = state.universe.len();
+            let fno = state.universe.fno_stocks().len();
+            let by_sector: Vec<serde_json::Value> = sectors.iter().map(|s| {
+                serde_json::json!({ "sector": s, "count": state.universe.by_sector(s).len() })
+            }).collect();
+            Ok(serde_json::json!({ "total_stocks": total, "fno_stocks": fno, "sectors": by_sector }))
         }
 
         "oms_submit_order" => {

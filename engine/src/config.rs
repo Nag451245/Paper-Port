@@ -41,6 +41,16 @@ pub struct EngineConfig {
     pub oms_retry: OmsRetryConfig,
     #[serde(default)]
     pub premarket: PremarketConfig,
+    #[serde(default)]
+    pub continuous_scan: ContinuousScanConfig,
+    #[serde(default)]
+    pub news: NewsConfig,
+    #[serde(default)]
+    pub breeze_rate_limit: BreezeRateLimitConfig,
+    #[serde(default)]
+    pub futures: FuturesConfig,
+    #[serde(default)]
+    pub universe: UniverseConfig,
     #[serde(default = "default_initial_capital")]
     pub initial_capital: f64,
 }
@@ -477,7 +487,116 @@ impl Default for EngineConfig {
             circuit_breaker: CircuitBreakerConfig::default(),
             oms_retry: OmsRetryConfig::default(),
             premarket: PremarketConfig::default(),
+            continuous_scan: ContinuousScanConfig::default(),
+            news: NewsConfig::default(),
+            breeze_rate_limit: BreezeRateLimitConfig::default(),
+            futures: FuturesConfig::default(),
+            universe: UniverseConfig::default(),
             initial_capital: 1_000_000.0,
+        }
+    }
+}
+
+// ─── Universe ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UniverseConfig {
+    pub file_path: String,
+}
+
+impl Default for UniverseConfig {
+    fn default() -> Self {
+        Self {
+            file_path: "data/nse_universe.json".into(),
+        }
+    }
+}
+
+// ─── Breeze Rate Limit ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BreezeRateLimitConfig {
+    pub max_requests_per_sec: f64,
+    pub burst_capacity: u64,
+}
+
+impl Default for BreezeRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_requests_per_sec: 2.5,
+            burst_capacity: 5,
+        }
+    }
+}
+
+// ─── Continuous Scanner ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContinuousScanConfig {
+    pub enabled: bool,
+    /// Interval between sector rotation scans (seconds)
+    pub sector_rotation_interval_secs: u64,
+    /// Interval between futures scans (seconds)
+    pub futures_scan_interval_secs: u64,
+    /// Interval between news RSS fetches (seconds)
+    pub news_fetch_interval_secs: u64,
+    /// Max age of signals before pruning (seconds)
+    pub signal_ttl_secs: i64,
+}
+
+impl Default for ContinuousScanConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sector_rotation_interval_secs: 600,
+            futures_scan_interval_secs: 1800,
+            news_fetch_interval_secs: 900,
+            signal_ttl_secs: 7200,
+        }
+    }
+}
+
+// ─── News Config ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NewsConfig {
+    pub enabled: bool,
+    pub cache_ttl_secs: u64,
+    pub rss_urls: Vec<String>,
+}
+
+impl Default for NewsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cache_ttl_secs: 900,
+            rss_urls: vec![
+                "https://www.moneycontrol.com/rss/latestnews.xml".into(),
+                "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms".into(),
+                "https://www.livemint.com/rss/markets".into(),
+            ],
+        }
+    }
+}
+
+// ─── Futures Config ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FuturesConfig {
+    pub enabled: bool,
+    pub symbols: Vec<String>,
+}
+
+impl Default for FuturesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            symbols: Vec::new(),
         }
     }
 }

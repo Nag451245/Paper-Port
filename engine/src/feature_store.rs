@@ -707,6 +707,40 @@ fn estimate_hurst(returns: &[f64]) -> f64 {
 }
 
 
+/// Extract context features for a symbol using enriched data from the continuous scanner.
+/// Returns a Vec<f64> with 7 additional features:
+///   [sector_score, cap_category, news_sentiment, options_pcr, options_iv_rank, futures_basis, scan_confirmation_count]
+/// These can be appended to `raw_features` or set as named fields on `FeatureRow`.
+pub fn extract_context_features(
+    _symbol: &str,
+    sector_score: f64,
+    cap_category_num: f64,
+    news_sentiment: f64,
+    options_pcr: Option<f64>,
+    options_iv_rank: Option<f64>,
+    futures_basis: Option<f64>,
+    scan_count: u32,
+) -> Vec<f64> {
+    vec![
+        sector_score.clamp(-1.0, 1.0),
+        cap_category_num,
+        news_sentiment.clamp(-1.0, 1.0),
+        options_pcr.unwrap_or(0.0),
+        options_iv_rank.unwrap_or(0.0),
+        futures_basis.unwrap_or(0.0),
+        scan_count as f64,
+    ]
+}
+
+/// Convert CapCategory to a numeric value for ML features.
+pub fn cap_to_numeric(cap: &str) -> f64 {
+    match cap.to_lowercase().as_str() {
+        "largecap" | "large" => 1.0,
+        "midcap" | "mid" => 0.5,
+        _ => 0.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,6 +934,24 @@ mod tests {
                 assert!(!v.is_nan(), "NaN found at row {}, col {}", row_idx, col_idx);
             }
         }
+    }
+
+    #[test]
+    fn test_extract_context_features() {
+        let feats = extract_context_features("RELIANCE", 0.7, 1.0, 0.5, Some(0.8), Some(15.0), Some(0.3), 3);
+        assert_eq!(feats.len(), 7);
+        assert_eq!(feats[0], 0.7);  // sector_score
+        assert_eq!(feats[1], 1.0);  // cap_category_num (large)
+        assert_eq!(feats[2], 0.5);  // news_sentiment
+        assert_eq!(feats[3], 0.8);  // options_pcr
+        assert_eq!(feats[6], 3.0);  // scan_count
+    }
+
+    #[test]
+    fn test_cap_to_numeric() {
+        assert_eq!(cap_to_numeric("LargeCap"), 1.0);
+        assert_eq!(cap_to_numeric("mid"), 0.5);
+        assert_eq!(cap_to_numeric("SmallCap"), 0.0);
     }
 
     #[test]
