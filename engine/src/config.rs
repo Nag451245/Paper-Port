@@ -33,6 +33,12 @@ pub struct EngineConfig {
     pub market_data: MarketDataConfig,
     #[serde(default)]
     pub live_executor: LiveExecutorConfig,
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
+    #[serde(default)]
+    pub circuit_breaker: CircuitBreakerConfig,
+    #[serde(default)]
+    pub oms_retry: OmsRetryConfig,
     #[serde(default = "default_initial_capital")]
     pub initial_capital: f64,
 }
@@ -465,6 +471,9 @@ impl Default for EngineConfig {
             broker: BrokerConfig::default(),
             market_data: MarketDataConfig::default(),
             live_executor: LiveExecutorConfig::default(),
+            rate_limit: RateLimitConfig::default(),
+            circuit_breaker: CircuitBreakerConfig::default(),
+            oms_retry: OmsRetryConfig::default(),
             initial_capital: 1_000_000.0,
         }
     }
@@ -554,6 +563,24 @@ pub struct LiveExecutorConfig {
     pub default_qty: i64,
     pub exchange: String,
     pub product: String,
+    /// Candle aggregation interval in seconds (default 60 = 1 minute candles)
+    pub candle_interval_secs: u64,
+    /// Position sizing mode: "fixed", "nav_pct", "kelly", "half_kelly", "risk_parity", "vol_target", "regime_adaptive"
+    pub position_sizing_mode: String,
+    /// Max percentage of NAV per position
+    pub max_position_pct: f64,
+    /// Execution algorithm: "direct", "twap", "vwap", "iceberg"
+    pub exec_algo: String,
+    /// Number of slices for TWAP/VWAP execution
+    pub exec_slices: u32,
+    /// Duration in seconds for TWAP/VWAP execution
+    pub exec_duration_secs: u64,
+    /// Visible quantity for iceberg orders
+    pub iceberg_visible_qty: i64,
+    /// Enable tick-level threshold execution (bypass candle aggregation for simple thresholds)
+    pub tick_execution_enabled: bool,
+    /// Tick-level price threshold percentage above/below entry for immediate execution
+    pub tick_threshold_pct: f64,
 }
 
 impl Default for LiveExecutorConfig {
@@ -567,6 +594,81 @@ impl Default for LiveExecutorConfig {
             default_qty: 1,
             exchange: "NSE".into(),
             product: "intraday".into(),
+            candle_interval_secs: 60,
+            position_sizing_mode: "fixed".into(),
+            max_position_pct: 20.0,
+            exec_algo: "direct".into(),
+            exec_slices: 5,
+            exec_duration_secs: 300,
+            iceberg_visible_qty: 10,
+            tick_execution_enabled: false,
+            tick_threshold_pct: 0.5,
+        }
+    }
+}
+
+// ─── Rate Limiting ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RateLimitConfig {
+    pub enabled: bool,
+    /// Max requests per window
+    pub max_requests: u64,
+    /// Window size in seconds
+    pub window_secs: u64,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_requests: 100,
+            window_secs: 10,
+        }
+    }
+}
+
+// ─── Circuit Breaker ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CircuitBreakerConfig {
+    pub enabled: bool,
+    /// Auto-activate kill switch at this drawdown percentage
+    pub auto_kill_drawdown_pct: f64,
+    /// Check interval in seconds
+    pub check_interval_secs: u64,
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_kill_drawdown_pct: 10.0,
+            check_interval_secs: 5,
+        }
+    }
+}
+
+// ─── OMS Retry ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OmsRetryConfig {
+    pub enabled: bool,
+    /// Max retry attempts for failed broker calls
+    pub max_retries: u32,
+    /// Initial backoff in milliseconds (doubles each retry)
+    pub initial_backoff_ms: u64,
+}
+
+impl Default for OmsRetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_retries: 3,
+            initial_backoff_ms: 200,
         }
     }
 }

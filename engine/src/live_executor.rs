@@ -7,9 +7,10 @@ use crate::strategy::{Indicators, Side, create_strategy};
 use crate::utils::Candle;
 use crate::broker::{OrderRequest, OrderSide, OrderType, ProductType};
 use crate::alerts::{AlertSeverity, AlertType};
+use crate::position_sizing::{SizingMethod, SizingContext, MarketRegime, compute_quantity};
+use crate::exec_algo::{ExecAlgoType, plan_twap, plan_vwap, plan_iceberg, execute_plan_sync, TwapConfig, VwapConfig, IcebergConfig};
 
 const MAX_ROLLING_CANDLES: usize = 300;
-const CANDLE_INTERVAL_SECS: u64 = 60;
 
 /// Spawns the live executor background task.
 /// Subscribes to live price ticks, aggregates them into candles,
@@ -28,19 +29,34 @@ pub fn spawn(state: Arc<AppState>) {
     let default_qty = config.live_executor.default_qty;
     let exchange = config.live_executor.exchange.clone();
     let product_str = config.live_executor.product.clone();
+    let candle_interval = config.live_executor.candle_interval_secs.max(1);
+    let sizing_mode = config.live_executor.position_sizing_mode.clone();
+    let max_position_pct = config.live_executor.max_position_pct;
+    let exec_algo_str = config.live_executor.exec_algo.clone();
+    let exec_slices = config.live_executor.exec_slices;
+    let exec_duration = config.live_executor.exec_duration_secs;
+    let iceberg_visible = config.live_executor.iceberg_visible_qty;
+    let tick_exec_enabled = config.live_executor.tick_execution_enabled;
+    let _tick_threshold_pct = config.live_executor.tick_threshold_pct;
 
     info!(
         strategies = ?strategies_names,
         auto_execute = auto_execute,
         min_confidence = min_confidence,
+        candle_interval_secs = candle_interval,
+        position_sizing = %sizing_mode,
         "Starting live executor"
     );
 
     let mut rx = state.live_prices.subscribe();
 
     tokio::spawn(async move {
-        let mut candle_windows: HashMap<String, Vec<Candle>> = HashMap::new();
+        let mut candle_windows_1m: HashMap<String, Vec<Candle>> = HashMap::new();
+        let mut candle_windows_5m: HashMap<String, Vec<Candle>> = HashMap::new();
+        let mut candle_windows_15m: HashMap<String, Vec<Candle>> = HashMap::new();
         let mut current_candles: HashMap<String, PartialCandle> = HashMap::new();
+        let mut partial_5m: HashMap<String, PartialCandle> = HashMap::new();
+        let mut partial_15m: HashMap<String, PartialCandle> = HashMap::new();
 
         loop {
             let tick = match rx.recv().await {
@@ -59,6 +75,100 @@ pub fn spawn(state: Arc<AppState>) {
                 continue;
             }
 
+            // ─── Tick-Level Threshold Execution (sub-second path) ──────────
+            // Bypasses candle aggregation for positions with SL/TP thresholds
+            if tick_exec_enabled {
+                for entry in state.positions.iter() {
+                    let pos = entry.value();
+                    if pos.symbol != tick.symbol { continue; }
+
+                    let is_long = pos.side.eq_ignore_ascii_case("buy");
+                    if let Some(sl) = pos.stop_loss {
+                        let hit = if is_long { tick.ltp <= sl } else { tick.ltp >= sl };
+                        if hit {
+                            let close_side = if is_long { OrderSide::Sell } else { OrderSide::Buy };
+                            let order_req = OrderRequest {
+                                symbol: tick.symbol.clone(),
+                                exchange: exchange.clone(),
+                                side: close_side,
+                                order_type: OrderType::Market,
+                                quantity: pos.qty,
+                                price: Some(tick.ltp),
+                                product: ProductType::Intraday,
+                                tag: Some("tick_sl".into()),
+                                ..Default::default()
+                            };
+                            let ref_price = Some(tick.ltp);
+                            if let Ok(order) = state.oms.submit_order(order_req, None, ref_price) {
+                                if order.filled_qty > 0 {
+                                    let side_str = if is_long { "sell" } else { "buy" };
+                                    state.sync_oms_fill(&order.symbol, side_str, order.filled_qty,
+                                        order.avg_fill_price, None, None);
+                                    state.log_audit("TICK_SL_EXIT", Some(&tick.symbol),
+                                        &format!("SL hit at {:.2}, closed {} qty", tick.ltp, order.filled_qty));
+                                }
+                            }
+                        }
+                    }
+                    if let Some(tp) = pos.take_profit {
+                        let hit = if is_long { tick.ltp >= tp } else { tick.ltp <= tp };
+                        if hit {
+                            let close_side = if is_long { OrderSide::Sell } else { OrderSide::Buy };
+                            let order_req = OrderRequest {
+                                symbol: tick.symbol.clone(),
+                                exchange: exchange.clone(),
+                                side: close_side,
+                                order_type: OrderType::Market,
+                                quantity: pos.qty,
+                                price: Some(tick.ltp),
+                                product: ProductType::Intraday,
+                                tag: Some("tick_tp".into()),
+                                ..Default::default()
+                            };
+                            let ref_price = Some(tick.ltp);
+                            if let Ok(order) = state.oms.submit_order(order_req, None, ref_price) {
+                                if order.filled_qty > 0 {
+                                    let side_str = if is_long { "sell" } else { "buy" };
+                                    state.sync_oms_fill(&order.symbol, side_str, order.filled_qty,
+                                        order.avg_fill_price, None, None);
+                                    state.log_audit("TICK_TP_EXIT", Some(&tick.symbol),
+                                        &format!("TP hit at {:.2}, closed {} qty", tick.ltp, order.filled_qty));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Update 5m and 15m partial candles
+            partial_5m.entry(tick.symbol.clone())
+                .or_insert_with(|| PartialCandle::new(tick.ltp, tick.volume))
+                .update(tick.ltp, tick.volume);
+            partial_15m.entry(tick.symbol.clone())
+                .or_insert_with(|| PartialCandle::new(tick.ltp, tick.volume))
+                .update(tick.ltp, tick.volume);
+
+            // Emit 5m candle
+            if let Some(p5) = partial_5m.get(&tick.symbol) {
+                if p5.started.elapsed().as_secs() >= 300 {
+                    let candle = p5.to_candle(&tick.symbol);
+                    let w5 = candle_windows_5m.entry(tick.symbol.clone()).or_default();
+                    w5.push(candle);
+                    if w5.len() > MAX_ROLLING_CANDLES { w5.drain(..w5.len() - MAX_ROLLING_CANDLES); }
+                    partial_5m.insert(tick.symbol.clone(), PartialCandle::new(tick.ltp, tick.volume));
+                }
+            }
+            // Emit 15m candle
+            if let Some(p15) = partial_15m.get(&tick.symbol) {
+                if p15.started.elapsed().as_secs() >= 900 {
+                    let candle = p15.to_candle(&tick.symbol);
+                    let w15 = candle_windows_15m.entry(tick.symbol.clone()).or_default();
+                    w15.push(candle);
+                    if w15.len() > MAX_ROLLING_CANDLES { w15.drain(..w15.len() - MAX_ROLLING_CANDLES); }
+                    partial_15m.insert(tick.symbol.clone(), PartialCandle::new(tick.ltp, tick.volume));
+                }
+            }
+
             let partial = current_candles.entry(tick.symbol.clone()).or_insert_with(|| {
                 PartialCandle::new(tick.ltp, tick.volume)
             });
@@ -66,20 +176,28 @@ pub fn spawn(state: Arc<AppState>) {
             partial.update(tick.ltp, tick.volume);
 
             let elapsed = partial.started.elapsed().as_secs();
-            if elapsed < CANDLE_INTERVAL_SECS {
+            if elapsed < candle_interval {
                 continue;
             }
 
             let candle = partial.to_candle(&tick.symbol);
             *partial = PartialCandle::new(tick.ltp, tick.volume);
 
-            let window = candle_windows.entry(tick.symbol.clone()).or_default();
+            let window = candle_windows_1m.entry(tick.symbol.clone()).or_default();
             window.push(candle);
             if window.len() > MAX_ROLLING_CANDLES {
                 window.drain(..window.len() - MAX_ROLLING_CANDLES);
             }
 
             if window.len() < 30 {
+                continue;
+            }
+
+            // Risk check: block if drawdown exceeds limit
+            let nav = state.get_nav();
+            let peak = state.get_peak_nav();
+            let dd = if peak > 0.0 { (peak - nav) / peak * 100.0 } else { 0.0 };
+            if dd > state.config.risk.max_drawdown_pct {
                 continue;
             }
 
@@ -105,6 +223,24 @@ pub fn spawn(state: Arc<AppState>) {
                         continue;
                     }
 
+                    // Advanced position sizing
+                    let sizing_method = SizingMethod::from_str_loose(&sizing_mode);
+                    let sizing_ctx = SizingContext {
+                        nav,
+                        price: signal.price,
+                        win_rate: 0.55,
+                        avg_win: 1.0,
+                        avg_loss: 1.0,
+                        asset_volatility: 0.02,
+                        target_volatility: 0.15,
+                        portfolio_volatility: 0.12,
+                        regime: MarketRegime::Normal,
+                        signal_confidence: signal.confidence,
+                        max_position_pct,
+                        default_qty,
+                    };
+                    let qty = compute_quantity(sizing_method, &sizing_ctx);
+
                     let cached = CachedSignal {
                         symbol: tick.symbol.clone(),
                         strategy: strat_name.clone(),
@@ -113,21 +249,28 @@ pub fn spawn(state: Arc<AppState>) {
                         confidence: signal.confidence,
                         reason: signal.reason.clone(),
                         timestamp: chrono::Utc::now().to_rfc3339(),
-                        ttl_seconds: CANDLE_INTERVAL_SECS * 2,
+                        ttl_seconds: candle_interval * 2,
                         stop_loss: signal.stop_loss,
                         take_profit: signal.take_profit,
-                        suggested_qty: Some(default_qty),
+                        suggested_qty: Some(qty),
                     };
 
                     state.cache_signal(cached);
                     state.log_audit("LIVE_SIGNAL", Some(&tick.symbol),
-                        &format!("strategy={} side={} conf={:.2} price={:.2}",
-                            strat_name, side_str, signal.confidence, signal.price));
+                        &format!("strategy={} side={} conf={:.2} price={:.2} qty={}",
+                            strat_name, side_str, signal.confidence, signal.price, qty));
 
                     if auto_execute {
                         let position_count = state.positions.len();
                         if position_count >= max_positions {
                             warn!(symbol = %tick.symbol, "Max positions reached, skipping auto-execute");
+                            continue;
+                        }
+
+                        // Daily trade limit check
+                        let daily_count = state.daily_trade_count.load(std::sync::atomic::Ordering::Relaxed);
+                        if daily_count >= state.config.risk.max_daily_trades {
+                            warn!(symbol = %tick.symbol, "Daily trade limit reached");
                             continue;
                         }
 
@@ -140,35 +283,90 @@ pub fn spawn(state: Arc<AppState>) {
                             _ => ProductType::Intraday,
                         };
 
-                        let order_req = OrderRequest {
-                            symbol: tick.symbol.clone(),
-                            exchange: exchange.clone(),
-                            side: order_side,
-                            order_type: OrderType::Limit,
-                            quantity: default_qty,
-                            price: Some(signal.price),
-                            trigger_price: signal.stop_loss,
-                            product,
-                            tag: Some(format!("live:{}", strat_name)),
-                        };
-
                         let ref_price = state.live_prices.get_ltp(&tick.symbol);
-                        match state.oms.submit_order(order_req, Some(strat_name.clone()), ref_price) {
-                            Ok(order) => {
-                                info!(symbol = %tick.symbol, order_id = %order.internal_id,
-                                    "Live executor auto-submitted order");
-                                state.log_audit("LIVE_AUTO_EXEC", Some(&tick.symbol),
-                                    &format!("order_id={}", order.internal_id));
+                        let algo = ExecAlgoType::from_str_loose(&exec_algo_str);
+
+                        match algo {
+                            ExecAlgoType::TWAP => {
+                                let plan = plan_twap(&tick.symbol, order_side, qty, &TwapConfig {
+                                    duration_secs: exec_duration, num_slices: exec_slices, randomize_pct: 15.0,
+                                });
+                                let result = execute_plan_sync(&plan, &state.oms, &exchange, product,
+                                    Some(signal.price), Some(strat_name.clone()), ref_price);
+                                if result.total_filled > 0 {
+                                    state.sync_oms_fill(&tick.symbol, side_str, result.total_filled,
+                                        result.avg_fill_price, signal.stop_loss, signal.take_profit);
+                                    state.log_audit("LIVE_TWAP_EXEC", Some(&tick.symbol),
+                                        &format!("filled={}/{} avg={:.2} slices={}/{}",
+                                            result.total_filled, qty, result.avg_fill_price,
+                                            result.num_slices_filled, result.num_slices_attempted));
+                                }
                             }
-                            Err(e) => {
-                                error!(symbol = %tick.symbol, error = %e,
-                                    "Live executor order submission failed");
-                                state.alert_manager.fire(
-                                    AlertType::OrderRejected, AlertSeverity::Warning,
-                                    "Live auto-execution rejected",
-                                    &format!("Live exec rejected for {}: {}", tick.symbol, e),
-                                    Some(&tick.symbol), None,
-                                );
+                            ExecAlgoType::VWAP => {
+                                let plan = plan_vwap(&tick.symbol, order_side, qty, &VwapConfig {
+                                    duration_secs: exec_duration, num_slices: exec_slices,
+                                    volume_profile: Vec::new(), max_participation_rate: 0.25,
+                                });
+                                let result = execute_plan_sync(&plan, &state.oms, &exchange, product,
+                                    Some(signal.price), Some(strat_name.clone()), ref_price);
+                                if result.total_filled > 0 {
+                                    state.sync_oms_fill(&tick.symbol, side_str, result.total_filled,
+                                        result.avg_fill_price, signal.stop_loss, signal.take_profit);
+                                    state.log_audit("LIVE_VWAP_EXEC", Some(&tick.symbol),
+                                        &format!("filled={}/{} vwap={:.2}", result.total_filled, qty, result.vwap_achieved));
+                                }
+                            }
+                            ExecAlgoType::Iceberg => {
+                                let plan = plan_iceberg(&tick.symbol, order_side, qty, &IcebergConfig {
+                                    visible_qty: iceberg_visible, replenish_delay_ms: 500,
+                                });
+                                let result = execute_plan_sync(&plan, &state.oms, &exchange, product,
+                                    Some(signal.price), Some(strat_name.clone()), ref_price);
+                                if result.total_filled > 0 {
+                                    state.sync_oms_fill(&tick.symbol, side_str, result.total_filled,
+                                        result.avg_fill_price, signal.stop_loss, signal.take_profit);
+                                    state.log_audit("LIVE_ICEBERG_EXEC", Some(&tick.symbol),
+                                        &format!("filled={}/{} slices={}", result.total_filled, qty, result.num_slices_filled));
+                                }
+                            }
+                            ExecAlgoType::Direct => {
+                                let order_req = OrderRequest {
+                                    symbol: tick.symbol.clone(),
+                                    exchange: exchange.clone(),
+                                    side: order_side,
+                                    order_type: OrderType::Limit,
+                                    quantity: qty,
+                                    price: Some(signal.price),
+                                    trigger_price: signal.stop_loss,
+                                    product,
+                                    tag: Some(format!("live:{}", strat_name)),
+                                    ..Default::default()
+                                };
+
+                                match state.oms.submit_order(order_req, Some(strat_name.clone()), ref_price) {
+                                    Ok(order) => {
+                                        if order.status == crate::broker::OrderStatus::Filled && order.filled_qty > 0 {
+                                            state.sync_oms_fill(
+                                                &order.symbol, side_str, order.filled_qty,
+                                                order.avg_fill_price, signal.stop_loss, signal.take_profit,
+                                            );
+                                        }
+                                        info!(symbol = %tick.symbol, order_id = %order.internal_id,
+                                            "Live executor auto-submitted order");
+                                        state.log_audit("LIVE_AUTO_EXEC", Some(&tick.symbol),
+                                            &format!("order_id={} qty={}", order.internal_id, qty));
+                                    }
+                                    Err(e) => {
+                                        error!(symbol = %tick.symbol, error = %e,
+                                            "Live executor order submission failed");
+                                        state.alert_manager.fire(
+                                            AlertType::OrderRejected, AlertSeverity::Warning,
+                                            "Live auto-execution rejected",
+                                            &format!("Live exec rejected for {}: {}", tick.symbol, e),
+                                            Some(&tick.symbol), None,
+                                        );
+                                    }
+                                }
                             }
                         }
                     }

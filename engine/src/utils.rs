@@ -12,6 +12,47 @@ pub struct Candle {
     pub volume: f64,
 }
 
+/// Sanitize a slice of candles in-place: replace NaN/Inf with safe defaults,
+/// clamp negative volumes to 0. Returns the number of candles that were repaired.
+pub fn sanitize_candles(candles: &mut [Candle]) -> usize {
+    let mut repaired = 0;
+    let n = candles.len();
+    for i in 0..n {
+        let mut touched = false;
+        if !candles[i].close.is_finite() || candles[i].close <= 0.0 {
+            candles[i].close = if i > 0 { candles[i - 1].close } else { 0.0 };
+            touched = true;
+        }
+        let close = candles[i].close;
+        if !candles[i].high.is_finite() || candles[i].high <= 0.0 {
+            candles[i].high = close;
+            touched = true;
+        }
+        if !candles[i].low.is_finite() || candles[i].low <= 0.0 {
+            candles[i].low = close;
+            touched = true;
+        }
+        if !candles[i].open.is_finite() || candles[i].open <= 0.0 {
+            candles[i].open = close;
+            touched = true;
+        }
+        if !candles[i].volume.is_finite() || candles[i].volume < 0.0 {
+            candles[i].volume = 0.0;
+            touched = true;
+        }
+        if candles[i].high < candles[i].low {
+            let tmp = candles[i].high;
+            candles[i].high = candles[i].low;
+            candles[i].low = tmp;
+            touched = true;
+        }
+        if candles[i].high < close { candles[i].high = close; touched = true; }
+        if candles[i].low > close { candles[i].low = close; touched = true; }
+        if touched { repaired += 1; }
+    }
+    repaired
+}
+
 pub fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
@@ -747,6 +788,40 @@ mod tests {
             "zero trade value should only incur fixed brokerage+GST (no slippage in total_cost), got {} vs expected {}",
             cost, expected_fixed
         );
+    }
+
+    #[test]
+    fn test_sanitize_candles_nan() {
+        let mut candles = vec![
+            Candle { timestamp: "".into(), open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000.0 },
+            Candle { timestamp: "".into(), open: f64::NAN, high: f64::NAN, low: f64::NAN, close: f64::NAN, volume: -500.0 },
+            Candle { timestamp: "".into(), open: 102.0, high: 103.0, low: 101.0, close: 102.0, volume: 2000.0 },
+        ];
+        let repaired = sanitize_candles(&mut candles);
+        assert!(repaired >= 1, "should repair at least 1 candle");
+        assert!(candles[1].close.is_finite(), "NaN close should be replaced");
+        assert_eq!(candles[1].close, 100.0, "NaN close should inherit from previous");
+        assert!(candles[1].volume >= 0.0, "negative volume should be clamped to 0");
+    }
+
+    #[test]
+    fn test_sanitize_candles_negative_close() {
+        let mut candles = vec![
+            Candle { timestamp: "".into(), open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000.0 },
+            Candle { timestamp: "".into(), open: 100.0, high: 101.0, low: 99.0, close: -50.0, volume: 1000.0 },
+        ];
+        let repaired = sanitize_candles(&mut candles);
+        assert!(repaired >= 1);
+        assert!(candles[1].close > 0.0, "negative close should be replaced with prev close");
+    }
+
+    #[test]
+    fn test_sanitize_candles_high_low_swap() {
+        let mut candles = vec![
+            Candle { timestamp: "".into(), open: 100.0, high: 95.0, low: 105.0, close: 100.0, volume: 1000.0 },
+        ];
+        sanitize_candles(&mut candles);
+        assert!(candles[0].high >= candles[0].low, "high should be >= low after sanitization");
     }
 
     #[test]

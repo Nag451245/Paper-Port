@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::utils::{Candle, calc_ema_series as calc_ema, calc_rsi_series as calc_rsi, calc_atr_series as calc_atr};
+use crate::utils::{Candle, calc_ema_series as calc_ema, calc_rsi_series as calc_rsi, calc_atr_series as calc_atr, sanitize_candles};
 
 #[derive(Deserialize)]
 struct SignalInput {
@@ -23,8 +23,10 @@ struct SignalOutput {
 }
 
 pub fn compute(data: Value) -> Result<Value, String> {
-    let input: SignalInput =
+    let mut input: SignalInput =
         serde_json::from_value(data).map_err(|e| format!("Invalid signal input: {}", e))?;
+
+    sanitize_candles(&mut input.candles);
 
     let closes: Vec<f64> = input.candles.iter().map(|c| c.close).collect();
     let highs: Vec<f64> = input.candles.iter().map(|c| c.high).collect();

@@ -26,6 +26,17 @@ pub struct Order {
     pub created_at: String,
     pub updated_at: String,
     pub rejection_reason: Option<String>,
+    /// Tracks how many fills have already been synced to AppState positions.
+    /// Used by the fill-sync loop to compute the delta and avoid double-counting.
+    #[serde(default)]
+    pub synced_fill_qty: i64,
+}
+
+/// Represents a fill delta that needs to be synced to AppState.positions
+#[derive(Debug, Clone)]
+pub struct FillDelta {
+    pub order: Order,
+    pub new_fills: i64,
 }
 
 /// Fat-finger protection config
@@ -52,6 +63,12 @@ pub struct OMS {
     broker: Arc<dyn BrokerAdapter>,
     fat_finger: FatFingerLimits,
     next_id: std::sync::atomic::AtomicU64,
+    pub total_orders: std::sync::atomic::AtomicU64,
+    pub total_fills: std::sync::atomic::AtomicU64,
+    pub total_rejections: std::sync::atomic::AtomicU64,
+    pub retry_enabled: bool,
+    pub max_retries: u32,
+    pub initial_backoff_ms: u64,
 }
 
 impl OMS {
@@ -61,7 +78,20 @@ impl OMS {
             broker,
             fat_finger,
             next_id: std::sync::atomic::AtomicU64::new(1),
+            total_orders: std::sync::atomic::AtomicU64::new(0),
+            total_fills: std::sync::atomic::AtomicU64::new(0),
+            total_rejections: std::sync::atomic::AtomicU64::new(0),
+            retry_enabled: false,
+            max_retries: 3,
+            initial_backoff_ms: 200,
         }
+    }
+
+    pub fn with_retry(mut self, enabled: bool, max_retries: u32, initial_backoff_ms: u64) -> Self {
+        self.retry_enabled = enabled;
+        self.max_retries = max_retries;
+        self.initial_backoff_ms = initial_backoff_ms;
+        self
     }
 
     fn next_id(&self) -> String {
@@ -140,25 +170,51 @@ impl OMS {
             created_at: now.clone(),
             updated_at: now.clone(),
             rejection_reason: None,
+            synced_fill_qty: 0,
         };
 
-        match self.broker.place_order(&req) {
-            Ok(resp) => {
-                order.broker_order_id = Some(resp.broker_order_id);
-                order.status = resp.status;
-                order.filled_qty = resp.filled_qty;
-                order.avg_fill_price = resp.avg_price;
-                order.updated_at = resp.timestamp;
-                if resp.status == OrderStatus::Rejected {
-                    order.rejection_reason = resp.message;
+        let max_attempts = if self.retry_enabled { self.max_retries + 1 } else { 1 };
+        let mut last_err = String::new();
+
+        for attempt in 0..max_attempts {
+            if attempt > 0 {
+                let backoff = self.initial_backoff_ms * (1u64 << (attempt - 1).min(5));
+                std::thread::sleep(std::time::Duration::from_millis(backoff));
+                tracing::info!(attempt = attempt + 1, backoff_ms = backoff, symbol = %req.symbol,
+                    "Retrying order placement");
+            }
+
+            match self.broker.place_order(&req) {
+                Ok(resp) => {
+                    order.broker_order_id = Some(resp.broker_order_id);
+                    order.status = resp.status;
+                    order.filled_qty = resp.filled_qty;
+                    order.avg_fill_price = resp.avg_price;
+                    order.updated_at = resp.timestamp;
+                    if resp.status == OrderStatus::Filled || resp.status == OrderStatus::PartialFill {
+                        order.synced_fill_qty = resp.filled_qty;
+                        self.total_fills.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if resp.status == OrderStatus::Rejected {
+                        order.rejection_reason = resp.message;
+                        self.total_rejections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    last_err.clear();
+                    break;
+                }
+                Err(e) => {
+                    last_err = e;
+                    if attempt + 1 >= max_attempts {
+                        order.status = OrderStatus::Rejected;
+                        order.rejection_reason = Some(format!("Failed after {} attempt(s): {}", max_attempts, last_err));
+                        order.updated_at = chrono::Utc::now().to_rfc3339();
+                        self.total_rejections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
             }
-            Err(e) => {
-                order.status = OrderStatus::Rejected;
-                order.rejection_reason = Some(e.clone());
-                order.updated_at = chrono::Utc::now().to_rfc3339();
-            }
         }
+
+        self.total_orders.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         if let Ok(mut orders) = self.orders.lock() {
             orders.push(order.clone());
@@ -168,12 +224,13 @@ impl OMS {
     }
 
     /// Poll the broker for fill updates on all submitted (non-terminal) orders.
-    /// Call periodically to keep engine positions in sync with broker.
-    pub fn sync_pending_fills(&self) -> Vec<Order> {
-        let mut updated = Vec::new();
+    /// Returns `FillDelta` entries only for orders where new fills occurred,
+    /// with `new_fills` indicating the delta quantity to sync (avoids double-counting).
+    pub fn sync_pending_fills(&self) -> Vec<FillDelta> {
+        let mut deltas = Vec::new();
         let mut orders = match self.orders.lock() {
             Ok(o) => o,
-            Err(_) => return updated,
+            Err(poisoned) => poisoned.into_inner(),
         };
 
         for order in orders.iter_mut() {
@@ -193,11 +250,19 @@ impl OMS {
                 Ok(resp) => {
                     let changed = resp.status != order.status || resp.filled_qty != order.filled_qty;
                     if changed {
+                        let prev_synced = order.synced_fill_qty;
                         order.status = resp.status;
                         order.filled_qty = resp.filled_qty;
                         order.avg_fill_price = resp.avg_price;
                         order.updated_at = resp.timestamp;
-                        updated.push(order.clone());
+                        let new_fills = order.filled_qty - prev_synced;
+                        if new_fills > 0 {
+                            order.synced_fill_qty = order.filled_qty;
+                            deltas.push(FillDelta {
+                                order: order.clone(),
+                                new_fills,
+                            });
+                        }
                     }
                 }
                 Err(e) => {
@@ -206,12 +271,12 @@ impl OMS {
             }
         }
 
-        updated
+        deltas
     }
 
     /// Cancel an order by internal ID
     pub fn cancel_order(&self, internal_id: &str) -> Result<Order, String> {
-        let mut orders = self.orders.lock().map_err(|_| "Lock poisoned".to_string())?;
+        let mut orders = self.orders.lock().unwrap_or_else(|e| e.into_inner());
         let order = orders.iter_mut().find(|o| o.internal_id == internal_id)
             .ok_or_else(|| format!("Order {} not found", internal_id))?;
 
@@ -251,7 +316,7 @@ impl OMS {
         new_price: Option<f64>,
         new_trigger_price: Option<f64>,
     ) -> Result<Order, String> {
-        let mut orders = self.orders.lock().map_err(|_| "Lock poisoned".to_string())?;
+        let mut orders = self.orders.lock().unwrap_or_else(|e| e.into_inner());
         let order = orders.iter_mut().find(|o| o.internal_id == internal_id)
             .ok_or_else(|| format!("Order {} not found", internal_id))?;
 
@@ -274,6 +339,7 @@ impl OMS {
             trigger_price: new_trigger_price.or(order.trigger_price),
             product: order.product,
             tag: order.tag.clone(),
+            ..Default::default()
         };
 
         let reference_price = order.avg_fill_price.max(
@@ -440,6 +506,7 @@ mod tests {
             trigger_price: None,
             product: ProductType::Delivery,
             tag: None,
+            ..Default::default()
         };
         let order = oms.submit_order(req, Some("test_strategy".into()), None).unwrap();
         assert_eq!(order.status, OrderStatus::Filled);
@@ -460,6 +527,7 @@ mod tests {
             trigger_price: None,
             product: ProductType::Intraday,
             tag: None,
+            ..Default::default()
         };
         let result = oms.submit_order(req, None, None);
         assert!(result.is_err());
@@ -479,6 +547,7 @@ mod tests {
             trigger_price: None,
             product: ProductType::Delivery,
             tag: None,
+            ..Default::default()
         };
         let result = oms.submit_order(req, None, None);
         assert!(result.is_err());
@@ -498,6 +567,7 @@ mod tests {
             trigger_price: None,
             product: ProductType::Delivery,
             tag: None,
+            ..Default::default()
         };
         let result = oms.submit_order(req, None, Some(1500.0));
         assert!(result.is_err());
@@ -517,6 +587,7 @@ mod tests {
             trigger_price: None,
             product: ProductType::Delivery,
             tag: None,
+            ..Default::default()
         };
         let order = oms.submit_order(req, None, None).unwrap();
         let result = oms.cancel_order(&order.internal_id);
@@ -536,6 +607,7 @@ mod tests {
             trigger_price: None,
             product: ProductType::Delivery,
             tag: None,
+            ..Default::default()
         };
         oms.submit_order(req, Some("strat1".into()), None).unwrap();
         assert_eq!(oms.get_orders().len(), 1);
@@ -571,6 +643,7 @@ mod tests {
             trigger_price: None,
             product: ProductType::Delivery,
             tag: None,
+            ..Default::default()
         };
         let result = oms.validate_order(&req, None);
         assert!(result.is_err());
@@ -596,6 +669,7 @@ mod tests {
             trigger_price: None,
             product: ProductType::Delivery,
             tag: None,
+            ..Default::default()
         };
         let result = oms.validate_order(&req, Some(2500.0));
         assert!(result.is_err());

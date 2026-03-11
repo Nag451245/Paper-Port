@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::utils::{Candle, rolling_std, calc_ema_last, calc_rsi_last, calc_atr_last, round2 as r2, round4 as r4};
+use crate::utils::{Candle, rolling_std, calc_ema_last, calc_rsi_last, calc_atr_last, round2 as r2, round4 as r4, sanitize_candles};
 
 #[derive(Deserialize)]
 struct Config {
@@ -67,7 +67,8 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
 }
 
 fn extract_features(config: Config) -> Result<serde_json::Value, String> {
-    let candles = config.candles.ok_or("candles required")?;
+    let mut candles = config.candles.ok_or("candles required")?;
+    sanitize_candles(&mut candles);
     let n = candles.len();
     if n < 30 { return Err("Need at least 30 candles".into()); }
 
@@ -483,7 +484,8 @@ fn extract_features(config: Config) -> Result<serde_json::Value, String> {
 }
 
 fn detect_regime(config: Config) -> Result<serde_json::Value, String> {
-    let candles = config.candles.ok_or("candles required")?;
+    let mut candles = config.candles.ok_or("candles required")?;
+    sanitize_candles(&mut candles);
     let n = candles.len();
     if n < 50 { return Err("Need at least 50 candles for regime detection".into()); }
 
@@ -573,7 +575,8 @@ fn detect_regime(config: Config) -> Result<serde_json::Value, String> {
 }
 
 fn detect_anomalies(config: Config) -> Result<serde_json::Value, String> {
-    let candles = config.candles.ok_or("candles required")?;
+    let mut candles = config.candles.ok_or("candles required")?;
+    sanitize_candles(&mut candles);
     let n = candles.len();
     if n < 30 { return Err("Need at least 30 candles".into()); }
 

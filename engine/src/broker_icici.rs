@@ -487,6 +487,7 @@ mod tests {
             side: OrderSide::Buy, order_type: OrderType::Limit,
             quantity: 10, price: Some(2500.0), trigger_price: None,
             product: ProductType::Delivery, tag: None,
+            ..Default::default()
         };
         let result = broker.place_order(&req);
         assert!(result.is_err());

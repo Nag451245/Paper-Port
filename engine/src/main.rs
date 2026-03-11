@@ -27,6 +27,9 @@ mod correlation;
 mod feature_store;
 mod multi_timeframe;
 mod ml_scorer;
+pub mod exec_algo;
+pub mod slippage;
+pub mod position_sizing;
 pub mod live_executor;
 
 use std::sync::Arc;
@@ -35,7 +38,7 @@ use tracing::{info, warn, error};
 
 use crate::config::EngineConfig;
 use crate::state::AppState;
-use crate::broker::{OrderRequest, OrderSide, OrderType, ProductType};
+use crate::broker::{OrderRequest, OrderSide, OrderType, ProductType, OrderStatus};
 use crate::alerts::{AlertSeverity, AlertType};
 
 #[derive(Deserialize)]
@@ -109,6 +112,7 @@ async fn main() {
     AppState::start_price_update_loop(state.clone());
 
     // Periodic OMS fill sync — polls broker for fill updates every 5s
+    // and syncs filled orders into AppState.positions
     let fill_sync_state = state.clone();
     tokio::spawn(async move {
         loop {
@@ -117,19 +121,63 @@ async fn main() {
             let updated = tokio::task::spawn_blocking(move || {
                 st.oms.sync_pending_fills()
             }).await;
-            if let Ok(fills) = updated {
-                for order in &fills {
+            if let Ok(deltas) = updated {
+                for delta in &deltas {
+                    let order = &delta.order;
+                    let side_str = match order.side {
+                        OrderSide::Buy => "buy",
+                        OrderSide::Sell => "sell",
+                    };
                     info!(
                         order_id = %order.internal_id,
                         status = ?order.status,
-                        filled = order.filled_qty,
+                        new_fills = delta.new_fills,
+                        total_filled = order.filled_qty,
                         avg_price = order.avg_fill_price,
-                        "OMS fill sync: order updated"
+                        "OMS fill sync: new fills detected"
                     );
+                    fill_sync_state.sync_oms_fill(
+                        &order.symbol, side_str, delta.new_fills,
+                        order.avg_fill_price, None, None,
+                    );
+                    fill_sync_state.log_audit("FILL_SYNC_POSITION", Some(&order.symbol),
+                        &format!("Polled fill synced: id={} side={} delta_qty={} total={}/{} price={:.2}",
+                            order.internal_id, side_str, delta.new_fills,
+                            order.filled_qty, order.requested_qty, order.avg_fill_price));
+                    fill_sync_state.increment_trades();
                 }
             }
         }
     });
+
+    // Automated circuit breaker — monitors drawdown and auto-kills if threshold exceeded
+    if config.circuit_breaker.enabled {
+        let cb_state = state.clone();
+        let cb_threshold = config.circuit_breaker.auto_kill_drawdown_pct;
+        let cb_interval = config.circuit_breaker.check_interval_secs;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(cb_interval)).await;
+                let nav = cb_state.get_nav();
+                let peak = cb_state.get_peak_nav();
+                let dd = if peak > 0.0 { (peak - nav) / peak * 100.0 } else { 0.0 };
+                if dd >= cb_threshold && !cb_state.is_killed() {
+                    tracing::error!(drawdown_pct = dd, threshold = cb_threshold,
+                        "CIRCUIT BREAKER: drawdown exceeded threshold, auto-activating kill switch");
+                    cb_state.activate_kill_switch();
+                    cb_state.log_audit("CIRCUIT_BREAKER", None,
+                        &format!("Auto-kill activated: drawdown {:.2}% >= threshold {:.1}%", dd, cb_threshold));
+                    cb_state.alert_manager.fire(
+                        crate::alerts::AlertType::DrawdownBreached,
+                        crate::alerts::AlertSeverity::Critical,
+                        "Circuit Breaker Activated",
+                        &format!("Drawdown {:.2}% exceeded {:.1}% threshold. Kill switch activated.", dd, cb_threshold),
+                        None, None,
+                    );
+                }
+            }
+        });
+    }
 
     match mode {
         "http" => {
@@ -387,6 +435,144 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
         "multi_timeframe_scan" => multi_timeframe::compute(req.data),
         "ml_score" => ml_scorer::compute(req.data),
 
+        "ml_scan" => {
+            let ml_weights = req.data.get("ml_weights").cloned();
+            let scan_data = req.data.clone();
+
+            let scan_result = match scan::compute(scan_data) {
+                Ok(v) => v,
+                Err(e) => return Response { id, success: false, data: serde_json::Value::Null, error: Some(e) },
+            };
+
+            let signals = match scan_result.get("signals").and_then(|v| v.as_array()) {
+                Some(arr) if !arr.is_empty() => arr.clone(),
+                _ => return Response { id, success: true, data: scan_result, error: None },
+            };
+
+            let symbols_arr = match req.data.get("symbols").and_then(|v| v.as_array()) {
+                Some(a) => a,
+                None => return Response { id, success: true, data: scan_result, error: None },
+            };
+
+            let mut features_by_symbol: std::collections::HashMap<String, Vec<Vec<f64>>> =
+                std::collections::HashMap::new();
+
+            for sym_obj in symbols_arr {
+                let symbol = match sym_obj.get("symbol").and_then(|v| v.as_str()) {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
+                let candles = match sym_obj.get("candles") {
+                    Some(c) if c.is_array() => c.clone(),
+                    _ => continue,
+                };
+                let candle_count = candles.as_array().map(|a| a.len()).unwrap_or(0);
+                if candle_count < 30 { continue; }
+
+                let fs_input = serde_json::json!({
+                    "command": "extract_features",
+                    "candles": candles,
+                });
+                if let Ok(fs_result) = feature_store::compute(fs_input) {
+                    if let Some(data) = fs_result.get("features")
+                        .and_then(|f| f.get("data"))
+                        .and_then(|d| d.as_array())
+                    {
+                        let rows: Vec<Vec<f64>> = data.iter()
+                            .filter_map(|row| {
+                                row.as_array().map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_f64())
+                                        .collect()
+                                })
+                            })
+                            .collect();
+                        if !rows.is_empty() {
+                            features_by_symbol.insert(symbol, rows);
+                        }
+                    }
+                }
+            }
+
+            let mut enriched_signals: Vec<serde_json::Value> = Vec::new();
+
+            for sig in &signals {
+                let mut enriched = sig.clone();
+                let symbol = sig.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+
+                let raw_features = features_by_symbol.get(symbol)
+                    .and_then(|rows| rows.last())
+                    .cloned()
+                    .unwrap_or_default();
+
+                let votes = sig.get("votes");
+                let ema_vote = votes.and_then(|v| v.get("ema_crossover")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let rsi_vote = votes.and_then(|v| v.get("rsi")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let macd_vote = votes.and_then(|v| v.get("macd")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let st_vote = votes.and_then(|v| v.get("supertrend")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let bb_vote = votes.and_then(|v| v.get("bollinger")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let vwap_vote = votes.and_then(|v| v.get("vwap")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let mom_vote = votes.and_then(|v| v.get("momentum")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let vol_vote = votes.and_then(|v| v.get("volume")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let composite = sig.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.5);
+
+                let feature_row = serde_json::json!({
+                    "ema_vote": ema_vote,
+                    "rsi_vote": rsi_vote,
+                    "macd_vote": macd_vote,
+                    "supertrend_vote": st_vote,
+                    "bollinger_vote": bb_vote,
+                    "vwap_vote": vwap_vote,
+                    "momentum_vote": mom_vote,
+                    "volume_vote": vol_vote,
+                    "composite_score": composite,
+                    "regime": 1.0,
+                    "hour_of_day": chrono::Utc::now().format("%H").to_string().parse::<f64>().unwrap_or(12.0),
+                    "day_of_week": chrono::Utc::now().format("%u").to_string().parse::<f64>().unwrap_or(3.0),
+                    "raw_features": raw_features,
+                });
+
+                enriched["ml_features"] = feature_row.clone();
+
+                if let Some(weights) = &ml_weights {
+                    let predict_input = serde_json::json!({
+                        "command": "predict",
+                        "features": [feature_row],
+                        "weights": weights,
+                    });
+                    if let Ok(pred_result) = ml_scorer::compute(predict_input) {
+                        if let Some(scores) = pred_result.get("scores").and_then(|v| v.as_array()) {
+                            if let Some(ml_score) = scores.first().and_then(|v| v.as_f64()) {
+                                enriched["ml_score"] = serde_json::json!(ml_score);
+                                let blended = composite * 0.6 + ml_score * 0.4;
+                                enriched["blended_confidence"] = serde_json::json!(
+                                    (blended * 1000.0).round() / 1000.0
+                                );
+                            }
+                        }
+                    }
+                }
+
+                enriched_signals.push(enriched);
+            }
+
+            enriched_signals.sort_by(|a, b| {
+                let key_a = a.get("blended_confidence")
+                    .or_else(|| a.get("confidence"))
+                    .and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let key_b = b.get("blended_confidence")
+                    .or_else(|| b.get("confidence"))
+                    .and_then(|v| v.as_f64()).unwrap_or(0.0);
+                key_b.partial_cmp(&key_a).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            Ok(serde_json::json!({
+                "signals": enriched_signals,
+                "ml_enhanced": ml_weights.is_some(),
+                "features_extracted": features_by_symbol.len(),
+            }))
+        }
+
         "portfolio_snapshot" => {
             Ok(serde_json::to_value(state.snapshot()).unwrap_or_default())
         }
@@ -489,10 +675,17 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
                     trigger_price: sig.stop_loss,
                     product,
                     tag: Some(format!("auto:{}", sig.strategy)),
+                    ..Default::default()
                 };
                 let ref_price = state.live_prices.get_ltp(&sig.symbol);
                 match state.oms.submit_order(order_req, Some(sig.strategy.clone()), ref_price) {
                     Ok(order) => {
+                        if order.status == OrderStatus::Filled && order.filled_qty > 0 {
+                            state.sync_oms_fill(
+                                &order.symbol, &sig.side, order.filled_qty,
+                                order.avg_fill_price, sig.stop_loss, sig.take_profit,
+                            );
+                        }
                         state.log_audit("SIGNAL_EXECUTED", Some(&sig.symbol),
                             &format!("strategy={} side={} qty={} price={:.2} conf={:.2}",
                                 sig.strategy, sig.side, qty, sig.price, sig.confidence));
@@ -575,6 +768,7 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
                 symbol: d.symbol.clone(), exchange: d.exchange.unwrap_or_else(|| "NSE".into()),
                 side, order_type, quantity: d.quantity, price: d.price,
                 trigger_price: d.trigger_price, product, tag: d.tag,
+                ..Default::default()
             };
 
             let ref_price = d.reference_price.or_else(|| {
@@ -585,6 +779,18 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
                 Ok(order) => {
                     state.log_audit("OMS_ORDER_SUBMITTED", Some(&order.symbol),
                         &format!("id={} side={:?} qty={}", order.internal_id, order.side, order.requested_qty));
+
+                    if order.status == OrderStatus::Filled && order.filled_qty > 0 {
+                        let fill_side = match order.side {
+                            OrderSide::Buy => "buy",
+                            OrderSide::Sell => "sell",
+                        };
+                        state.sync_oms_fill(
+                            &order.symbol, fill_side, order.filled_qty,
+                            order.avg_fill_price, None, None,
+                        );
+                    }
+
                     Ok(serde_json::to_value(order).unwrap_or_default())
                 }
                 Err(e) => {
@@ -986,5 +1192,66 @@ mod tests {
         }, &state);
         assert!(!modify_resp.success);
         assert!(modify_resp.error.as_ref().unwrap().contains("Kill switch"));
+    }
+
+    #[test]
+    fn test_ml_scan_without_weights() {
+        let closes: Vec<f64> = (0..35).map(|i| 100.0 + i as f64 * 2.0).collect();
+        let candles: Vec<serde_json::Value> = closes.iter().enumerate().map(|(i, &c)| {
+            json!({
+                "timestamp": format!("2025-01-{:02}", (i % 28) + 1),
+                "open": c - 0.5, "high": c + 1.0, "low": c - 1.0,
+                "close": c, "volume": 1000.0 + i as f64 * 200.0,
+            })
+        }).collect();
+        let resp = req("ml_scan", json!({
+            "symbols": [{ "symbol": "TEST", "candles": candles }],
+        }));
+        assert!(resp.success, "ml_scan failed: {:?}", resp.error);
+        assert_eq!(resp.data["ml_enhanced"], false);
+        let signals = resp.data.get("signals").and_then(|v| v.as_array());
+        if let Some(sigs) = signals {
+            for sig in sigs {
+                assert!(sig.get("ml_features").is_some(),
+                    "each signal should have ml_features attached");
+            }
+        }
+    }
+
+    #[test]
+    fn test_ml_scan_with_weights() {
+        let closes: Vec<f64> = (0..35).map(|i| 100.0 + i as f64 * 2.0).collect();
+        let candles: Vec<serde_json::Value> = closes.iter().enumerate().map(|(i, &c)| {
+            json!({
+                "timestamp": format!("2025-01-{:02}", (i % 28) + 1),
+                "open": c - 0.5, "high": c + 1.0, "low": c - 1.0,
+                "close": c, "volume": 1000.0 + i as f64 * 200.0,
+            })
+        }).collect();
+        let weights = json!({
+            "w": vec![0.1; 12],
+            "bias": 0.0,
+            "feature_names": [],
+            "training_samples": 100,
+            "training_accuracy": 0.75,
+        });
+        let resp = req("ml_scan", json!({
+            "symbols": [{ "symbol": "TEST", "candles": candles }],
+            "ml_weights": weights,
+        }));
+        assert!(resp.success, "ml_scan with weights failed: {:?}", resp.error);
+        assert_eq!(resp.data["ml_enhanced"], true);
+        let signals = resp.data.get("signals").and_then(|v| v.as_array());
+        if let Some(sigs) = signals {
+            for sig in sigs {
+                if sig.get("ml_score").is_some() {
+                    let ml_score = sig["ml_score"].as_f64().unwrap();
+                    assert!(ml_score >= 0.0 && ml_score <= 1.0,
+                        "ml_score should be between 0 and 1, got {}", ml_score);
+                    assert!(sig.get("blended_confidence").is_some(),
+                        "should have blended_confidence when weights provided");
+                }
+            }
+        }
     }
 }

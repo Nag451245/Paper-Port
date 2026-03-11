@@ -26,6 +26,39 @@ pub struct Position {
     pub entry_time: String,
     pub stop_loss: Option<f64>,
     pub take_profit: Option<f64>,
+    #[serde(default)]
+    pub asset_class: crate::broker::AssetClass,
+    #[serde(default)]
+    pub expiry: Option<String>,
+    #[serde(default)]
+    pub strike: Option<f64>,
+    #[serde(default)]
+    pub option_type: Option<String>,
+}
+
+/// Build a position key that differentiates the same underlying across asset classes.
+/// Equity: "RELIANCE", Futures: "RELIANCE:FUT:2026-03", Options: "RELIANCE:OPT:2026-03:22000:CE",
+/// FX: "USDINR:FX", Crypto: "BTCUSDT:CRYPTO"
+pub fn position_key(symbol: &str, ac: crate::broker::AssetClass,
+                    expiry: Option<&str>, strike: Option<f64>, opt_type: Option<&str>) -> String {
+    match ac {
+        crate::broker::AssetClass::Equity => symbol.to_string(),
+        crate::broker::AssetClass::Futures => {
+            format!("{}:FUT:{}", symbol, expiry.unwrap_or(""))
+        }
+        crate::broker::AssetClass::Options => {
+            format!("{}:OPT:{}:{}:{}", symbol,
+                expiry.unwrap_or(""),
+                strike.map(|s| format!("{:.0}", s)).unwrap_or_default(),
+                opt_type.unwrap_or(""))
+        }
+        crate::broker::AssetClass::FX => {
+            format!("{}:FX", symbol)
+        }
+        crate::broker::AssetClass::Crypto => {
+            format!("{}:CRYPTO", symbol)
+        }
+    }
 }
 
 impl Position {
@@ -135,7 +168,12 @@ impl AppState {
     pub fn new(config: EngineConfig, initial_capital: f64) -> Arc<Self> {
         let broker: Arc<dyn BrokerAdapter> = create_broker(&config, initial_capital);
         let fat_finger = FatFingerLimits::default();
-        let oms = OMS::new(broker.clone(), fat_finger);
+        let oms = OMS::new(broker.clone(), fat_finger)
+            .with_retry(
+                config.oms_retry.enabled,
+                config.oms_retry.max_retries,
+                config.oms_retry.initial_backoff_ms,
+            );
         let alert_manager = AlertManager::new(NotificationConfig::default());
         let (live_prices, _price_rx) = LivePriceStore::new();
         let options_data = OptionsDataStore::new();
@@ -292,7 +330,7 @@ impl AppState {
     // ─── Audit Log ────────────────────────────────────────────────────
 
     pub fn log_audit(&self, action: &str, symbol: Option<&str>, details: &str) {
-        if let Ok(mut log) = self.audit_log.lock() {
+        if let Ok(mut log) = self.audit_log.lock().or_else(|e| Ok::<_, ()>(e.into_inner())) {
             log.push(AuditEntry {
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 action: action.to_string(),
@@ -308,7 +346,9 @@ impl AppState {
     }
 
     pub fn get_audit_log(&self) -> Vec<AuditEntry> {
-        self.audit_log.lock().map(|l| l.clone()).unwrap_or_default()
+        self.audit_log.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     // ─── State Persistence ────────────────────────────────────────────
@@ -383,7 +423,7 @@ impl AppState {
             return Err("Kill switch is active — all new orders rejected".into());
         }
 
-        let _guard = self.position_lock.lock().unwrap();
+        let _guard = self.position_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         let nav = self.get_nav();
 
@@ -430,7 +470,7 @@ impl AppState {
     /// Close a position by symbol. Returns the realized PnL.
     /// Holds position_lock so cash + positions are read atomically in recalculate_nav.
     pub fn close_position(&self, symbol: &str, exit_price: f64) -> Result<f64, String> {
-        let _guard = self.position_lock.lock().unwrap();
+        let _guard = self.position_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         match self.positions.remove(symbol) {
             Some((_, mut pos)) => {
@@ -468,8 +508,66 @@ impl AppState {
 
     /// Public recalculate_nav that acquires the lock itself (for external callers).
     pub fn recalculate_nav(&self) {
-        let _guard = self.position_lock.lock().unwrap();
+        let _guard = self.position_lock.lock().unwrap_or_else(|e| e.into_inner());
         self.recalculate_nav_locked();
+    }
+
+    /// Sync a filled OMS order into AppState.positions.
+    /// Call after submit_order when the order is filled.
+    /// Holds position_lock for the entire operation to prevent TOCTOU races.
+    pub fn sync_oms_fill(&self, symbol: &str, side: &str, qty: i64, fill_price: f64,
+                         stop_loss: Option<f64>, take_profit: Option<f64>) {
+        let _guard = self.position_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        if let Some(mut existing) = self.positions.get_mut(symbol) {
+            let same_side = existing.side.eq_ignore_ascii_case(side);
+            if same_side {
+                let old_qty = existing.qty;
+                let old_price = existing.entry_price;
+                let new_qty = old_qty + qty;
+                existing.entry_price = (old_price * old_qty as f64 + fill_price * qty as f64) / new_qty as f64;
+                existing.qty = new_qty;
+                existing.update_price(fill_price);
+                if stop_loss.is_some() { existing.stop_loss = stop_loss; }
+                if take_profit.is_some() { existing.take_profit = take_profit; }
+            } else {
+                let close_qty = qty.min(existing.qty);
+                let remaining = existing.qty - close_qty;
+                if remaining <= 0 {
+                    let pnl = if existing.side.eq_ignore_ascii_case("buy") {
+                        (fill_price - existing.entry_price) * close_qty as f64
+                    } else {
+                        (existing.entry_price - fill_price) * close_qty as f64
+                    };
+                    drop(existing);
+                    self.positions.remove(symbol);
+                    self.add_realized_pnl(pnl);
+                    let value = fill_price * close_qty.unsigned_abs() as f64;
+                    self.adjust_cash(value);
+                } else {
+                    existing.qty = remaining;
+                    existing.update_price(fill_price);
+                }
+            }
+        } else {
+            let pos = Position {
+                symbol: symbol.to_string(),
+                side: side.to_string(),
+                qty,
+                entry_price: fill_price,
+                current_price: fill_price,
+                unrealized_pnl: 0.0,
+                realized_pnl: 0.0,
+                entry_time: chrono::Utc::now().to_rfc3339(),
+                stop_loss,
+                take_profit,
+                asset_class: crate::broker::AssetClass::Equity,
+                expiry: None,
+                strike: None,
+                option_type: None,
+            };
+            self.positions.insert(symbol.to_string(), pos);
+        }
     }
 
     pub fn cache_signal(&self, signal: CachedSignal) {
@@ -557,6 +655,10 @@ mod tests {
             entry_time: "2025-01-01T10:00:00".into(),
             stop_loss: Some(2400.0),
             take_profit: Some(2600.0),
+            asset_class: crate::broker::AssetClass::Equity,
+            expiry: None,
+            strike: None,
+            option_type: None,
         };
         assert!(state.open_position(pos).is_ok());
         assert_eq!(state.positions.len(), 1);
@@ -581,6 +683,10 @@ mod tests {
             entry_time: "2025-01-01T10:00:00".into(),
             stop_loss: None,
             take_profit: None,
+            asset_class: crate::broker::AssetClass::Equity,
+            expiry: None,
+            strike: None,
+            option_type: None,
         };
         let result = state.open_position(pos);
         assert!(result.is_err());
@@ -608,6 +714,8 @@ mod tests {
             entry_price: 100.0, current_price: 100.0, unrealized_pnl: 0.0,
             realized_pnl: 0.0, entry_time: "2025-01-01".into(),
             stop_loss: None, take_profit: None,
+            asset_class: crate::broker::AssetClass::Equity,
+            expiry: None, strike: None, option_type: None,
         };
         assert!(state.open_position(pos).is_err());
         state.deactivate_kill_switch();
@@ -649,5 +757,36 @@ mod tests {
     fn test_close_nonexistent_position() {
         let state = make_state();
         assert!(state.close_position("FAKE", 100.0).is_err());
+    }
+
+    #[test]
+    fn test_sync_oms_fill_creates_position() {
+        let state = make_state();
+        state.sync_oms_fill("INFY", "buy", 10, 1500.0, Some(1450.0), Some(1550.0));
+        assert_eq!(state.positions.len(), 1);
+        let pos = state.positions.get("INFY").unwrap();
+        assert_eq!(pos.qty, 10);
+        assert_eq!(pos.entry_price, 1500.0);
+        assert_eq!(pos.stop_loss, Some(1450.0));
+    }
+
+    #[test]
+    fn test_sync_oms_fill_adds_to_existing() {
+        let state = make_state();
+        state.sync_oms_fill("RELIANCE", "buy", 10, 2500.0, None, None);
+        state.sync_oms_fill("RELIANCE", "buy", 10, 2600.0, None, None);
+        let pos = state.positions.get("RELIANCE").unwrap();
+        assert_eq!(pos.qty, 20);
+        assert!((pos.entry_price - 2550.0).abs() < 0.01, "avg price should be 2550");
+    }
+
+    #[test]
+    fn test_sync_oms_fill_closes_opposite() {
+        let state = make_state();
+        state.sync_oms_fill("TCS", "buy", 10, 3500.0, None, None);
+        assert_eq!(state.positions.len(), 1);
+        state.sync_oms_fill("TCS", "sell", 10, 3600.0, None, None);
+        assert_eq!(state.positions.len(), 0, "opposite fill should close position");
+        assert!(state.get_realized_pnl() > 0.0, "should have positive realized PnL");
     }
 }

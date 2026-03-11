@@ -87,6 +87,7 @@ mod tests {
             side: crate::broker::OrderSide::Buy, order_type: crate::broker::OrderType::Limit,
             quantity: 10, price: Some(2500.0), trigger_price: None,
             product: crate::broker::ProductType::Delivery, tag: None,
+            ..Default::default()
         };
         assert!(broker.place_order(&req).is_err());
     }

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use crate::signals;
-use crate::utils::{Candle, calc_ema_series, get_f64, round2, round3, round4, calc_atr_candles};
+use crate::utils::{Candle, calc_ema_series, get_f64, round2, round3, round4, calc_atr_candles, sanitize_candles};
 
 #[derive(Deserialize)]
 struct ScanInput {
@@ -223,6 +223,10 @@ pub fn compute(data: Value) -> Result<Value, String> {
         if sym_data.candles.len() < 26 {
             continue;
         }
+
+        let mut candles_clean = sym_data.candles.clone();
+        sanitize_candles(&mut candles_clean);
+        let sym_data = &SymbolData { symbol: sym_data.symbol.clone(), candles: candles_clean };
 
         let candles_json = match serde_json::to_value(
             &serde_json::json!({ "candles": sym_data.candles })

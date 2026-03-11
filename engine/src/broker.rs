@@ -7,6 +7,10 @@ pub enum OrderSide {
     Sell,
 }
 
+impl Default for OrderSide {
+    fn default() -> Self { Self::Buy }
+}
+
 /// Order type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderType {
@@ -14,6 +18,10 @@ pub enum OrderType {
     Limit,
     StopLoss,
     StopLossMarket,
+}
+
+impl Default for OrderType {
+    fn default() -> Self { Self::Limit }
 }
 
 /// Order status in the lifecycle
@@ -37,18 +45,77 @@ pub enum ProductType {
     Delivery,
 }
 
+impl Default for ProductType {
+    fn default() -> Self { Self::Delivery }
+}
+
+/// Asset class for multi-instrument support
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub enum AssetClass {
+    Equity,
+    Futures,
+    Options,
+    FX,
+    Crypto,
+}
+
+impl Default for AssetClass {
+    fn default() -> Self { Self::Equity }
+}
+
+impl std::fmt::Display for AssetClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Equity => write!(f, "equity"),
+            Self::Futures => write!(f, "futures"),
+            Self::Options => write!(f, "options"),
+            Self::FX => write!(f, "fx"),
+            Self::Crypto => write!(f, "crypto"),
+        }
+    }
+}
+
+impl AssetClass {
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "futures" | "fut" | "nrml" => Self::Futures,
+            "options" | "opt" | "option" => Self::Options,
+            "fx" | "forex" | "currency" | "cds" => Self::FX,
+            "crypto" | "cryptocurrency" | "btc" | "eth" | "digital" => Self::Crypto,
+            _ => Self::Equity,
+        }
+    }
+}
+
 /// Request to place an order
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OrderRequest {
+    #[serde(default)]
     pub symbol: String,
+    #[serde(default)]
     pub exchange: String,
+    #[serde(default)]
     pub side: OrderSide,
+    #[serde(default)]
     pub order_type: OrderType,
+    #[serde(default)]
     pub quantity: i64,
+    #[serde(default)]
     pub price: Option<f64>,
+    #[serde(default)]
     pub trigger_price: Option<f64>,
+    #[serde(default)]
     pub product: ProductType,
+    #[serde(default)]
     pub tag: Option<String>,
+    #[serde(default)]
+    pub asset_class: AssetClass,
+    #[serde(default)]
+    pub expiry: Option<String>,
+    #[serde(default)]
+    pub strike: Option<f64>,
+    #[serde(default)]
+    pub option_type: Option<String>,
 }
 
 /// Broker-returned order confirmation
@@ -270,6 +337,7 @@ mod tests {
             trigger_price: None,
             product: ProductType::Delivery,
             tag: None,
+            ..Default::default()
         };
         let resp = broker.place_order(&req).unwrap();
         assert_eq!(resp.status, OrderStatus::Filled);
@@ -289,6 +357,7 @@ mod tests {
             trigger_price: None,
             product: ProductType::Intraday,
             tag: None,
+            ..Default::default()
         };
         broker.place_order(&req).unwrap();
         let positions = broker.positions().unwrap();

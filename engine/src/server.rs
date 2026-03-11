@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use axum::{
     Router,
     extract::{State, Json, Path, WebSocketUpgrade, ws},
@@ -18,6 +19,77 @@ use crate::{Request, Response, handle_request};
 use crate::config::TlsConfig;
 
 type SharedState = Arc<AppState>;
+
+// ─── Rate Limiter (token-bucket per server) ───────────────────────────
+
+struct RateLimiter {
+    tokens: AtomicU64,
+    max_tokens: u64,
+    last_refill: AtomicU64,
+    window_secs: u64,
+}
+
+impl RateLimiter {
+    fn new(max_requests: u64, window_secs: u64) -> Arc<Self> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Arc::new(Self {
+            tokens: AtomicU64::new(max_requests),
+            max_tokens: max_requests,
+            last_refill: AtomicU64::new(now),
+            window_secs,
+        })
+    }
+
+    fn try_acquire(&self) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let last = self.last_refill.load(Ordering::Acquire);
+        if now.saturating_sub(last) >= self.window_secs {
+            self.tokens.store(self.max_tokens, Ordering::Release);
+            self.last_refill.store(now, Ordering::Release);
+        }
+        loop {
+            let current = self.tokens.load(Ordering::Acquire);
+            if current == 0 {
+                return false;
+            }
+            if self.tokens.compare_exchange_weak(
+                current, current - 1,
+                Ordering::AcqRel, Ordering::Relaxed,
+            ).is_ok() {
+                return true;
+            }
+        }
+    }
+}
+
+async fn rate_limit_layer(
+    State((state, limiter)): State<(SharedState, Arc<RateLimiter>)>,
+    req: HttpRequest<axum::body::Body>,
+    next: Next,
+) -> impl IntoResponse {
+    if !state.config.rate_limit.enabled {
+        return next.run(req).await;
+    }
+    let path = req.uri().path();
+    if path == "/health" || path == "/metrics" {
+        return next.run(req).await;
+    }
+    if limiter.try_acquire() {
+        next.run(req).await
+    } else {
+        state.log_audit("RATE_LIMITED", None, &format!("Request to {} rate-limited", path));
+        (StatusCode::TOO_MANY_REQUESTS, Json(json!({
+            "error": "Rate limit exceeded. Try again later.",
+            "retry_after_secs": state.config.rate_limit.window_secs,
+        }))).into_response()
+    }
+}
 
 /// Auth middleware: checks X-API-Key header when auth is enabled
 async fn auth_layer(
@@ -119,6 +191,13 @@ pub async fn run(state: SharedState) {
         .route("/ws", get(ws_handler))
 
         .layer(middleware::from_fn_with_state(state.clone(), auth_layer))
+        .layer(middleware::from_fn_with_state(
+            (state.clone(), RateLimiter::new(
+                state.config.rate_limit.max_requests,
+                state.config.rate_limit.window_secs,
+            )),
+            rate_limit_layer,
+        ))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
@@ -316,8 +395,16 @@ async fn health(State(state): State<SharedState>) -> impl IntoResponse {
 async fn metrics(State(state): State<SharedState>) -> impl IntoResponse {
     let positions = state.positions.len();
     let nav = state.get_nav();
+    let peak_nav = state.get_peak_nav();
+    let drawdown_pct = if peak_nav > 0.0 { (peak_nav - nav) / peak_nav * 100.0 } else { 0.0 };
     let uptime = state.uptime_seconds();
     let daily_trades = state.daily_trade_count.load(std::sync::atomic::Ordering::Relaxed);
+    let total_orders = state.oms.total_orders.load(std::sync::atomic::Ordering::Relaxed);
+    let total_fills = state.oms.total_fills.load(std::sync::atomic::Ordering::Relaxed);
+    let total_rejections = state.oms.total_rejections.load(std::sync::atomic::Ordering::Relaxed);
+    let killed = if state.is_killed() { 1 } else { 0 };
+    let cash = state.get_cash();
+    let realized_pnl = state.get_realized_pnl();
 
     let body = format!(
         "# HELP cg_rust_uptime_seconds Engine uptime in seconds\n\
@@ -329,9 +416,33 @@ async fn metrics(State(state): State<SharedState>) -> impl IntoResponse {
          # HELP cg_rust_portfolio_nav Portfolio NAV\n\
          # TYPE cg_rust_portfolio_nav gauge\n\
          cg_rust_portfolio_nav {nav}\n\
+         # HELP cg_rust_peak_nav Peak NAV watermark\n\
+         # TYPE cg_rust_peak_nav gauge\n\
+         cg_rust_peak_nav {peak_nav}\n\
+         # HELP cg_rust_drawdown_pct Current drawdown percentage\n\
+         # TYPE cg_rust_drawdown_pct gauge\n\
+         cg_rust_drawdown_pct {drawdown_pct:.4}\n\
+         # HELP cg_rust_cash Available cash\n\
+         # TYPE cg_rust_cash gauge\n\
+         cg_rust_cash {cash}\n\
+         # HELP cg_rust_realized_pnl Total realized PnL\n\
+         # TYPE cg_rust_realized_pnl gauge\n\
+         cg_rust_realized_pnl {realized_pnl}\n\
          # HELP cg_rust_daily_trades Daily trade count\n\
          # TYPE cg_rust_daily_trades counter\n\
-         cg_rust_daily_trades {daily_trades}\n"
+         cg_rust_daily_trades {daily_trades}\n\
+         # HELP cg_rust_total_orders Total orders submitted to OMS\n\
+         # TYPE cg_rust_total_orders counter\n\
+         cg_rust_total_orders {total_orders}\n\
+         # HELP cg_rust_total_fills Total filled orders\n\
+         # TYPE cg_rust_total_fills counter\n\
+         cg_rust_total_fills {total_fills}\n\
+         # HELP cg_rust_total_rejections Total rejected orders\n\
+         # TYPE cg_rust_total_rejections counter\n\
+         cg_rust_total_rejections {total_rejections}\n\
+         # HELP cg_rust_kill_switch Kill switch status (0=off, 1=on)\n\
+         # TYPE cg_rust_kill_switch gauge\n\
+         cg_rust_kill_switch {killed}\n"
     );
 
     (
@@ -431,22 +542,61 @@ async fn open_position(
     State(state): State<SharedState>,
     Json(req): Json<OpenPositionRequest>,
 ) -> impl IntoResponse {
-    let pos = Position {
-        symbol: req.symbol,
-        side: req.side,
-        qty: req.qty,
-        entry_price: req.price,
-        current_price: req.price,
-        unrealized_pnl: 0.0,
-        realized_pnl: 0.0,
-        entry_time: chrono::Utc::now().to_rfc3339(),
-        stop_loss: req.stop_loss,
-        take_profit: req.take_profit,
+    use crate::broker::{OrderRequest, OrderSide, OrderType, ProductType};
+
+    let order_side = if req.side.eq_ignore_ascii_case("sell") || req.side.eq_ignore_ascii_case("short") {
+        OrderSide::Sell
+    } else {
+        OrderSide::Buy
     };
 
-    match state.open_position(pos) {
-        Ok(()) => (StatusCode::CREATED, Json(json!({ "success": true }))),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "error": e }))),
+    let order_req = OrderRequest {
+        symbol: req.symbol.clone(),
+        exchange: "NSE".into(),
+        side: order_side,
+        order_type: OrderType::Limit,
+        quantity: req.qty,
+        price: Some(req.price),
+        trigger_price: None,
+        product: ProductType::Delivery,
+        tag: Some("position_api".into()),
+        ..Default::default()
+    };
+
+    let ref_price = state.live_prices.get_ltp(&req.symbol);
+    match state.oms.submit_order(order_req, None, ref_price) {
+        Ok(order) => {
+            let pos = Position {
+                symbol: req.symbol,
+                side: req.side,
+                qty: req.qty,
+                entry_price: if order.avg_fill_price > 0.0 { order.avg_fill_price } else { req.price },
+                current_price: req.price,
+                unrealized_pnl: 0.0,
+                realized_pnl: 0.0,
+                entry_time: chrono::Utc::now().to_rfc3339(),
+                stop_loss: req.stop_loss,
+                take_profit: req.take_profit,
+                asset_class: crate::broker::AssetClass::Equity,
+                expiry: None,
+                strike: None,
+                option_type: None,
+            };
+
+            match state.open_position(pos) {
+                Ok(()) => (StatusCode::CREATED, Json(json!({
+                    "success": true,
+                    "oms_order_id": order.internal_id,
+                    "broker_order_id": order.broker_order_id,
+                }))),
+                Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "error": e }))),
+            }
+        }
+        Err(e) => {
+            state.log_audit("POSITION_REJECTED_BY_OMS", Some(&req.symbol),
+                &format!("OMS rejected: {}", e));
+            (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "error": e })))
+        }
     }
 }
 
@@ -460,6 +610,10 @@ async fn close_position(
     Path(symbol): Path<String>,
     Json(query): Json<ClosePositionQuery>,
 ) -> impl IntoResponse {
+    if state.is_killed() {
+        state.log_audit("CLOSE_DURING_KILL_SWITCH", Some(&symbol),
+            &format!("Closing position at {:.2} while kill switch is active (allowed for risk reduction)", query.price));
+    }
     match state.close_position(&symbol, query.price) {
         Ok(pnl) => (StatusCode::OK, Json(json!({ "success": true, "realized_pnl": pnl }))),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "success": false, "error": e }))),
