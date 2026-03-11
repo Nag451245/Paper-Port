@@ -253,6 +253,45 @@ async fn main() {
 
             live_executor::spawn(state.clone());
 
+            // Try to refresh the universe from Breeze bridge at startup
+            {
+                let bridge_url = config.broker.icici.bridge_url.clone();
+                if !bridge_url.is_empty() {
+                    let refresh_universe = state.universe.clone();
+                    tokio::task::spawn_blocking(move || {
+                        refresh_universe.try_refresh(&bridge_url);
+                    });
+                }
+            }
+
+            // Daily universe refresh background task (refreshes at 08:30 IST)
+            {
+                let daily_state = state.clone();
+                tokio::spawn(async move {
+                    let mut last_refresh_date = String::new();
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        let now_utc = chrono::Utc::now();
+                        let ist = now_utc + chrono::Duration::hours(5) + chrono::Duration::minutes(30);
+                        let ist_time = ist.format("%H:%M").to_string();
+                        let ist_date = ist.format("%Y-%m-%d").to_string();
+                        let ist_day = ist.format("%A").to_string();
+
+                        if matches!(ist_day.as_str(), "Saturday" | "Sunday") { continue; }
+                        if ist_time.as_str() >= "08:30" && ist_time.as_str() < "08:35" && last_refresh_date != ist_date {
+                            let bridge = daily_state.config.broker.icici.bridge_url.clone();
+                            if !bridge.is_empty() {
+                                let u = daily_state.universe.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    u.try_refresh(&bridge);
+                                }).await.ok();
+                            }
+                            last_refresh_date = ist_date;
+                        }
+                    }
+                });
+            }
+
             // Start pre-market scanner scheduler (runs at configured IST time)
             premarket::spawn_scheduler(state.clone());
 
@@ -790,13 +829,13 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
             if stocks.is_empty() {
                 Ok(serde_json::json!({ "error": format!("No stocks found for sector '{}'", sector), "sectors_available": state.universe.sector_list() }))
             } else {
-                let stock_refs: Vec<&crate::universe::StockInfo> = stocks.into_iter().collect();
+                let num_stocks = stocks.len();
                 let count = continuous_scanner::run_sector_scan(
                     state, &state.universe, &state.rate_limiter,
                     &state.news_store, &state.scan_ledger,
-                    sector, &stock_refs,
+                    sector, &stocks,
                 );
-                Ok(serde_json::json!({ "sector": sector, "stocks_scanned": stock_refs.len(), "signals_generated": count }))
+                Ok(serde_json::json!({ "sector": sector, "stocks_scanned": num_stocks, "signals_generated": count }))
             }
         }
 
@@ -844,7 +883,34 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
             let by_sector: Vec<serde_json::Value> = sectors.iter().map(|s| {
                 serde_json::json!({ "sector": s, "count": state.universe.by_sector(s).len() })
             }).collect();
-            Ok(serde_json::json!({ "total_stocks": total, "fno_stocks": fno, "sectors": by_sector }))
+            let by_cap = serde_json::json!({
+                "large": state.universe.by_cap(crate::universe::CapCategory::LargeCap).len(),
+                "mid": state.universe.by_cap(crate::universe::CapCategory::MidCap).len(),
+                "small": state.universe.by_cap(crate::universe::CapCategory::SmallCap).len(),
+            });
+            Ok(serde_json::json!({
+                "total_stocks": total, "fno_stocks": fno,
+                "sectors": by_sector, "by_cap": by_cap,
+                "dynamic": true,
+                "note": "Universe is refreshed daily from Breeze bridge. Use refresh_universe to update now."
+            }))
+        }
+
+        "refresh_universe" => {
+            let bridge_url = state.config.broker.icici.bridge_url.clone();
+            if bridge_url.is_empty() {
+                Ok(serde_json::json!({ "error": "No bridge URL configured" }))
+            } else {
+                match state.universe.refresh_from_bridge(&bridge_url) {
+                    Ok(count) => Ok(serde_json::json!({
+                        "success": true,
+                        "stocks_loaded": count,
+                        "sectors": state.universe.sector_list().len(),
+                        "fno_stocks": state.universe.fno_stocks().len(),
+                    })),
+                    Err(e) => Ok(serde_json::json!({ "error": e })),
+                }
+            }
         }
 
         "oms_submit_order" => {

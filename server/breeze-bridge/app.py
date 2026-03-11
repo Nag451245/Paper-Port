@@ -993,6 +993,137 @@ def get_expiries(symbol):
         return {"expiries": [], "error": str(e)}
 
 
+_SECTOR_MAP = {
+    "RELIANCE": "Energy", "ONGC": "Energy", "BPCL": "Energy", "IOC": "Energy", "GAIL": "Energy",
+    "PETRONET": "Energy", "IGL": "Energy", "MGL": "Energy", "HINDPETRO": "Energy", "OIL": "Energy",
+    "TCS": "IT", "INFY": "IT", "WIPRO": "IT", "HCLTECH": "IT", "TECHM": "IT", "LTIM": "IT",
+    "PERSISTENT": "IT", "COFORGE": "IT", "MPHASIS": "IT", "LTTS": "IT", "TATAELXSI": "IT", "KPITTECH": "IT",
+    "HDFCBANK": "Banking", "ICICIBANK": "Banking", "SBIN": "Banking", "KOTAKBANK": "Banking",
+    "AXISBANK": "Banking", "BANKBARODA": "Banking", "PNB": "Banking", "INDUSINDBK": "Banking",
+    "FEDERALBNK": "Banking", "IDFCFIRSTB": "Banking", "AUBANK": "Banking", "BANDHANBNK": "Banking",
+    "CANBK": "Banking", "RBLBANK": "Banking",
+    "HINDUNILVR": "FMCG", "ITC": "FMCG", "NESTLEIND": "FMCG", "BRITANNIA": "FMCG", "DABUR": "FMCG",
+    "MARICO": "FMCG", "TATACONSUM": "FMCG", "COLPAL": "FMCG", "GODREJCP": "FMCG",
+    "SUNPHARMA": "Pharma", "DRREDDY": "Pharma", "CIPLA": "Pharma", "DIVISLAB": "Pharma",
+    "APOLLOHOSP": "Pharma", "LUPIN": "Pharma", "AUROPHARMA": "Pharma", "BIOCON": "Pharma",
+    "TORNTPHARM": "Pharma", "ALKEM": "Pharma", "IPCALAB": "Pharma", "ZYDUSLIFE": "Pharma",
+    "MAXHEALTH": "Pharma", "SYNGENE": "Pharma",
+    "TATAMOTORS": "Auto", "MARUTI": "Auto", "M&M": "Auto", "BAJAJ-AUTO": "Auto",
+    "HEROMOTOCO": "Auto", "EICHERMOT": "Auto", "MOTHERSON": "Auto", "ESCORTS": "Auto",
+    "MRF": "Auto", "BALKRISIND": "Auto", "ASHOKLEY": "Auto", "TVSMOTOR": "Auto",
+    "BOSCHLTD": "Auto", "EXIDEIND": "Auto", "SONACOMS": "Auto",
+    "TATASTEEL": "Metals", "JSWSTEEL": "Metals", "HINDALCO": "Metals", "VEDL": "Metals",
+    "COALINDIA": "Metals", "SAIL": "Metals", "JINDALSTEL": "Metals", "NMDC": "Metals",
+    "NATIONALUM": "Metals", "HINDZINC": "Metals",
+    "LT": "Infra", "ADANIENT": "Infra", "ADANIPORTS": "Infra", "ULTRACEMCO": "Infra",
+    "GRASIM": "Infra", "SIEMENS": "Infra", "ABB": "Infra", "HAL": "Infra", "BEL": "Infra",
+    "BHEL": "Infra", "ACC": "Infra", "AMBUJACEM": "Infra", "JKCEMENT": "Infra", "RAMCOCEM": "Infra",
+    "NTPC": "Power", "POWERGRID": "Power", "TATAPOWER": "Power", "NHPC": "Power",
+    "ADANIGREEN": "Power", "SJVN": "Power", "PFC": "Power", "RECLTD": "Power", "IREDA": "Power",
+    "BAJFINANCE": "Finance", "BAJAJFINSV": "Finance", "SBILIFE": "Finance", "HDFCLIFE": "Finance",
+    "CHOLAFIN": "Finance", "MUTHOOTFIN": "Finance", "MANAPPURAM": "Finance", "LICI": "Finance",
+    "ICICIGI": "Finance", "ICICIPRULI": "Finance", "ABCAPITAL": "Finance", "SHRIRAMFIN": "Finance",
+    "HDFCAMC": "Finance", "SBICARD": "Finance", "LICHSGFIN": "Finance", "CANFINHOME": "Finance",
+    "TITAN": "Consumer", "ASIANPAINT": "Consumer", "PIDILITIND": "Consumer", "TRENT": "Consumer",
+    "DMART": "Consumer", "PAGEIND": "Consumer", "BATAINDIA": "Consumer", "JUBLFOOD": "Consumer",
+    "HAVELLS": "Consumer", "VOLTAS": "Consumer", "CROMPTON": "Consumer", "POLYCAB": "Consumer",
+    "BERGEPAINT": "Consumer", "DIXON": "Consumer", "ABFRL": "Consumer",
+    "BHARTIARTL": "Telecom", "IDEA": "Telecom",
+    "DLF": "Realty", "GODREJPROP": "Realty", "OBEROIRLTY": "Realty", "PRESTIGE": "Realty",
+    "LODHA": "Realty", "PHOENIXLTD": "Realty",
+    "ZOMATO": "Digital", "NAUKRI": "Digital", "PAYTM": "Digital", "POLICYBZR": "Digital",
+    "DELHIVERY": "Digital",
+    "IRCTC": "Transport", "CONCOR": "Transport", "IRFC": "Transport",
+    "DEEPAKNTR": "Chemicals", "ATUL": "Chemicals", "PIIND": "Chemicals", "SRF": "Chemicals",
+    "UPL": "Chemicals", "CLEAN": "Chemicals",
+    "INDIGO": "Aviation", "CUMMINSIND": "Engineering", "TIINDIA": "Engineering",
+}
+
+_NIFTY50 = {
+    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "HINDUNILVR", "SBIN", "BHARTIARTL",
+    "KOTAKBANK", "ITC", "LT", "AXISBANK", "BAJFINANCE", "TATAMOTORS", "MARUTI", "SUNPHARMA",
+    "TITAN", "NTPC", "WIPRO", "ASIANPAINT", "HCLTECH", "ULTRACEMCO", "POWERGRID", "NESTLEIND",
+    "TATASTEEL", "JSWSTEEL", "ADANIENT", "ADANIPORTS", "BAJAJFINSV", "GRASIM", "TECHM",
+    "DRREDDY", "CIPLA", "BRITANNIA", "HINDALCO", "M&M", "EICHERMOT", "DIVISLAB", "COALINDIA",
+    "TATACONSUM", "HEROMOTOCO", "SBILIFE", "HDFCLIFE", "INDUSINDBK", "APOLLOHOSP",
+    "BAJAJ-AUTO", "ONGC", "BPCL", "TATAPOWER", "SHRIRAMFIN",
+}
+
+_NIFTY_NEXT50 = {
+    "BANKBARODA", "PNB", "CANBK", "IDFCFIRSTB", "FEDERALBNK", "AUBANK",
+    "TRENT", "ZOMATO", "DMART", "PIDILITIND", "GODREJCP", "DABUR", "MARICO", "COLPAL",
+    "HAVELLS", "VOLTAS", "SIEMENS", "ABB", "BHEL", "HAL", "BEL", "IRCTC",
+    "IOC", "GAIL", "SAIL", "VEDL", "JINDALSTEL", "NMDC",
+    "DLF", "GODREJPROP", "PIIND", "UPL", "SRF", "BERGEPAINT",
+    "ICICIGI", "ICICIPRULI", "MAXHEALTH", "LICI", "MUTHOOTFIN", "CHOLAFIN",
+    "LTIM", "PERSISTENT", "COFORGE", "POLYCAB",
+    "LUPIN", "AUROPHARMA", "TORNTPHARM", "ZYDUSLIFE",
+}
+
+
+def _classify_cap(symbol):
+    """Classify a stock's market cap tier based on index membership."""
+    if symbol in _NIFTY50:
+        return "large"
+    if symbol in _NIFTY_NEXT50:
+        return "large"
+    return "mid"
+
+
+def get_nse_stock_list():
+    """Build a dynamic stock universe from the Breeze SDK stock script data + NSE lot sizes.
+    Returns all NSE equity stocks that the SDK knows about, enriched with sector/cap/FnO data.
+    Does NOT require API calls — uses locally cached SDK data."""
+    lot_sizes = get_lot_sizes()
+    fno_symbols = set(lot_sizes.keys())
+
+    # Extract NSE equity stocks from the Breeze SDK script dictionaries
+    nse_stocks = set()
+
+    if breeze_instance and breeze_instance.stock_script_dict_list:
+        # Dict index 0 = NSE equity, 1 = BSE equity, 4 = NFO, etc.
+        for dict_idx in [0, 1]:
+            try:
+                stock_dict = breeze_instance.stock_script_dict_list[dict_idx]
+                for key in stock_dict.keys():
+                    parts = key.split("-")
+                    if len(parts) >= 2:
+                        nse_stocks.add(parts[1].upper())
+            except (IndexError, AttributeError):
+                pass
+
+    # Also add all FnO symbols (from lot sizes)
+    nse_stocks.update(fno_symbols)
+
+    # Also add all hardcoded breeze codes (known tradeable stocks)
+    nse_stocks.update(k.upper() for k in _HARDCODED_BREEZE_CODES.keys())
+
+    # Build the result list
+    stocks = []
+    for sym in sorted(nse_stocks):
+        if len(sym) < 2 or sym.startswith("NIFTY") or sym.startswith("BANK"):
+            continue  # Skip indices
+        is_fno = sym in fno_symbols
+        lot = lot_sizes.get(sym)
+        sector = _SECTOR_MAP.get(sym, "Other")
+        cap = _classify_cap(sym)
+        stocks.append({
+            "symbol": sym,
+            "name": sym,
+            "sector": sector,
+            "cap": cap,
+            "is_fno": is_fno,
+            "lot_size": lot,
+        })
+
+    return {
+        "stocks": stocks,
+        "count": len(stocks),
+        "fno_count": sum(1 for s in stocks if s["is_fno"]),
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
 def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None, exchange="NSE"):
     """Fetch historical candle data via Breeze API."""
     if not breeze_instance:
@@ -1212,6 +1343,10 @@ class BreezeHandler(BaseHTTPRequestHandler):
                         self.send_json({"symbol": symbol, "ltp": 0, "change": 0, "changePercent": 0, "volume": 0, "timestamp": datetime.now().isoformat()})
                 except Exception as e:
                     self.send_json({"error": str(e)}, 500)
+
+            elif path == "/stocks":
+                data = get_nse_stock_list()
+                self.send_json(data)
 
             elif path == "/debug/symbol-map":
                 self.send_json({

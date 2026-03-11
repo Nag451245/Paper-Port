@@ -111,6 +111,7 @@ pub fn scan_futures(
         .filter_map(|stock| analyze_futures(limiter, bridge_url, &stock.symbol))
         .collect();
 
+
     info!(
         scanned = results.len(),
         bullish = results.iter().filter(|r| r.signal > 0.3).count(),

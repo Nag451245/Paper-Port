@@ -1,189 +1,4250 @@
 [
-  {"symbol":"RELIANCE","name":"Reliance Industries","sector":"Energy","cap":"large","is_fno":true,"lot_size":250},
-  {"symbol":"ONGC","name":"Oil & Natural Gas Corp","sector":"Energy","cap":"large","is_fno":true,"lot_size":3850},
-  {"symbol":"BPCL","name":"Bharat Petroleum","sector":"Energy","cap":"large","is_fno":true,"lot_size":1800},
-  {"symbol":"IOC","name":"Indian Oil Corporation","sector":"Energy","cap":"large","is_fno":true,"lot_size":4850},
-  {"symbol":"GAIL","name":"GAIL India","sector":"Energy","cap":"large","is_fno":true,"lot_size":4575},
-  {"symbol":"PETRONET","name":"Petronet LNG","sector":"Energy","cap":"mid","is_fno":true,"lot_size":3000},
-  {"symbol":"IGL","name":"Indraprastha Gas","sector":"Energy","cap":"mid","is_fno":true,"lot_size":1375},
-  {"symbol":"MGL","name":"Mahanagar Gas","sector":"Energy","cap":"mid","is_fno":true,"lot_size":600},
-  {"symbol":"HINDPETRO","name":"Hindustan Petroleum","sector":"Energy","cap":"large","is_fno":true,"lot_size":2700},
-  {"symbol":"OIL","name":"Oil India","sector":"Energy","cap":"mid","is_fno":true,"lot_size":1625},
-
-  {"symbol":"TCS","name":"Tata Consultancy Services","sector":"IT","cap":"large","is_fno":true,"lot_size":175},
-  {"symbol":"INFY","name":"Infosys","sector":"IT","cap":"large","is_fno":true,"lot_size":400},
-  {"symbol":"WIPRO","name":"Wipro","sector":"IT","cap":"large","is_fno":true,"lot_size":1500},
-  {"symbol":"HCLTECH","name":"HCL Technologies","sector":"IT","cap":"large","is_fno":true,"lot_size":350},
-  {"symbol":"TECHM","name":"Tech Mahindra","sector":"IT","cap":"large","is_fno":true,"lot_size":600},
-  {"symbol":"LTIM","name":"LTIMindtree","sector":"IT","cap":"large","is_fno":true,"lot_size":150},
-  {"symbol":"PERSISTENT","name":"Persistent Systems","sector":"IT","cap":"mid","is_fno":true,"lot_size":100},
-  {"symbol":"COFORGE","name":"Coforge","sector":"IT","cap":"mid","is_fno":true,"lot_size":100},
-  {"symbol":"MPHASIS","name":"MphasiS","sector":"IT","cap":"mid","is_fno":true,"lot_size":175},
-  {"symbol":"LTTS","name":"L&T Technology Services","sector":"IT","cap":"mid","is_fno":true,"lot_size":200},
-  {"symbol":"TATAELXSI","name":"Tata Elxsi","sector":"IT","cap":"mid","is_fno":true,"lot_size":150},
-  {"symbol":"KPITTECH","name":"KPIT Technologies","sector":"IT","cap":"mid","is_fno":true,"lot_size":500},
-
-  {"symbol":"HDFCBANK","name":"HDFC Bank","sector":"Banking","cap":"large","is_fno":true,"lot_size":550},
-  {"symbol":"ICICIBANK","name":"ICICI Bank","sector":"Banking","cap":"large","is_fno":true,"lot_size":700},
-  {"symbol":"SBIN","name":"State Bank of India","sector":"Banking","cap":"large","is_fno":true,"lot_size":1500},
-  {"symbol":"KOTAKBANK","name":"Kotak Mahindra Bank","sector":"Banking","cap":"large","is_fno":true,"lot_size":400},
-  {"symbol":"AXISBANK","name":"Axis Bank","sector":"Banking","cap":"large","is_fno":true,"lot_size":1200},
-  {"symbol":"BANKBARODA","name":"Bank of Baroda","sector":"Banking","cap":"large","is_fno":true,"lot_size":5850},
-  {"symbol":"PNB","name":"Punjab National Bank","sector":"Banking","cap":"mid","is_fno":true,"lot_size":8000},
-  {"symbol":"INDUSINDBK","name":"IndusInd Bank","sector":"Banking","cap":"large","is_fno":true,"lot_size":500},
-  {"symbol":"FEDERALBNK","name":"Federal Bank","sector":"Banking","cap":"mid","is_fno":true,"lot_size":5000},
-  {"symbol":"IDFCFIRSTB","name":"IDFC First Bank","sector":"Banking","cap":"mid","is_fno":true,"lot_size":7500},
-  {"symbol":"AUBANK","name":"AU Small Finance Bank","sector":"Banking","cap":"mid","is_fno":true,"lot_size":1000},
-  {"symbol":"BANDHANBNK","name":"Bandhan Bank","sector":"Banking","cap":"mid","is_fno":true,"lot_size":2400},
-  {"symbol":"CANBK","name":"Canara Bank","sector":"Banking","cap":"mid","is_fno":true,"lot_size":6750},
-  {"symbol":"RBLBANK","name":"RBL Bank","sector":"Banking","cap":"small","is_fno":true,"lot_size":3200},
-
-  {"symbol":"HINDUNILVR","name":"Hindustan Unilever","sector":"FMCG","cap":"large","is_fno":true,"lot_size":300},
-  {"symbol":"ITC","name":"ITC","sector":"FMCG","cap":"large","is_fno":true,"lot_size":1600},
-  {"symbol":"NESTLEIND","name":"Nestle India","sector":"FMCG","cap":"large","is_fno":true,"lot_size":40},
-  {"symbol":"BRITANNIA","name":"Britannia Industries","sector":"FMCG","cap":"large","is_fno":true,"lot_size":200},
-  {"symbol":"DABUR","name":"Dabur India","sector":"FMCG","cap":"large","is_fno":true,"lot_size":1250},
-  {"symbol":"MARICO","name":"Marico","sector":"FMCG","cap":"mid","is_fno":true,"lot_size":1200},
-  {"symbol":"TATACONSUM","name":"Tata Consumer Products","sector":"FMCG","cap":"large","is_fno":true,"lot_size":675},
-  {"symbol":"COLPAL","name":"Colgate-Palmolive","sector":"FMCG","cap":"mid","is_fno":true,"lot_size":350},
-  {"symbol":"GODREJCP","name":"Godrej Consumer Products","sector":"FMCG","cap":"mid","is_fno":true,"lot_size":500},
-
-  {"symbol":"SUNPHARMA","name":"Sun Pharmaceutical","sector":"Pharma","cap":"large","is_fno":true,"lot_size":700},
-  {"symbol":"DRREDDY","name":"Dr. Reddy's Laboratories","sector":"Pharma","cap":"large","is_fno":true,"lot_size":125},
-  {"symbol":"CIPLA","name":"Cipla","sector":"Pharma","cap":"large","is_fno":true,"lot_size":650},
-  {"symbol":"DIVISLAB","name":"Divi's Laboratories","sector":"Pharma","cap":"large","is_fno":true,"lot_size":200},
-  {"symbol":"APOLLOHOSP","name":"Apollo Hospitals","sector":"Pharma","cap":"large","is_fno":true,"lot_size":125},
-  {"symbol":"LUPIN","name":"Lupin","sector":"Pharma","cap":"mid","is_fno":true,"lot_size":425},
-  {"symbol":"AUROPHARMA","name":"Aurobindo Pharma","sector":"Pharma","cap":"mid","is_fno":true,"lot_size":500},
-  {"symbol":"BIOCON","name":"Biocon","sector":"Pharma","cap":"mid","is_fno":true,"lot_size":2100},
-  {"symbol":"TORNTPHARM","name":"Torrent Pharmaceuticals","sector":"Pharma","cap":"mid","is_fno":true,"lot_size":250},
-  {"symbol":"ALKEM","name":"Alkem Laboratories","sector":"Pharma","cap":"mid","is_fno":true,"lot_size":200},
-  {"symbol":"IPCALAB","name":"IPCA Laboratories","sector":"Pharma","cap":"mid","is_fno":true,"lot_size":450},
-  {"symbol":"ZYDUSLIFE","name":"Zydus Lifesciences","sector":"Pharma","cap":"mid","is_fno":true,"lot_size":800},
-  {"symbol":"MAXHEALTH","name":"Max Healthcare","sector":"Pharma","cap":"mid","is_fno":true,"lot_size":800},
-
-  {"symbol":"TATAMOTORS","name":"Tata Motors","sector":"Auto","cap":"large","is_fno":true,"lot_size":1350},
-  {"symbol":"MARUTI","name":"Maruti Suzuki","sector":"Auto","cap":"large","is_fno":true,"lot_size":100},
-  {"symbol":"M&M","name":"Mahindra & Mahindra","sector":"Auto","cap":"large","is_fno":true,"lot_size":350},
-  {"symbol":"BAJAJ-AUTO","name":"Bajaj Auto","sector":"Auto","cap":"large","is_fno":true,"lot_size":125},
-  {"symbol":"HEROMOTOCO","name":"Hero MotoCorp","sector":"Auto","cap":"large","is_fno":true,"lot_size":150},
-  {"symbol":"EICHERMOT","name":"Eicher Motors","sector":"Auto","cap":"large","is_fno":true,"lot_size":175},
-  {"symbol":"MOTHERSON","name":"Samvardhana Motherson","sector":"Auto","cap":"mid","is_fno":true,"lot_size":5000},
-  {"symbol":"ESCORTS","name":"Escorts Kubota","sector":"Auto","cap":"mid","is_fno":true,"lot_size":275},
-  {"symbol":"MRF","name":"MRF","sector":"Auto","cap":"mid","is_fno":true,"lot_size":5},
-  {"symbol":"BALKRISIND","name":"Balkrishna Industries","sector":"Auto","cap":"mid","is_fno":true,"lot_size":300},
-  {"symbol":"ASHOKLEY","name":"Ashok Leyland","sector":"Auto","cap":"mid","is_fno":true,"lot_size":5000},
-  {"symbol":"TVSMOTOR","name":"TVS Motor Company","sector":"Auto","cap":"mid","is_fno":true,"lot_size":350},
-
-  {"symbol":"TATASTEEL","name":"Tata Steel","sector":"Metals","cap":"large","is_fno":true,"lot_size":5500},
-  {"symbol":"JSWSTEEL","name":"JSW Steel","sector":"Metals","cap":"large","is_fno":true,"lot_size":900},
-  {"symbol":"HINDALCO","name":"Hindalco Industries","sector":"Metals","cap":"large","is_fno":true,"lot_size":1075},
-  {"symbol":"VEDL","name":"Vedanta","sector":"Metals","cap":"mid","is_fno":true,"lot_size":1550},
-  {"symbol":"COALINDIA","name":"Coal India","sector":"Metals","cap":"large","is_fno":true,"lot_size":2400},
-  {"symbol":"SAIL","name":"Steel Authority of India","sector":"Metals","cap":"mid","is_fno":true,"lot_size":4850},
-  {"symbol":"JINDALSTEL","name":"Jindal Steel & Power","sector":"Metals","cap":"mid","is_fno":true,"lot_size":750},
-  {"symbol":"NMDC","name":"NMDC","sector":"Metals","cap":"mid","is_fno":true,"lot_size":3350},
-  {"symbol":"NATIONALUM","name":"National Aluminium","sector":"Metals","cap":"mid","is_fno":true,"lot_size":3750},
-  {"symbol":"HINDZINC","name":"Hindustan Zinc","sector":"Metals","cap":"mid","is_fno":true,"lot_size":2175},
-
-  {"symbol":"LT","name":"Larsen & Toubro","sector":"Infra","cap":"large","is_fno":true,"lot_size":375},
-  {"symbol":"ADANIENT","name":"Adani Enterprises","sector":"Infra","cap":"large","is_fno":true,"lot_size":500},
-  {"symbol":"ADANIPORTS","name":"Adani Ports","sector":"Infra","cap":"large","is_fno":true,"lot_size":625},
-  {"symbol":"ULTRACEMCO","name":"UltraTech Cement","sector":"Infra","cap":"large","is_fno":true,"lot_size":100},
-  {"symbol":"GRASIM","name":"Grasim Industries","sector":"Infra","cap":"large","is_fno":true,"lot_size":475},
-  {"symbol":"SIEMENS","name":"Siemens","sector":"Infra","cap":"mid","is_fno":true,"lot_size":75},
-  {"symbol":"ABB","name":"ABB India","sector":"Infra","cap":"mid","is_fno":true,"lot_size":125},
-  {"symbol":"HAL","name":"Hindustan Aeronautics","sector":"Infra","cap":"large","is_fno":true,"lot_size":150},
-  {"symbol":"BEL","name":"Bharat Electronics","sector":"Infra","cap":"mid","is_fno":true,"lot_size":2750},
-  {"symbol":"BHEL","name":"Bharat Heavy Electricals","sector":"Infra","cap":"mid","is_fno":true,"lot_size":3150},
-  {"symbol":"ACC","name":"ACC","sector":"Infra","cap":"mid","is_fno":true,"lot_size":250},
-  {"symbol":"AMBUJACEM","name":"Ambuja Cements","sector":"Infra","cap":"mid","is_fno":true,"lot_size":900},
-
-  {"symbol":"NTPC","name":"NTPC","sector":"Power","cap":"large","is_fno":true,"lot_size":2700},
-  {"symbol":"POWERGRID","name":"Power Grid Corporation","sector":"Power","cap":"large","is_fno":true,"lot_size":2700},
-  {"symbol":"TATAPOWER","name":"Tata Power","sector":"Power","cap":"mid","is_fno":true,"lot_size":2700},
-  {"symbol":"NHPC","name":"NHPC","sector":"Power","cap":"mid","is_fno":true,"lot_size":7000},
-  {"symbol":"ADANIGREEN","name":"Adani Green Energy","sector":"Power","cap":"mid","is_fno":true,"lot_size":500},
-  {"symbol":"SJVN","name":"SJVN","sector":"Power","cap":"small","is_fno":true,"lot_size":5500},
-  {"symbol":"PFC","name":"Power Finance Corp","sector":"Power","cap":"mid","is_fno":true,"lot_size":1600},
-  {"symbol":"RECLTD","name":"REC","sector":"Power","cap":"mid","is_fno":true,"lot_size":1500},
-  {"symbol":"IREDA","name":"Indian Renewable Energy","sector":"Power","cap":"small","is_fno":true,"lot_size":3750},
-  {"symbol":"CESC","name":"CESC","sector":"Power","cap":"small","is_fno":false,"lot_size":null},
-
-  {"symbol":"BAJFINANCE","name":"Bajaj Finance","sector":"Finance","cap":"large","is_fno":true,"lot_size":125},
-  {"symbol":"BAJAJFINSV","name":"Bajaj Finserv","sector":"Finance","cap":"large","is_fno":true,"lot_size":500},
-  {"symbol":"SBILIFE","name":"SBI Life Insurance","sector":"Finance","cap":"large","is_fno":true,"lot_size":750},
-  {"symbol":"HDFCLIFE","name":"HDFC Life Insurance","sector":"Finance","cap":"large","is_fno":true,"lot_size":1100},
-  {"symbol":"CHOLAFIN","name":"Cholamandalam Investment","sector":"Finance","cap":"mid","is_fno":true,"lot_size":500},
-  {"symbol":"MUTHOOTFIN","name":"Muthoot Finance","sector":"Finance","cap":"mid","is_fno":true,"lot_size":375},
-  {"symbol":"MANAPPURAM","name":"Manappuram Finance","sector":"Finance","cap":"small","is_fno":true,"lot_size":4000},
-  {"symbol":"LICI","name":"Life Insurance Corp","sector":"Finance","cap":"large","is_fno":true,"lot_size":1000},
-  {"symbol":"ICICIGI","name":"ICICI Lombard General","sector":"Finance","cap":"mid","is_fno":true,"lot_size":425},
-  {"symbol":"ICICIPRULI","name":"ICICI Prudential Life","sector":"Finance","cap":"mid","is_fno":true,"lot_size":1500},
-  {"symbol":"ABCAPITAL","name":"Aditya Birla Capital","sector":"Finance","cap":"mid","is_fno":true,"lot_size":5500},
-  {"symbol":"SHRIRAMFIN","name":"Shriram Finance","sector":"Finance","cap":"large","is_fno":true,"lot_size":300},
-
-  {"symbol":"TITAN","name":"Titan Company","sector":"Consumer","cap":"large","is_fno":true,"lot_size":375},
-  {"symbol":"ASIANPAINT","name":"Asian Paints","sector":"Consumer","cap":"large","is_fno":true,"lot_size":300},
-  {"symbol":"PIDILITIND","name":"Pidilite Industries","sector":"Consumer","cap":"large","is_fno":true,"lot_size":375},
-  {"symbol":"TRENT","name":"Trent","sector":"Consumer","cap":"mid","is_fno":true,"lot_size":100},
-  {"symbol":"DMART","name":"Avenue Supermarts","sector":"Consumer","cap":"large","is_fno":true,"lot_size":200},
-  {"symbol":"PAGEIND","name":"Page Industries","sector":"Consumer","cap":"mid","is_fno":true,"lot_size":15},
-  {"symbol":"BATAINDIA","name":"Bata India","sector":"Consumer","cap":"mid","is_fno":true,"lot_size":550},
-  {"symbol":"JUBLFOOD","name":"Jubilant FoodWorks","sector":"Consumer","cap":"mid","is_fno":true,"lot_size":1250},
-  {"symbol":"HAVELLS","name":"Havells India","sector":"Consumer","cap":"mid","is_fno":true,"lot_size":500},
-  {"symbol":"VOLTAS","name":"Voltas","sector":"Consumer","cap":"mid","is_fno":true,"lot_size":500},
-  {"symbol":"CROMPTON","name":"Crompton Greaves Consumer","sector":"Consumer","cap":"small","is_fno":true,"lot_size":1600},
-  {"symbol":"POLYCAB","name":"Polycab India","sector":"Consumer","cap":"mid","is_fno":true,"lot_size":150},
-  {"symbol":"BERGEPAINT","name":"Berger Paints","sector":"Consumer","cap":"mid","is_fno":true,"lot_size":1600},
-
-  {"symbol":"BHARTIARTL","name":"Bharti Airtel","sector":"Telecom","cap":"large","is_fno":true,"lot_size":475},
-  {"symbol":"IDEA","name":"Vodafone Idea","sector":"Telecom","cap":"small","is_fno":true,"lot_size":60000},
-  {"symbol":"TTML","name":"Tata Teleservices","sector":"Telecom","cap":"small","is_fno":false,"lot_size":null},
-
-  {"symbol":"DLF","name":"DLF","sector":"Realty","cap":"mid","is_fno":true,"lot_size":825},
-  {"symbol":"GODREJPROP","name":"Godrej Properties","sector":"Realty","cap":"mid","is_fno":true,"lot_size":325},
-  {"symbol":"OBEROIRLTY","name":"Oberoi Realty","sector":"Realty","cap":"mid","is_fno":true,"lot_size":350},
-  {"symbol":"PRESTIGE","name":"Prestige Estates Projects","sector":"Realty","cap":"mid","is_fno":true,"lot_size":500},
-  {"symbol":"LODHA","name":"Macrotech Developers","sector":"Realty","cap":"mid","is_fno":true,"lot_size":625},
-  {"symbol":"PHOENIXLTD","name":"Phoenix Mills","sector":"Realty","cap":"small","is_fno":true,"lot_size":350},
-
-  {"symbol":"ZOMATO","name":"Zomato","sector":"Digital","cap":"mid","is_fno":true,"lot_size":2875},
-  {"symbol":"NAUKRI","name":"Info Edge (Naukri)","sector":"Digital","cap":"mid","is_fno":true,"lot_size":100},
-  {"symbol":"PAYTM","name":"One97 Communications","sector":"Digital","cap":"small","is_fno":true,"lot_size":750},
-  {"symbol":"POLICYBZR","name":"PB Fintech","sector":"Digital","cap":"small","is_fno":true,"lot_size":500},
-  {"symbol":"DELHIVERY","name":"Delhivery","sector":"Digital","cap":"small","is_fno":true,"lot_size":1500},
-
-  {"symbol":"IRCTC","name":"Indian Railway Catering","sector":"Transport","cap":"mid","is_fno":true,"lot_size":875},
-  {"symbol":"CONCOR","name":"Container Corp of India","sector":"Transport","cap":"mid","is_fno":true,"lot_size":1000},
-  {"symbol":"IRFC","name":"Indian Railway Finance","sector":"Transport","cap":"mid","is_fno":true,"lot_size":5000},
-
-  {"symbol":"DEEPAKNTR","name":"Deepak Nitrite","sector":"Chemicals","cap":"mid","is_fno":true,"lot_size":250},
-  {"symbol":"ATUL","name":"Atul","sector":"Chemicals","cap":"mid","is_fno":true,"lot_size":75},
-  {"symbol":"PIIND","name":"PI Industries","sector":"Chemicals","cap":"mid","is_fno":true,"lot_size":175},
-  {"symbol":"SRF","name":"SRF","sector":"Chemicals","cap":"mid","is_fno":true,"lot_size":375},
-  {"symbol":"UPL","name":"UPL","sector":"Chemicals","cap":"mid","is_fno":true,"lot_size":1300},
-  {"symbol":"CLEAN","name":"Clean Science & Technology","sector":"Chemicals","cap":"small","is_fno":true,"lot_size":500},
-
-  {"symbol":"INDIGO","name":"InterGlobe Aviation","sector":"Aviation","cap":"large","is_fno":true,"lot_size":175},
-  {"symbol":"TIINDIA","name":"Tube Investments","sector":"Engineering","cap":"mid","is_fno":true,"lot_size":150},
-  {"symbol":"CUMMINSIND","name":"Cummins India","sector":"Engineering","cap":"mid","is_fno":true,"lot_size":200},
-  {"symbol":"SYNGENE","name":"Syngene International","sector":"Pharma","cap":"mid","is_fno":true,"lot_size":750},
-  {"symbol":"GLAXO","name":"GlaxoSmithKline Pharma","sector":"Pharma","cap":"small","is_fno":false,"lot_size":null},
-  {"symbol":"PFIZER","name":"Pfizer India","sector":"Pharma","cap":"small","is_fno":false,"lot_size":null},
-  {"symbol":"HDFCAMC","name":"HDFC Asset Management","sector":"Finance","cap":"mid","is_fno":true,"lot_size":200},
-  {"symbol":"MCDOWELL-N","name":"United Spirits","sector":"FMCG","cap":"mid","is_fno":true,"lot_size":500},
-  {"symbol":"UNITDSPR","name":"United Breweries","sector":"FMCG","cap":"small","is_fno":false,"lot_size":null},
-  {"symbol":"JKCEMENT","name":"JK Cement","sector":"Infra","cap":"mid","is_fno":true,"lot_size":125},
-  {"symbol":"RAMCOCEM","name":"The Ramco Cements","sector":"Infra","cap":"small","is_fno":true,"lot_size":700},
-  {"symbol":"ABFRL","name":"Aditya Birla Fashion","sector":"Consumer","cap":"small","is_fno":true,"lot_size":2100},
-  {"symbol":"CANFINHOME","name":"Can Fin Homes","sector":"Finance","cap":"small","is_fno":true,"lot_size":975},
-  {"symbol":"LICHSGFIN","name":"LIC Housing Finance","sector":"Finance","cap":"mid","is_fno":true,"lot_size":1500},
-  {"symbol":"SBICARD","name":"SBI Cards","sector":"Finance","cap":"mid","is_fno":true,"lot_size":1000},
-  {"symbol":"DIXON","name":"Dixon Technologies","sector":"Consumer","cap":"mid","is_fno":true,"lot_size":75},
-  {"symbol":"SONACOMS","name":"Sona BLW Precision","sector":"Auto","cap":"mid","is_fno":true,"lot_size":1000},
-  {"symbol":"BOSCHLTD","name":"Bosch","sector":"Auto","cap":"mid","is_fno":true,"lot_size":25},
-  {"symbol":"EXIDEIND","name":"Exide Industries","sector":"Auto","cap":"mid","is_fno":true,"lot_size":1800},
-  {"symbol":"NIACL","name":"New India Assurance","sector":"Finance","cap":"small","is_fno":false,"lot_size":null},
-  {"symbol":"GICRE","name":"General Insurance Corp","sector":"Finance","cap":"small","is_fno":false,"lot_size":null}
+  {
+    "symbol": "RELIANCE",
+    "name": "Reliance Industries",
+    "sector": "Energy",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "ONGC",
+    "name": "Oil & Natural Gas Corp",
+    "sector": "Energy",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 3850
+  },
+  {
+    "symbol": "BPCL",
+    "name": "Bharat Petroleum",
+    "sector": "Energy",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 1800
+  },
+  {
+    "symbol": "IOC",
+    "name": "Indian Oil Corporation",
+    "sector": "Energy",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 4850
+  },
+  {
+    "symbol": "GAIL",
+    "name": "GAIL India",
+    "sector": "Energy",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 4575
+  },
+  {
+    "symbol": "PETRONET",
+    "name": "Petronet LNG",
+    "sector": "Energy",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 3000
+  },
+  {
+    "symbol": "IGL",
+    "name": "Indraprastha Gas",
+    "sector": "Energy",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1375
+  },
+  {
+    "symbol": "MGL",
+    "name": "Mahanagar Gas",
+    "sector": "Energy",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 600
+  },
+  {
+    "symbol": "HINDPETRO",
+    "name": "Hindustan Petroleum",
+    "sector": "Energy",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 2700
+  },
+  {
+    "symbol": "OIL",
+    "name": "Oil India",
+    "sector": "Energy",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1625
+  },
+  {
+    "symbol": "TCS",
+    "name": "Tata Consultancy Services",
+    "sector": "IT",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 175
+  },
+  {
+    "symbol": "INFY",
+    "name": "Infosys",
+    "sector": "IT",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 400
+  },
+  {
+    "symbol": "WIPRO",
+    "name": "Wipro",
+    "sector": "IT",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "HCLTECH",
+    "name": "HCL Technologies",
+    "sector": "IT",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 350
+  },
+  {
+    "symbol": "TECHM",
+    "name": "Tech Mahindra",
+    "sector": "IT",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 600
+  },
+  {
+    "symbol": "LTIM",
+    "name": "LTIMindtree",
+    "sector": "IT",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 150
+  },
+  {
+    "symbol": "PERSISTENT",
+    "name": "Persistent Systems",
+    "sector": "IT",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 100
+  },
+  {
+    "symbol": "COFORGE",
+    "name": "Coforge",
+    "sector": "IT",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 100
+  },
+  {
+    "symbol": "MPHASIS",
+    "name": "MphasiS",
+    "sector": "IT",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 175
+  },
+  {
+    "symbol": "LTTS",
+    "name": "L&T Technology Services",
+    "sector": "IT",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 200
+  },
+  {
+    "symbol": "TATAELXSI",
+    "name": "Tata Elxsi",
+    "sector": "IT",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 150
+  },
+  {
+    "symbol": "KPITTECH",
+    "name": "KPIT Technologies",
+    "sector": "IT",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "HDFCBANK",
+    "name": "HDFC Bank",
+    "sector": "Banking",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 550
+  },
+  {
+    "symbol": "ICICIBANK",
+    "name": "ICICI Bank",
+    "sector": "Banking",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 700
+  },
+  {
+    "symbol": "SBIN",
+    "name": "State Bank of India",
+    "sector": "Banking",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "KOTAKBANK",
+    "name": "Kotak Mahindra Bank",
+    "sector": "Banking",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 400
+  },
+  {
+    "symbol": "AXISBANK",
+    "name": "Axis Bank",
+    "sector": "Banking",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 1200
+  },
+  {
+    "symbol": "BANKBARODA",
+    "name": "Bank of Baroda",
+    "sector": "Banking",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 5850
+  },
+  {
+    "symbol": "PNB",
+    "name": "Punjab National Bank",
+    "sector": "Banking",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 8000
+  },
+  {
+    "symbol": "INDUSINDBK",
+    "name": "IndusInd Bank",
+    "sector": "Banking",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "FEDERALBNK",
+    "name": "Federal Bank",
+    "sector": "Banking",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 5000
+  },
+  {
+    "symbol": "IDFCFIRSTB",
+    "name": "IDFC First Bank",
+    "sector": "Banking",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 7500
+  },
+  {
+    "symbol": "AUBANK",
+    "name": "AU Small Finance Bank",
+    "sector": "Banking",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "BANDHANBNK",
+    "name": "Bandhan Bank",
+    "sector": "Banking",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 2400
+  },
+  {
+    "symbol": "CANBK",
+    "name": "Canara Bank",
+    "sector": "Banking",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 6750
+  },
+  {
+    "symbol": "RBLBANK",
+    "name": "RBL Bank",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 3200
+  },
+  {
+    "symbol": "HINDUNILVR",
+    "name": "Hindustan Unilever",
+    "sector": "FMCG",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 300
+  },
+  {
+    "symbol": "ITC",
+    "name": "ITC",
+    "sector": "FMCG",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 1600
+  },
+  {
+    "symbol": "NESTLEIND",
+    "name": "Nestle India",
+    "sector": "FMCG",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 40
+  },
+  {
+    "symbol": "BRITANNIA",
+    "name": "Britannia Industries",
+    "sector": "FMCG",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 200
+  },
+  {
+    "symbol": "DABUR",
+    "name": "Dabur India",
+    "sector": "FMCG",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 1250
+  },
+  {
+    "symbol": "MARICO",
+    "name": "Marico",
+    "sector": "FMCG",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1200
+  },
+  {
+    "symbol": "TATACONSUM",
+    "name": "Tata Consumer Products",
+    "sector": "FMCG",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 675
+  },
+  {
+    "symbol": "COLPAL",
+    "name": "Colgate-Palmolive",
+    "sector": "FMCG",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 350
+  },
+  {
+    "symbol": "GODREJCP",
+    "name": "Godrej Consumer Products",
+    "sector": "FMCG",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "SUNPHARMA",
+    "name": "Sun Pharmaceutical",
+    "sector": "Pharma",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 700
+  },
+  {
+    "symbol": "DRREDDY",
+    "name": "Dr. Reddy's Laboratories",
+    "sector": "Pharma",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 125
+  },
+  {
+    "symbol": "CIPLA",
+    "name": "Cipla",
+    "sector": "Pharma",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 650
+  },
+  {
+    "symbol": "DIVISLAB",
+    "name": "Divi's Laboratories",
+    "sector": "Pharma",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 200
+  },
+  {
+    "symbol": "APOLLOHOSP",
+    "name": "Apollo Hospitals",
+    "sector": "Pharma",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 125
+  },
+  {
+    "symbol": "LUPIN",
+    "name": "Lupin",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 425
+  },
+  {
+    "symbol": "AUROPHARMA",
+    "name": "Aurobindo Pharma",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "BIOCON",
+    "name": "Biocon",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 2100
+  },
+  {
+    "symbol": "TORNTPHARM",
+    "name": "Torrent Pharmaceuticals",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "ALKEM",
+    "name": "Alkem Laboratories",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 200
+  },
+  {
+    "symbol": "IPCALAB",
+    "name": "IPCA Laboratories",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 450
+  },
+  {
+    "symbol": "ZYDUSLIFE",
+    "name": "Zydus Lifesciences",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 800
+  },
+  {
+    "symbol": "MAXHEALTH",
+    "name": "Max Healthcare",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 800
+  },
+  {
+    "symbol": "TATAMOTORS",
+    "name": "Tata Motors",
+    "sector": "Auto",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 1350
+  },
+  {
+    "symbol": "MARUTI",
+    "name": "Maruti Suzuki",
+    "sector": "Auto",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 100
+  },
+  {
+    "symbol": "M&M",
+    "name": "Mahindra & Mahindra",
+    "sector": "Auto",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 350
+  },
+  {
+    "symbol": "BAJAJ-AUTO",
+    "name": "Bajaj Auto",
+    "sector": "Auto",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 125
+  },
+  {
+    "symbol": "HEROMOTOCO",
+    "name": "Hero MotoCorp",
+    "sector": "Auto",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 150
+  },
+  {
+    "symbol": "EICHERMOT",
+    "name": "Eicher Motors",
+    "sector": "Auto",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 175
+  },
+  {
+    "symbol": "MOTHERSON",
+    "name": "Samvardhana Motherson",
+    "sector": "Auto",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 5000
+  },
+  {
+    "symbol": "ESCORTS",
+    "name": "Escorts Kubota",
+    "sector": "Auto",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 275
+  },
+  {
+    "symbol": "MRF",
+    "name": "MRF",
+    "sector": "Auto",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 5
+  },
+  {
+    "symbol": "BALKRISIND",
+    "name": "Balkrishna Industries",
+    "sector": "Auto",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 300
+  },
+  {
+    "symbol": "ASHOKLEY",
+    "name": "Ashok Leyland",
+    "sector": "Auto",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 5000
+  },
+  {
+    "symbol": "TVSMOTOR",
+    "name": "TVS Motor Company",
+    "sector": "Auto",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 350
+  },
+  {
+    "symbol": "TATASTEEL",
+    "name": "Tata Steel",
+    "sector": "Metals",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 5500
+  },
+  {
+    "symbol": "JSWSTEEL",
+    "name": "JSW Steel",
+    "sector": "Metals",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 900
+  },
+  {
+    "symbol": "HINDALCO",
+    "name": "Hindalco Industries",
+    "sector": "Metals",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 1075
+  },
+  {
+    "symbol": "VEDL",
+    "name": "Vedanta",
+    "sector": "Metals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1550
+  },
+  {
+    "symbol": "COALINDIA",
+    "name": "Coal India",
+    "sector": "Metals",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 2400
+  },
+  {
+    "symbol": "SAIL",
+    "name": "Steel Authority of India",
+    "sector": "Metals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 4850
+  },
+  {
+    "symbol": "JINDALSTEL",
+    "name": "Jindal Steel & Power",
+    "sector": "Metals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "NMDC",
+    "name": "NMDC",
+    "sector": "Metals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 3350
+  },
+  {
+    "symbol": "NATIONALUM",
+    "name": "National Aluminium",
+    "sector": "Metals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 3750
+  },
+  {
+    "symbol": "HINDZINC",
+    "name": "Hindustan Zinc",
+    "sector": "Metals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 2175
+  },
+  {
+    "symbol": "LT",
+    "name": "Larsen & Toubro",
+    "sector": "Infra",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 375
+  },
+  {
+    "symbol": "ADANIENT",
+    "name": "Adani Enterprises",
+    "sector": "Infra",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "ADANIPORTS",
+    "name": "Adani Ports",
+    "sector": "Infra",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 625
+  },
+  {
+    "symbol": "ULTRACEMCO",
+    "name": "UltraTech Cement",
+    "sector": "Infra",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 100
+  },
+  {
+    "symbol": "GRASIM",
+    "name": "Grasim Industries",
+    "sector": "Infra",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 475
+  },
+  {
+    "symbol": "SIEMENS",
+    "name": "Siemens",
+    "sector": "Infra",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 75
+  },
+  {
+    "symbol": "ABB",
+    "name": "ABB India",
+    "sector": "Infra",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 125
+  },
+  {
+    "symbol": "HAL",
+    "name": "Hindustan Aeronautics",
+    "sector": "Infra",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 150
+  },
+  {
+    "symbol": "BEL",
+    "name": "Bharat Electronics",
+    "sector": "Infra",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 2750
+  },
+  {
+    "symbol": "BHEL",
+    "name": "Bharat Heavy Electricals",
+    "sector": "Infra",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 3150
+  },
+  {
+    "symbol": "ACC",
+    "name": "ACC",
+    "sector": "Infra",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "AMBUJACEM",
+    "name": "Ambuja Cements",
+    "sector": "Infra",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 900
+  },
+  {
+    "symbol": "NTPC",
+    "name": "NTPC",
+    "sector": "Power",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 2700
+  },
+  {
+    "symbol": "POWERGRID",
+    "name": "Power Grid Corporation",
+    "sector": "Power",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 2700
+  },
+  {
+    "symbol": "TATAPOWER",
+    "name": "Tata Power",
+    "sector": "Power",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 2700
+  },
+  {
+    "symbol": "NHPC",
+    "name": "NHPC",
+    "sector": "Power",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 7000
+  },
+  {
+    "symbol": "ADANIGREEN",
+    "name": "Adani Green Energy",
+    "sector": "Power",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "SJVN",
+    "name": "SJVN",
+    "sector": "Power",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 5500
+  },
+  {
+    "symbol": "PFC",
+    "name": "Power Finance Corp",
+    "sector": "Power",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1600
+  },
+  {
+    "symbol": "RECLTD",
+    "name": "REC",
+    "sector": "Power",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "IREDA",
+    "name": "Indian Renewable Energy",
+    "sector": "Power",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 3750
+  },
+  {
+    "symbol": "CESC",
+    "name": "CESC",
+    "sector": "Power",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "BAJFINANCE",
+    "name": "Bajaj Finance",
+    "sector": "Finance",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 125
+  },
+  {
+    "symbol": "BAJAJFINSV",
+    "name": "Bajaj Finserv",
+    "sector": "Finance",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "SBILIFE",
+    "name": "SBI Life Insurance",
+    "sector": "Finance",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "HDFCLIFE",
+    "name": "HDFC Life Insurance",
+    "sector": "Finance",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 1100
+  },
+  {
+    "symbol": "CHOLAFIN",
+    "name": "Cholamandalam Investment",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "MUTHOOTFIN",
+    "name": "Muthoot Finance",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 375
+  },
+  {
+    "symbol": "MANAPPURAM",
+    "name": "Manappuram Finance",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 4000
+  },
+  {
+    "symbol": "LICI",
+    "name": "Life Insurance Corp",
+    "sector": "Finance",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "ICICIGI",
+    "name": "ICICI Lombard General",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 425
+  },
+  {
+    "symbol": "ICICIPRULI",
+    "name": "ICICI Prudential Life",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "ABCAPITAL",
+    "name": "Aditya Birla Capital",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 5500
+  },
+  {
+    "symbol": "SHRIRAMFIN",
+    "name": "Shriram Finance",
+    "sector": "Finance",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 300
+  },
+  {
+    "symbol": "TITAN",
+    "name": "Titan Company",
+    "sector": "Consumer",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 375
+  },
+  {
+    "symbol": "ASIANPAINT",
+    "name": "Asian Paints",
+    "sector": "Consumer",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 300
+  },
+  {
+    "symbol": "PIDILITIND",
+    "name": "Pidilite Industries",
+    "sector": "Consumer",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 375
+  },
+  {
+    "symbol": "TRENT",
+    "name": "Trent",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 100
+  },
+  {
+    "symbol": "DMART",
+    "name": "Avenue Supermarts",
+    "sector": "Consumer",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 200
+  },
+  {
+    "symbol": "PAGEIND",
+    "name": "Page Industries",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 15
+  },
+  {
+    "symbol": "BATAINDIA",
+    "name": "Bata India",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 550
+  },
+  {
+    "symbol": "JUBLFOOD",
+    "name": "Jubilant FoodWorks",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1250
+  },
+  {
+    "symbol": "HAVELLS",
+    "name": "Havells India",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "VOLTAS",
+    "name": "Voltas",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "CROMPTON",
+    "name": "Crompton Greaves Consumer",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1600
+  },
+  {
+    "symbol": "POLYCAB",
+    "name": "Polycab India",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 150
+  },
+  {
+    "symbol": "BERGEPAINT",
+    "name": "Berger Paints",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1600
+  },
+  {
+    "symbol": "BHARTIARTL",
+    "name": "Bharti Airtel",
+    "sector": "Telecom",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 475
+  },
+  {
+    "symbol": "IDEA",
+    "name": "Vodafone Idea",
+    "sector": "Telecom",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 60000
+  },
+  {
+    "symbol": "TTML",
+    "name": "Tata Teleservices",
+    "sector": "Telecom",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "DLF",
+    "name": "DLF",
+    "sector": "Realty",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 825
+  },
+  {
+    "symbol": "GODREJPROP",
+    "name": "Godrej Properties",
+    "sector": "Realty",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 325
+  },
+  {
+    "symbol": "OBEROIRLTY",
+    "name": "Oberoi Realty",
+    "sector": "Realty",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 350
+  },
+  {
+    "symbol": "PRESTIGE",
+    "name": "Prestige Estates Projects",
+    "sector": "Realty",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "LODHA",
+    "name": "Macrotech Developers",
+    "sector": "Realty",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 625
+  },
+  {
+    "symbol": "PHOENIXLTD",
+    "name": "Phoenix Mills",
+    "sector": "Realty",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 350
+  },
+  {
+    "symbol": "ZOMATO",
+    "name": "Zomato",
+    "sector": "Digital",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 2875
+  },
+  {
+    "symbol": "NAUKRI",
+    "name": "Info Edge (Naukri)",
+    "sector": "Digital",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 100
+  },
+  {
+    "symbol": "PAYTM",
+    "name": "One97 Communications",
+    "sector": "Digital",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "POLICYBZR",
+    "name": "PB Fintech",
+    "sector": "Digital",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "DELHIVERY",
+    "name": "Delhivery",
+    "sector": "Digital",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "IRCTC",
+    "name": "Indian Railway Catering",
+    "sector": "Transport",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 875
+  },
+  {
+    "symbol": "CONCOR",
+    "name": "Container Corp of India",
+    "sector": "Transport",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "IRFC",
+    "name": "Indian Railway Finance",
+    "sector": "Transport",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 5000
+  },
+  {
+    "symbol": "DEEPAKNTR",
+    "name": "Deepak Nitrite",
+    "sector": "Chemicals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "ATUL",
+    "name": "Atul",
+    "sector": "Chemicals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 75
+  },
+  {
+    "symbol": "PIIND",
+    "name": "PI Industries",
+    "sector": "Chemicals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 175
+  },
+  {
+    "symbol": "SRF",
+    "name": "SRF",
+    "sector": "Chemicals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 375
+  },
+  {
+    "symbol": "UPL",
+    "name": "UPL",
+    "sector": "Chemicals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1300
+  },
+  {
+    "symbol": "CLEAN",
+    "name": "Clean Science & Technology",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "INDIGO",
+    "name": "InterGlobe Aviation",
+    "sector": "Aviation",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 175
+  },
+  {
+    "symbol": "TIINDIA",
+    "name": "Tube Investments",
+    "sector": "Engineering",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 150
+  },
+  {
+    "symbol": "CUMMINSIND",
+    "name": "Cummins India",
+    "sector": "Engineering",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 200
+  },
+  {
+    "symbol": "SYNGENE",
+    "name": "Syngene International",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "GLAXO",
+    "name": "GlaxoSmithKline Pharma",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "PFIZER",
+    "name": "Pfizer India",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "HDFCAMC",
+    "name": "HDFC Asset Management",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 200
+  },
+  {
+    "symbol": "MCDOWELL-N",
+    "name": "United Spirits",
+    "sector": "FMCG",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "UNITDSPR",
+    "name": "United Breweries",
+    "sector": "FMCG",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "JKCEMENT",
+    "name": "JK Cement",
+    "sector": "Infra",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 125
+  },
+  {
+    "symbol": "RAMCOCEM",
+    "name": "The Ramco Cements",
+    "sector": "Infra",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 700
+  },
+  {
+    "symbol": "ABFRL",
+    "name": "Aditya Birla Fashion",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2100
+  },
+  {
+    "symbol": "CANFINHOME",
+    "name": "Can Fin Homes",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 975
+  },
+  {
+    "symbol": "LICHSGFIN",
+    "name": "LIC Housing Finance",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "SBICARD",
+    "name": "SBI Cards",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "DIXON",
+    "name": "Dixon Technologies",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 75
+  },
+  {
+    "symbol": "SONACOMS",
+    "name": "Sona BLW Precision",
+    "sector": "Auto",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "BOSCHLTD",
+    "name": "Bosch",
+    "sector": "Auto",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 25
+  },
+  {
+    "symbol": "EXIDEIND",
+    "name": "Exide Industries",
+    "sector": "Auto",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1800
+  },
+  {
+    "symbol": "NIACL",
+    "name": "New India Assurance",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "GICRE",
+    "name": "General Insurance Corp",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "YESBANK",
+    "name": "Yes Bank",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1800
+  },
+  {
+    "symbol": "INDIANB",
+    "name": "Indian Bank",
+    "sector": "Banking",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 4500
+  },
+  {
+    "symbol": "UNIONBANK",
+    "name": "Union Bank of India",
+    "sector": "Banking",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 6500
+  },
+  {
+    "symbol": "IOB",
+    "name": "Indian Overseas Bank",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 12000
+  },
+  {
+    "symbol": "CENTRALBK",
+    "name": "Central Bank of India",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 8500
+  },
+  {
+    "symbol": "MAHABANK",
+    "name": "Bank of Maharashtra",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 5500
+  },
+  {
+    "symbol": "BANKOFMAHARASHTRA",
+    "name": "Bank of Maharashtra",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "UCO",
+    "name": "UCO Bank",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 7500
+  },
+  {
+    "symbol": "PSB",
+    "name": "Punjab & Sind Bank",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 6000
+  },
+  {
+    "symbol": "JKBANK",
+    "name": "Jammu & Kashmir Bank",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "SOUTHBANK",
+    "name": "South Indian Bank",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 5000
+  },
+  {
+    "symbol": "KARURVYSYA",
+    "name": "Karur Vysya Bank",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 3500
+  },
+  {
+    "symbol": "CITYUNIONBANK",
+    "name": "City Union Bank",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "DCBBANK",
+    "name": "DCB Bank",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 3500
+  },
+  {
+    "symbol": "TMB",
+    "name": "Tamilnad Mercantile Bank",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "EQUITASBNK",
+    "name": "Equitas Small Finance Bank",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 5000
+  },
+  {
+    "symbol": "UJJIVANSFB",
+    "name": "Ujjivan Small Finance Bank",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 4000
+  },
+  {
+    "symbol": "FINOPB",
+    "name": "Fino Payments Bank",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "ZENSAR",
+    "name": "Zensar Technologies",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "BIRLASOFT",
+    "name": "Birla Soft",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "INTELLECT",
+    "name": "Intellect Design Arena",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "CYIENT",
+    "name": "Cyient",
+    "sector": "IT",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "MASTEK",
+    "name": "Mastek",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "HAPPSTMNDS",
+    "name": "Happiest Minds Technologies",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "TANLA",
+    "name": "Tanla Platforms",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "ROUTE",
+    "name": "Route Mobile",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "DATAPATTNS",
+    "name": "Data Patterns",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "NEWGEN",
+    "name": "Newgen Software",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "GLENMARK",
+    "name": "Glenmark Pharmaceuticals",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "NATCOPHARM",
+    "name": "Natco Pharma",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "AJANTPHARM",
+    "name": "Ajanta Pharma",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "LALPATHLAB",
+    "name": "Dr Lal PathLabs",
+    "sector": "Healthcare",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "METROPOLIS",
+    "name": "Metropolis Healthcare",
+    "sector": "Healthcare",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "THYROCARE",
+    "name": "Thyrocare Technologies",
+    "sector": "Healthcare",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "GRANULES",
+    "name": "Granules India",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "ASTRAZEN",
+    "name": "AstraZeneca Pharma",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "GLAND",
+    "name": "Gland Pharma",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "IOLCP",
+    "name": "IOL Chemicals",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "LAURUSLABS",
+    "name": "Laurus Labs",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "SOLARA",
+    "name": "Solara Active Pharma",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "ERIS",
+    "name": "Eris Lifesciences",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "STAR",
+    "name": "Strides Pharma",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "MEDPLUS",
+    "name": "Medplus Health Services",
+    "sector": "Healthcare",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "RAINBOW",
+    "name": "Rainbow Children Medicare",
+    "sector": "Healthcare",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "YATHARTH",
+    "name": "Yatharth Hospital",
+    "sector": "Healthcare",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "VIJAYA",
+    "name": "Vijaya Diagnostic Centre",
+    "sector": "Healthcare",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "BHARATFORG",
+    "name": "Bharat Forge",
+    "sector": "Auto",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "CEATLTD",
+    "name": "CEAT",
+    "sector": "Auto",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 400
+  },
+  {
+    "symbol": "APOLLOTYRE",
+    "name": "Apollo Tyres",
+    "sector": "Auto",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "ENDURANCE",
+    "name": "Endurance Technologies",
+    "sector": "Auto",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "SUNDARMFIN",
+    "name": "Sundaram Finance",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "SUPRAJIT",
+    "name": "Suprajit Engineering",
+    "sector": "Auto",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "JAMNAAUTO",
+    "name": "Jamna Auto Industries",
+    "sector": "Auto",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "APLAPOLLO",
+    "name": "APL Apollo Tubes",
+    "sector": "Metals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "RATNAMANI",
+    "name": "Ratnamani Metals",
+    "sector": "Metals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "WELCORP",
+    "name": "Welspun Corp",
+    "sector": "Metals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "MOIL",
+    "name": "MOIL",
+    "sector": "Metals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "IRCON",
+    "name": "IRCON International",
+    "sector": "Infra",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 5000
+  },
+  {
+    "symbol": "NBCC",
+    "name": "NBCC India",
+    "sector": "Infra",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 5500
+  },
+  {
+    "symbol": "RVNL",
+    "name": "Rail Vikas Nigam",
+    "sector": "Infra",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 5000
+  },
+  {
+    "symbol": "KEC",
+    "name": "KEC International",
+    "sector": "Infra",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "KALPATPOWR",
+    "name": "Kalpataru Projects",
+    "sector": "Infra",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "PNCINFRA",
+    "name": "PNC Infratech",
+    "sector": "Infra",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "GPPL",
+    "name": "Gujarat Pipavav Port",
+    "sector": "Infra",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "AHLUCONT",
+    "name": "Ahluwalia Contracts",
+    "sector": "Infra",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "TORNTPOWER",
+    "name": "Torrent Power",
+    "sector": "Power",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "JSW",
+    "name": "JSW Energy",
+    "sector": "Power",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "ADANIPOWER",
+    "name": "Adani Power",
+    "sector": "Power",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "JSWENERGY",
+    "name": "JSW Energy",
+    "sector": "Power",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "KPIGREENERGY",
+    "name": "KPI Green Energy",
+    "sector": "Power",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "POONAWALLA",
+    "name": "Poonawalla Fincorp",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "CREDITACC",
+    "name": "CreditAccess Grameen",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "AAVAS",
+    "name": "Aavas Financiers",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "HOMEFIRST",
+    "name": "Home First Finance",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "APTUS",
+    "name": "Aptus Value Housing",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "SBFC",
+    "name": "SBFC Finance",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "MASFIN",
+    "name": "MAS Financial Services",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "UGROCAP",
+    "name": "Ugro Capital",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "SUNDARMHLD",
+    "name": "Sundaram Holdings",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "M&MFIN",
+    "name": "Mahindra & Mahindra Financial",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "L&TFH",
+    "name": "L&T Finance Holdings",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 3500
+  },
+  {
+    "symbol": "IIFL",
+    "name": "IIFL Finance",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "FIVESTAR",
+    "name": "Five-Star Business Finance",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "RELAXO",
+    "name": "Relaxo Footwears",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "VBL",
+    "name": "Varun Beverages",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "WHIRLPOOL",
+    "name": "Whirlpool India",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "RAJESHEXPO",
+    "name": "Rajesh Exports",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "KALYANKJIL",
+    "name": "Kalyan Jewellers",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "SENCO",
+    "name": "Senco Gold",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "SHOPERSTOP",
+    "name": "Shoppers Stop",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "CERA",
+    "name": "Cera Sanitaryware",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "CENTURYPLY",
+    "name": "Century Plyboards",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "GREENPLY",
+    "name": "Greenply Industries",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "SYMPHONY",
+    "name": "Symphony",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "NAVINFLUOR",
+    "name": "Navin Fluorine",
+    "sector": "Chemicals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "GALAXYSURF",
+    "name": "Galaxy Surfactants",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "FINEORG",
+    "name": "Fine Organic",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "LXCHEM",
+    "name": "Laxmi Organic",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "TATACHEM",
+    "name": "Tata Chemicals",
+    "sector": "Chemicals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "ALKYLAMINE",
+    "name": "Alkyl Amines",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "VINATIORGN",
+    "name": "Vinati Organics",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "ROSSARI",
+    "name": "Rossari Biotech",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "AETHER",
+    "name": "Aether Industries",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "NEOGEN",
+    "name": "Neogen Chemicals",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "SUDARSCHEM",
+    "name": "Sudarshan Chemical",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "BALAJIAMIINES",
+    "name": "Balaji Amines",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "RAYMOND",
+    "name": "Raymond",
+    "sector": "Textiles",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "TRIDENT",
+    "name": "Trident",
+    "sector": "Textiles",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "WELSPUNLIV",
+    "name": "Welspun India",
+    "sector": "Textiles",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "KPR",
+    "name": "KPR Mill",
+    "sector": "Textiles",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "GOKALDAS",
+    "name": "Gokaldas Exports",
+    "sector": "Textiles",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "ARVIND",
+    "name": "Arvind",
+    "sector": "Textiles",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "SGBML",
+    "name": "SGBL",
+    "sector": "Textiles",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "PVRINOX",
+    "name": "PVR Inox",
+    "sector": "Media",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "SAREGAMA",
+    "name": "Saregama India",
+    "sector": "Media",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "TIPS",
+    "name": "Tips Industries",
+    "sector": "Media",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "NAZARA",
+    "name": "Nazara Technologies",
+    "sector": "Media",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "NETWORK18",
+    "name": "Network18 Media",
+    "sector": "Media",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 5000
+  },
+  {
+    "symbol": "CHAMBLFERT",
+    "name": "Chambal Fertilizers",
+    "sector": "Fertilizers",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "COROMANDEL",
+    "name": "Coromandel International",
+    "sector": "Fertilizers",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "GNFC",
+    "name": "GNFC",
+    "sector": "Fertilizers",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "GSFC",
+    "name": "GSFC",
+    "sector": "Fertilizers",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "RCF",
+    "name": "Rashtriya Chemicals",
+    "sector": "Fertilizers",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "DEEPAKFERT",
+    "name": "Deepak Fertilizers",
+    "sector": "Fertilizers",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "NFL",
+    "name": "National Fertilizers",
+    "sector": "Fertilizers",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "BALRAMCHIN",
+    "name": "Balrampur Chini",
+    "sector": "Sugar",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "DHAMPUR",
+    "name": "Dhampur Sugar",
+    "sector": "Sugar",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "RENUKA",
+    "name": "Shree Renuka Sugars",
+    "sector": "Sugar",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "DWARIKESH",
+    "name": "Dwarikesh Sugar",
+    "sector": "Sugar",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "TRIVENI",
+    "name": "Triveni Engineering",
+    "sector": "Sugar",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "JKPAPER",
+    "name": "JK Paper",
+    "sector": "Paper",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "ASTRAL",
+    "name": "Astral",
+    "sector": "Paper",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "SHREECEM",
+    "name": "Shree Cement",
+    "sector": "Cement",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 25
+  },
+  {
+    "symbol": "DALMIACEM",
+    "name": "Dalmia Bharat",
+    "sector": "Cement",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "BIRLACEM",
+    "name": "Birla Corporation",
+    "sector": "Cement",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "PRISMCEM",
+    "name": "Prism Johnson",
+    "sector": "Cement",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "JSWCEMENT",
+    "name": "JSW Cement",
+    "sector": "Cement",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "STARCEM",
+    "name": "Star Cement",
+    "sector": "Cement",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "FORTIS",
+    "name": "Fortis Healthcare",
+    "sector": "Healthcare",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "KIMS",
+    "name": "Krishna Institute of Medical Sciences",
+    "sector": "Healthcare",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "ASTER",
+    "name": "Aster DM Healthcare",
+    "sector": "Healthcare",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "NARAYANA",
+    "name": "Narayana Health",
+    "sector": "Healthcare",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "GLOBALHEAL",
+    "name": "Global Health",
+    "sector": "Healthcare",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "STARHEALTH",
+    "name": "Star Health Insurance",
+    "sector": "Insurance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "GENINS",
+    "name": "General Insurance",
+    "sector": "Insurance",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "LIFEINSURANCE",
+    "name": "Life Insurance Corp",
+    "sector": "Insurance",
+    "cap": "large",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "BDL",
+    "name": "Bharat Dynamics",
+    "sector": "Defence",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "MAZAGONDOCK",
+    "name": "Mazagon Dock",
+    "sector": "Defence",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "GRSE",
+    "name": "Garden Reach Shipbuilders",
+    "sector": "Defence",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "COCHINSHIP",
+    "name": "Cochin Shipyard",
+    "sector": "Defence",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "GARDENCHM",
+    "name": "Garden Reach Shipbuilders",
+    "sector": "Defence",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "MIDHANI",
+    "name": "Mishra Dhatu Nigam",
+    "sector": "Defence",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "BLUEDART",
+    "name": "Blue Dart Express",
+    "sector": "Logistics",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 125
+  },
+  {
+    "symbol": "TCIEXPRESS",
+    "name": "TCI Express",
+    "sector": "Logistics",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "ALLCARGO",
+    "name": "Allcargo Logistics",
+    "sector": "Logistics",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "MAHINDRALOG",
+    "name": "Mahindra Logistics",
+    "sector": "Logistics",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "GATI",
+    "name": "Gati",
+    "sector": "Logistics",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "BRIGADE",
+    "name": "Brigade Enterprises",
+    "sector": "Realty",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "SOBHA",
+    "name": "Sobha",
+    "sector": "Realty",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "SUNTECK",
+    "name": "Sunteck Realty",
+    "sector": "Realty",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "MAHLIFE",
+    "name": "Mahindra Lifespace",
+    "sector": "Realty",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "KOLTEPATIL",
+    "name": "Kolte-Patil Developers",
+    "sector": "Realty",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "ZEEL",
+    "name": "Zee Entertainment",
+    "sector": "Media",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "CAMS",
+    "name": "Computer Age Management",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "BSE",
+    "name": "BSE",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "KFINTECH",
+    "name": "KFin Technologies",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "MCX",
+    "name": "Multi Commodity Exchange",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "CDSL",
+    "name": "Central Depository Services",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "ANGELONE",
+    "name": "Angel One",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "MOTILALOFS",
+    "name": "Motilal Oswal Financial",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "TATACOMM",
+    "name": "Tata Communications",
+    "sector": "Telecom",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "TATATECH",
+    "name": "Tata Technologies",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "OLECTRA",
+    "name": "Olectra Greentech",
+    "sector": "Auto",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "AFFLE",
+    "name": "Affle India",
+    "sector": "Digital",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "KAYNES",
+    "name": "Kaynes Technology",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "SWARAJENG",
+    "name": "Swaraj Engines",
+    "sector": "Auto",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "VEDANT",
+    "name": "Vedant Fashions",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "PCBL",
+    "name": "PCBL",
+    "sector": "Chemicals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "GODREJIND",
+    "name": "Godrej Industries",
+    "sector": "Chemicals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "CENTURYTEX",
+    "name": "Century Textiles",
+    "sector": "Textiles",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "GPIL",
+    "name": "GPIL",
+    "sector": "Logistics",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "GRINDWELL",
+    "name": "Grindwell Norton",
+    "sector": "Engineering",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "INDIACEM",
+    "name": "India Cements",
+    "sector": "Cement",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "SUZLON",
+    "name": "Suzlon Energy",
+    "sector": "Power",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 10000
+  },
+  {
+    "symbol": "INDIANHOTEL",
+    "name": "Indian Hotels",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "CGPOWER",
+    "name": "CG Power and Industrial",
+    "sector": "Engineering",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "AEGISLOG",
+    "name": "Aegis Logistics",
+    "sector": "Logistics",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "AIAENG",
+    "name": "AIA Engineering",
+    "sector": "Engineering",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "ALOKTEXT",
+    "name": "Alok Industries",
+    "sector": "Textiles",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 5000
+  },
+  {
+    "symbol": "AMARAJABAT",
+    "name": "Amara Raja Batteries",
+    "sector": "Auto",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "APOLLOPIPE",
+    "name": "Apollo Pipes",
+    "sector": "Infra",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "ASTRAMICRO",
+    "name": "Astra Microwave",
+    "sector": "Defence",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "BEML",
+    "name": "BEML",
+    "sector": "Defence",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "BORORENEW",
+    "name": "Borosil Renewables",
+    "sector": "Power",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "CARBORUNIV",
+    "name": "Carborundum Universal",
+    "sector": "Engineering",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "CASTROLIND",
+    "name": "Castrol India",
+    "sector": "Energy",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "CENTUM",
+    "name": "Centum Electronics",
+    "sector": "Defence",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "CESCVENT",
+    "name": "CESC Ventures",
+    "sector": "Power",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "CHALET",
+    "name": "Chalet Hotels",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "CHEMPLAST",
+    "name": "Chemplast Sanmar",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "DELTACORP",
+    "name": "Delta Corp",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "DEVYANI",
+    "name": "Devyani International",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "EIHOTEL",
+    "name": "EIH",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "FINCABLES",
+    "name": "Finolex Cables",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "FSL",
+    "name": "Firstsource Solutions",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "GHCL",
+    "name": "GHCL",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "GODFRYPHLP",
+    "name": "Godfrey Phillips",
+    "sector": "FMCG",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "GRAVITA",
+    "name": "Gravita India",
+    "sector": "Metals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "HATHWAY",
+    "name": "Hathway Cable",
+    "sector": "Media",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "HIKAL",
+    "name": "Hikal",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "HINDCOPPER",
+    "name": "Hindustan Copper",
+    "sector": "Metals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "HINDNATNL",
+    "name": "Hindustan National Glass",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "HLEGLAS",
+    "name": "HLE Glascoat",
+    "sector": "Engineering",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "HUDCO",
+    "name": "HUDCO",
+    "sector": "Infra",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "IDFC",
+    "name": "IDFC",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 5000
+  },
+  {
+    "symbol": "IFCI",
+    "name": "IFCI",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 5000
+  },
+  {
+    "symbol": "INDOCO",
+    "name": "Indoco Remedies",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "INOXWIND",
+    "name": "Inox Wind",
+    "sector": "Power",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "JBCHEPHARM",
+    "name": "JB Chemicals",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "JCHAC",
+    "name": "Johnson Controls",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "JINDALSAW",
+    "name": "Jindal Saw",
+    "sector": "Metals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "JKLAKSHMI",
+    "name": "JK Lakshmi Cement",
+    "sector": "Cement",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "JTEKTINDIA",
+    "name": "Jtekt India",
+    "sector": "Auto",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "JUBLINGREA",
+    "name": "Jubilant Ingrevia",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "JUBLPHARMA",
+    "name": "Jubilant Pharmova",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "KAJARIACER",
+    "name": "Kajaria Ceramics",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "KANSAINER",
+    "name": "Kansai Nerolac",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "KEI",
+    "name": "KEI Industries",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "KNRCON",
+    "name": "KNR Constructions",
+    "sector": "Infra",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "KPIL",
+    "name": "Kalyani Steels",
+    "sector": "Metals",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "LAXMICOT",
+    "name": "Laxmi Cotspin",
+    "sector": "Textiles",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "LINDEINDIA",
+    "name": "Linde India",
+    "sector": "Chemicals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 125
+  },
+  {
+    "symbol": "LUXIND",
+    "name": "Lux Industries",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "MAHLOG",
+    "name": "Mahindra Logistics",
+    "sector": "Logistics",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "MAHSCOOTER",
+    "name": "Mahindra Scooters",
+    "sector": "Auto",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "MAHSEAMLES",
+    "name": "Maharashtra Seamless",
+    "sector": "Metals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "MANGCHEFER",
+    "name": "Mangalore Chemicals",
+    "sector": "Fertilizers",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "MARKSANS",
+    "name": "Marksans Pharma",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "MINDACORP",
+    "name": "Minda Corporation",
+    "sector": "Auto",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "MINDAIND",
+    "name": "Minda Industries",
+    "sector": "Auto",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "NCC",
+    "name": "NCC",
+    "sector": "Infra",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "NOCIL",
+    "name": "NOCIL",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "OFSS",
+    "name": "Oracle Financial Services",
+    "sector": "IT",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 100
+  },
+  {
+    "symbol": "PEL",
+    "name": "Piramal Enterprises",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "PRSMJOHNSN",
+    "name": "Prism Johnson",
+    "sector": "Cement",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "RADICO",
+    "name": "Radico Khaitan",
+    "sector": "FMCG",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "ADANITRANS",
+    "name": "Adani Transmission",
+    "sector": "Power",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "AARTIPHARM",
+    "name": "Aarti Pharmalab",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "ABBOTINDIA",
+    "name": "Abbott India",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 50
+  },
+  {
+    "symbol": "AARTIIND",
+    "name": "Aarti Industries",
+    "sector": "Chemicals",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "APARINDS",
+    "name": "Apar Industries",
+    "sector": "Engineering",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "APOLLO",
+    "name": "Apollo Microsystems",
+    "sector": "Defence",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "APOLLOMICRO",
+    "name": "Apollo Microsystems",
+    "sector": "Defence",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "SIS",
+    "name": "SIS",
+    "sector": "Logistics",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "SKFINDIA",
+    "name": "SKF India",
+    "sector": "Auto",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "SUNCLAYLTD",
+    "name": "Sundaram Clayton",
+    "sector": "Auto",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "TATAINVEST",
+    "name": "Tata Investment",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "TIMETECHNO",
+    "name": "Time Technoplast",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "TITAGARH",
+    "name": "Titagarh Rail Systems",
+    "sector": "Transport",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "TTKPRESTIG",
+    "name": "TTK Prestige",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "VAIBHAVGBL",
+    "name": "Vaibhav Global",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "VGUARD",
+    "name": "V-Guard Industries",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "VIPIND",
+    "name": "VIP Industries",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "WABCOINDIA",
+    "name": "Wabco India",
+    "sector": "Auto",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "WESTLIFE",
+    "name": "Westlife Foodworld",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "AARTIDRUGS",
+    "name": "Aarti Drugs",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "ADANIGAS",
+    "name": "Adani Total Gas",
+    "sector": "Energy",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "ALEMBICLTD",
+    "name": "Alembic",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "AMBER",
+    "name": "Amber Enterprises",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "ANANDRATHI",
+    "name": "Anand Rathi",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "APLLTD",
+    "name": "Alembic Pharma",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "BASML",
+    "name": "Bannari Amman Spinning",
+    "sector": "Textiles",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "BBTC",
+    "name": "Bombay Burmah",
+    "sector": "FMCG",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 250
+  },
+  {
+    "symbol": "BECTORFOOD",
+    "name": "Mrs Bectors Food",
+    "sector": "FMCG",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "BIRLAMONEY",
+    "name": "Aditya Birla Money",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": false,
+    "lot_size": null
+  },
+  {
+    "symbol": "BLUESTARCO",
+    "name": "Blue Star",
+    "sector": "Consumer",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "CAPLIPOINT",
+    "name": "Caplin Point",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "CARERATING",
+    "name": "Care Ratings",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "DALBHARAT",
+    "name": "Dalmia Bharat Sugar",
+    "sector": "Sugar",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "DCMSHRIRAM",
+    "name": "DCM Shriram",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "DHANUKA",
+    "name": "Dhanuka Agritech",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "EIDPARRY",
+    "name": "EID Parry",
+    "sector": "Fertilizers",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "EMAMILTD",
+    "name": "Emami",
+    "sector": "FMCG",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "FDC",
+    "name": "FDC",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "GILLETTE",
+    "name": "Gillette India",
+    "sector": "FMCG",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 50
+  },
+  {
+    "symbol": "HEIDELBERG",
+    "name": "Heidelberg Cement",
+    "sector": "Cement",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "3MINDIA",
+    "name": "3M India",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 100
+  },
+  {
+    "symbol": "AADHARHFC",
+    "name": "Aadhar Housing Finance",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "ADORWELD",
+    "name": "Ador Welding",
+    "sector": "Engineering",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "ALPHAGEO",
+    "name": "Alphageo India",
+    "sector": "Energy",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "AMRUTANJAN",
+    "name": "Amrutanjan Health",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "ANSALAPI",
+    "name": "Ansal Properties",
+    "sector": "Realty",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "APTECHT",
+    "name": "Aptech",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "ASHOKA",
+    "name": "Ashoka Buildcon",
+    "sector": "Infra",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "ASTRON",
+    "name": "Astron Paper",
+    "sector": "Paper",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "AURIONPRO",
+    "name": "Aurionpro Solutions",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "AVANTIFEED",
+    "name": "Avanti Feeds",
+    "sector": "FMCG",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "BANKINDIA",
+    "name": "Bank of India",
+    "sector": "Banking",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 4500
+  },
+  {
+    "symbol": "BEDMUTHA",
+    "name": "Bedmutha Industries",
+    "sector": "Metals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "BHAGERIA",
+    "name": "Bhageria Industries",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "BGRENERGY",
+    "name": "BGR Energy",
+    "sector": "Infra",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "BIRLACORPN",
+    "name": "Birla Corporation",
+    "sector": "Cement",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "BLISSGVS",
+    "name": "Bliss GVS Pharma",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "BODALCHEM",
+    "name": "Bodal Chemicals",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "BOMDYEING",
+    "name": "Bombay Dyeing",
+    "sector": "Textiles",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "BOROSIL",
+    "name": "Borosil",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "CAMPUS",
+    "name": "Campus Activewear",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "CANTABIL",
+    "name": "Cantabil Retail",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "CAPACITE",
+    "name": "Capacite Infraprojects",
+    "sector": "Infra",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "CENTENKA",
+    "name": "Century Enka",
+    "sector": "Textiles",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "CHENNPETRO",
+    "name": "Chennai Petroleum",
+    "sector": "Energy",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "CHOLAHLDNG",
+    "name": "Cholamandalam Holdings",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "CIGNITI",
+    "name": "Cigniti Technologies",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "CINELINE",
+    "name": "Cineline India",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "CREST",
+    "name": "Crest Ventures",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "CSBBANK",
+    "name": "CSB Bank",
+    "sector": "Banking",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "DBCORP",
+    "name": "D B Corp",
+    "sector": "Media",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "DBREALTY",
+    "name": "DB Realty",
+    "sector": "Realty",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 5000
+  },
+  {
+    "symbol": "DEN",
+    "name": "Den Networks",
+    "sector": "Media",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "DENORA",
+    "name": "De Nora India",
+    "sector": "Engineering",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "ELECON",
+    "name": "Elecon Engineering",
+    "sector": "Engineering",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "ELGIEQUIP",
+    "name": "Elgi Equipments",
+    "sector": "Engineering",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "ENGINERSIN",
+    "name": "Engineers India",
+    "sector": "Infra",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "ENIL",
+    "name": "Entertainment Network",
+    "sector": "Media",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "GABRIEL",
+    "name": "Gabriel India",
+    "sector": "Auto",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "GALLANTT",
+    "name": "Gallantt Ispat",
+    "sector": "Metals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "GANDHITUBE",
+    "name": "Gandhi Special Tubes",
+    "sector": "Metals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "GMRINFRA",
+    "name": "GMR Infrastructure",
+    "sector": "Infra",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 7500
+  },
+  {
+    "symbol": "HERANBA",
+    "name": "Heranba Industries",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "HGS",
+    "name": "HGS",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "ITI",
+    "name": "ITI",
+    "sector": "Telecom",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 5000
+  },
+  {
+    "symbol": "JAGSNPHARM",
+    "name": "Jagsonpal Pharma",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "JAYAGRO",
+    "name": "Jayant Agro",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "JMFINANCIL",
+    "name": "JM Financial",
+    "sector": "Finance",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "KABRAEXTR",
+    "name": "Kabra Extrusion",
+    "sector": "Infra",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "KAMDHENU",
+    "name": "Kamdhenu",
+    "sector": "Metals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "KOPRAN",
+    "name": "Kopran",
+    "sector": "Pharma",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "KRBL",
+    "name": "KRBL",
+    "sector": "FMCG",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "LAOPALA",
+    "name": "La Opala RG",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "LAXMIMACH",
+    "name": "Laxmi Machine",
+    "sector": "Textiles",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "MEDANTA",
+    "name": "Medanta Medicity",
+    "sector": "Healthcare",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "MEIL",
+    "name": "Megha Engineering",
+    "sector": "Infra",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "MMTC",
+    "name": "MMTC",
+    "sector": "Metals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 5000
+  },
+  {
+    "symbol": "MRPL",
+    "name": "Mangalore Refinery",
+    "sector": "Energy",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "NELCO",
+    "name": "Nelco",
+    "sector": "Defence",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "NESCO",
+    "name": "Nesco",
+    "sector": "Infra",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "NILKAMAL",
+    "name": "Nilkamal",
+    "sector": "Consumer",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "NIPPOBATRY",
+    "name": "Nippo Batteries",
+    "sector": "Auto",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "NUVOCO",
+    "name": "Nuvoco Vistas",
+    "sector": "Cement",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "ORIENTCEM",
+    "name": "Orient Cement",
+    "sector": "Cement",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "PRAJIND",
+    "name": "Praj Industries",
+    "sector": "Engineering",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "PTC",
+    "name": "PTC India",
+    "sector": "Power",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 2500
+  },
+  {
+    "symbol": "QUESS",
+    "name": "Quess Corp",
+    "sector": "Finance",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "RAILTEL",
+    "name": "Railtel",
+    "sector": "Telecom",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "RALLIS",
+    "name": "Rallis India",
+    "sector": "Chemicals",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 500
+  },
+  {
+    "symbol": "REDINGTON",
+    "name": "Redington",
+    "sector": "IT",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1500
+  },
+  {
+    "symbol": "RITES",
+    "name": "RITES",
+    "sector": "Infra",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 1000
+  },
+  {
+    "symbol": "SANOFI",
+    "name": "Sanofi India",
+    "sector": "Pharma",
+    "cap": "mid",
+    "is_fno": true,
+    "lot_size": 50
+  },
+  {
+    "symbol": "SASKEN",
+    "name": "Sasken Technologies",
+    "sector": "IT",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  },
+  {
+    "symbol": "TEJASNET",
+    "name": "Tejas Networks",
+    "sector": "Telecom",
+    "cap": "small",
+    "is_fno": true,
+    "lot_size": 750
+  }
 ]

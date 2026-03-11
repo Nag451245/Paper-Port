@@ -147,7 +147,7 @@ pub fn run_sector_scan(
     news_store: &NewsSentimentStore,
     ledger: &ScanLedger,
     sector: &str,
-    stocks: &[&crate::universe::StockInfo],
+    stocks: &[crate::universe::StockInfo],
 ) -> usize {
     let bridge_url = &state.config.broker.icici.bridge_url;
     let now_str = chrono::Utc::now().to_rfc3339();

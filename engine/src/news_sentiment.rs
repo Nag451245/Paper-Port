@@ -121,14 +121,14 @@ impl NewsSentimentStore {
     }
 
     pub fn get_sector_sentiment(&self, sector: &str, universe: &Universe) -> f64 {
-        let symbols = universe.by_sector(sector);
-        if symbols.is_empty() {
+        let stocks = universe.by_sector(sector);
+        if stocks.is_empty() {
             return 0.0;
         }
-        let total: f64 = symbols.iter()
+        let total: f64 = stocks.iter()
             .map(|s| self.get_sentiment(&s.symbol))
             .sum();
-        (total / symbols.len() as f64).clamp(-1.0, 1.0)
+        (total / stocks.len() as f64).clamp(-1.0, 1.0)
     }
 
     pub fn recent_items(&self, limit: usize) -> Vec<NewsItem> {
