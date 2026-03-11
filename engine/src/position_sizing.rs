@@ -113,8 +113,16 @@ impl MarketRegime {
     }
 }
 
-/// Compute the optimal quantity for a position given the sizing method and context
+/// Compute the optimal quantity for a position given the sizing method and context.
+/// Returns `default_qty` if price is zero or negative (avoids division by zero).
 pub fn compute_quantity(method: SizingMethod, ctx: &SizingContext) -> i64 {
+    if ctx.price <= 0.0 || !ctx.price.is_finite() {
+        return ctx.default_qty.max(1);
+    }
+    if ctx.nav <= 0.0 {
+        return ctx.default_qty.max(1);
+    }
+
     let raw_qty = match method {
         SizingMethod::Fixed => {
             return ctx.default_qty;

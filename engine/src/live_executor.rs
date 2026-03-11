@@ -71,28 +71,32 @@ pub fn spawn(state: Arc<AppState>) {
                 }
             };
 
-            if state.is_killed() {
-                continue;
-            }
-
             // ─── Tick-Level Threshold Execution (sub-second path) ──────────
-            // Bypasses candle aggregation for positions with SL/TP thresholds
+            // Risk-reducing SL/TP exits are allowed even when kill switch is active.
+            // Collect position snapshots first to avoid holding DashMap read locks
+            // while calling sync_oms_fill (which needs write locks) — prevents deadlock.
             if tick_exec_enabled {
-                for entry in state.positions.iter() {
-                    let pos = entry.value();
-                    if pos.symbol != tick.symbol { continue; }
+                let exits_needed: Vec<(String, i64, bool, Option<f64>, Option<f64>)> = state.positions.iter()
+                    .filter(|entry| entry.value().symbol == tick.symbol)
+                    .map(|entry| {
+                        let pos = entry.value();
+                        (pos.symbol.clone(), pos.qty, pos.side.eq_ignore_ascii_case("buy"),
+                         pos.stop_loss, pos.take_profit)
+                    })
+                    .collect();
 
-                    let is_long = pos.side.eq_ignore_ascii_case("buy");
-                    if let Some(sl) = pos.stop_loss {
-                        let hit = if is_long { tick.ltp <= sl } else { tick.ltp >= sl };
+                for (sym, qty, is_long, sl, tp) in exits_needed {
+                    let mut exited = false;
+                    if let Some(sl_price) = sl {
+                        let hit = if is_long { tick.ltp <= sl_price } else { tick.ltp >= sl_price };
                         if hit {
                             let close_side = if is_long { OrderSide::Sell } else { OrderSide::Buy };
                             let order_req = OrderRequest {
-                                symbol: tick.symbol.clone(),
+                                symbol: sym.clone(),
                                 exchange: exchange.clone(),
                                 side: close_side,
                                 order_type: OrderType::Market,
-                                quantity: pos.qty,
+                                quantity: qty,
                                 price: Some(tick.ltp),
                                 product: ProductType::Intraday,
                                 tag: Some("tick_sl".into()),
@@ -104,40 +108,47 @@ pub fn spawn(state: Arc<AppState>) {
                                     let side_str = if is_long { "sell" } else { "buy" };
                                     state.sync_oms_fill(&order.symbol, side_str, order.filled_qty,
                                         order.avg_fill_price, None, None);
-                                    state.log_audit("TICK_SL_EXIT", Some(&tick.symbol),
+                                    state.log_audit("TICK_SL_EXIT", Some(&sym),
                                         &format!("SL hit at {:.2}, closed {} qty", tick.ltp, order.filled_qty));
                                 }
                             }
+                            exited = true;
                         }
                     }
-                    if let Some(tp) = pos.take_profit {
-                        let hit = if is_long { tick.ltp >= tp } else { tick.ltp <= tp };
-                        if hit {
-                            let close_side = if is_long { OrderSide::Sell } else { OrderSide::Buy };
-                            let order_req = OrderRequest {
-                                symbol: tick.symbol.clone(),
-                                exchange: exchange.clone(),
-                                side: close_side,
-                                order_type: OrderType::Market,
-                                quantity: pos.qty,
-                                price: Some(tick.ltp),
-                                product: ProductType::Intraday,
-                                tag: Some("tick_tp".into()),
-                                ..Default::default()
-                            };
-                            let ref_price = Some(tick.ltp);
-                            if let Ok(order) = state.oms.submit_order(order_req, None, ref_price) {
-                                if order.filled_qty > 0 {
-                                    let side_str = if is_long { "sell" } else { "buy" };
-                                    state.sync_oms_fill(&order.symbol, side_str, order.filled_qty,
-                                        order.avg_fill_price, None, None);
-                                    state.log_audit("TICK_TP_EXIT", Some(&tick.symbol),
-                                        &format!("TP hit at {:.2}, closed {} qty", tick.ltp, order.filled_qty));
+                    if !exited {
+                        if let Some(tp_price) = tp {
+                            let hit = if is_long { tick.ltp >= tp_price } else { tick.ltp <= tp_price };
+                            if hit {
+                                let close_side = if is_long { OrderSide::Sell } else { OrderSide::Buy };
+                                let order_req = OrderRequest {
+                                    symbol: sym.clone(),
+                                    exchange: exchange.clone(),
+                                    side: close_side,
+                                    order_type: OrderType::Market,
+                                    quantity: qty,
+                                    price: Some(tick.ltp),
+                                    product: ProductType::Intraday,
+                                    tag: Some("tick_tp".into()),
+                                    ..Default::default()
+                                };
+                                let ref_price = Some(tick.ltp);
+                                if let Ok(order) = state.oms.submit_order(order_req, None, ref_price) {
+                                    if order.filled_qty > 0 {
+                                        let side_str = if is_long { "sell" } else { "buy" };
+                                        state.sync_oms_fill(&order.symbol, side_str, order.filled_qty,
+                                            order.avg_fill_price, None, None);
+                                        state.log_audit("TICK_TP_EXIT", Some(&sym),
+                                            &format!("TP hit at {:.2}, closed {} qty", tick.ltp, order.filled_qty));
+                                    }
                                 }
                             }
                         }
                     }
                 }
+            }
+
+            if state.is_killed() {
+                continue;
             }
 
             // Update 5m and 15m partial candles
@@ -267,7 +278,6 @@ pub fn spawn(state: Arc<AppState>) {
                             continue;
                         }
 
-                        // Daily trade limit check
                         let daily_count = state.daily_trade_count.load(std::sync::atomic::Ordering::Relaxed);
                         if daily_count >= state.config.risk.max_daily_trades {
                             warn!(symbol = %tick.symbol, "Daily trade limit reached");
@@ -286,87 +296,104 @@ pub fn spawn(state: Arc<AppState>) {
                         let ref_price = state.live_prices.get_ltp(&tick.symbol);
                         let algo = ExecAlgoType::from_str_loose(&exec_algo_str);
 
+                        let exec_state = state.clone();
+                        let exec_symbol = tick.symbol.clone();
+                        let exec_exchange = exchange.clone();
+                        let exec_strat = strat_name.clone();
+                        let exec_side_str = side_str.to_string();
+                        let exec_sl = signal.stop_loss;
+                        let exec_tp = signal.take_profit;
+                        let exec_price = signal.price;
+
                         match algo {
                             ExecAlgoType::TWAP => {
-                                let plan = plan_twap(&tick.symbol, order_side, qty, &TwapConfig {
+                                let plan = plan_twap(&exec_symbol, order_side, qty, &TwapConfig {
                                     duration_secs: exec_duration, num_slices: exec_slices, randomize_pct: 15.0,
                                 });
-                                let result = execute_plan_sync(&plan, &state.oms, &exchange, product,
-                                    Some(signal.price), Some(strat_name.clone()), ref_price);
-                                if result.total_filled > 0 {
-                                    state.sync_oms_fill(&tick.symbol, side_str, result.total_filled,
-                                        result.avg_fill_price, signal.stop_loss, signal.take_profit);
-                                    state.log_audit("LIVE_TWAP_EXEC", Some(&tick.symbol),
-                                        &format!("filled={}/{} avg={:.2} slices={}/{}",
-                                            result.total_filled, qty, result.avg_fill_price,
-                                            result.num_slices_filled, result.num_slices_attempted));
-                                }
+                                tokio::task::spawn_blocking(move || {
+                                    let result = execute_plan_sync(&plan, &exec_state.oms, &exec_exchange, product,
+                                        Some(exec_price), Some(exec_strat.clone()), ref_price);
+                                    if result.total_filled > 0 {
+                                        exec_state.sync_oms_fill(&exec_symbol, &exec_side_str, result.total_filled,
+                                            result.avg_fill_price, exec_sl, exec_tp);
+                                        exec_state.log_audit("LIVE_TWAP_EXEC", Some(&exec_symbol),
+                                            &format!("filled={}/{} avg={:.2} slices={}/{}",
+                                                result.total_filled, qty, result.avg_fill_price,
+                                                result.num_slices_filled, result.num_slices_attempted));
+                                    }
+                                });
                             }
                             ExecAlgoType::VWAP => {
-                                let plan = plan_vwap(&tick.symbol, order_side, qty, &VwapConfig {
+                                let plan = plan_vwap(&exec_symbol, order_side, qty, &VwapConfig {
                                     duration_secs: exec_duration, num_slices: exec_slices,
                                     volume_profile: Vec::new(), max_participation_rate: 0.25,
                                 });
-                                let result = execute_plan_sync(&plan, &state.oms, &exchange, product,
-                                    Some(signal.price), Some(strat_name.clone()), ref_price);
-                                if result.total_filled > 0 {
-                                    state.sync_oms_fill(&tick.symbol, side_str, result.total_filled,
-                                        result.avg_fill_price, signal.stop_loss, signal.take_profit);
-                                    state.log_audit("LIVE_VWAP_EXEC", Some(&tick.symbol),
-                                        &format!("filled={}/{} vwap={:.2}", result.total_filled, qty, result.vwap_achieved));
-                                }
+                                tokio::task::spawn_blocking(move || {
+                                    let result = execute_plan_sync(&plan, &exec_state.oms, &exec_exchange, product,
+                                        Some(exec_price), Some(exec_strat.clone()), ref_price);
+                                    if result.total_filled > 0 {
+                                        exec_state.sync_oms_fill(&exec_symbol, &exec_side_str, result.total_filled,
+                                            result.avg_fill_price, exec_sl, exec_tp);
+                                        exec_state.log_audit("LIVE_VWAP_EXEC", Some(&exec_symbol),
+                                            &format!("filled={}/{} vwap={:.2}", result.total_filled, qty, result.vwap_achieved));
+                                    }
+                                });
                             }
                             ExecAlgoType::Iceberg => {
-                                let plan = plan_iceberg(&tick.symbol, order_side, qty, &IcebergConfig {
+                                let plan = plan_iceberg(&exec_symbol, order_side, qty, &IcebergConfig {
                                     visible_qty: iceberg_visible, replenish_delay_ms: 500,
                                 });
-                                let result = execute_plan_sync(&plan, &state.oms, &exchange, product,
-                                    Some(signal.price), Some(strat_name.clone()), ref_price);
-                                if result.total_filled > 0 {
-                                    state.sync_oms_fill(&tick.symbol, side_str, result.total_filled,
-                                        result.avg_fill_price, signal.stop_loss, signal.take_profit);
-                                    state.log_audit("LIVE_ICEBERG_EXEC", Some(&tick.symbol),
-                                        &format!("filled={}/{} slices={}", result.total_filled, qty, result.num_slices_filled));
-                                }
+                                tokio::task::spawn_blocking(move || {
+                                    let result = execute_plan_sync(&plan, &exec_state.oms, &exec_exchange, product,
+                                        Some(exec_price), Some(exec_strat.clone()), ref_price);
+                                    if result.total_filled > 0 {
+                                        exec_state.sync_oms_fill(&exec_symbol, &exec_side_str, result.total_filled,
+                                            result.avg_fill_price, exec_sl, exec_tp);
+                                        exec_state.log_audit("LIVE_ICEBERG_EXEC", Some(&exec_symbol),
+                                            &format!("filled={}/{} slices={}", result.total_filled, qty, result.num_slices_filled));
+                                    }
+                                });
                             }
                             ExecAlgoType::Direct => {
-                                let order_req = OrderRequest {
-                                    symbol: tick.symbol.clone(),
-                                    exchange: exchange.clone(),
-                                    side: order_side,
-                                    order_type: OrderType::Limit,
-                                    quantity: qty,
-                                    price: Some(signal.price),
-                                    trigger_price: signal.stop_loss,
-                                    product,
-                                    tag: Some(format!("live:{}", strat_name)),
-                                    ..Default::default()
-                                };
+                                tokio::task::spawn_blocking(move || {
+                                    let order_req = OrderRequest {
+                                        symbol: exec_symbol.clone(),
+                                        exchange: exec_exchange,
+                                        side: order_side,
+                                        order_type: OrderType::Limit,
+                                        quantity: qty,
+                                        price: Some(exec_price),
+                                        trigger_price: exec_sl,
+                                        product,
+                                        tag: Some(format!("live:{}", exec_strat)),
+                                        ..Default::default()
+                                    };
 
-                                match state.oms.submit_order(order_req, Some(strat_name.clone()), ref_price) {
-                                    Ok(order) => {
-                                        if order.status == crate::broker::OrderStatus::Filled && order.filled_qty > 0 {
-                                            state.sync_oms_fill(
-                                                &order.symbol, side_str, order.filled_qty,
-                                                order.avg_fill_price, signal.stop_loss, signal.take_profit,
+                                    match exec_state.oms.submit_order(order_req, Some(exec_strat.clone()), ref_price) {
+                                        Ok(order) => {
+                                            if order.status == crate::broker::OrderStatus::Filled && order.filled_qty > 0 {
+                                                exec_state.sync_oms_fill(
+                                                    &order.symbol, &exec_side_str, order.filled_qty,
+                                                    order.avg_fill_price, exec_sl, exec_tp,
+                                                );
+                                            }
+                                            info!(symbol = %exec_symbol, order_id = %order.internal_id,
+                                                "Live executor auto-submitted order");
+                                            exec_state.log_audit("LIVE_AUTO_EXEC", Some(&exec_symbol),
+                                                &format!("order_id={} qty={}", order.internal_id, qty));
+                                        }
+                                        Err(e) => {
+                                            error!(symbol = %exec_symbol, error = %e,
+                                                "Live executor order submission failed");
+                                            exec_state.alert_manager.fire(
+                                                AlertType::OrderRejected, AlertSeverity::Warning,
+                                                "Live auto-execution rejected",
+                                                &format!("Live exec rejected for {}: {}", exec_symbol, e),
+                                                Some(&exec_symbol), None,
                                             );
                                         }
-                                        info!(symbol = %tick.symbol, order_id = %order.internal_id,
-                                            "Live executor auto-submitted order");
-                                        state.log_audit("LIVE_AUTO_EXEC", Some(&tick.symbol),
-                                            &format!("order_id={} qty={}", order.internal_id, qty));
                                     }
-                                    Err(e) => {
-                                        error!(symbol = %tick.symbol, error = %e,
-                                            "Live executor order submission failed");
-                                        state.alert_manager.fire(
-                                            AlertType::OrderRejected, AlertSeverity::Warning,
-                                            "Live auto-execution rejected",
-                                            &format!("Live exec rejected for {}: {}", tick.symbol, e),
-                                            Some(&tick.symbol), None,
-                                        );
-                                    }
-                                }
+                                });
                             }
                         }
                     }

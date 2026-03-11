@@ -134,6 +134,10 @@ impl OMS {
                     }
                 }
             }
+        } else if matches!(req.order_type, OrderType::Market) {
+            return Err(
+                "Market order rejected: no price or reference_price provided for fat-finger validation".into()
+            );
         }
 
         Ok(())

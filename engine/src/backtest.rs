@@ -154,7 +154,7 @@ pub fn run(data: Value) -> Result<Value, String> {
         nav = cash;
         if let Some((ep, qty, _, is_short, _, _)) = &position {
             if *is_short {
-                nav += (*ep - candle.close) * (*qty) as f64 + *ep * (*qty) as f64;
+                nav += (*ep - candle.close) * (*qty) as f64;
             } else {
                 nav += candle.close * (*qty) as f64;
             }
@@ -186,7 +186,7 @@ pub fn run(data: Value) -> Result<Value, String> {
                 let exit_cost = costs.total_cost(exit_value, true);
                 let net_pnl = gross_pnl - exit_cost;
                 if is_short {
-                    cash += ep * qty as f64 + gross_pnl - exit_cost;
+                    cash += gross_pnl - exit_cost;
                 } else {
                     cash += exit_value - exit_cost;
                 }
@@ -220,7 +220,7 @@ pub fn run(data: Value) -> Result<Value, String> {
                 let exit_cost = costs.total_cost(exit_value, true);
                 let net_pnl = gross_pnl - exit_cost;
                 if is_short {
-                    cash += ep * qty as f64 + gross_pnl - exit_cost;
+                    cash += gross_pnl - exit_cost;
                 } else {
                     cash += exit_value - exit_cost;
                 }
@@ -247,7 +247,7 @@ pub fn run(data: Value) -> Result<Value, String> {
                         let exit_value = exit_price * qty as f64;
                         let exit_cost = costs.total_cost(exit_value, true);
                         let net_pnl = gross_pnl - exit_cost;
-                        cash += ep * qty as f64 + gross_pnl - exit_cost;
+                        cash += gross_pnl - exit_cost;
                         total_costs += exit_cost;
                         trades.push(TradeEntry {
                             symbol: config.symbol.clone(), side: "SHORT".into(),
@@ -302,7 +302,6 @@ pub fn run(data: Value) -> Result<Value, String> {
                             let entry_price = costs.slippage_adjusted_price(signal.price, false);
                             let position_value = entry_price * qty as f64;
                             let entry_cost = costs.total_cost(position_value, false);
-                            // Short: we receive proceeds but must post margin (simplified: deduct cost only)
                             cash -= entry_cost;
                             total_costs += entry_cost;
                             position = Some((entry_price, qty, candle.timestamp.clone(), true, signal.stop_loss, signal.take_profit));
@@ -316,7 +315,7 @@ pub fn run(data: Value) -> Result<Value, String> {
         nav = cash;
         if let Some((ep, qty, _, is_short, _, _)) = &position {
             if *is_short {
-                nav += (*ep - candle.close) * (*qty) as f64 + *ep * (*qty) as f64;
+                nav += (*ep - candle.close) * (*qty) as f64;
             } else {
                 nav += candle.close * (*qty) as f64;
             }
@@ -339,7 +338,7 @@ pub fn run(data: Value) -> Result<Value, String> {
             let exit_cost = costs.total_cost(exit_value, true);
             let net_pnl = gross_pnl - exit_cost;
             if is_short {
-                cash += ep * qty as f64 + gross_pnl - exit_cost;
+                cash += gross_pnl - exit_cost;
             } else {
                 cash += exit_value - exit_cost;
             }

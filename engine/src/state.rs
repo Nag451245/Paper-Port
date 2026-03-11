@@ -62,6 +62,18 @@ pub fn position_key(symbol: &str, ac: crate::broker::AssetClass,
 }
 
 impl Position {
+    /// Unique position key that differentiates across asset classes.
+    /// Equity: "RELIANCE", Futures: "RELIANCE:FUT:2026-03", Options: "RELIANCE:OPT:2026-03:22000:CE"
+    pub fn key(&self) -> String {
+        position_key(
+            &self.symbol,
+            self.asset_class,
+            self.expiry.as_deref(),
+            self.strike,
+            self.option_type.as_deref(),
+        )
+    }
+
     pub fn update_price(&mut self, price: f64) {
         self.current_price = price;
         self.unrealized_pnl = if self.side == "buy" {
@@ -208,8 +220,10 @@ impl AppState {
             loop {
                 match rx.recv().await {
                     Ok(tick) => {
-                        if let Some(mut pos) = state.positions.get_mut(&tick.symbol) {
-                            pos.update_price(tick.ltp);
+                        for mut entry in state.positions.iter_mut() {
+                            if entry.value().symbol == tick.symbol {
+                                entry.value_mut().update_price(tick.ltp);
+                            }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -368,7 +382,8 @@ impl AppState {
         state.peak_nav.store(snap.peak_nav.to_bits(), Ordering::Release);
         state.set_nav(snap.nav);
         for pos in snap.positions {
-            state.positions.insert(pos.symbol.clone(), pos);
+            let key = pos.key();
+            state.positions.insert(key, pos);
         }
         if snap.realized_pnl != 0.0 {
             state.add_realized_pnl(snap.realized_pnl);
@@ -459,20 +474,25 @@ impl AppState {
             + self.config.costs.commission_per_trade;
         self.adjust_cash(-(position_value + cost));
 
-        let sym = pos.symbol.clone();
-        let detail = format!("side={} qty={} price={:.2}", pos.side, pos.qty, pos.entry_price);
-        self.positions.insert(sym.clone(), pos);
+        let key = pos.key();
+        let detail = format!("side={} qty={} price={:.2} key={}", pos.side, pos.qty, pos.entry_price, key);
+        self.positions.insert(key.clone(), pos);
         self.recalculate_nav_locked();
-        self.log_audit("OPEN_POSITION", Some(&sym), &detail);
+        self.log_audit("OPEN_POSITION", Some(&key), &detail);
         Ok(())
     }
 
-    /// Close a position by symbol. Returns the realized PnL.
+    /// Close a position by key (or symbol for backward compat). Returns the realized PnL.
     /// Holds position_lock so cash + positions are read atomically in recalculate_nav.
     pub fn close_position(&self, symbol: &str, exit_price: f64) -> Result<f64, String> {
         let _guard = self.position_lock.lock().unwrap_or_else(|e| e.into_inner());
 
-        match self.positions.remove(symbol) {
+        match self.positions.remove(symbol).or_else(|| {
+            let matching_key = self.positions.iter()
+                .find(|entry| entry.value().symbol == symbol)
+                .map(|entry| entry.key().clone());
+            matching_key.and_then(|k| self.positions.remove(&k))
+        }) {
             Some((_, mut pos)) => {
                 pos.update_price(exit_price);
                 let pnl = pos.unrealized_pnl;
@@ -515,11 +535,21 @@ impl AppState {
     /// Sync a filled OMS order into AppState.positions.
     /// Call after submit_order when the order is filled.
     /// Holds position_lock for the entire operation to prevent TOCTOU races.
+    /// For equity positions, `symbol` alone is sufficient. For derivatives, the
+    /// key is derived from the Position's asset_class fields via `position_key()`.
     pub fn sync_oms_fill(&self, symbol: &str, side: &str, qty: i64, fill_price: f64,
                          stop_loss: Option<f64>, take_profit: Option<f64>) {
         let _guard = self.position_lock.lock().unwrap_or_else(|e| e.into_inner());
 
-        if let Some(mut existing) = self.positions.get_mut(symbol) {
+        let key = {
+            if let Some(entry) = self.positions.iter().find(|e| e.value().symbol == symbol) {
+                entry.key().clone()
+            } else {
+                symbol.to_string()
+            }
+        };
+
+        if let Some(mut existing) = self.positions.get_mut(&key) {
             let same_side = existing.side.eq_ignore_ascii_case(side);
             if same_side {
                 let old_qty = existing.qty;
@@ -540,11 +570,19 @@ impl AppState {
                         (existing.entry_price - fill_price) * close_qty as f64
                     };
                     drop(existing);
-                    self.positions.remove(symbol);
+                    self.positions.remove(&key);
                     self.add_realized_pnl(pnl);
                     let value = fill_price * close_qty.unsigned_abs() as f64;
                     self.adjust_cash(value);
                 } else {
+                    let partial_pnl = if existing.side.eq_ignore_ascii_case("buy") {
+                        (fill_price - existing.entry_price) * close_qty as f64
+                    } else {
+                        (existing.entry_price - fill_price) * close_qty as f64
+                    };
+                    let partial_value = fill_price * close_qty.unsigned_abs() as f64;
+                    self.add_realized_pnl(partial_pnl);
+                    self.adjust_cash(partial_value);
                     existing.qty = remaining;
                     existing.update_price(fill_price);
                 }
@@ -566,7 +604,8 @@ impl AppState {
                 strike: None,
                 option_type: None,
             };
-            self.positions.insert(symbol.to_string(), pos);
+            let new_key = pos.key();
+            self.positions.insert(new_key, pos);
         }
     }
 

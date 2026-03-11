@@ -226,12 +226,16 @@ impl Strategy for EmaCrossover {
     fn reset(&mut self) { self.in_position = false; }
 
     fn on_candle(&mut self, i: usize, candle: &Candle, ind: &Indicators) -> Option<Signal> {
-        if i < self.long_period { return None; }
+        if i < self.long_period || i == 0 { return None; }
 
         let ema_s = ind.ema_short[i];
         let ema_l = ind.ema_long[i];
+        let prev_s = ind.ema_short[i - 1];
+        let prev_l = ind.ema_long[i - 1];
 
-        if !self.in_position && ema_s > ema_l {
+        if ema_l == 0.0 || prev_l == 0.0 { return None; }
+
+        if !self.in_position && prev_s <= prev_l && ema_s > ema_l {
             self.in_position = true;
             Some(Signal {
                 side: Side::Buy,
@@ -241,7 +245,7 @@ impl Strategy for EmaCrossover {
                 confidence: ((ema_s - ema_l) / ema_l * 100.0).min(1.0),
                 reason: format!("EMA {} crossed above EMA {}", self.short_period, self.long_period),
             })
-        } else if self.in_position && ema_s < ema_l {
+        } else if self.in_position && prev_s >= prev_l && ema_s < ema_l {
             self.in_position = false;
             Some(Signal {
                 side: Side::Sell,
@@ -442,7 +446,7 @@ impl Strategy for RsiReversal {
     fn reset(&mut self) { self.in_position = false; }
 
     fn on_candle(&mut self, i: usize, candle: &Candle, ind: &Indicators) -> Option<Signal> {
-        if i >= ind.rsi.len() || ind.rsi[i] == 0.0 { return None; }
+        if i >= ind.rsi.len() || ind.rsi[i].is_nan() || i < 14 { return None; }
 
         let rsi = ind.rsi[i];
 
@@ -1367,7 +1371,8 @@ mod tests {
     #[test]
     fn test_ema_crossover_generates_signals() {
         let config = make_config();
-        let candles = make_trending_candles(60, 100.0, 1.0);
+        let mut candles = make_trending_candles(30, 100.0, -0.5);
+        candles.extend(make_trending_candles(40, 85.0, 1.5));
         let indicators = Indicators::from_candles(&candles, &config);
         let mut strat = EmaCrossover::new(&config);
 
@@ -1377,7 +1382,7 @@ mod tests {
                 signal_count += 1;
             }
         }
-        assert!(signal_count > 0, "EMA crossover should generate signals on trending data");
+        assert!(signal_count > 0, "EMA crossover should generate signals on data with a clear crossover");
     }
 
     #[test]
