@@ -174,6 +174,8 @@ pub struct AppState {
     pub live_prices: Arc<LivePriceStore>,
     /// Options chain data store (populated by options feed)
     pub options_data: Arc<OptionsDataStore>,
+    /// Dynamic watchlist from pre-market scanner (symbols to subscribe for live ticks)
+    dynamic_watchlist: Mutex<Vec<String>>,
 }
 
 impl AppState {
@@ -209,6 +211,7 @@ impl AppState {
             broker_adapter: broker,
             live_prices,
             options_data,
+            dynamic_watchlist: Mutex::new(Vec::new()),
         })
     }
 
@@ -335,6 +338,16 @@ impl AppState {
     pub fn deactivate_kill_switch(&self) {
         self.killed.store(false, Ordering::Release);
         self.log_audit("KILL_SWITCH_OFF", None, "Kill switch deactivated");
+    }
+
+    pub fn set_dynamic_watchlist(&self, symbols: Vec<String>) {
+        if let Ok(mut wl) = self.dynamic_watchlist.lock() {
+            *wl = symbols;
+        }
+    }
+
+    pub fn get_dynamic_watchlist(&self) -> Vec<String> {
+        self.dynamic_watchlist.lock().map(|wl| wl.clone()).unwrap_or_default()
     }
 
     pub fn is_killed(&self) -> bool {

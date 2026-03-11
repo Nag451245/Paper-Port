@@ -39,6 +39,8 @@ pub struct EngineConfig {
     pub circuit_breaker: CircuitBreakerConfig,
     #[serde(default)]
     pub oms_retry: OmsRetryConfig,
+    #[serde(default)]
+    pub premarket: PremarketConfig,
     #[serde(default = "default_initial_capital")]
     pub initial_capital: f64,
 }
@@ -474,7 +476,80 @@ impl Default for EngineConfig {
             rate_limit: RateLimitConfig::default(),
             circuit_breaker: CircuitBreakerConfig::default(),
             oms_retry: OmsRetryConfig::default(),
+            premarket: PremarketConfig::default(),
             initial_capital: 1_000_000.0,
+        }
+    }
+}
+
+// ─── Pre-Market Scanner ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PremarketConfig {
+    /// Master switch for the pre-market scanner
+    pub enabled: bool,
+    /// IST time to run pre-market scan (HH:MM format, e.g. "08:50")
+    pub scan_time_ist: String,
+    /// IST time to auto-execute queued signals (e.g. "09:15" for market open)
+    pub execute_time_ist: String,
+    /// Auto-execute top signals at market open
+    pub auto_execute_at_open: bool,
+
+    /// Path to symbol universe file (JSON array or one-per-line text)
+    pub universe_file: String,
+    /// Inline symbol list (used if universe_file is empty)
+    pub symbols: Vec<String>,
+
+    /// Tier-1 quick filter thresholds
+    pub min_avg_volume: u64,
+    pub min_price: f64,
+    pub max_price: f64,
+    pub min_volume_ratio: f64,
+
+    /// Tier-2 deep scan settings
+    pub lookback_days: i64,
+    pub scan_interval: String,
+    pub aggressiveness: String,
+    pub min_signal_confidence: f64,
+
+    /// How many top signals to keep after ranking
+    pub max_signals: usize,
+    /// Max parallel HTTP requests for data fetching
+    pub concurrency: usize,
+    /// Position sizing mode for pre-market signals
+    pub position_sizing_mode: String,
+    /// Max orders to auto-execute at market open
+    pub max_auto_orders: usize,
+    /// Exchange for execution
+    pub execution_exchange: String,
+    /// Product type for execution
+    pub execution_product: String,
+}
+
+impl Default for PremarketConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_time_ist: "08:50".into(),
+            execute_time_ist: "09:15".into(),
+            auto_execute_at_open: false,
+            universe_file: String::new(),
+            symbols: Vec::new(),
+            min_avg_volume: 100_000,
+            min_price: 10.0,
+            max_price: 0.0,
+            min_volume_ratio: 0.5,
+            lookback_days: 60,
+            scan_interval: "1day".into(),
+            aggressiveness: "medium".into(),
+            min_signal_confidence: 0.65,
+            max_signals: 20,
+            concurrency: 15,
+            position_sizing_mode: "nav_pct".into(),
+            max_auto_orders: 10,
+            execution_exchange: "NSE".into(),
+            execution_product: "intraday".into(),
         }
     }
 }

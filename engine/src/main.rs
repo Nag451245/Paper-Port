@@ -31,6 +31,7 @@ pub mod exec_algo;
 pub mod slippage;
 pub mod position_sizing;
 pub mod live_executor;
+pub mod premarket;
 
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -246,6 +247,17 @@ async fn main() {
             }
 
             live_executor::spawn(state.clone());
+
+            // Start pre-market scanner scheduler (runs at configured IST time)
+            premarket::spawn_scheduler(state.clone());
+
+            // Start dynamic watchlist feed (polls quotes for pre-market discovered symbols)
+            if state.config.premarket.enabled {
+                let dyn_state = state.clone();
+                tokio::spawn(async move {
+                    premarket::start_dynamic_feed(dyn_state).await;
+                });
+            }
 
             server::run(state).await;
         }
@@ -714,6 +726,47 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
             Ok(serde_json::json!({
                 "signals_evaluated": qualifying.len(),
                 "orders": results,
+            }))
+        }
+
+        "premarket_scan" => {
+            let scan_state = state.clone();
+            let report = premarket::run_premarket_pipeline(&scan_state);
+            Ok(serde_json::to_value(&report).unwrap_or_default())
+        }
+
+        "premarket_execute" => {
+            let exec_config = state.config.premarket.clone();
+            let results = premarket::execute_queued_signals(state, &exec_config);
+            Ok(serde_json::json!({
+                "executed": results.len(),
+                "submitted": results.iter().filter(|r| r.status == "submitted").count(),
+                "rejected": results.iter().filter(|r| r.status == "rejected").count(),
+                "orders": results,
+            }))
+        }
+
+        "premarket_status" => {
+            let watchlist = state.get_dynamic_watchlist();
+            let cached_signals: Vec<serde_json::Value> = state.signal_cache.iter()
+                .filter(|e| e.key().contains("premarket") || e.key().contains("composite"))
+                .map(|e| {
+                    let s = e.value();
+                    serde_json::json!({
+                        "symbol": s.symbol, "strategy": s.strategy,
+                        "side": s.side, "price": s.price,
+                        "confidence": s.confidence, "suggested_qty": s.suggested_qty,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "scheduler_enabled": state.config.premarket.enabled,
+                "scan_time_ist": state.config.premarket.scan_time_ist,
+                "execute_time_ist": state.config.premarket.execute_time_ist,
+                "auto_execute": state.config.premarket.auto_execute_at_open,
+                "dynamic_watchlist": watchlist,
+                "cached_signals": cached_signals.len(),
+                "signals": cached_signals,
             }))
         }
 
