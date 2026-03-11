@@ -36,7 +36,7 @@ LOT_SIZE_FILE = os.path.join(SCRIPT_DIR, ".lot_sizes.json")
 # In-memory response cache to avoid hammering Breeze API
 _response_cache = {}
 _response_cache_lock = threading.Lock()
-CACHE_TTL_SECONDS = 8
+CACHE_TTL_SECONDS = 3
 
 
 def _cache_get(key):
@@ -712,10 +712,10 @@ def _guess_strike(symbol):
     """Return ATM strike: cache → Breeze API → Yahoo → hardcoded fallback."""
     sym = symbol.upper()
 
-    # 1. Check cache (valid for 5 minutes)
+    # 1. Check cache (valid for 30 seconds)
     with _spot_price_cache_lock:
         cached = _spot_price_cache.get(sym)
-        if cached and (datetime.now() - cached["at"]).total_seconds() < 300:
+        if cached and (datetime.now() - cached["at"]).total_seconds() < 30:
             spot = cached["price"]
             step = _get_strike_step(sym)
             atm = round(spot / step) * step
