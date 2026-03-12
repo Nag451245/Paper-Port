@@ -40,6 +40,13 @@ vi.mock('../services/api', () => ({
 
 vi.mock('../services/websocket', () => ({
     priceFeed: { subscribe: vi.fn(), unsubscribe: vi.fn() },
+    liveSocket: {
+        on: vi.fn().mockReturnValue(() => {}),
+        off: vi.fn(),
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+        send: vi.fn(),
+    },
 }));
 
 vi.mock('../stores/auth', () => ({

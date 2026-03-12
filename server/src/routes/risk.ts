@@ -170,13 +170,27 @@ export async function riskRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ── Stop-Loss Monitor Status ──
-  app.get('/stop-loss/status', async (_request, reply) => {
+  app.get('/stop-loss/status', async (request, reply) => {
+    const userId = getUserId(request);
     const monitor = (app as any).stopLossMonitor;
-    if (!monitor) return reply.send({ active: false, positions: [] });
+    const positions = monitor ? monitor.getMonitoredPositions() : [];
+
+    const dailySummary = await riskService.getDailyRiskSummary(userId);
+    const pauseState = await riskService.checkConsecutiveLossPause(userId);
+
     return reply.send({
-      active: true,
-      monitoredCount: monitor.getMonitoredCount(),
-      positions: monitor.getMonitoredPositions(),
+      active: !!monitor,
+      monitoredCount: positions.length,
+      positions,
+      circuitBreaker: {
+        triggered: dailySummary.circuitBreakerActive,
+        reason: dailySummary.circuitBreakerActive
+          ? `Daily drawdown ${dailySummary.dayDrawdownPct.toFixed(2)}% exceeds limit`
+          : null,
+        consecutiveLosses: dailySummary.consecutiveLosses,
+        paused: pauseState.paused,
+        pauseUntil: pauseState.pauseUntil ?? null,
+      },
     });
   });
 

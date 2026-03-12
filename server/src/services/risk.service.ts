@@ -490,10 +490,19 @@ export class RiskService {
 
   async getDailyRiskSummary(userId: string): Promise<{
     dayPnl: number;
+    dayPnlPercent: number;
     dayDrawdownPct: number;
     openPositions: number;
+    totalExposure: number;
+    maxDrawdown: number;
+    dailyLossLimit: number;
+    dailyLossUsed: number;
+    tradeCount: number;
+    avgWinRate: number;
     largestPosition: { symbol: string; value: number } | null;
+    largestPositionPct: number;
     circuitBreakerActive: boolean;
+    consecutiveLosses: number;
     riskScore: number;
   }> {
     const portfolios = await this.prisma.portfolio.findMany({
@@ -503,8 +512,10 @@ export class RiskService {
 
     if (portfolios.length === 0) {
       return {
-        dayPnl: 0, dayDrawdownPct: 0, openPositions: 0,
-        largestPosition: null, circuitBreakerActive: false, riskScore: 0,
+        dayPnl: 0, dayPnlPercent: 0, dayDrawdownPct: 0, openPositions: 0,
+        totalExposure: 0, maxDrawdown: 0, dailyLossLimit: 0, dailyLossUsed: 0,
+        tradeCount: 0, avgWinRate: 0, largestPosition: null, largestPositionPct: 0,
+        circuitBreakerActive: false, consecutiveLosses: 0, riskScore: 0,
       };
     }
 
@@ -519,24 +530,46 @@ export class RiskService {
       select: { netPnl: true },
     });
     const dayPnl = todayTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
+    const dayPnlPercent = capital > 0 ? (dayPnl / capital) * 100 : 0;
     const dayDrawdownPct = capital > 0 ? Math.abs(Math.min(dayPnl, 0)) / capital * 100 : 0;
+
+    const dailyLossLimit = capital * (DEFAULT_CONFIG.maxDailyDrawdownPct / 100);
+    const dailyLossUsed = Math.min(dayPnl, 0);
 
     const positions = await this.prisma.position.findMany({
       where: { portfolioId: { in: portfolioIds }, status: 'OPEN' },
       select: { symbol: true, qty: true, avgEntryPrice: true },
     });
 
+    let totalExposure = 0;
     let largestPosition: { symbol: string; value: number } | null = null;
     for (const p of positions) {
       const val = Number(p.avgEntryPrice) * p.qty;
+      totalExposure += val;
       if (!largestPosition || val > largestPosition.value) {
         largestPosition = { symbol: p.symbol, value: val };
       }
     }
+    const largestPositionPct = (largestPosition && capital > 0)
+      ? (largestPosition.value / capital) * 100 : 0;
 
     const circuitBreakerActive = dayDrawdownPct >= DEFAULT_CONFIG.maxDailyDrawdownPct;
 
-    // Risk score: 0 (safe) to 100 (critical)
+    const recentTrades = await this.prisma.trade.findMany({
+      where: { portfolioId: { in: portfolioIds } },
+      orderBy: { exitTime: 'desc' },
+      take: 50,
+      select: { netPnl: true },
+    });
+    const winCount = recentTrades.filter(t => Number(t.netPnl) > 0).length;
+    const avgWinRate = recentTrades.length > 0 ? (winCount / recentTrades.length) * 100 : 0;
+
+    let consecutiveLosses = 0;
+    for (const t of recentTrades) {
+      if (Number(t.netPnl) < 0) consecutiveLosses++;
+      else break;
+    }
+
     const drawdownScore = Math.min(dayDrawdownPct / DEFAULT_CONFIG.maxDailyDrawdownPct * 50, 50);
     const positionScore = Math.min(positions.length / DEFAULT_CONFIG.maxOpenPositions * 30, 30);
     const concentrationScore = largestPosition
@@ -545,10 +578,19 @@ export class RiskService {
 
     return {
       dayPnl,
+      dayPnlPercent: Number(dayPnlPercent.toFixed(3)),
       dayDrawdownPct,
       openPositions: positions.length,
+      totalExposure: Number(totalExposure.toFixed(2)),
+      maxDrawdown: Number(dayDrawdownPct.toFixed(3)),
+      dailyLossLimit: Number(dailyLossLimit.toFixed(2)),
+      dailyLossUsed: Number(dailyLossUsed.toFixed(2)),
+      tradeCount: todayTrades.length,
+      avgWinRate: Number(avgWinRate.toFixed(1)),
       largestPosition,
+      largestPositionPct: Number(largestPositionPct.toFixed(2)),
       circuitBreakerActive,
+      consecutiveLosses,
       riskScore: Math.round(drawdownScore + positionScore + concentrationScore),
     };
   }
@@ -556,11 +598,15 @@ export class RiskService {
   async getPortfolioVaR(userId: string, confidenceLevel = 0.95, holdingDays = 1): Promise<{
     parametricVaR: number;
     historicalVaR: number;
+    var95: number;
+    var99: number;
+    expectedShortfall: number;
     portfolioValue: number;
     positions: Array<{ symbol: string; value: number; weight: number; dailyVol: number }>;
   }> {
+    const emptyResult = { parametricVaR: 0, historicalVaR: 0, var95: 0, var99: 0, expectedShortfall: 0, portfolioValue: 0, positions: [] as Array<{ symbol: string; value: number; weight: number; dailyVol: number }> };
     const portfolios = await this.prisma.portfolio.findMany({ where: { userId }, select: { id: true, currentNav: true } });
-    if (!portfolios.length) return { parametricVaR: 0, historicalVaR: 0, portfolioValue: 0, positions: [] };
+    if (!portfolios.length) return emptyResult;
 
     const portfolio = portfolios[0];
     const nav = Number(portfolio.currentNav);
@@ -569,9 +615,8 @@ export class RiskService {
       where: { portfolioId: portfolio.id, status: 'OPEN' },
     });
 
-    if (openPositions.length === 0) return { parametricVaR: 0, historicalVaR: 0, portfolioValue: nav, positions: [] };
+    if (openPositions.length === 0) return { ...emptyResult, portfolioValue: nav };
 
-    // Fetch recent trades for volatility estimation
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
@@ -581,7 +626,6 @@ export class RiskService {
       orderBy: { exitTime: 'asc' },
     });
 
-    // Estimate daily volatility per symbol from trade history or use sector-based defaults
     const posDetails: Array<{ symbol: string; value: number; weight: number; dailyVol: number }> = [];
     let totalPositionValue = 0;
 
@@ -614,16 +658,19 @@ export class RiskService {
       posDetails.push({ symbol: pos.symbol, value, weight, dailyVol });
     }
 
-    // Z-score for confidence level
     const zScores: Record<number, number> = { 0.90: 1.282, 0.95: 1.645, 0.99: 2.326 };
+
+    const computeVaR = (z: number): number => {
+      const portfolioVolSq = posDetails.reduce((sum, p) => sum + (p.weight * p.dailyVol) ** 2, 0);
+      const portfolioVol = Math.sqrt(portfolioVolSq) * Math.sqrt(holdingDays);
+      return z * portfolioVol * totalPositionValue;
+    };
+
     const z = zScores[confidenceLevel] ?? 1.645;
+    const parametricVaR = computeVaR(z);
+    const var95 = computeVaR(1.645);
+    const var99 = computeVaR(2.326);
 
-    // Parametric VaR: assuming no correlation (conservative)
-    const portfolioVolSq = posDetails.reduce((sum, p) => sum + (p.weight * p.dailyVol) ** 2, 0);
-    const portfolioVol = Math.sqrt(portfolioVolSq) * Math.sqrt(holdingDays);
-    const parametricVaR = z * portfolioVol * totalPositionValue;
-
-    // Historical VaR from recent daily P&L
     const dailyPnls = await this.prisma.dailyPnlRecord.findMany({
       where: { userId },
       orderBy: { date: 'desc' },
@@ -632,13 +679,26 @@ export class RiskService {
     });
 
     let historicalVaR = parametricVaR;
+    let expectedShortfall = var95 * 1.2;
     if (dailyPnls.length >= 10) {
       const sortedLosses = dailyPnls.map(d => Number(d.netPnl)).sort((a, b) => a - b);
       const idx = Math.floor((1 - confidenceLevel) * sortedLosses.length);
       historicalVaR = Math.abs(sortedLosses[idx] ?? parametricVaR);
+
+      const idx95 = Math.floor(0.05 * sortedLosses.length);
+      const tailLosses = sortedLosses.slice(0, Math.max(idx95, 1));
+      expectedShortfall = Math.abs(tailLosses.reduce((s, v) => s + v, 0) / tailLosses.length);
     }
 
-    return { parametricVaR: Number(parametricVaR.toFixed(2)), historicalVaR: Number(historicalVaR.toFixed(2)), portfolioValue: nav, positions: posDetails };
+    return {
+      parametricVaR: Number(parametricVaR.toFixed(2)),
+      historicalVaR: Number(historicalVaR.toFixed(2)),
+      var95: Number(var95.toFixed(2)),
+      var99: Number(var99.toFixed(2)),
+      expectedShortfall: Number(expectedShortfall.toFixed(2)),
+      portfolioValue: nav,
+      positions: posDetails,
+    };
   }
 
   async getSectorConcentration(userId: string): Promise<{
@@ -683,13 +743,23 @@ export class RiskService {
 
   async getMarginUtilization(userId: string): Promise<{
     totalMarginUsed: number;
+    totalMarginAvailable: number;
     totalCapital: number;
     utilizationPct: number;
+    utilizationPercent: number;
+    positions: Array<{ symbol: string; marginUsed: number; marginPercent: number }>;
     shortPositions: Array<{ symbol: string; marginBlocked: number }>;
     warning: string | null;
   }> {
+    const emptyResult = {
+      totalMarginUsed: 0, totalMarginAvailable: 0, totalCapital: 0,
+      utilizationPct: 0, utilizationPercent: 0,
+      positions: [] as Array<{ symbol: string; marginUsed: number; marginPercent: number }>,
+      shortPositions: [] as Array<{ symbol: string; marginBlocked: number }>,
+      warning: null as string | null,
+    };
     const portfolios = await this.prisma.portfolio.findMany({ where: { userId }, select: { id: true, initialCapital: true, currentNav: true } });
-    if (!portfolios.length) return { totalMarginUsed: 0, totalCapital: 0, utilizationPct: 0, shortPositions: [], warning: null };
+    if (!portfolios.length) return emptyResult;
 
     const capital = Number(portfolios[0].currentNav);
     const shorts = await this.prisma.position.findMany({
@@ -698,6 +768,7 @@ export class RiskService {
 
     let totalMarginUsed = 0;
     const shortPositions: Array<{ symbol: string; marginBlocked: number }> = [];
+    const positions: Array<{ symbol: string; marginUsed: number; marginPercent: number }> = [];
 
     for (const pos of shorts) {
       const entryPrice = Number(pos.avgEntryPrice);
@@ -708,6 +779,15 @@ export class RiskService {
     }
 
     const utilizationPct = capital > 0 ? (totalMarginUsed / capital) * 100 : 0;
+    const totalMarginAvailable = Math.max(0, capital - totalMarginUsed);
+
+    for (const sp of shortPositions) {
+      positions.push({
+        symbol: sp.symbol,
+        marginUsed: sp.marginBlocked,
+        marginPercent: capital > 0 ? Number(((sp.marginBlocked / capital) * 100).toFixed(1)) : 0,
+      });
+    }
 
     let warning: string | null = null;
     if (utilizationPct > DEFAULT_CONFIG.marginUtilizationLimitPct) {
@@ -716,8 +796,11 @@ export class RiskService {
 
     return {
       totalMarginUsed: Number(totalMarginUsed.toFixed(2)),
+      totalMarginAvailable: Number(totalMarginAvailable.toFixed(2)),
       totalCapital: Number(capital.toFixed(2)),
       utilizationPct: Number(utilizationPct.toFixed(1)),
+      utilizationPercent: Number(utilizationPct.toFixed(1)),
+      positions,
       shortPositions,
       warning,
     };

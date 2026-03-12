@@ -125,13 +125,22 @@ export default function RiskDashboard() {
           dayPnlPercent: num(d.dayPnlPercent ?? d.pnlPercent),
           openPositions: num(d.openPositions ?? d.positionCount),
           totalExposure: num(d.totalExposure ?? d.exposure),
-          maxDrawdown: num(d.maxDrawdown),
+          maxDrawdown: num(d.maxDrawdown ?? d.dayDrawdownPct),
           dailyLossLimit: num(d.dailyLossLimit ?? d.lossLimit),
           dailyLossUsed: num(d.dailyLossUsed ?? d.lossUsed),
           positionCount: num(d.positionCount ?? d.openPositions),
           avgWinRate: num(d.avgWinRate ?? d.winRate),
           tradeCount: num(d.tradeCount ?? d.trades),
         });
+        if (d.circuitBreakerActive != null || d.consecutiveLosses != null) {
+          setCircuitBreaker((prev: any) => ({
+            ...prev,
+            triggered: !!d.circuitBreakerActive,
+            consecutiveLosses: num(d.consecutiveLosses),
+            reason: d.circuitBreakerActive ? `Daily drawdown exceeded limit` : null,
+            largestPositionPct: num(d.largestPositionPct),
+          }));
+        }
       }
       if (varRes.status === 'fulfilled') {
         const v = varRes.value.data;
@@ -154,7 +163,9 @@ export default function RiskDashboard() {
       if (slRes.status === 'fulfilled') {
         const sl = slRes.value.data;
         setStopLossPositions(Array.isArray(sl.positions ?? sl) ? (sl.positions ?? sl) : []);
-        if (sl.circuitBreaker) setCircuitBreaker(sl.circuitBreaker);
+        if (sl.circuitBreaker) {
+          setCircuitBreaker((prev: any) => ({ ...prev, ...sl.circuitBreaker }));
+        }
       }
       if (ksRes.status === 'fulfilled') {
         const ks = ksRes.value.data;
@@ -186,7 +197,7 @@ export default function RiskDashboard() {
       } else {
         const confirmed = window.confirm('ACTIVATE KILL SWITCH?\n\nThis will:\n• Halt ALL trading immediately\n• Square off ALL open positions\n• Cancel ALL pending orders\n\nAre you sure?');
         if (!confirmed) { setKillLoading(false); return; }
-        await riskApi.squareOffAll();
+        await riskApi.killSwitchActivate();
         setKillSwitch({ active: true, activatedAt: new Date().toISOString(), reason: 'Manual activation' });
       }
       await fetchRiskData();
@@ -400,10 +411,10 @@ export default function RiskDashboard() {
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
-                  <StatusPill label="Max Position Size" ok={true} />
+                  <StatusPill label="Max Position Size" ok={(circuitBreaker?.largestPositionPct ?? 0) < 10} />
                   <StatusPill label="Daily Loss Limit" ok={lossUsedPct < 80} />
                   <StatusPill label="Margin Limit" ok={marginPct < 80} />
-                  <StatusPill label="Consecutive Losses" ok={!circuitBreaker?.consecutiveLosses} />
+                  <StatusPill label="Consecutive Losses" ok={(circuitBreaker?.consecutiveLosses ?? 0) < 3} />
                 </div>
               </div>
             </div>

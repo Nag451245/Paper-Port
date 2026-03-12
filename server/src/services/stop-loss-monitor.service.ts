@@ -107,14 +107,42 @@ export class StopLossMonitor {
     return this.monitoredPositions.size;
   }
 
-  getMonitoredPositions(): Array<{ positionId: string; symbol: string; side: string; stopLoss: number; trailingStop: number }> {
-    return [...this.monitoredPositions.values()].map(p => ({
-      positionId: p.config.positionId,
-      symbol: p.config.symbol,
-      side: p.config.side,
-      stopLoss: p.config.stopLossPrice,
-      trailingStop: p.currentTrailingStop,
-    }));
+  getMonitoredPositions(): Array<{
+    positionId: string; symbol: string; side: string; qty: number;
+    entryPrice: number; stopLoss: number; takeProfit: number;
+    currentPrice: number; unrealizedPnl: number;
+    distanceToStop: number; distanceToTarget: number;
+    trailingStop: number;
+  }> {
+    return [...this.monitoredPositions.values()].map(p => {
+      const { config } = p;
+      const currentPrice = config.side === 'LONG' ? p.highWaterMark : p.lowWaterMark;
+      const unrealizedPnl = config.side === 'LONG'
+        ? (currentPrice - config.entryPrice) * config.qty
+        : (config.entryPrice - currentPrice) * config.qty;
+
+      const distanceToStop = config.entryPrice > 0
+        ? Math.abs(currentPrice - p.currentTrailingStop) / config.entryPrice * 100 : 0;
+
+      const tp = config.takeProfitPrice ?? 0;
+      const distanceToTarget = (tp > 0 && config.entryPrice > 0)
+        ? Math.abs(tp - currentPrice) / config.entryPrice * 100 : 0;
+
+      return {
+        positionId: config.positionId,
+        symbol: config.symbol,
+        side: config.side,
+        qty: config.qty,
+        entryPrice: config.entryPrice,
+        stopLoss: p.currentTrailingStop,
+        takeProfit: tp,
+        currentPrice: Number(currentPrice.toFixed(2)),
+        unrealizedPnl: Number(unrealizedPnl.toFixed(2)),
+        distanceToStop: Number(distanceToStop.toFixed(2)),
+        distanceToTarget: Number(distanceToTarget.toFixed(2)),
+        trailingStop: p.currentTrailingStop,
+      };
+    });
   }
 
   /**

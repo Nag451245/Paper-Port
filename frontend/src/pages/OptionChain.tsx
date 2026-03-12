@@ -256,7 +256,11 @@ export default function OptionChain() {
       const containerRect = container.getBoundingClientRect();
       const rowRect = row.getBoundingClientRect();
       const scrollTop = container.scrollTop + (rowRect.top - containerRect.top) - containerRect.height / 2 + rowRect.height / 2;
-      container.scrollTo({ top: scrollTop, behavior: 'smooth' });
+      if (typeof container.scrollTo === 'function') {
+        container.scrollTo({ top: scrollTop, behavior: 'smooth' });
+      } else {
+        container.scrollTop = scrollTop;
+      }
       hasScrolledRef.current = true;
     }
   }, [visibleStrikes, atmStrike]);
