@@ -32,6 +32,7 @@ export default function TopBar() {
 
   const nifty = indices.find((i) => i.name === 'NIFTY 50');
   const bankNifty = indices.find((i) => i.name === 'NIFTY BANK');
+  const sensex = indices.find((i) => i.name === 'SENSEX');
 
   return (
     <header className="fixed top-0 left-0 right-0 z-40 h-14 bg-white/90 backdrop-blur-xl border-b border-slate-200/60 flex items-center px-4 gap-4 shadow-sm">
@@ -78,6 +79,9 @@ export default function TopBar() {
         )}
         {bankNifty && (
           <IndexTicker name="BANKNIFTY" value={bankNifty.value} change={bankNifty.change} changePercent={bankNifty.changePercent} />
+        )}
+        {sensex && (
+          <IndexTicker name="SENSEX" value={sensex.value} change={sensex.change} changePercent={sensex.changePercent} />
         )}
         {vix && (
           <div className="flex items-center gap-1.5 text-xs">

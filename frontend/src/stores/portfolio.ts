@@ -53,19 +53,32 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
         tradingApi.positions().catch(() => ({ data: [] })),
       ]);
       const raw = summaryRes.data as any;
-      const summary: PortfolioSummary | null = raw
+      const p = portfolio as any;
+      const fallbackNav = Number(p.currentNav ?? p.current_nav ?? p.nav ?? p.initialCapital ?? p.capital ?? 0);
+      const fallbackCap = Number(p.initialCapital ?? p.initial_capital ?? p.capital ?? 1000000);
+      const summary: PortfolioSummary = raw && (raw.totalNav !== undefined || raw.current_nav !== undefined)
         ? {
-            totalNav: Number(raw.totalNav ?? raw.current_nav ?? 0),
+            totalNav: Number(raw.totalNav ?? raw.current_nav ?? fallbackNav),
             dayPnl: Number(raw.dayPnl ?? raw.day_pnl ?? 0),
             dayPnlPercent: Number(raw.dayPnlPercent ?? raw.day_pnl_pct ?? 0),
             totalPnl: Number(raw.totalPnl ?? raw.total_pnl ?? 0),
             totalPnlPercent: Number(raw.totalPnlPercent ?? raw.total_pnl_pct ?? 0),
             investedValue: Number(raw.investedValue ?? raw.invested_value ?? 0),
-            currentValue: Number(raw.currentValue ?? raw.totalNav ?? 0),
-            availableMargin: Number(raw.availableMargin ?? raw.available_margin ?? 0),
+            currentValue: Number(raw.currentValue ?? raw.totalNav ?? fallbackNav),
+            availableMargin: Number(raw.availableMargin ?? raw.available_margin ?? fallbackNav),
             usedMargin: Number(raw.usedMargin ?? raw.used_margin ?? 0),
           }
-        : null;
+        : {
+            totalNav: fallbackNav,
+            dayPnl: 0,
+            dayPnlPercent: 0,
+            totalPnl: fallbackNav - fallbackCap,
+            totalPnlPercent: fallbackCap > 0 ? ((fallbackNav - fallbackCap) / fallbackCap) * 100 : 0,
+            investedValue: 0,
+            currentValue: fallbackNav,
+            availableMargin: fallbackNav,
+            usedMargin: 0,
+          };
 
       const allPositions = (positionsRes.data ?? []) as any[];
       const filtered = allPositions.filter(
