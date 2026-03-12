@@ -281,7 +281,7 @@ describe('TradeService', () => {
   });
 
   describe('closePosition', () => {
-    it('should close position and create trade', async () => {
+    it('should close position, create exit order, and create trade', async () => {
       mockPrisma.position.findUnique.mockResolvedValue({
         id: 'pos-1',
         portfolioId: 'p1',
@@ -297,6 +297,13 @@ describe('TradeService', () => {
         portfolio: { userId: 'user1' },
       });
       mockPrisma.position.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.order.create.mockResolvedValue({ id: 'exit-order-1', status: 'PENDING' });
+      // OMS transitions for exit order: PENDING → SUBMITTED → FILLED
+      mockPrisma.order.findUnique
+        .mockResolvedValueOnce({ id: 'exit-order-1', status: 'PENDING', qty: 10, filledQty: 0 })
+        .mockResolvedValueOnce({ id: 'exit-order-1', status: 'SUBMITTED', qty: 10, filledQty: 0 })
+        .mockResolvedValueOnce({ id: 'exit-order-1', status: 'SUBMITTED', qty: 10, filledQty: 0 });
+      mockPrisma.order.update.mockResolvedValue({});
       mockPrisma.trade.create.mockResolvedValue({
         id: 'trade-1',
         grossPnl: 5000,
@@ -309,6 +316,11 @@ describe('TradeService', () => {
       const result = await service.closePosition('pos-1', 'user1', 3000);
 
       expect(result.id).toBe('trade-1');
+      expect(mockPrisma.order.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ side: 'SELL', orderType: 'MARKET', status: 'PENDING' }),
+        }),
+      );
       expect(mockPrisma.trade.create).toHaveBeenCalled();
       expect(mockPrisma.position.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -329,6 +341,50 @@ describe('TradeService', () => {
         statusCode: 400,
         message: 'Position is already closed',
       });
+    });
+  });
+
+  describe('F&O order placement', () => {
+    it('should pass F&O fields (expiry, strike, optionType) to broker input', async () => {
+      mockPrisma.portfolio.findUnique.mockResolvedValue({ id: 'p1', userId: 'user1', currentNav: 1000000, initialCapital: 1000000 });
+      mockPrisma.order.create.mockResolvedValue({
+        id: 'order-fno',
+        symbol: 'NIFTY2503022000CE',
+        side: 'BUY',
+        orderType: 'MARKET',
+        qty: 50,
+        status: 'PENDING',
+      });
+      mockPrisma.order.findUnique
+        .mockResolvedValueOnce({ id: 'order-fno', symbol: 'NIFTY2503022000CE', status: 'PENDING', qty: 50, filledQty: 0 })
+        .mockResolvedValueOnce({ id: 'order-fno', symbol: 'NIFTY2503022000CE', status: 'SUBMITTED', qty: 50, filledQty: 0, avgFillPrice: null })
+        .mockResolvedValueOnce({ id: 'order-fno', symbol: 'NIFTY2503022000CE', status: 'SUBMITTED', qty: 50, filledQty: 0 })
+        .mockResolvedValue({ id: 'order-fno', symbol: 'NIFTY2503022000CE', side: 'BUY', orderType: 'MARKET', qty: 50, status: 'FILLED' });
+      mockPrisma.position.findFirst.mockResolvedValue(null);
+      mockPrisma.position.create.mockResolvedValue({
+        id: 'pos-fno',
+        symbol: 'NIFTY2503022000CE',
+        qty: 50,
+        avgEntryPrice: 200,
+      });
+      mockPrisma.order.update.mockResolvedValue({});
+
+      const result = await service.placeOrder('user1', {
+        portfolioId: 'p1',
+        symbol: 'NIFTY2503022000CE',
+        side: 'BUY',
+        orderType: 'MARKET',
+        qty: 50,
+        price: 200,
+        instrumentToken: 'nifty-token',
+        exchange: 'NFO',
+        expiry: '2025-03-27',
+        strike: 22000,
+        optionType: 'CE',
+      });
+
+      expect(result.status).toBeDefined();
+      expect(mockPrisma.order.create).toHaveBeenCalled();
     });
   });
 

@@ -277,6 +277,12 @@ describe('UAT Flow 4: Trading Terminal', () => {
       portfolio: { userId: 'uat-user' },
     });
     mockPrisma.position.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.order.create.mockResolvedValue({ id: 'exit-order-uat', status: 'PENDING' });
+    mockPrisma.order.findUnique
+      .mockResolvedValueOnce({ id: 'exit-order-uat', status: 'PENDING', qty: 10, filledQty: 0 })
+      .mockResolvedValueOnce({ id: 'exit-order-uat', status: 'SUBMITTED', qty: 10, filledQty: 0 })
+      .mockResolvedValueOnce({ id: 'exit-order-uat', status: 'SUBMITTED', qty: 10, filledQty: 0 });
+    mockPrisma.order.update.mockResolvedValue({});
     mockPrisma.trade.create.mockResolvedValue({
       id: 'uat-trade', grossPnl: 5000, netPnl: 4950, symbol: 'RELIANCE',
     });

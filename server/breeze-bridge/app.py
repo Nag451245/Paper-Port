@@ -1508,17 +1508,24 @@ class BreezeHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": "Breeze session not active"}, 503)
                     return
                 try:
-                    result = breeze_instance.place_order(
-                        stock_code=body.get("stock_code", ""),
-                        exchange_code=body.get("exchange_code", "NSE"),
-                        product=body.get("product", "cash"),
-                        action=body.get("action", "buy"),
-                        order_type=body.get("order_type", "market"),
-                        quantity=str(body.get("quantity", 1)),
-                        price=str(body.get("price", 0)),
-                        stoploss=str(body.get("stoploss", 0)),
-                        validity=body.get("validity", "day"),
-                    )
+                    kwargs = {
+                        "stock_code": body.get("stock_code", ""),
+                        "exchange_code": body.get("exchange_code", "NSE"),
+                        "product": body.get("product", "cash"),
+                        "action": body.get("action", "buy"),
+                        "order_type": body.get("order_type", "market"),
+                        "quantity": str(body.get("quantity", 1)),
+                        "price": str(body.get("price", 0)),
+                        "stoploss": str(body.get("stoploss", 0)),
+                        "validity": body.get("validity", "day"),
+                    }
+                    if body.get("expiry_date"):
+                        kwargs["expiry_date"] = body["expiry_date"]
+                    if body.get("right"):
+                        kwargs["right"] = body["right"]
+                    if body.get("strike_price"):
+                        kwargs["strike_price"] = str(body["strike_price"])
+                    result = breeze_instance.place_order(**kwargs)
                     order_id = ""
                     if isinstance(result, dict):
                         success = result.get("Success")

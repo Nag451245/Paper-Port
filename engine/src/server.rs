@@ -614,6 +614,53 @@ async fn close_position(
         state.log_audit("CLOSE_DURING_KILL_SWITCH", Some(&symbol),
             &format!("Closing position at {:.2} while kill switch is active (allowed for risk reduction)", query.price));
     }
+
+    // Submit a sell/cover order through the broker before updating internal state
+    {
+        use crate::broker::{OrderRequest, OrderSide, OrderType, ProductType, AssetClass};
+
+        let pos_snapshot = state.positions.get(&symbol)
+            .map(|r| r.value().clone())
+            .or_else(|| {
+                state.positions.iter()
+                    .find(|entry| entry.value().symbol == symbol)
+                    .map(|entry| entry.value().clone())
+            });
+
+        if let Some(pos) = pos_snapshot {
+            let exit_side = if pos.side == "buy" { OrderSide::Sell } else { OrderSide::Buy };
+            let exchange = match pos.asset_class {
+                AssetClass::Options | AssetClass::Futures => "NFO".to_string(),
+                _ => "NSE".to_string(),
+            };
+            let req = OrderRequest {
+                symbol: pos.symbol.clone(),
+                exchange,
+                side: exit_side,
+                order_type: OrderType::Market,
+                quantity: pos.qty.unsigned_abs() as i64,
+                price: Some(query.price),
+                trigger_price: None,
+                product: ProductType::Intraday,
+                tag: Some("EXIT".to_string()),
+                asset_class: pos.asset_class,
+                expiry: pos.expiry.clone(),
+                strike: pos.strike,
+                option_type: pos.option_type.clone(),
+            };
+            match state.broker_adapter.place_order(&req) {
+                Ok(resp) => {
+                    state.log_audit("BROKER_EXIT_ORDER", Some(&symbol),
+                        &format!("Exit order submitted: broker_id={} status={:?}", resp.broker_order_id, resp.status));
+                }
+                Err(e) => {
+                    state.log_audit("BROKER_EXIT_FAILED", Some(&symbol),
+                        &format!("Broker exit order failed: {} — proceeding with internal close", e));
+                }
+            }
+        }
+    }
+
     match state.close_position(&symbol, query.price) {
         Ok(pnl) => (StatusCode::OK, Json(json!({ "success": true, "realized_pnl": pnl }))),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "success": false, "error": e }))),

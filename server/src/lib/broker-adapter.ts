@@ -102,6 +102,9 @@ export interface BrokerOrderInput {
   triggerPrice?: number;
   product?: 'INTRADAY' | 'DELIVERY' | 'MARGIN';
   validity?: 'DAY' | 'IOC';
+  expiry?: string;
+  strike?: number;
+  optionType?: 'CE' | 'PE';
 }
 
 export interface BrokerOrderResult {

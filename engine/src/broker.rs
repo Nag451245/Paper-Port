@@ -220,15 +220,30 @@ impl BrokerAdapter for PaperBroker {
         }
 
         let order_id = self.next_order_id();
-        let value = fill_price * req.quantity.unsigned_abs() as f64;
 
-        if req.side == OrderSide::Buy && value > self.get_cash() {
+        // F&O: margin-based cost (~20% for futures, premium for options)
+        let required_capital = match req.asset_class {
+            AssetClass::Options => {
+                // Option buyers pay premium * lot_size
+                fill_price * req.quantity.unsigned_abs() as f64
+            }
+            AssetClass::Futures => {
+                // Futures require ~20% margin of notional value
+                fill_price * req.quantity.unsigned_abs() as f64 * 0.20
+            }
+            _ => fill_price * req.quantity.unsigned_abs() as f64,
+        };
+
+        if req.side == OrderSide::Buy && required_capital > self.get_cash() {
             return Ok(OrderResponse {
                 broker_order_id: order_id.clone(),
                 status: OrderStatus::Rejected,
                 filled_qty: 0,
                 avg_price: 0.0,
-                message: Some("Insufficient funds".into()),
+                message: Some(format!(
+                    "Insufficient funds: need {:.2}, have {:.2} ({})",
+                    required_capital, self.get_cash(), req.asset_class
+                )),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             });
         }

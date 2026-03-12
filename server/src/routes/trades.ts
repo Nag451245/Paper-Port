@@ -16,8 +16,11 @@ const placeOrderSchema = z.object({
   price: z.number().positive().optional(),
   trigger_price: z.number().positive().optional(),
   instrument_token: z.string().default(''),
-  exchange: z.enum(['NSE', 'BSE', 'MCX', 'CDS']).default('NSE'),
+  exchange: z.enum(['NSE', 'BSE', 'NFO', 'MCX', 'CDS']).default('NSE'),
   strategy_tag: z.string().optional(),
+  expiry: z.string().optional(),
+  strike: z.number().positive().optional(),
+  option_type: z.enum(['CE', 'PE']).optional(),
 });
 
 const closePositionSchema = z.object({
@@ -49,6 +52,9 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
         instrumentToken: parsed.data.instrument_token,
         exchange: parsed.data.exchange,
         strategyTag: parsed.data.strategy_tag,
+        expiry: parsed.data.expiry,
+        strike: parsed.data.strike,
+        optionType: parsed.data.option_type,
       });
       return reply.code(201).send(order);
     } catch (err) {
@@ -281,6 +287,9 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
             instrumentToken: `${symbol}-NFO-${leg.strike}-${leg.type}`,
             exchange: 'NFO',
             strategyTag: tag,
+            expiry,
+            strike: leg.strike,
+            optionType: leg.type as 'CE' | 'PE',
           });
           results.push({ leg: i + 1, order });
         } catch (err) {

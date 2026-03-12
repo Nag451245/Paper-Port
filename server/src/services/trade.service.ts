@@ -35,6 +35,9 @@ export interface PlaceOrderInput {
   instrumentToken: string;
   exchange?: Exchange;
   strategyTag?: string;
+  expiry?: string;
+  strike?: number;
+  optionType?: 'CE' | 'PE';
 }
 
 interface CostBreakdown {
@@ -233,6 +236,9 @@ export class TradeService {
       price: input.price,
       triggerPrice: input.triggerPrice,
       product: input.exchange === 'NFO' ? 'INTRADAY' : 'DELIVERY',
+      expiry: input.expiry,
+      strike: input.strike,
+      optionType: input.optionType,
     };
 
     const result = await this.broker.placeOrder(brokerInput);
@@ -1142,19 +1148,50 @@ export class TradeService {
     }
 
     const entryPrice = Number(position.avgEntryPrice);
+    const exitSide = position.side === 'LONG' ? 'SELL' : 'BUY';
     const grossPnl = position.side === 'LONG'
       ? (exitPrice - entryPrice) * position.qty
       : (entryPrice - exitPrice) * position.qty;
     const costs = calculateCosts(position.qty, exitPrice, 'SELL');
     const netPnl = grossPnl - costs.totalCost;
 
+    // Create an exit Order record so the close flows through OMS
+    const exitOrder = await this.prisma.order.create({
+      data: {
+        portfolioId: position.portfolioId,
+        instrumentToken: (position as any).instrumentToken ?? `${position.symbol}-EXIT`,
+        symbol: position.symbol,
+        exchange: position.exchange,
+        orderType: 'MARKET',
+        side: exitSide,
+        qty: position.qty,
+        price: exitPrice,
+        status: 'PENDING',
+        filledQty: 0,
+        avgFillPrice: null,
+        ...costs,
+      },
+    });
+
+    // OMS transitions: PENDING → SUBMITTED → FILLED
+    if (this.oms) {
+      await this.oms.submitOrder(exitOrder.id);
+      await this.oms.recordFill(exitOrder.id, position.qty, exitPrice);
+    } else {
+      await this.prisma.order.update({
+        where: { id: exitOrder.id },
+        data: { status: 'FILLED', filledQty: position.qty, avgFillPrice: exitPrice, filledAt: new Date() },
+      });
+    }
+
     const trade = await this.prisma.trade.create({
       data: {
         portfolioId: position.portfolioId,
+        orderId: exitOrder.id,
         positionId: position.id,
         symbol: position.symbol,
         exchange: position.exchange,
-        side: position.side === 'LONG' ? 'SELL' : 'BUY',
+        side: exitSide,
         entryPrice,
         exitPrice,
         qty: position.qty,

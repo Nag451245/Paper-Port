@@ -122,6 +122,15 @@ impl IciciBreezeBroker {
         }
     }
 
+    fn breeze_product_for_order(req: &OrderRequest) -> &'static str {
+        use crate::broker::AssetClass;
+        match req.asset_class {
+            AssetClass::Options => "options",
+            AssetClass::Futures => "futures",
+            _ => Self::breeze_product(req.product),
+        }
+    }
+
     fn breeze_action(side: OrderSide) -> &'static str {
         match side {
             OrderSide::Buy => "buy",
@@ -149,10 +158,10 @@ impl BrokerAdapter for IciciBreezeBroker {
             return Err("Breeze Bridge not connected — check bridge health or initialize session".into());
         }
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "stock_code": req.symbol,
             "exchange_code": req.exchange,
-            "product": Self::breeze_product(req.product),
+            "product": Self::breeze_product_for_order(req),
             "action": Self::breeze_action(req.side),
             "order_type": Self::breeze_order_type(req.order_type),
             "quantity": req.quantity,
@@ -160,6 +169,16 @@ impl BrokerAdapter for IciciBreezeBroker {
             "stoploss": req.trigger_price.unwrap_or(0.0),
             "validity": "day",
         });
+
+        if let Some(ref exp) = req.expiry {
+            body["expiry_date"] = serde_json::Value::String(format!("{}T06:00:00.000Z", exp));
+        }
+        if let Some(ref ot) = req.option_type {
+            body["right"] = serde_json::Value::String(ot.to_lowercase());
+        }
+        if let Some(strike) = req.strike {
+            body["strike_price"] = serde_json::Value::String(strike.to_string());
+        }
 
         let resp = self.bridge_post("/order/place", &body)?;
 
@@ -506,6 +525,19 @@ mod tests {
     fn test_breeze_product_mapping() {
         assert_eq!(IciciBreezeBroker::breeze_product(ProductType::Intraday), "intraday");
         assert_eq!(IciciBreezeBroker::breeze_product(ProductType::Delivery), "cash");
+    }
+
+    #[test]
+    fn test_breeze_product_for_fno_orders() {
+        use crate::broker::AssetClass;
+        let mut req = OrderRequest::default();
+        req.asset_class = AssetClass::Options;
+        assert_eq!(IciciBreezeBroker::breeze_product_for_order(&req), "options");
+        req.asset_class = AssetClass::Futures;
+        assert_eq!(IciciBreezeBroker::breeze_product_for_order(&req), "futures");
+        req.asset_class = AssetClass::Equity;
+        req.product = ProductType::Delivery;
+        assert_eq!(IciciBreezeBroker::breeze_product_for_order(&req), "cash");
     }
 
     #[test]

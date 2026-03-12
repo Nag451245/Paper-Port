@@ -190,6 +190,12 @@ describe('Trade Routes Integration', () => {
         portfolio: { userId: 'test-user' },
       });
       mockPrisma.position.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.order.create.mockResolvedValue({ id: 'exit-order-1', status: 'PENDING' });
+      mockPrisma.order.findUnique
+        .mockResolvedValueOnce({ id: 'exit-order-1', status: 'PENDING', qty: 10, filledQty: 0 })
+        .mockResolvedValueOnce({ id: 'exit-order-1', status: 'SUBMITTED', qty: 10, filledQty: 0 })
+        .mockResolvedValueOnce({ id: 'exit-order-1', status: 'SUBMITTED', qty: 10, filledQty: 0 });
+      mockPrisma.order.update.mockResolvedValue({});
       mockPrisma.trade.create.mockResolvedValue({
         id: 't1', grossPnl: 5000, netPnl: 4950,
       });
