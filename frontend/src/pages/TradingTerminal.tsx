@@ -73,7 +73,10 @@ export default function TradingTerminal() {
   // Real-time live price via WebSocket
   const livePrice = useLivePrice(symbol || null);
 
-  const fetchAll = useCallback(async () => {
+  const lastFetchRef = useRef(0);
+  const fetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const fetchAllImmediate = useCallback(async () => {
     setIsLoading(true);
     const errors: string[] = [];
     try {
@@ -99,10 +102,28 @@ export default function TradingTerminal() {
       setError('Failed to load trading data: ' + (e?.message ?? 'Unknown error'));
     } finally {
       setIsLoading(false);
+      lastFetchRef.current = Date.now();
     }
   }, []);
 
+  const fetchAll = useCallback(() => {
+    const now = Date.now();
+    const elapsed = now - lastFetchRef.current;
+    const MIN_INTERVAL = 2000;
+    if (elapsed < MIN_INTERVAL) {
+      if (!fetchTimerRef.current) {
+        fetchTimerRef.current = setTimeout(() => {
+          fetchTimerRef.current = null;
+          fetchAllImmediate();
+        }, MIN_INTERVAL - elapsed);
+      }
+      return;
+    }
+    fetchAllImmediate();
+  }, [fetchAllImmediate]);
+
   useEffect(() => { fetchAll(); }, [fetchAll]);
+  useEffect(() => () => { if (fetchTimerRef.current) clearTimeout(fetchTimerRef.current); }, []);
 
   // WebSocket-driven auto-refresh on order/position changes
   useTradeUpdates(fetchAll);

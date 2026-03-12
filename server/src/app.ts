@@ -92,7 +92,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   await app.register(rateLimit, {
-    max: 200,
+    max: 600,
     timeWindow: '1 minute',
     keyGenerator: (req) => {
       const user = (req as any).user;

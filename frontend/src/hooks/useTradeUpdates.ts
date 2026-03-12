@@ -18,6 +18,7 @@ export function useTradeUpdates(onRefresh: () => void) {
   const [lastEvent, setLastEvent] = useState<TradeEvent | null>(null);
   const refreshRef = useRef(onRefresh);
   refreshRef.current = onRefresh;
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     liveSocket.connect();
@@ -34,11 +35,18 @@ export function useTradeUpdates(onRefresh: () => void) {
     const unsubs = eventTypes.map(type =>
       liveSocket.on(type, (msg: any) => {
         setLastEvent({ type, data: msg.data ?? msg, receivedAt: Date.now() });
-        refreshRef.current();
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = setTimeout(() => {
+          debounceRef.current = null;
+          refreshRef.current();
+        }, 500);
       })
     );
 
-    return () => { for (const u of unsubs) u(); };
+    return () => {
+      for (const u of unsubs) u();
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
   }, []);
 
   return lastEvent;
