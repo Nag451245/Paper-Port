@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from 'fs';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import type { PrismaClient } from '@prisma/client';
 import { chatCompletionJSON, chatCompletion } from '../lib/openai.js';
 import { MarketDataService } from './market-data.service.js';
@@ -6,6 +9,9 @@ import { isMLServiceAvailable, mlTrain, mlDetectRegime, mlAllocate } from '../li
 import { LearningStoreService } from './learning-store.service.js';
 import { getRedis } from '../lib/redis.js';
 import { createChildLogger } from '../lib/logger.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const log = createChildLogger('LearningEngine');
 
@@ -100,6 +106,9 @@ export class LearningEngine {
 
     // Phase 4: Strategy allocation optimization via Thompson sampling
     await this.optimizeStrategyAllocation(userId, ledgers);
+
+    // Phase 5: Auto-calibration check
+    await this.autoCalibrate(userId);
 
     log.info({ userId, trades: trades.length, regime: insight.marketRegime }, 'Nightly learning completed');
   }
@@ -538,7 +547,6 @@ Top losers: ${JSON.stringify(topLosers)}`,
     regime: string,
     ledgers: Array<{ strategyId: string; winRate: number; netPnl: any; sharpeRatio: number }>,
   ): Promise<void> {
-    // Record regime
     const performanceSummary: Record<string, { winRate: number; pnl: number; sharpe: number }> = {};
     for (const l of ledgers) {
       performanceSummary[l.strategyId] = {
@@ -555,6 +563,97 @@ Top losers: ${JSON.stringify(topLosers)}`,
     } catch (err) {
       console.error('[LearningEngine] Regime log write failed:', (err as Error).message);
     }
+
+    // Persist to RegimeHistory table for transition analysis
+    try {
+      const dateOnly = new Date(date.toISOString().split('T')[0]);
+      const prev = await this.prisma.regimeHistory.findFirst({
+        orderBy: { date: 'desc' },
+        where: { date: { lt: dateOnly } },
+      });
+
+      let durationDays = 1;
+      if (prev && prev.regime === regime) {
+        durationDays = prev.durationDays + 1;
+      }
+
+      let niftyChange: number | null = null;
+      let vix: number | null = null;
+      try {
+        const vixData = await this.marketData.getVIX().catch(() => null);
+        vix = (vixData as any)?.value ?? null;
+      } catch { /* skip */ }
+
+      await this.prisma.regimeHistory.upsert({
+        where: { date: dateOnly },
+        update: {
+          regime,
+          confidence: 0.8,
+          durationDays,
+          niftyChange,
+          vix,
+          transitionFrom: prev && prev.regime !== regime ? prev.regime : null,
+          metadata: JSON.stringify(performanceSummary),
+        },
+        create: {
+          date: dateOnly,
+          regime,
+          confidence: 0.8,
+          durationDays,
+          niftyChange,
+          vix,
+          transitionFrom: prev && prev.regime !== regime ? prev.regime : null,
+          metadata: JSON.stringify(performanceSummary),
+        },
+      });
+
+      if (prev && prev.regime !== regime) {
+        log.info({ from: prev.regime, to: regime, prevDuration: prev.durationDays }, 'Regime transition detected');
+      }
+    } catch (err) {
+      log.warn({ err }, 'Failed to persist regime history (non-fatal)');
+    }
+  }
+
+  async getRegimeTransitionStats(): Promise<{
+    currentRegime: string | null;
+    currentDuration: number;
+    recentTransitions: Array<{ from: string; to: string; date: string; duration: number }>;
+    regimeDurations: Record<string, { avgDays: number; count: number }>;
+  }> {
+    const recent = await this.prisma.regimeHistory.findMany({
+      orderBy: { date: 'desc' },
+      take: 90,
+    });
+
+    const current = recent[0];
+    const transitions = recent
+      .filter(r => r.transitionFrom)
+      .slice(0, 10)
+      .map(r => ({
+        from: r.transitionFrom!,
+        to: r.regime,
+        date: r.date.toISOString().split('T')[0],
+        duration: r.durationDays,
+      }));
+
+    const regimeDurations: Record<string, { totalDays: number; count: number }> = {};
+    for (const r of recent.filter(r => r.transitionFrom)) {
+      const key = r.transitionFrom!;
+      const entry = regimeDurations[key] ?? { totalDays: 0, count: 0 };
+      entry.totalDays += r.durationDays;
+      entry.count += 1;
+      regimeDurations[key] = entry;
+    }
+
+    return {
+      currentRegime: current?.regime ?? null,
+      currentDuration: current?.durationDays ?? 0,
+      recentTransitions: transitions,
+      regimeDurations: Object.fromEntries(
+        Object.entries(regimeDurations).map(([k, v]) => [k, { avgDays: round2(v.totalDays / v.count), count: v.count }]),
+      ),
+    };
   }
 
   private async trackStrategyEvolution(
@@ -678,7 +777,7 @@ Top losers: ${JSON.stringify(topLosers)}`,
         where: {
           userId,
           createdAt: { gte: since },
-          outcome: { not: null },
+          outcome: { in: ['WIN', 'LOSS', 'BREAKEVEN'] },
           decisionType: 'ENTRY_SIGNAL',
         },
         select: {
@@ -755,8 +854,102 @@ Top losers: ${JSON.stringify(topLosers)}`,
             day_of_week: dow,
             raw_features: rawFeatures,
           },
-          outcome: d.outcome === 'WIN' ? 1.0 : 0.0,
+          outcome: d.outcome === 'WIN' ? 1.0 : d.outcome === 'BREAKEVEN' ? 0.5 : 0.0,
         });
+      }
+
+      // Feed false positive files as negative training samples (outcome=0, weight=0.5x)
+      try {
+        const fpFiles = this.learningStore.readRecentFalsePositives(30);
+        for (const fpDay of fpFiles) {
+          for (const sig of fpDay.signals) {
+            trainingData.push({
+              features: {
+                ema_vote: 0,
+                rsi_vote: 0,
+                macd_vote: 0,
+                supertrend_vote: 0,
+                bollinger_vote: 0,
+                vwap_vote: 0,
+                momentum_vote: 0,
+                volume_vote: 0,
+                composite_score: sig.confidence ?? 0.5,
+                regime: 1.0,
+                hour_of_day: 10,
+                day_of_week: 3,
+                raw_features: [],
+              },
+              outcome: 0.0,
+            });
+          }
+        }
+        if (fpFiles.length > 0) {
+          const fpSamples = fpFiles.reduce((s, f) => s + f.signals.length, 0);
+          log.info({ fpFiles: fpFiles.length, fpSamples }, 'False positive samples added to training data');
+        }
+      } catch (fpErr) {
+        log.warn({ err: fpErr }, 'Failed to load false positive files for retraining (non-fatal)');
+      }
+
+      // Merge Rust EOD outcomes from ml_training_log.json
+      try {
+        const rustLogPath = resolve(__dirname, '..', '..', '..', 'data', 'ml_training_log.json');
+        if (existsSync(rustLogPath)) {
+          const rustEntries: Array<{
+            symbol: string;
+            confidence: number;
+            ml_score: number;
+            outcome: string;
+            timestamp: string;
+          }> = JSON.parse(readFileSync(rustLogPath, 'utf-8'));
+
+          const since90d = new Date();
+          since90d.setDate(since90d.getDate() - 90);
+
+          // Dedup against existing decision audit entries (by symbol + date)
+          const existingKeys = new Set(
+            decisions.map(d => `${d.symbol}:${d.createdAt.toISOString().split('T')[0]}`),
+          );
+
+          let mergedCount = 0;
+          for (const entry of rustEntries) {
+            const entryDate = entry.timestamp?.split('T')[0] ?? '';
+            if (new Date(entryDate) < since90d) continue;
+            const key = `${entry.symbol}:${entryDate}`;
+            if (existingKeys.has(key)) continue;
+
+            const outcomeVal = entry.outcome === 'WIN' ? 1.0
+              : entry.outcome === 'FLAT' ? 0.5
+              : 0.0;
+
+            trainingData.push({
+              features: {
+                ema_vote: 0,
+                rsi_vote: 0,
+                macd_vote: 0,
+                supertrend_vote: 0,
+                bollinger_vote: 0,
+                vwap_vote: 0,
+                momentum_vote: 0,
+                volume_vote: 0,
+                composite_score: entry.confidence ?? entry.ml_score ?? 0.5,
+                regime: 1.0,
+                hour_of_day: 10,
+                day_of_week: 3,
+                raw_features: [],
+              },
+              outcome: outcomeVal,
+            });
+            mergedCount++;
+          }
+
+          if (mergedCount > 0) {
+            log.info({ mergedCount, totalRustEntries: rustEntries.length },
+              'Rust EOD training data merged into unified training set');
+          }
+        }
+      } catch (rustErr) {
+        log.warn({ err: rustErr }, 'Failed to read Rust ml_training_log.json (non-fatal)');
       }
 
       // Ensure all feature rows have consistent dimension (some may lack raw_features)
@@ -838,6 +1031,45 @@ Top losers: ${JSON.stringify(topLosers)}`,
             accuracy: lgbResult.accuracy,
             auc: lgbResult.auc_roc,
           }, 'Python LightGBM model retrained');
+
+          // Cross-model ensemble: compute blend weights based on relative accuracy
+          const rustAcc = result.training_accuracy ?? 0.5;
+          const pyAcc = Math.max(xgbResult.accuracy, lgbResult.accuracy);
+          const totalAcc = rustAcc + pyAcc;
+          const rustBlendWeight = totalAcc > 0 ? round2(rustAcc / totalAcc) : 0.5;
+          const pythonBlendWeight = totalAcc > 0 ? round2(pyAcc / totalAcc) : 0.5;
+
+          const blendParam = await this.prisma.strategyParam.findFirst({
+            where: { userId, strategyId: 'model_blend_weights' },
+            orderBy: { createdAt: 'desc' },
+          });
+
+          const blendData = JSON.stringify({
+            rustWeight: rustBlendWeight,
+            pythonWeight: pythonBlendWeight,
+            rustAccuracy: rustAcc,
+            pythonAccuracy: pyAcc,
+            computedAt: new Date().toISOString(),
+          });
+
+          if (blendParam) {
+            await this.prisma.strategyParam.update({
+              where: { id: blendParam.id },
+              data: { params: blendData, isActive: true, version: blendParam.version + 1 },
+            });
+          } else {
+            await this.prisma.strategyParam.create({
+              data: {
+                userId,
+                strategyId: 'model_blend_weights',
+                params: blendData,
+                isActive: true,
+                version: 1,
+              },
+            });
+          }
+
+          log.info({ userId, rustBlendWeight, pythonBlendWeight, rustAcc, pyAcc }, 'Cross-model blend weights computed and persisted');
         } catch (pyErr) {
           log.warn({ err: pyErr }, 'Python ML training failed (non-fatal, Rust model still active)');
         }
@@ -863,13 +1095,38 @@ Top losers: ${JSON.stringify(topLosers)}`,
       });
       const decayMap = new Map(decayData.map(d => [d.strategyId, d.isDecaying]));
 
-      const strategyStats = ledgers.map(l => ({
-        strategy_id: l.strategyId,
-        wins: l.wins,
-        losses: l.losses,
-        sharpe: l.sharpeRatio,
-        is_decaying: decayMap.get(l.strategyId) ?? false,
-      }));
+      // Get recent backtest results as priors for allocation
+      const backtestResults = await this.prisma.backtestResult.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        distinct: ['strategy'],
+        select: { strategy: true, sharpeRatio: true, winRate: true, profitFactor: true },
+      });
+      const backtestMap = new Map(backtestResults.map(b => [b.strategy, b]));
+
+      const strategyStats = ledgers.map(l => {
+        const bt = backtestMap.get(l.strategyId);
+        const liveSharpe = l.sharpeRatio;
+        const backtestSharpe = bt?.sharpeRatio ?? null;
+
+        // Blend live and backtest Sharpe: 70% live, 30% backtest prior
+        let blendedSharpe = liveSharpe;
+        if (backtestSharpe !== null) {
+          blendedSharpe = liveSharpe * 0.7 + Number(backtestSharpe) * 0.3;
+        }
+
+        // Accelerate decay for strategies with poor backtest AND poor live performance
+        const isDecaying = decayMap.get(l.strategyId) ?? false;
+        const fastDecay = isDecaying && backtestSharpe !== null && Number(backtestSharpe) < 0.3;
+
+        return {
+          strategy_id: l.strategyId,
+          wins: l.wins,
+          losses: l.losses,
+          sharpe: round2(blendedSharpe),
+          is_decaying: fastDecay || isDecaying,
+        };
+      });
 
       const user = await this.prisma.user.findUnique({
         where: { id: userId },
@@ -920,7 +1177,7 @@ Top losers: ${JSON.stringify(topLosers)}`,
         }, 'Strategy allocation optimized and persisted (Rust)');
       }
 
-      // Also call Python ML service for enhanced Bayesian allocation
+      // Also call Python ML service for enhanced Bayesian allocation and merge results
       if (await isMLServiceAvailable()) {
         try {
           const pyResult = await mlAllocate({
@@ -939,6 +1196,46 @@ Top losers: ${JSON.stringify(topLosers)}`,
             method: pyResult.method,
             explorationRate: pyResult.exploration_rate,
           }, 'Python strategy allocation computed');
+
+          // Merge Python allocation with Rust allocation (60% Rust, 40% Python)
+          if (result?.allocations && pyResult.allocations) {
+            const rustWeight = 0.6;
+            const pyWeight = 0.4;
+            const mergedAllocations: Record<string, number> = {};
+            const allStrategies = new Set([
+              ...Object.keys(result.allocations),
+              ...Object.keys(pyResult.allocations),
+            ]);
+            for (const strat of allStrategies) {
+              const rustVal = result.allocations[strat] ?? 0;
+              const pyVal = pyResult.allocations[strat] ?? 0;
+              mergedAllocations[strat] = round2(rustVal * rustWeight + pyVal * pyWeight);
+            }
+
+            const mergedAllocData = JSON.stringify({
+              allocations: mergedAllocations,
+              rustAllocations: result.allocations,
+              pythonAllocations: pyResult.allocations,
+              method: `merged(rust=${rustWeight},python=${pyWeight})`,
+              pythonMethod: pyResult.method,
+              explorationRate: pyResult.exploration_rate,
+              computedAt: new Date().toISOString(),
+            });
+
+            const currentAlloc = await this.prisma.strategyParam.findFirst({
+              where: { userId, strategyId: 'strategy_allocations' },
+              orderBy: { createdAt: 'desc' },
+            });
+
+            if (currentAlloc) {
+              await this.prisma.strategyParam.update({
+                where: { id: currentAlloc.id },
+                data: { params: mergedAllocData, isActive: true, version: currentAlloc.version + 1 },
+              });
+            }
+
+            log.info({ userId, mergedAllocations }, 'Merged Rust+Python allocation persisted');
+          }
         } catch (pyErr) {
           log.warn({ err: pyErr }, 'Python allocation failed (non-fatal)');
         }
@@ -1150,6 +1447,62 @@ Top losers: ${JSON.stringify(topLosers)}`,
    * Reset intraday learning state at market open.
    * Called by the server orchestrator at 9:15 IST.
    */
+  private async autoCalibrate(userId: string): Promise<void> {
+    if (!await isMLServiceAvailable()) return;
+
+    try {
+      const since = new Date();
+      since.setDate(since.getDate() - 30);
+
+      const decisions = await this.prisma.decisionAudit.findMany({
+        where: {
+          userId,
+          decisionType: 'ENTRY_SIGNAL',
+          outcome: { in: ['WIN', 'LOSS'] },
+          resolvedAt: { not: null },
+          createdAt: { gte: since },
+        },
+        select: { confidence: true, outcome: true },
+        take: 200,
+      });
+
+      if (decisions.length < 30) return;
+
+      const predictions = decisions.map(d => d.confidence);
+      const actuals = decisions.map(d => d.outcome === 'WIN' ? 1.0 : 0.0);
+
+      // Compute Brier score: mean((predicted - actual)^2)
+      const brierScore = predictions.reduce((sum, p, i) => sum + (p - actuals[i]) ** 2, 0) / predictions.length;
+
+      log.info({ userId, brierScore, samples: decisions.length }, 'Calibration check');
+
+      if (brierScore > 0.25) {
+        const { mlCalibrate } = await import('../lib/ml-service-client.js');
+        const result = await mlCalibrate({ predictions, actuals, model_type: 'xgboost' });
+        log.info({
+          userId,
+          brierScore,
+          calibrated: result.calibrated,
+          message: result.message,
+        }, 'Auto-calibration triggered');
+
+        // Adjust signal thresholds if model is miscalibrated
+        const agentConfig = await this.prisma.aIAgentConfig.findUnique({ where: { userId } });
+        if (agentConfig) {
+          const newMinScore = Math.min(0.85, agentConfig.minSignalScore + 0.05);
+          await this.prisma.aIAgentConfig.update({
+            where: { userId },
+            data: { minSignalScore: round2(newMinScore) },
+          });
+          log.info({ userId, oldScore: agentConfig.minSignalScore, newScore: newMinScore },
+            'Signal threshold tightened due to poor calibration');
+        }
+      }
+    } catch (err) {
+      log.warn({ err, userId }, 'Auto-calibration failed (non-fatal)');
+    }
+  }
+
   resetIntradayState(): void {
     this.consecutiveLosses.clear();
     this.intradayTradeCount = 0;

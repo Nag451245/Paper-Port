@@ -119,6 +119,13 @@ symbols = [
     "VOLTAS", "HINDZINC", "LICI",
 ]
 
+[continuous_scan]
+enabled = true
+sector_rotation_interval_secs = 600   # Every 10 minutes
+futures_scan_interval_secs = 1800     # Every 30 minutes
+news_fetch_interval_secs = 900       # Every 15 minutes
+signal_ttl_secs = 7200               # 2 hours
+
 [persistence]
 enabled = true
 snapshot_path = "engine_state.json"

@@ -62,6 +62,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const learningEngine = new LearningEngine(getPrisma());
   const morningBoot = new MorningBoot(getPrisma());
   const orchestrator = new ServerOrchestrator(getPrisma(), botEngine, env.PORT);
+  orchestrator.setLearningEngine(learningEngine);
   const uptimeMonitor = new UptimeMonitorService(async () => {
     try { await getPrisma().$queryRaw`SELECT 1`; return true; } catch { return false; }
   });

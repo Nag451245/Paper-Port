@@ -56,15 +56,23 @@ export class DecisionAuditService {
     exitPrice: number;
     pnl: number;
     predictionAccuracy?: number;
-    outcomeNotes: string;
+    outcomeNotes?: string;
   }): Promise<void> {
+    let outcomeLabel: 'WIN' | 'LOSS' | 'BREAKEVEN';
+    if (Math.abs(outcome.pnl) < 10) outcomeLabel = 'BREAKEVEN';
+    else if (outcome.pnl > 0) outcomeLabel = 'WIN';
+    else outcomeLabel = 'LOSS';
+
     await this.prisma.decisionAudit.update({
       where: { id: auditId },
       data: {
         exitPrice: outcome.exitPrice,
         pnl: outcome.pnl,
         predictionAccuracy: outcome.predictionAccuracy,
-        outcome: outcome.outcomeNotes,
+        outcome: outcomeLabel,
+        reasoning: outcome.outcomeNotes
+          ? `${outcomeLabel}: ${outcome.outcomeNotes}`
+          : undefined,
         resolvedAt: new Date(),
       },
     });

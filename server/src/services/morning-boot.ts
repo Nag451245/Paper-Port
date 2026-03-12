@@ -67,11 +67,9 @@ export class MorningBoot {
     await this.applyRegimeAdaptation(userId, latestInsight);
     const strategiesActivated = await this.adjustBotStrategies(userId, latestInsight);
 
-    // Load optimized ML weights into execution engine context
     await this.loadMLWeights(userId);
-
-    // Configure risk limits based on VIX/regime
     await this.configureRegimeRiskLimits(userId, latestInsight);
+    await this.loadRegimeHistory(userId);
 
     // Pre-compute signals for watchlist symbols
     await this.precomputeWatchlistSignals(userId);
@@ -372,6 +370,43 @@ Currently active bots: ${bots.map(b => `${b.name} (${b.assignedStrategy || 'none
       log.info({ userId, precomputed, total: universe.length }, 'Watchlist signals pre-computed');
     } catch (err) {
       log.error({ err, userId }, 'Failed to precompute watchlist signals');
+    }
+  }
+
+  private async loadRegimeHistory(userId: string): Promise<void> {
+    try {
+      const recent = await this.prisma.regimeHistory.findMany({
+        orderBy: { date: 'desc' },
+        take: 5,
+      });
+
+      if (recent.length === 0) return;
+
+      const current = recent[0];
+      const lastTransition = recent.find(r => r.transitionFrom);
+
+      log.info({
+        userId,
+        currentRegime: current.regime,
+        durationDays: current.durationDays,
+        lastTransition: lastTransition
+          ? `${lastTransition.transitionFrom} -> ${lastTransition.regime} on ${lastTransition.date.toISOString().split('T')[0]}`
+          : 'none',
+      }, 'Regime history loaded for morning boot');
+
+      const { getRedis } = await import('../lib/redis.js');
+      const redis = getRedis();
+      if (redis) {
+        await redis.set(`cg:regime_history:${userId}`, JSON.stringify({
+          current: current.regime,
+          durationDays: current.durationDays,
+          vix: current.vix,
+          lastTransition: lastTransition?.transitionFrom ?? null,
+          updatedAt: new Date().toISOString(),
+        }), 'EX', 24 * 3600);
+      }
+    } catch (err) {
+      log.warn({ err, userId }, 'Failed to load regime history (non-fatal)');
     }
   }
 

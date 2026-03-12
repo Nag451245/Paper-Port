@@ -178,6 +178,7 @@ export class BotEngine {
   private recentWinRates = new Map<string, { wins: number; total: number; emaWinRate: number }>();
   private intradayVolatility = new Map<string, number>();
   private mlWeights: Record<string, unknown> | null = null;
+  private abTestTracker = { rustCorrect: 0, pythonCorrect: 0, total: 0 };
 
   constructor(private prisma: PrismaClient, oms?: OrderManagementService) {
     this.tradeService = new TradeService(prisma, oms);
@@ -1793,7 +1794,20 @@ Approve or reject?` },
       }
     } catch { /* Python service unavailable, no-op */ }
 
-    // ── Step 3: A/B logging ──
+    // ── Step 2b: Challenger model (LightGBM) for A/B testing ──
+    let challengerScore = -1;
+    try {
+      const { isMLServiceAvailable, mlScore } = await import('../lib/ml-service-client.js');
+      if (await isMLServiceAvailable()) {
+        const lgbResult = await mlScore({
+          features: [{ features: featureObj }],
+          model_type: 'lightgbm',
+        });
+        challengerScore = lgbResult.scores?.[0] ?? -1;
+      }
+    } catch { /* challenger unavailable */ }
+
+    // ── Step 3: A/B logging with challenger tracking ──
     const agreed = rustScore >= 0 && pythonScore >= 0
       ? (rustScore >= 0.5) === (pythonScore >= 0.5)
       : null;
@@ -1802,10 +1816,11 @@ Approve or reject?` },
       symbol: sig.symbol, confidence: sig.confidence,
       rustScore: rustScore >= 0 ? rustScore.toFixed(4) : 'N/A',
       pythonScore: pythonScore >= 0 ? pythonScore.toFixed(4) : 'N/A',
+      challengerScore: challengerScore >= 0 ? challengerScore.toFixed(4) : 'N/A',
       agreed, usedModel,
     }, 'ML A/B score comparison');
 
-    // ── Step 4: Record in DecisionAudit for later analysis ──
+    // ── Step 4: Record in DecisionAudit for A/B analysis ──
     try {
       await this.decisionAudit.recordDecision({
         userId: 'system',
@@ -1815,14 +1830,69 @@ Approve or reject?` },
         confidence: sig.confidence,
         signalSource: sig.strategy ?? 'rust-engine',
         marketDataSnapshot: {
-          rustScore, pythonScore, agreed, usedModel,
+          rustScore, pythonScore, challengerScore, agreed, usedModel,
           entry: sig.entry, stopLoss: sig.stop_loss, target: sig.target,
         },
-        reasoning: `Rust: ${rustScore >= 0 ? rustScore.toFixed(4) : 'N/A'}, Python: ${pythonScore >= 0 ? pythonScore.toFixed(4) : 'N/A'}, Used: ${usedModel}`,
+        reasoning: `Rust: ${rustScore >= 0 ? rustScore.toFixed(4) : 'N/A'}, Python(XGB): ${pythonScore >= 0 ? pythonScore.toFixed(4) : 'N/A'}, Challenger(LGB): ${challengerScore >= 0 ? challengerScore.toFixed(4) : 'N/A'}, Used: ${usedModel}`,
       });
     } catch { /* audit is best-effort */ }
 
-    // ── Step 5: Decision — prefer Python when available ──
+    // ── Step 4b: A/B test auto-promotion check (every 50 trades) ──
+    this.abTestTracker.total++;
+    if (this.abTestTracker.total % 50 === 0 && this.abTestTracker.total > 0) {
+      try {
+        const recentABTests = await this.prisma.decisionAudit.findMany({
+          where: { decisionType: 'ML_AB_TEST', resolvedAt: { not: null } },
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+          select: { marketDataSnapshot: true, pnl: true },
+        });
+
+        let xgbWins = 0;
+        let lgbWins = 0;
+        for (const test of recentABTests) {
+          const snap = typeof test.marketDataSnapshot === 'string'
+            ? JSON.parse(test.marketDataSnapshot) : test.marketDataSnapshot;
+          const won = (test.pnl ?? 0) > 0;
+          const xgbPredicted = (snap?.pythonScore ?? 0) >= 0.5;
+          const lgbPredicted = (snap?.challengerScore ?? 0) >= 0.5;
+          if (xgbPredicted === won) xgbWins++;
+          if (lgbPredicted === won) lgbWins++;
+        }
+
+        if (recentABTests.length >= 30 && lgbWins > xgbWins + 5) {
+          log.info({ xgbWins, lgbWins, samples: recentABTests.length },
+            'Challenger model (LightGBM) outperforming — promoting as primary');
+          emit('system', {
+            type: 'ML_WEIGHTS_UPDATED',
+            userId: 'system',
+            version: -1,
+            timestamp: new Date().toISOString(),
+            note: 'LightGBM promoted via A/B test',
+          } as any).catch(() => {});
+        }
+      } catch { /* A/B evaluation is best-effort */ }
+    }
+
+    // ── Step 5: Ensemble blending — use weighted average when both available ──
+    if (rustScore >= 0 && pythonScore >= 0) {
+      let rw = 0.5;
+      let pw = 0.5;
+      try {
+        const blendParam = await this.prisma.strategyParam.findFirst({
+          where: { strategyId: 'model_blend_weights', isActive: true },
+          orderBy: { createdAt: 'desc' },
+        });
+        if (blendParam) {
+          const blend = JSON.parse(blendParam.params);
+          rw = blend.rustWeight ?? 0.5;
+          pw = blend.pythonWeight ?? 0.5;
+        }
+      } catch { /* fallback to equal weights */ }
+      const ensembleScore = rw * rustScore + pw * pythonScore;
+      log.info({ symbol: sig.symbol, ensembleScore, rw, pw }, 'Ensemble ML score');
+      return ensembleScore >= 0.5;
+    }
     if (pythonScore >= 0) return pythonScore >= 0.5;
     if (rustScore >= 0) return rustScore >= 0.5;
     return sig.confidence >= 0.45;

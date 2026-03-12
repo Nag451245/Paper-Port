@@ -150,3 +150,20 @@ export async function mlDetectRegime(req: RegimeRequest): Promise<RegimeResponse
 export async function mlAllocate(req: AllocateRequest): Promise<AllocateResponse> {
   return mlFetch<AllocateResponse>('/allocate', req);
 }
+
+export interface CalibrateRequest {
+  predictions: number[];
+  actuals: number[];
+  model_type?: 'xgboost' | 'lightgbm';
+}
+
+export interface CalibrateResponse {
+  brier_score: number;
+  calibrated: boolean;
+  adjustments: Record<string, number>;
+  message: string;
+}
+
+export async function mlCalibrate(req: CalibrateRequest): Promise<CalibrateResponse> {
+  return mlFetch<CalibrateResponse>('/calibrate', req);
+}

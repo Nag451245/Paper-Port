@@ -84,6 +84,35 @@ export class LearningStoreService {
     return JSON.parse(readFileSync(filePath, 'utf-8'));
   }
 
+  readRecentFalsePositives(days = 30): Array<{
+    date: string;
+    signals: Array<{ symbol: string; type: string; confidence: number; status: string; outcome: string | null }>;
+  }> {
+    const fpDir = join(LEARNING_DIR, 'false-positives');
+    if (!existsSync(fpDir)) return [];
+
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+    const cutoffStr = dateStr(cutoff);
+
+    const results: Array<{
+      date: string;
+      signals: Array<{ symbol: string; type: string; confidence: number; status: string; outcome: string | null }>;
+    }> = [];
+
+    for (const file of readdirSync(fpDir).filter(f => f.endsWith('.json'))) {
+      const name = file.replace('.json', '');
+      if (name < cutoffStr) continue;
+      try {
+        const data = JSON.parse(readFileSync(join(fpDir, file), 'utf-8'));
+        if (data?.signals) {
+          results.push({ date: name, signals: data.signals });
+        }
+      } catch { /* skip corrupted files */ }
+    }
+    return results;
+  }
+
   getTotalSize(): number {
     return this.dirSize(LEARNING_DIR);
   }

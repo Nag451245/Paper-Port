@@ -18,6 +18,8 @@ import {
 } from '../lib/event-bus.js';
 import { wsHub } from '../lib/websocket.js';
 import { createChildLogger } from '../lib/logger.js';
+import { getRedis } from '../lib/redis.js';
+import { emit } from '../lib/event-bus.js';
 import type { LearningEngine } from './learning-engine.js';
 import type { BotEngine } from './bot-engine.js';
 import { TelegramService } from './telegram.service.js';
@@ -267,11 +269,84 @@ export function registerAllWorkers(
         log.warn({ symbol: event.symbol, gapMinutes: event.gapMinutes }, 'Data gap detected');
         break;
 
-      case 'TICK_RECEIVED':
-        break;
+      case 'TICK_RECEIVED': {
+        // Sample 1-in-10 ticks for volume anomaly detection
+        const tickKey = `tick_count:${event.symbol}`;
+        const redis = getRedis();
+        if (redis) {
+          try {
+            const count = await redis.incr(tickKey);
+            if (count === 1) await redis.expire(tickKey, 3600);
 
-      case 'CANDLE_CLOSED':
+            if (count % 10 === 0) {
+              const volKey = `cg:vol_profile:${event.symbol}`;
+              const raw = await redis.get(volKey);
+              const profile = raw ? JSON.parse(raw) : { samples: 0, avgVolume: 0, maxVolume: 0 };
+              const vol = event.volume ?? 0;
+
+              profile.samples += 1;
+              profile.avgVolume = profile.avgVolume + (vol - profile.avgVolume) / profile.samples;
+              if (vol > profile.maxVolume) profile.maxVolume = vol;
+
+              // Detect unusual volume spike (3x average)
+              if (profile.samples > 20 && vol > profile.avgVolume * 3) {
+                log.info({ symbol: event.symbol, volume: vol, avg: profile.avgVolume }, 'Volume anomaly detected');
+                emit('signals', {
+                  type: 'SIGNAL_GENERATED',
+                  symbol: event.symbol,
+                  direction: 'NEUTRAL',
+                  confidence: 0.6,
+                  source: 'volume_anomaly',
+                  userId: 'system',
+                } as any).catch(() => {});
+              }
+
+              await redis.set(volKey, JSON.stringify(profile), 'EX', 6 * 3600);
+            }
+          } catch { /* tick learning is best-effort */ }
+        }
         break;
+      }
+
+      case 'CANDLE_CLOSED': {
+        // Compute intraday volume profile and VWAP deviation
+        const candleRedis = getRedis();
+        if (candleRedis && event.symbol) {
+          try {
+            const vpKey = `cg:vwap_profile:${event.symbol}`;
+            const raw = await candleRedis.get(vpKey);
+            const profile = raw ? JSON.parse(raw) : {
+              cumulativeVolume: 0,
+              cumulativeVwap: 0,
+              candleCount: 0,
+              highOfDay: -Infinity,
+              lowOfDay: Infinity,
+            };
+
+            const close = event.close ?? 0;
+            const vol = event.volume ?? 0;
+
+            profile.cumulativeVolume += vol;
+            profile.cumulativeVwap += close * vol;
+            profile.candleCount += 1;
+            if (close > profile.highOfDay) profile.highOfDay = close;
+            if (close < profile.lowOfDay) profile.lowOfDay = close;
+
+            const vwap = profile.cumulativeVolume > 0
+              ? profile.cumulativeVwap / profile.cumulativeVolume
+              : close;
+            const vwapDeviation = close !== 0 ? ((close - vwap) / close) * 100 : 0;
+
+            profile.vwap = vwap;
+            profile.vwapDeviation = vwapDeviation;
+            profile.lastClose = close;
+            profile.updatedAt = new Date().toISOString();
+
+            await candleRedis.set(vpKey, JSON.stringify(profile), 'EX', 12 * 3600);
+          } catch { /* candle learning is best-effort */ }
+        }
+        break;
+      }
     }
   }, { concurrency: 3 });
 

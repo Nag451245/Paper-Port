@@ -686,3 +686,21 @@ model AlphaDecay {
   @@index([userId, strategyId])
   @@map("alpha_decay")
 }
+
+model RegimeHistory {
+  id            String   @id @default(uuid())
+  date          DateTime @db.Date
+  regime        String
+  confidence    Float    @default(0)
+  durationDays  Int      @default(1) @map("duration_days")
+  niftyChange   Float?   @map("nifty_change")
+  vix           Float?
+  transitionFrom String? @map("transition_from")
+  metadata      String   @default("{}")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@unique([date])
+  @@index([regime])
+  @@index([date])
+  @@map("regime_history")
+}

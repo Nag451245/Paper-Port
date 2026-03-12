@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import type { PrismaClient } from '@prisma/client';
 import { MarketCalendar, type MarketPhase } from './market-calendar.js';
 import type { BotEngine } from './bot-engine.js';
+import type { LearningEngine } from './learning-engine.js';
 import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
 
@@ -24,6 +25,8 @@ export class ServerOrchestrator {
   private serverUrl: string;
   private stats: OrchestratorStats;
   private scheduledTasks: cron.ScheduledTask[] = [];
+
+  private learningEngine?: LearningEngine;
 
   constructor(
     private prisma: PrismaClient,
@@ -57,6 +60,10 @@ export class ServerOrchestrator {
     });
 
     this.resetDailyStats();
+  }
+
+  setLearningEngine(engine: LearningEngine): void {
+    this.learningEngine = engine;
   }
 
   stop(): void {
@@ -106,7 +113,9 @@ export class ServerOrchestrator {
     const config = this.calendar.getPhaseConfig(to);
 
     if (to === 'MARKET_HOURS') {
-      // Market just opened — start bots and set fast intervals
+      if (this.learningEngine) {
+        this.learningEngine.resetIntradayState();
+      }
       await this.autoStartBots();
       this.botEngine.setTickInterval(config.botTickMs || 60_000);
       this.botEngine.setMarketScanInterval(config.scanIntervalMs || 5 * 60_000);

@@ -1235,6 +1235,7 @@ export class TradeService {
     emit('execution', {
       type: 'POSITION_CLOSED', userId, positionId,
       symbol: position.symbol, pnl: netPnl, exitPrice,
+      strategyTag: position.strategyTag ?? undefined,
     }).catch(err => log.error({ err, positionId }, 'Failed to emit POSITION_CLOSED event'));
 
     return trade;
