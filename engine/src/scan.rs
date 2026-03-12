@@ -296,22 +296,23 @@ pub fn compute(data: Value) -> Result<Value, String> {
         };
 
         // --- Vote: RSI Momentum (weight: 0.10) ---
-        // FIXED: RSI 50-70 is BULLISH momentum, not neutral!
-        // RSI > 70 means strong trend, not "overbought" in a trending market
+        // RSI 50-70 is BULLISH momentum, RSI > 70 is strong trend
         let rsi_vote = if rsi < thresholds.rsi_strong_oversold {
             1.0   // deeply oversold — strong buy
         } else if rsi < thresholds.rsi_oversold {
             0.7   // oversold — buy
         } else if rsi > 80.0 {
-            -0.3  // extreme — slight caution but don't fight the trend
+            -0.2  // extreme — slight caution but don't fight the trend
+        } else if rsi > 70.0 {
+            0.7   // strong bullish momentum
         } else if rsi > 60.0 {
-            0.5   // bullish momentum zone (50-80)
+            0.8   // sweet-spot bullish momentum zone
         } else if rsi > 50.0 {
-            0.3   // mild bullish
+            0.5   // mild bullish
         } else if rsi > 40.0 {
             -0.3  // mild bearish
         } else {
-            -0.5  // bearish momentum
+            -0.6  // bearish momentum
         };
 
         // --- Vote: MACD (weight: 0.10) ---
@@ -332,9 +333,9 @@ pub fn compute(data: Value) -> Result<Value, String> {
 
         // --- Vote: Supertrend (weight: 0.10) ---
         let st_vote = if close > supertrend {
-            0.8
+            1.0
         } else {
-            -0.8
+            -1.0
         };
 
         // --- Vote: Bollinger Position (weight: 0.05) ---
@@ -342,17 +343,17 @@ pub fn compute(data: Value) -> Result<Value, String> {
         let bb_vote = if bb_range > 0.0 {
             let position = (close - bb_lower) / bb_range;
             if position > 0.9 && momentum_score > 0.5 {
-                0.6  // riding upper band with momentum = bullish breakout
+                0.9  // riding upper band with momentum = bullish breakout
             } else if position > 0.8 {
-                0.3  // near upper band
+                0.5  // near upper band
             } else if position < 0.1 && momentum_score < -0.5 {
-                -0.6 // riding lower band with negative momentum
+                -0.9 // riding lower band with negative momentum
             } else if position < 0.2 {
-                -0.3
+                -0.5
             } else if close > bb_mid {
-                0.2  // above midline
+                0.3  // above midline
             } else {
-                -0.2 // below midline
+                -0.3 // below midline
             }
         } else {
             0.0
@@ -360,14 +361,18 @@ pub fn compute(data: Value) -> Result<Value, String> {
 
         // --- Vote: VWAP (weight: 0.05) ---
         let vwap_pct = if vwap > 0.0 { (close - vwap) / vwap * 100.0 } else { 0.0 };
-        let vwap_vote = if vwap_pct > 0.5 {
-            0.6  // clearly above VWAP
+        let vwap_vote = if vwap_pct > 1.0 {
+            1.0  // strongly above VWAP
+        } else if vwap_pct > 0.5 {
+            0.7  // clearly above VWAP
         } else if vwap_pct > 0.0 {
-            0.3
+            0.4
+        } else if vwap_pct < -1.0 {
+            -1.0
         } else if vwap_pct < -0.5 {
-            -0.6
+            -0.7
         } else {
-            -0.3
+            -0.4
         };
 
         // --- Vote: MOMENTUM (NEW - weight: 0.25) ---
@@ -389,27 +394,64 @@ pub fn compute(data: Value) -> Result<Value, String> {
             0.0 // below average volume — no conviction
         };
 
-        let composite: f64 = ema_vote * weights.ema
-            + rsi_vote * weights.rsi
-            + macd_vote * weights.macd
-            + st_vote * weights.supertrend
-            + bb_vote * weights.bollinger
-            + vwap_vote * weights.vwap
-            + momentum_vote * weights.momentum
-            + volume_vote * weights.volume;
+        // When volume is below average, redistribute its weight to non-zero votes
+        let effective_weights = if (volume_vote as f64).abs() < 0.001 {
+            let redistributed = weights.volume;
+            let non_vol_sum = weights.ema + weights.rsi + weights.macd
+                + weights.supertrend + weights.bollinger + weights.vwap + weights.momentum;
+            if non_vol_sum > 0.0 {
+                let scale = (non_vol_sum + redistributed) / non_vol_sum;
+                (weights.ema * scale, weights.rsi * scale, weights.macd * scale,
+                 weights.supertrend * scale, weights.bollinger * scale,
+                 weights.vwap * scale, weights.momentum * scale, 0.0)
+            } else {
+                (weights.ema, weights.rsi, weights.macd, weights.supertrend,
+                 weights.bollinger, weights.vwap, weights.momentum, weights.volume)
+            }
+        } else {
+            (weights.ema, weights.rsi, weights.macd, weights.supertrend,
+             weights.bollinger, weights.vwap, weights.momentum, weights.volume)
+        };
 
-        // Factor signals
-        // Volatility factor: high vol = reduce confidence, low vol = look for breakouts
+        let composite: f64 = ema_vote * effective_weights.0
+            + rsi_vote * effective_weights.1
+            + macd_vote * effective_weights.2
+            + st_vote * effective_weights.3
+            + bb_vote * effective_weights.4
+            + vwap_vote * effective_weights.5
+            + momentum_vote * effective_weights.6
+            + volume_vote * effective_weights.7;
+
+        // Agreement bonus: when most votes align, amplify the signal
+        let votes_arr = [ema_vote, rsi_vote, macd_vote, st_vote, bb_vote, vwap_vote, momentum_vote, volume_vote];
+        let bullish_count = votes_arr.iter().filter(|&&v| v > 0.1).count();
+        let bearish_count = votes_arr.iter().filter(|&&v| v < -0.1).count();
+        let agreement_bonus = if bullish_count >= 6 || bearish_count >= 6 {
+            0.15
+        } else if bullish_count >= 5 || bearish_count >= 5 {
+            0.08
+        } else {
+            0.0
+        };
+        let composite = if composite > 0.0 {
+            composite + agreement_bonus
+        } else if composite < 0.0 {
+            composite - agreement_bonus
+        } else {
+            composite
+        };
+
+        // Volatility factor: high vol = slight reduction, low vol = slight boost
         let vol_factor = if atr > 0.0 && close > 0.0 {
             let vol_pct = atr / close;
-            if vol_pct > 0.03 { -0.15 } // very volatile, reduce
-            else if vol_pct < 0.01 { 0.10 } // low vol, potential breakout
+            if vol_pct > 0.03 { -0.08 }
+            else if vol_pct < 0.01 { 0.08 }
             else { 0.0 }
         } else { 0.0 };
 
         // Liquidity factor: volume vs average
-        let liq_factor = if volume_ratio > 2.0 { 0.10 }
-            else if volume_ratio < 0.5 { -0.10 }
+        let liq_factor = if volume_ratio > 2.0 { 0.08 }
+            else if volume_ratio < 0.5 { -0.05 }
             else { 0.0 };
 
         let composite = composite + breakout_score * 0.10 + vol_factor + liq_factor;

@@ -315,8 +315,96 @@ async fn main() {
             server::run(state).await;
         }
         "daemon" => {
-            info!("Starting daemon mode (stdin/stdout JSON-RPC)");
-            run_daemon(state);
+            info!("Starting daemon mode (stdin/stdout JSON-RPC + background scanners)");
+
+            // Persistence snapshots
+            if config.persistence.enabled {
+                let persist_state = state.clone();
+                let interval = config.persistence.snapshot_interval_secs;
+                let path = config.persistence.snapshot_path.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+                        if let Err(e) = persist_state.save_snapshot(&path) {
+                            tracing::warn!("Snapshot save failed: {}", e);
+                        }
+                    }
+                });
+            }
+
+            // Market data feed (required for live executor ticks)
+            if config.market_data.enabled && !config.market_data.symbols.is_empty() {
+                let feed_store = state.live_prices.clone();
+                let symbols = config.market_data.symbols.clone();
+                let poll_interval = config.market_data.reconnect_delay_secs.max(1);
+                let bridge_url = config.broker.icici.bridge_url.clone();
+                if !bridge_url.is_empty() {
+                    info!("[daemon] Starting market data feed via Breeze Bridge");
+                    tokio::spawn(async move {
+                        market_data::start_bridge_feed(feed_store, &bridge_url, &symbols, poll_interval).await;
+                    });
+                }
+            }
+
+            // Options chain feed
+            if config.options.feed_enabled {
+                let options_store = state.options_data.clone();
+                let signal_state = state.clone();
+                let oc_symbols = if config.options.feed_symbols.is_empty() {
+                    config.market_data.symbols.clone()
+                } else {
+                    config.options.feed_symbols.clone()
+                };
+                let bridge_url = config.broker.icici.bridge_url.clone();
+                let opts_config = config.options.clone();
+                if !bridge_url.is_empty() {
+                    info!("[daemon] Starting options chain feed");
+                    tokio::spawn(async move {
+                        options_data::start_options_feed(options_store, signal_state, &bridge_url, &oc_symbols, &opts_config).await;
+                    });
+                }
+            }
+
+            // Live executor (processes ticks → strategies → auto-executes orders)
+            live_executor::spawn(state.clone());
+
+            // Universe refresh at startup
+            {
+                let bridge_url = config.broker.icici.bridge_url.clone();
+                if !bridge_url.is_empty() {
+                    let refresh_universe = state.universe.clone();
+                    tokio::task::spawn_blocking(move || {
+                        refresh_universe.try_refresh(&bridge_url);
+                    });
+                }
+            }
+
+            // Premarket scanner scheduler
+            premarket::spawn_scheduler(state.clone());
+            if state.config.premarket.enabled {
+                let dyn_state = state.clone();
+                tokio::spawn(async move {
+                    premarket::start_dynamic_feed(dyn_state).await;
+                });
+            }
+
+            // Continuous scanner (sector rotation, futures, news, EOD)
+            continuous_scanner::spawn(
+                state.clone(),
+                state.universe.clone(),
+                state.rate_limiter.clone(),
+                state.news_store.clone(),
+                state.scan_ledger.clone(),
+            );
+
+            // Run the JSON-RPC stdin/stdout loop on a blocking thread
+            // so that tokio background tasks (scanners, live executor) keep running
+            let daemon_state = state.clone();
+            tokio::task::spawn_blocking(move || {
+                run_daemon(daemon_state);
+            }).await.unwrap_or_else(|e| {
+                error!("Daemon thread panicked: {}", e);
+            });
         }
         _ => {
             run_single_shot(state);
