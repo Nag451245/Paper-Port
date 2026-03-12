@@ -1187,7 +1187,6 @@ export class TradeService {
     const trade = await this.prisma.trade.create({
       data: {
         portfolioId: position.portfolioId,
-        orderId: exitOrder.id,
         positionId: position.id,
         symbol: position.symbol,
         exchange: position.exchange,
