@@ -192,9 +192,19 @@ export class DataPipelineService {
           const label = scoreResult.labels[i] ?? 'LOSS';
 
           if (label === 'WIN' && score > 0.6) {
-            const direction = (f: Record<string, number>) => {
-              const composite = f.composite_score ?? f.ema_vote ?? 0;
-              return composite > 0 ? 'BUY' : 'SELL';
+            const direction = (f: Record<string, number>): 'BUY' | 'SELL' => {
+              const emaRatio = f.ema_ratio_9_21 ?? 1.0;
+              const rsi = f.rsi_14 ?? 50;
+              const slope = f.linreg_slope_20 ?? 0;
+              const momentum = f.momentum_12d ?? 0;
+
+              let bullish = 0;
+              if (emaRatio > 1.0) bullish++;
+              if (rsi > 50) bullish++;
+              if (slope > 0) bullish++;
+              if (momentum > 0) bullish++;
+
+              return bullish >= 3 ? 'BUY' : bullish <= 1 ? 'SELL' : (emaRatio > 1.0 ? 'BUY' : 'SELL');
             };
 
             const dir = direction(features[i].featureMap);

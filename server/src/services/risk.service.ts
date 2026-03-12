@@ -211,7 +211,7 @@ export class RiskService {
       },
     });
 
-    if (side === 'BUY' && openPositions >= cfg.maxOpenPositions) {
+    if (openPositions >= cfg.maxOpenPositions) {
       violations.push(`Already at max ${cfg.maxOpenPositions} open positions`);
     }
 
@@ -224,7 +224,7 @@ export class RiskService {
       },
     });
 
-    if (side === 'BUY' && symbolPositions >= cfg.maxSymbolConcentration) {
+    if (symbolPositions >= cfg.maxSymbolConcentration) {
       violations.push(`Already ${symbolPositions} open positions in ${symbol} (max ${cfg.maxSymbolConcentration})`);
     }
 
@@ -253,7 +253,7 @@ export class RiskService {
     }
 
     // Rule 6: Correlation-aware position limits
-    if (side === 'BUY') {
+    {
       const newSector = SECTOR_MAP[symbol] ?? 'Other';
       const existingPositions = await this.prisma.position.findMany({
         where: { portfolioId: portfolio.id, status: 'OPEN' },
@@ -279,7 +279,7 @@ export class RiskService {
     }
 
     // Rule 6b: Pairwise return correlation — reject if new position is too correlated with existing
-    if (side === 'BUY') {
+    {
       const existingPositions = await this.prisma.position.findMany({
         where: { portfolioId: portfolio.id, status: 'OPEN' },
         select: { symbol: true },
@@ -323,7 +323,7 @@ export class RiskService {
     }
 
     // Rule 7: Portfolio heat — total open exposure as % of capital
-    if (side === 'BUY') {
+    {
       const allOpen = await this.prisma.position.findMany({
         where: { portfolioId: portfolio.id, status: 'OPEN' },
         select: { avgEntryPrice: true, qty: true },
@@ -338,7 +338,7 @@ export class RiskService {
     }
 
     // Rule 8: Sector concentration by value (% of capital)
-    if (side === 'BUY') {
+    {
       const newSectorForValue = SECTOR_MAP[symbol] ?? 'Other';
       const sectorPositions = await this.prisma.position.findMany({
         where: { portfolioId: portfolio.id, status: 'OPEN' },
@@ -357,7 +357,7 @@ export class RiskService {
     }
 
     // Rule 9: Volume participation limits
-    if (side === 'BUY') {
+    {
       const avgDailyVolume = 500_000;
       const participationPct = avgDailyVolume > 0 ? (qty / avgDailyVolume) * 100 : 0;
       if (participationPct > cfg.maxVolumeParticipationPct) {
@@ -366,7 +366,6 @@ export class RiskService {
         warnings.push(`Volume participation at ${participationPct.toFixed(1)}% — approaching limit`);
       }
 
-      // Estimate market impact for the caller
       const k = 0.10;
       const estVol = 0.018;
       const impactBps = k * Math.sqrt(participationPct / 100) * estVol * 10000;
@@ -376,7 +375,7 @@ export class RiskService {
     }
 
     // Rule 10: Stop-loss sizing — position risk must fit within capital risk budget
-    if (side === 'BUY') {
+    {
       const stopLossRisk = orderValue * (cfg.maxStopLossPctPerPosition / 100);
       const maxCapRisk = capital * (cfg.maxStopLossPctPerPosition / 100);
       if (stopLossRisk > maxCapRisk) {
@@ -385,7 +384,7 @@ export class RiskService {
     }
 
     // Rule 11: Simultaneous risk budget — total open risk must stay under limit
-    if (side === 'BUY') {
+    {
       const allOpen = await this.prisma.position.findMany({
         where: { portfolioId: portfolio.id, status: 'OPEN' },
         select: { avgEntryPrice: true, qty: true },

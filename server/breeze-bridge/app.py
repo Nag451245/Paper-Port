@@ -1243,6 +1243,99 @@ def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None
         return {"symbol": symbol, "bars": [], "error": str(e)}
 
 
+_INDEX_CONFIGS = [
+    {"symbol": "NIFTY",     "code": "NIFTY",  "exchange": "NSE", "name": "NIFTY 50"},
+    {"symbol": "BANKNIFTY", "code": "CNXBAN", "exchange": "NSE", "name": "NIFTY BANK"},
+    {"symbol": "SENSEX",    "code": "SENSEX", "exchange": "BSE", "name": "SENSEX"},
+]
+
+
+def get_live_indices():
+    """Fetch live index values from Breeze API for NIFTY, BANKNIFTY, SENSEX."""
+    if not breeze_instance:
+        return {"indices": [], "source": "breeze", "error": "Breeze session not active"}
+
+    cache_key = "indices:live"
+    cached = _cache_get(cache_key)
+    if cached:
+        return cached
+
+    indices = []
+    now = datetime.now()
+    from_dt = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    to_dt = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    today_open = now.replace(hour=9, minute=15, second=0).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    for cfg in _INDEX_CONFIGS:
+        value, prev_close = 0.0, 0.0
+        try:
+            result = _call_with_timeout(
+                breeze_instance.get_quotes,
+                stock_code=cfg["code"],
+                exchange_code=cfg["exchange"],
+                product_type="others",
+                timeout=5,
+            )
+            if result and result.get("Status") == 200:
+                records = result.get("Success", [])
+                if isinstance(records, list) and len(records) > 0:
+                    rec = records[0]
+                    value = _safe_float(rec.get("ltp"))
+                    prev_close = _safe_float(
+                        rec.get("previous_close") or rec.get("close") or rec.get("prev_close")
+                    )
+                    if value <= 0:
+                        value = _safe_float(rec.get("best_bid_price"))
+        except Exception as e:
+            print(f"[Breeze Bridge] Index quote {cfg['symbol']}: {e}")
+
+        if value <= 0:
+            try:
+                hist = _call_with_timeout(
+                    breeze_instance.get_historical_data_v2,
+                    interval="1minute",
+                    from_date=from_dt,
+                    to_date=to_dt,
+                    stock_code=cfg["code"],
+                    exchange_code=cfg["exchange"],
+                    product_type="cash",
+                    timeout=6,
+                )
+                if hist and hist.get("Status") == 200:
+                    bars = hist.get("Success", [])
+                    if isinstance(bars, list) and len(bars) > 0:
+                        value = _safe_float(bars[-1].get("close"))
+                        if prev_close <= 0:
+                            prev_close = _safe_float(bars[0].get("open"))
+            except Exception as e:
+                print(f"[Breeze Bridge] Index historical {cfg['symbol']}: {e}")
+
+        if value <= 0:
+            spot = _fetch_spot_from_yahoo(cfg["symbol"])
+            if spot and spot > 0:
+                value = spot
+
+        if value > 0:
+            change = round(value - prev_close, 2) if prev_close > 0 else 0.0
+            change_pct = round((change / prev_close) * 100, 2) if prev_close > 0 else 0.0
+            indices.append({
+                "name": cfg["name"],
+                "value": round(value, 2),
+                "change": change,
+                "changePercent": change_pct,
+            })
+
+    result_data = {
+        "indices": indices,
+        "count": len(indices),
+        "source": "breeze",
+        "timestamp": now.isoformat(),
+    }
+    if len(indices) > 0:
+        _cache_set(cache_key, result_data)
+    return result_data
+
+
 class BreezeHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"[Breeze Bridge] {args[0]}")
@@ -1294,6 +1387,10 @@ class BreezeHandler(BaseHTTPRequestHandler):
                     "session_active": breeze_instance is not None,
                     "session_expiry": session_expiry.isoformat() if session_expiry else None,
                 })
+
+            elif path == "/indices":
+                data = get_live_indices()
+                self.send_json(data)
 
             elif path.startswith("/option-chain/"):
                 symbol = path.split("/")[-1]

@@ -1131,9 +1131,21 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           ltp = quote.ltp;
         } catch { /* will be fetched by TradeService */ }
 
+        if (ltp <= 0) return { success: false, message: `Cannot short ${symbol}: no price available` };
+
         const kellyAllocation = await this.computeKellySize(userId, symbol, nav);
         const maxPerTrade = nav * kellyAllocation;
-        const qty = ltp > 0 ? Math.max(1, Math.floor(maxPerTrade / ltp)) : 1;
+        const qty = Math.max(1, Math.floor(maxPerTrade / ltp));
+
+        const sellRiskCheck = await this.riskService.preTradeCheck(userId, symbol, 'SELL', qty, ltp);
+        if (!sellRiskCheck.allowed) {
+          const msg = `RISK BLOCKED SHORT: ${sellRiskCheck.violations.join('; ')}`;
+          log.info({ symbol, violations: sellRiskCheck.violations }, msg);
+          if (auditId) {
+            try { await this.decisionAudit.resolveDecision(auditId, { exitPrice: 0, pnl: 0, predictionAccuracy: 0, outcomeNotes: msg }); } catch {}
+          }
+          return { success: false, message: msg };
+        }
 
         const order = await this.tradeService.placeOrder(userId, {
           portfolioId: portfolio.id,
@@ -2522,10 +2534,17 @@ Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted
         where: { portfolioId: portfolio.id, symbol: signal.symbol, side: 'LONG', status: 'OPEN' },
       });
       if (longPos) {
+        let exitPrice = 0;
+        try {
+          const q = await this.marketData.getQuote(signal.symbol);
+          exitPrice = q.ltp;
+        } catch { /* fallback to entry price */ }
+        if (exitPrice <= 0) exitPrice = Number(longPos.avgEntryPrice);
+
         const exitResult = await ExitCoordinator.closePosition({
           positionId: longPos.id,
           userId: bot.userId,
-          exitPrice: Number(longPos.avgEntryPrice),
+          exitPrice,
           reason: `Pipeline ML signal (confidence: ${signal.confidence.toFixed(2)}, strategy: ${signal.strategy})`,
           source: 'PIPELINE_ML',
           decisionType: 'EXIT_SIGNAL',

@@ -904,15 +904,26 @@ export class TradeService {
     qty: number,
     db?: any,
   ) {
+    if (fillPrice <= 0) {
+      throw new TradeError('Cannot open SHORT with invalid fill price', 400);
+    }
+
     const prisma = db ?? this.prisma;
     const existingShort = await prisma.position.findFirst({
       where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'SHORT', status: 'OPEN' },
     });
 
+    const MAX_SHORT_QTY = 10_000;
+
     if (existingShort) {
       const oldQty = existingShort.qty;
       const oldAvg = Number(existingShort.avgEntryPrice);
       const newQty = oldQty + qty;
+
+      if (newQty > MAX_SHORT_QTY) {
+        throw new TradeError(`SHORT qty ${newQty} would exceed max ${MAX_SHORT_QTY} for ${input.symbol}`, 400);
+      }
+
       const newAvg = (oldAvg * oldQty + fillPrice * qty) / newQty;
 
       await prisma.position.update({
@@ -921,6 +932,9 @@ export class TradeService {
       });
       await prisma.order.update({ where: { id: orderId }, data: { positionId: existingShort.id } });
     } else {
+      if (qty > MAX_SHORT_QTY) {
+        throw new TradeError(`SHORT qty ${qty} would exceed max ${MAX_SHORT_QTY} for ${input.symbol}`, 400);
+      }
       const position = await prisma.position.create({
         data: {
           portfolioId: input.portfolioId,
@@ -1152,7 +1166,7 @@ export class TradeService {
     const grossPnl = position.side === 'LONG'
       ? (exitPrice - entryPrice) * position.qty
       : (entryPrice - exitPrice) * position.qty;
-    const costs = calculateCosts(position.qty, exitPrice, 'SELL');
+    const costs = calculateCosts(position.qty, exitPrice, exitSide);
     const netPnl = grossPnl - costs.totalCost;
 
     // Create an exit Order record so the close flows through OMS

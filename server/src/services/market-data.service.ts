@@ -969,48 +969,109 @@ export class MarketDataService {
       if (cached) return cached;
     }
 
-    // Primary: Yahoo Finance for key indices
-    const indexSymbols: [string, string][] = [
+    const indices: { name: string; value: number; change: number; changePercent: number }[] = [];
+
+    // ── Primary: Breeze Bridge (live broker data) ──
+    const bridgeActive = await this.ensureBreezeBridgeSession();
+    if (bridgeActive) {
+      try {
+        const res = await fetch(`${BREEZE_BRIDGE_URL}/indices`, {
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
+        if (res.ok) {
+          const data = await res.json() as any;
+          const breezeIndices = data?.indices ?? [];
+          for (const idx of breezeIndices) {
+            if (idx.name && idx.value > 0) {
+              indices.push({
+                name: idx.name,
+                value: Number(Number(idx.value).toFixed(2)),
+                change: Number(Number(idx.change ?? 0).toFixed(2)),
+                changePercent: Number(Number(idx.changePercent ?? 0).toFixed(2)),
+              });
+            }
+          }
+          if (indices.length > 0) {
+            log.info(`Indices from Breeze: ${indices.map(i => i.name).join(', ')}`);
+          }
+        }
+      } catch { /* Breeze bridge unavailable */ }
+    }
+
+    // ── Fallback: Yahoo Finance for any missing indices ──
+    const expectedIndices: [string, string][] = [
       ['^NSEI', 'NIFTY 50'],
       ['^NSEBANK', 'NIFTY BANK'],
       ['^BSESN', 'SENSEX'],
       ['^INDIAVIX', 'INDIA VIX'],
     ];
 
-    const indices: { name: string; value: number; change: number; changePercent: number }[] = [];
+    const fetchedNames = new Set(indices.map(i => i.name));
+    const missingFromYahoo = expectedIndices.filter(([, name]) => !fetchedNames.has(name));
 
-    const promises = indexSymbols.map(async ([sym, name]) => {
+    if (missingFromYahoo.length > 0) {
+      const yahooPromises = missingFromYahoo.map(async ([sym, name]) => {
+        try {
+          const encoded = encodeURIComponent(sym);
+          const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encoded}?interval=1d&range=1d`;
+          const ac = new AbortController();
+          const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+          const res = await fetch(url, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+            signal: ac.signal,
+          });
+          clearTimeout(timer);
+
+          if (!res.ok) return;
+
+          const data = await res.json() as any;
+          const meta = data?.chart?.result?.[0]?.meta;
+          if (!meta) return;
+
+          const value = meta.regularMarketPrice ?? 0;
+          const prevClose = meta.chartPreviousClose ?? 0;
+          const change = value - prevClose;
+          const changePercent = prevClose > 0 ? (change / prevClose) * 100 : 0;
+
+          indices.push({
+            name,
+            value: Number(value.toFixed(2)),
+            change: Number(change.toFixed(2)),
+            changePercent: Number(changePercent.toFixed(2)),
+          });
+        } catch { /* skip */ }
+      });
+
+      await Promise.all(yahooPromises);
+    }
+
+    // ── Fallback: BSE API specifically for SENSEX ──
+    if (!indices.some(i => i.name === 'SENSEX')) {
       try {
-        const url = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=1d`;
         const ac = new AbortController();
         const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
-        const res = await fetch(url, {
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+        const res = await fetch('https://api.bseindia.com/BseIndiaAPI/api/GetSensexData/w?code=16', {
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', Accept: 'application/json' },
           signal: ac.signal,
         });
         clearTimeout(timer);
-
-        if (!res.ok) return;
-
-        const data = await res.json() as any;
-        const meta = data?.chart?.result?.[0]?.meta;
-        if (!meta) return;
-
-        const value = meta.regularMarketPrice ?? 0;
-        const prevClose = meta.chartPreviousClose ?? 0;
-        const change = value - prevClose;
-        const changePercent = prevClose > 0 ? (change / prevClose) * 100 : 0;
-
-        indices.push({
-          name,
-          value: Number(value.toFixed(2)),
-          change: Number(change.toFixed(2)),
-          changePercent: Number(changePercent.toFixed(2)),
-        });
-      } catch { /* skip */ }
-    });
-
-    await Promise.all(promises);
+        if (res.ok) {
+          const bseData = await res.json() as any;
+          const currentVal = parseFloat(bseData?.CurrValue ?? bseData?.ltp ?? '0');
+          const prevClose = parseFloat(bseData?.PrevClose ?? bseData?.prevclose ?? '0');
+          if (currentVal > 0) {
+            const change = prevClose > 0 ? currentVal - prevClose : 0;
+            const changePct = prevClose > 0 ? (change / prevClose) * 100 : 0;
+            indices.push({
+              name: 'SENSEX',
+              value: Number(currentVal.toFixed(2)),
+              change: Number(change.toFixed(2)),
+              changePercent: Number(changePct.toFixed(2)),
+            });
+          }
+        }
+      } catch { /* BSE fallback failed */ }
+    }
 
     if (indices.length > 0 && this.cache) {
       await this.cache.set(cacheKey, indices, CACHE_TTL_INDICES);
@@ -1018,13 +1079,13 @@ export class MarketDataService {
 
     if (indices.length > 0) return indices;
 
-    // Fallback: NSE direct
+    // ── Last resort: NSE allIndices ──
     try {
       const res = await this.nseFetch('https://www.nseindia.com/api/allIndices');
       if (!res.ok) { await res.text().catch(() => { /* drain */ }); return []; }
       const data = await res.json() as any;
       return (data.data ?? []).slice(0, 10).map((idx: any) => ({
-        name: idx.index,
+        name: idx.index === 'S&P BSE SENSEX' ? 'SENSEX' : idx.index,
         value: idx.last,
         change: idx.variation,
         changePercent: idx.percentChange,
