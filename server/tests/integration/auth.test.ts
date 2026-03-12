@@ -497,6 +497,9 @@ describe('Auth Routes Integration', () => {
 
   describe('GET /health', () => {
     it('should return health status', async () => {
+      const prismaModule = await import('../../src/lib/prisma.js');
+      (prismaModule.getPrisma as any).mockReturnValue(mockPrisma);
+      mockPrisma.$queryRaw = vi.fn().mockResolvedValue([{ 1: 1 }]);
       const res = await app.inject({
         method: 'GET',
         url: '/health',

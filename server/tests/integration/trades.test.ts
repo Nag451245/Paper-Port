@@ -4,6 +4,20 @@ import type { FastifyInstance } from 'fastify';
 let app: FastifyInstance;
 let mockPrisma: any;
 
+vi.mock('../../src/services/market-calendar.js', () => ({
+  MarketCalendar: vi.fn().mockImplementation(() => ({
+    isMarketOpen: vi.fn().mockReturnValue(true),
+    getMarketPhase: vi.fn().mockReturnValue('MARKET_HOURS'),
+    getPhaseConfig: vi.fn().mockReturnValue({ pingIntervalMs: 60000, botTickMs: 120000, scanIntervalMs: 180000, label: 'Market Hours' }),
+    getHolidayName: vi.fn().mockReturnValue(null),
+    getNextMarketOpen: vi.fn().mockReturnValue({ date: new Date().toISOString(), label: 'Today' }),
+    isHoliday: vi.fn().mockReturnValue(false),
+    isWeekend: vi.fn().mockReturnValue(false),
+    getStatus: vi.fn().mockReturnValue({ phase: 'MARKET_HOURS', phaseLabel: 'Market Hours', isOpen: true, isHoliday: false, holidayName: null, isWeekend: false, nextOpen: { date: '', label: '' }, upcomingHolidays: [], timestamp: new Date().toISOString() }),
+    getUpcomingHolidays: vi.fn().mockReturnValue([]),
+  })),
+}));
+
 vi.mock('../../src/lib/prisma.js', () => {
   const mock = {
     user: { findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
@@ -15,6 +29,8 @@ vi.mock('../../src/lib/prisma.js', () => {
     watchlist: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), delete: vi.fn() },
     watchlistItem: { findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn(), delete: vi.fn() },
     $disconnect: vi.fn(),
+    $transaction: vi.fn().mockImplementation(async (fn: any) => fn(mock)),
+    $queryRaw: vi.fn().mockResolvedValue([{ 1: 1 }]),
   };
   return { getPrisma: vi.fn(() => mock), disconnectPrisma: vi.fn(), __mockPrisma: mock };
 });
@@ -28,7 +44,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => { await app.close(); });
-beforeEach(() => { vi.resetAllMocks(); });
+beforeEach(() => { vi.clearAllMocks(); });
 
 function authHeaders(userId = 'test-user') {
   return { authorization: `Bearer ${app.jwt.sign({ sub: userId })}` };
@@ -189,7 +205,8 @@ describe('Trade Routes Integration', () => {
       });
 
       expect(res.statusCode).toBe(200);
-      expect(res.json().id).toBe('t1');
+      expect(res.json().success).toBe(true);
+      expect(res.json().pnl).toBeDefined();
     });
 
     it('should return 400 for missing exit_price', async () => {

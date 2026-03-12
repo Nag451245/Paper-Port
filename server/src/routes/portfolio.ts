@@ -153,7 +153,11 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
       const { portfolioId } = request.params as { portfolioId: string };
       const { days } = request.query as { days?: string };
       const userId = getUserId(request);
-      const history = await service.getPnlHistory(portfolioId, userId, days ? Number(days) : 30);
+      const parsedDays = days ? Math.max(1, Math.min(365, Math.floor(Number(days)))) : 30;
+      if (days && isNaN(Number(days))) {
+        return reply.code(400).send({ error: 'Invalid days parameter' });
+      }
+      const history = await service.getPnlHistory(portfolioId, userId, parsedDays);
       return reply.send(history);
     } catch (err) {
       if (err instanceof PortfolioError) return reply.code(err.statusCode).send({ error: err.message });
