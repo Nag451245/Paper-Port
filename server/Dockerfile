@@ -24,7 +24,7 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/prisma ./prisma
 
-COPY bin/ ./bin/ 2>/dev/null || true
+RUN mkdir -p ./bin
 
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
