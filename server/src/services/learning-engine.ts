@@ -1099,10 +1099,10 @@ Top losers: ${JSON.stringify(topLosers)}`,
       const backtestResults = await this.prisma.backtestResult.findMany({
         where: { userId },
         orderBy: { createdAt: 'desc' },
-        distinct: ['strategy'],
-        select: { strategy: true, sharpeRatio: true, winRate: true, profitFactor: true },
+        distinct: ['strategyId'],
+        select: { strategyId: true, sharpeRatio: true, winRate: true, profitFactor: true },
       });
-      const backtestMap = new Map(backtestResults.map(b => [b.strategy, b]));
+      const backtestMap = new Map(backtestResults.map(b => [b.strategyId, b]));
 
       const strategyStats = ledgers.map(l => {
         const bt = backtestMap.get(l.strategyId);
