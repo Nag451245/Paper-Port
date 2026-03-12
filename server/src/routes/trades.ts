@@ -106,7 +106,7 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(403).send({ error: 'Not authorized' });
       }
 
-      if (order.status !== 'PENDING') {
+      if (order.status !== 'PENDING' && order.status !== 'SUBMITTED') {
         return reply.code(400).send({ error: `Cannot modify order in ${order.status} status` });
       }
 

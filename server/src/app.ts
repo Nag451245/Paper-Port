@@ -43,6 +43,7 @@ import { DataPipelineService } from './services/data-pipeline.service.js';
 import { OrderManagementService } from './services/oms.service.js';
 import { registerAllWorkers } from './services/event-workers.js';
 import { register as metricsRegister, apiRequestDuration } from './lib/metrics.js';
+import { isEngineAvailable, ensureEngineAvailable, startDaemon, stopDaemon } from './lib/rust-engine.js';
 
 export interface BuildAppOptions {
   logger?: boolean;
@@ -148,8 +149,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     if (reply.statusCode >= 500) uptimeMonitor.recordError();
   });
 
-  // Prometheus metrics endpoint
-  app.get('/metrics', async (_req, reply) => {
+  // Prometheus metrics endpoint — protected by JWT auth
+  app.get('/metrics', { preHandler: [async (request, reply) => {
+    try {
+      await request.jwtVerify();
+    } catch {
+      reply.code(401).send({ error: 'Authentication required for metrics' });
+    }
+  }] }, async (_req, reply) => {
     reply.header('Content-Type', metricsRegister.contentType);
     return metricsRegister.metrics();
   });
@@ -177,7 +184,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
 
     try {
-      const { isEngineAvailable } = await import('./lib/rust-engine.js');
       checks.engine = isEngineAvailable() ? 'ok' : 'not_installed';
     } catch {
       checks.engine = 'error';
@@ -387,7 +393,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     orchestrator.stop();
     uptimeMonitor.stop();
     try {
-      const { stopDaemon } = await import('./lib/rust-engine.js');
       stopDaemon();
       console.log('[shutdown] Rust engine daemon stopped');
     } catch { /* engine not loaded */ }
@@ -395,10 +400,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     await disconnectPrisma();
   });
 
-  // Download Rust engine binary at startup if not already present
   app.addHook('onReady', async () => {
     try {
-      const { ensureEngineAvailable, startDaemon } = await import('./lib/rust-engine.js');
       const ok = await ensureEngineAvailable();
       if (ok) {
         const daemonOk = startDaemon();

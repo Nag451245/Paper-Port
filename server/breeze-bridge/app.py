@@ -34,6 +34,7 @@ session_expiry = None
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_FILE = os.path.join(SCRIPT_DIR, ".breeze_session.json")
 LOT_SIZE_FILE = os.path.join(SCRIPT_DIR, ".lot_sizes.json")
+BRIDGE_AUTH_TOKEN = os.environ.get("BREEZE_BRIDGE_AUTH_TOKEN", "")
 
 # In-memory response cache to avoid hammering Breeze API
 _response_cache = {}
@@ -113,12 +114,13 @@ _HARDCODED_BREEZE_CODES = {
 }
 
 _dynamic_nfo_codes = set()
+_nse_cash_codes = {}   # NSE ticker → Breeze cash stock_code
 _symbol_map_lock = threading.Lock()
 
 
 def _build_symbol_map():
-    """Extract valid NFO codes from loaded stock script data."""
-    global _dynamic_nfo_codes
+    """Extract valid NFO codes and NSE cash codes from loaded stock script data."""
+    global _dynamic_nfo_codes, _nse_cash_codes
 
     if not breeze_instance or not breeze_instance.stock_script_dict_list:
         return
@@ -132,6 +134,31 @@ def _build_symbol_map():
 
     _dynamic_nfo_codes = nfo_codes
     print(f"[Breeze Bridge] NFO underlying codes loaded: {len(nfo_codes)}")
+
+    # Build NSE cash code mapping from stock_script_dict_list[0] (NSE equity)
+    cash_codes = {}
+    try:
+        nse_dict = breeze_instance.stock_script_dict_list[0]
+        for key in nse_dict.keys():
+            parts = key.split("-")
+            if len(parts) >= 2:
+                code = parts[1]
+                cash_codes[code] = code
+        # Also add from dict index 1 (BSE equity) for broader coverage
+        try:
+            bse_dict = breeze_instance.stock_script_dict_list[1]
+            for key in bse_dict.keys():
+                parts = key.split("-")
+                if len(parts) >= 2:
+                    code = parts[1]
+                    if code not in cash_codes:
+                        cash_codes[code] = code
+        except (IndexError, AttributeError):
+            pass
+        _nse_cash_codes = cash_codes
+        print(f"[Breeze Bridge] NSE/BSE cash codes loaded: {len(cash_codes)}")
+    except (IndexError, AttributeError) as e:
+        print(f"[Breeze Bridge] Could not load NSE cash codes: {e}")
 
     mapped = 0
     unmapped = []
@@ -162,6 +189,20 @@ def _resolve_stock_code(symbol):
     if sym in _dynamic_nfo_codes:
         return sym
     print(f"[Breeze Bridge] WARNING: No Breeze code mapping for '{sym}', using as-is")
+    return sym
+
+
+def _resolve_cash_code(symbol):
+    """Resolve stock code for NSE cash quotes. Tries: direct NSE code, then NFO code as fallback."""
+    sym = symbol.upper()
+    # If the symbol itself is a known NSE cash code, use it directly
+    if sym in _nse_cash_codes:
+        return sym
+    # Try the hardcoded NFO mapping (some work for cash too)
+    if sym in _HARDCODED_BREEZE_CODES:
+        nfo_code = _HARDCODED_BREEZE_CODES[sym]
+        if nfo_code in _nse_cash_codes:
+            return nfo_code
     return sym
 
 
@@ -836,27 +877,36 @@ def _fetch_spot_from_breeze(symbol):
     """Fetch live spot price from Breeze API itself — most reliable source."""
     if not breeze_instance:
         return None
+    sym = symbol.upper()
     indices = {"NIFTY", "BANKNIFTY", "CNXBAN", "FINNIFTY", "FNXFIN", "NIFFIN",
                "MIDCPNIFTY", "MCDNTY", "NIFSEL", "SENSEX", "NIFTYNXT50", "NIFNXT", "NIFNEX"}
-    if symbol.upper() in indices:
+    if sym in indices:
         return None
-    breeze_code = _resolve_stock_code(symbol)
-    try:
-        result = _call_with_timeout(breeze_instance.get_quotes,
-            stock_code=breeze_code, exchange_code="NSE", product_type="cash",
-            timeout=10,
-        )
-        if result and result.get("Status") == 200 and isinstance(result.get("Success"), list):
-            records = result["Success"]
-            if records and len(records) > 0:
-                ltp = _safe_float(records[0].get("ltp"))
-                if ltp > 0:
-                    with _spot_price_cache_lock:
-                        _spot_price_cache[symbol.upper()] = {"price": ltp, "at": datetime.now()}
-                    print(f"[Breeze Bridge] Live spot for {symbol}: {ltp} (from Breeze API)")
-                    return ltp
-    except Exception as e:
-        print(f"[Breeze Bridge] Breeze spot fetch for {symbol}: {e}")
+
+    # Try multiple codes: original symbol, cash code, NFO code
+    codes_to_try = []
+    seen = set()
+    for c in [sym, _resolve_cash_code(sym), _resolve_stock_code(sym)]:
+        if c not in seen:
+            seen.add(c)
+            codes_to_try.append(c)
+
+    for code in codes_to_try:
+        try:
+            result = _call_with_timeout(breeze_instance.get_quotes,
+                stock_code=code, exchange_code="NSE", product_type="cash",
+                timeout=4,
+            )
+            if result and result.get("Status") == 200 and isinstance(result.get("Success"), list):
+                records = result["Success"]
+                if records and len(records) > 0:
+                    ltp = _safe_float(records[0].get("ltp"))
+                    if ltp > 0:
+                        with _spot_price_cache_lock:
+                            _spot_price_cache[sym] = {"price": ltp, "at": datetime.now()}
+                        return ltp
+        except Exception as e:
+            print(f"[Breeze Bridge] Breeze spot fetch for {sym} (code={code}): {e}")
     return None
 
 
@@ -1197,13 +1247,26 @@ class BreezeHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"[Breeze Bridge] {args[0]}")
 
+    def _check_auth(self):
+        """Validate bearer token if BREEZE_BRIDGE_AUTH_TOKEN is set."""
+        if not BRIDGE_AUTH_TOKEN:
+            return True
+        auth = self.headers.get("Authorization", "")
+        if auth == f"Bearer {BRIDGE_AUTH_TOKEN}":
+            return True
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"error": "Unauthorized"}).encode())
+        return False
+
     def send_json(self, data, status=200):
         try:
             body = json.dumps(data).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:8000")
             self.end_headers()
             self.wfile.write(body)
         except BrokenPipeError:
@@ -1218,6 +1281,12 @@ class BreezeHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/")
             params = parse_qs(parsed.query)
+
+            if path == "/health":
+                # Health check is always public
+                pass
+            elif not self._check_auth():
+                return
 
             if path == "/health":
                 self.send_json({
@@ -1316,33 +1385,58 @@ class BreezeHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": str(e), "available": 0, "used": 0, "total": 0}, 500)
 
             elif path.startswith("/quote/"):
-                symbol = path.split("/")[-1]
+                symbol = path.split("/")[-1].upper()
                 exchange = params.get("exchange", ["NSE"])[0]
                 if breeze_instance is None:
                     self.send_json({"error": "Breeze session not active"}, 503)
                     return
-                breeze_code = _resolve_stock_code(symbol)
-                try:
-                    result = breeze_instance.get_quotes(
-                        stock_code=breeze_code,
-                        exchange_code=exchange,
-                        product_type="cash",
-                    )
-                    quotes = result.get("Success", []) if isinstance(result, dict) else []
-                    if quotes and isinstance(quotes, list) and len(quotes) > 0:
-                        q = quotes[0]
-                        self.send_json({
-                            "symbol": symbol,
-                            "ltp": float(q.get("ltp", 0)),
-                            "change": float(q.get("ltp_change", q.get("change", 0))),
-                            "changePercent": float(q.get("ltp_percent_change", q.get("percent_change", 0))),
-                            "volume": int(q.get("total_quantity_traded", q.get("volume", 0))),
-                            "timestamp": datetime.now().isoformat(),
-                        })
-                    else:
-                        self.send_json({"symbol": symbol, "ltp": 0, "change": 0, "changePercent": 0, "volume": 0, "timestamp": datetime.now().isoformat()})
-                except Exception as e:
-                    self.send_json({"error": str(e)}, 500)
+
+                # Try multiple code resolutions: original symbol, cash code, NFO code
+                codes_to_try = []
+                cash_code = _resolve_cash_code(symbol)
+                nfo_code = _resolve_stock_code(symbol)
+                seen = set()
+                for c in [symbol, cash_code, nfo_code]:
+                    if c not in seen:
+                        seen.add(c)
+                        codes_to_try.append(c)
+
+                last_err = None
+                for code in codes_to_try:
+                    try:
+                        result = _call_with_timeout(
+                            breeze_instance.get_quotes,
+                            stock_code=code,
+                            exchange_code=exchange,
+                            product_type="cash",
+                            timeout=4,
+                        )
+                        if result is None:
+                            continue
+                        quotes = result.get("Success", []) if isinstance(result, dict) else []
+                        if quotes and isinstance(quotes, list) and len(quotes) > 0:
+                            q = quotes[0]
+                            ltp = float(q.get("ltp", 0))
+                            if ltp > 0:
+                                self.send_json({
+                                    "symbol": symbol,
+                                    "ltp": ltp,
+                                    "change": float(q.get("ltp_change", q.get("change", 0))),
+                                    "changePercent": float(q.get("ltp_percent_change", q.get("percent_change", 0))),
+                                    "volume": int(q.get("total_quantity_traded", q.get("volume", 0))),
+                                    "timestamp": datetime.now().isoformat(),
+                                })
+                                return
+                    except Exception as e:
+                        last_err = e
+
+                # All attempts returned no valid LTP
+                self.send_json({
+                    "symbol": symbol, "ltp": 0, "change": 0,
+                    "changePercent": 0, "volume": 0,
+                    "error": f"No valid LTP for {symbol}",
+                    "timestamp": datetime.now().isoformat(),
+                })
 
             elif path == "/stocks":
                 data = get_nse_stock_list()
@@ -1352,7 +1446,15 @@ class BreezeHandler(BaseHTTPRequestHandler):
                 self.send_json({
                     "hardcoded": len(_HARDCODED_BREEZE_CODES),
                     "nfo_codes_count": len(_dynamic_nfo_codes),
+                    "nse_cash_codes_count": len(_nse_cash_codes),
                     "mappings": _HARDCODED_BREEZE_CODES,
+                })
+
+            elif path == "/debug/cash-codes":
+                sample = dict(list(_nse_cash_codes.items())[:50])
+                self.send_json({
+                    "total": len(_nse_cash_codes),
+                    "sample": sample,
                 })
 
             elif path.startswith("/historical/"):
@@ -1380,6 +1482,9 @@ class BreezeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
+            if not self._check_auth():
+                return
+
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/")
 

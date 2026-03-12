@@ -18,6 +18,71 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
 
   app.addHook('preHandler', authenticate);
 
+  // BUG-1 FIX: Register /consolidated/summary BEFORE /:portfolioId to prevent route collision
+  app.get('/consolidated/summary', async (request, reply) => {
+    const userId = getUserId(request);
+    const prisma = getPrisma();
+
+    const portfolios = await prisma.portfolio.findMany({
+      where: { userId },
+      include: {
+        positions: { where: { status: 'OPEN' }, select: { symbol: true, qty: true, avgEntryPrice: true, side: true, exchange: true } },
+        _count: { select: { trades: true } },
+      },
+    });
+
+    let totalCapital = 0, totalCash = 0, totalInvestedValue = 0, totalOpenPositions = 0, totalTrades = 0;
+    for (const p of portfolios) {
+      totalCapital += Number(p.initialCapital);
+      totalCash += Number(p.currentNav);
+      totalOpenPositions += p.positions.length;
+      totalTrades += p._count.trades;
+      for (const pos of p.positions) {
+        const entryPrice = Number(pos.avgEntryPrice);
+        if (pos.side === 'LONG') {
+          totalInvestedValue += entryPrice * pos.qty;
+        } else {
+          const rate = pos.exchange === 'MCX' ? 0.10 : pos.exchange === 'CDS' ? 0.05 : 0.25;
+          totalInvestedValue += entryPrice * pos.qty * rate;
+        }
+      }
+    }
+    const totalNav = totalCash + totalInvestedValue;
+
+    return reply.send({
+      portfolioCount: portfolios.length,
+      totalCapital: Number(totalCapital.toFixed(2)),
+      totalNav: Number(totalNav.toFixed(2)),
+      totalPnl: Number((totalNav - totalCapital).toFixed(2)),
+      totalPnlPct: totalCapital > 0 ? Number((((totalNav - totalCapital) / totalCapital) * 100).toFixed(2)) : 0,
+      totalOpenPositions,
+      totalTrades,
+      portfolios: portfolios.map(p => {
+        let pInvested = 0;
+        for (const pos of p.positions) {
+          const ep = Number(pos.avgEntryPrice);
+          if (pos.side === 'LONG') {
+            pInvested += ep * pos.qty;
+          } else {
+            const rate = (pos as any).exchange === 'MCX' ? 0.10 : (pos as any).exchange === 'CDS' ? 0.05 : 0.25;
+            pInvested += ep * pos.qty * rate;
+          }
+        }
+        const pNav = Number(p.currentNav) + pInvested;
+        return {
+          id: p.id,
+          name: p.name,
+          isDefault: p.isDefault,
+          capital: Number(p.initialCapital),
+          nav: Number(pNav.toFixed(2)),
+          pnl: Number((pNav - Number(p.initialCapital)).toFixed(2)),
+          openPositions: p.positions.length,
+          trades: p._count.trades,
+        };
+      }),
+    });
+  });
+
   app.get('/', async (request, reply) => {
     const userId = getUserId(request);
     const portfolios = await service.list(userId);
@@ -136,14 +201,16 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(404).send({ error: 'Portfolio not found' });
       }
 
-      await prisma.portfolio.updateMany({
-        where: { userId, isDefault: true },
-        data: { isDefault: false },
-      });
-      await prisma.portfolio.update({
-        where: { id: portfolioId },
-        data: { isDefault: true },
-      });
+      await prisma.$transaction([
+        prisma.portfolio.updateMany({
+          where: { userId, isDefault: true },
+          data: { isDefault: false },
+        }),
+        prisma.portfolio.update({
+          where: { id: portfolioId },
+          data: { isDefault: true },
+        }),
+      ]);
 
       return reply.send({ message: 'Default portfolio updated', portfolioId });
     } catch (err) {
@@ -152,44 +219,4 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.get('/consolidated/summary', async (request, reply) => {
-    const userId = getUserId(request);
-    const prisma = getPrisma();
-
-    const portfolios = await prisma.portfolio.findMany({
-      where: { userId },
-      include: {
-        positions: { where: { status: 'OPEN' }, select: { symbol: true, qty: true, avgEntryPrice: true, side: true } },
-        _count: { select: { trades: true } },
-      },
-    });
-
-    let totalCapital = 0, totalNav = 0, totalOpenPositions = 0, totalTrades = 0;
-    for (const p of portfolios) {
-      totalCapital += Number(p.initialCapital);
-      totalNav += Number(p.currentNav);
-      totalOpenPositions += p.positions.length;
-      totalTrades += p._count.trades;
-    }
-
-    return reply.send({
-      portfolioCount: portfolios.length,
-      totalCapital: Number(totalCapital.toFixed(2)),
-      totalNav: Number(totalNav.toFixed(2)),
-      totalPnl: Number((totalNav - totalCapital).toFixed(2)),
-      totalPnlPct: totalCapital > 0 ? Number((((totalNav - totalCapital) / totalCapital) * 100).toFixed(2)) : 0,
-      totalOpenPositions,
-      totalTrades,
-      portfolios: portfolios.map(p => ({
-        id: p.id,
-        name: p.name,
-        isDefault: p.isDefault,
-        capital: Number(p.initialCapital),
-        nav: Number(p.currentNav),
-        pnl: Number((Number(p.currentNav) - Number(p.initialCapital)).toFixed(2)),
-        openPositions: p.positions.length,
-        trades: p._count.trades,
-      })),
-    });
-  });
 }

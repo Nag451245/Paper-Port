@@ -28,6 +28,7 @@ vi.mock('../../src/lib/prisma.js', () => {
     },
     $disconnect: vi.fn(),
     $connect: vi.fn(),
+    $queryRaw: vi.fn().mockResolvedValue([{ 1: 1 }]),
     $queryRawUnsafe: vi.fn().mockResolvedValue([{ 1: 1 }]),
   };
 

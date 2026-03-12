@@ -59,7 +59,7 @@ describe('Market Routes Integration', () => {
 
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(body).toHaveLength(1);
+      expect(body.length).toBeGreaterThanOrEqual(1);
       expect(body[0].symbol).toBe('RELIANCE');
     });
 

@@ -9,7 +9,7 @@ vi.mock('../../src/lib/prisma.js', () => {
     user: { findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
     breezeCredential: { findUnique: vi.fn(), upsert: vi.fn() },
     portfolio: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn() },
-    position: { findUnique: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
+    position: { findUnique: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
     order: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn(), count: vi.fn() },
     trade: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), count: vi.fn() },
     watchlist: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), delete: vi.fn() },
@@ -37,10 +37,15 @@ function authHeaders(userId = 'test-user') {
 describe('Trade Routes Integration', () => {
   describe('POST /api/trades/orders', () => {
     it('should place a market order', async () => {
-      mockPrisma.portfolio.findUnique.mockResolvedValue({ id: 'p1', userId: 'test-user' });
+      mockPrisma.portfolio.findUnique.mockResolvedValue({ id: 'p1', userId: 'test-user', currentNav: 1000000, initialCapital: 1000000 });
       mockPrisma.order.create.mockResolvedValue({
-        id: 'o1', symbol: 'RELIANCE', side: 'BUY', orderType: 'MARKET', qty: 10, status: 'FILLED',
+        id: 'o1', symbol: 'RELIANCE', side: 'BUY', orderType: 'MARKET', qty: 10, status: 'PENDING',
       });
+      mockPrisma.order.findUnique
+        .mockResolvedValueOnce({ id: 'o1', symbol: 'RELIANCE', status: 'PENDING', qty: 10, filledQty: 0 })
+        .mockResolvedValueOnce({ id: 'o1', symbol: 'RELIANCE', status: 'SUBMITTED', qty: 10, filledQty: 0, avgFillPrice: null })
+        .mockResolvedValueOnce({ id: 'o1', symbol: 'RELIANCE', status: 'SUBMITTED', qty: 10, filledQty: 0 })
+        .mockResolvedValue({ id: 'o1', symbol: 'RELIANCE', side: 'BUY', orderType: 'MARKET', qty: 10, status: 'FILLED' });
       mockPrisma.position.findFirst.mockResolvedValue(null);
       mockPrisma.position.create.mockResolvedValue({ id: 'pos1' });
       mockPrisma.order.update.mockResolvedValue({});
@@ -111,9 +116,10 @@ describe('Trade Routes Integration', () => {
 
   describe('DELETE /api/trades/orders/:id', () => {
     it('should cancel a pending order', async () => {
-      mockPrisma.order.findUnique.mockResolvedValue({
-        id: 'o1', status: 'PENDING', portfolio: { userId: 'test-user' },
-      });
+      mockPrisma.order.findUnique
+        .mockResolvedValueOnce({ id: 'o1', status: 'PENDING', portfolio: { userId: 'test-user' } })
+        .mockResolvedValueOnce({ id: 'o1', symbol: 'RELIANCE', status: 'PENDING' })
+        .mockResolvedValue({ id: 'o1', status: 'CANCELLED' });
       mockPrisma.order.update.mockResolvedValue({ id: 'o1', status: 'CANCELLED' });
 
       const res = await app.inject({
@@ -164,9 +170,10 @@ describe('Trade Routes Integration', () => {
       mockPrisma.position.findUnique.mockResolvedValue({
         id: 'pos1', portfolioId: 'p1', symbol: 'RELIANCE', exchange: 'NSE',
         qty: 10, avgEntryPrice: 2500, side: 'LONG', status: 'OPEN',
-        openedAt: new Date(), strategyTag: null,
+        openedAt: new Date(), strategyTag: null, realizedPnl: 0,
         portfolio: { userId: 'test-user' },
       });
+      mockPrisma.position.updateMany.mockResolvedValue({ count: 1 });
       mockPrisma.trade.create.mockResolvedValue({
         id: 't1', grossPnl: 5000, netPnl: 4950,
       });

@@ -34,6 +34,7 @@ function createMockPrisma() {
       findUnique: vi.fn(),
       findMany: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     trade: {
       create: vi.fn(),
@@ -68,15 +69,16 @@ describe('TradeService', () => {
         qty: 10,
         status: 'PENDING',
       });
-      // order.findUnique is called at the end to re-read final state
-      mockPrisma.order.findUnique.mockResolvedValue({
-        id: 'order-1',
-        symbol: 'RELIANCE',
-        side: 'BUY',
-        orderType: 'MARKET',
-        qty: 10,
-        status: 'FILLED',
-      });
+      // OMS calls findUnique multiple times during state transitions:
+      // 1. submitOrder → transition reads current state (PENDING)
+      // 2. recordFill reads order for qty info (SUBMITTED)
+      // 3. recordFill → transition reads current state (SUBMITTED)
+      // 4. final re-read after all OMS transitions (FILLED)
+      mockPrisma.order.findUnique
+        .mockResolvedValueOnce({ id: 'order-1', symbol: 'RELIANCE', status: 'PENDING', qty: 10, filledQty: 0 })
+        .mockResolvedValueOnce({ id: 'order-1', symbol: 'RELIANCE', status: 'SUBMITTED', qty: 10, filledQty: 0, avgFillPrice: null })
+        .mockResolvedValueOnce({ id: 'order-1', symbol: 'RELIANCE', status: 'SUBMITTED', qty: 10, filledQty: 0 })
+        .mockResolvedValue({ id: 'order-1', symbol: 'RELIANCE', side: 'BUY', orderType: 'MARKET', qty: 10, status: 'FILLED' });
       mockPrisma.position.findFirst.mockResolvedValue(null);
       mockPrisma.position.create.mockResolvedValue({
         id: 'pos-1',
@@ -117,7 +119,7 @@ describe('TradeService', () => {
     });
 
     it('should create SUBMITTED order for LIMIT type', async () => {
-      mockPrisma.portfolio.findUnique.mockResolvedValue({ id: 'p1', userId: 'user1' });
+      mockPrisma.portfolio.findUnique.mockResolvedValue({ id: 'p1', userId: 'user1', currentNav: 1000000, initialCapital: 1000000 });
       mockPrisma.order.create.mockResolvedValue({
         id: 'order-2',
         symbol: 'TCS',
@@ -128,16 +130,11 @@ describe('TradeService', () => {
         status: 'PENDING',
       });
       mockPrisma.order.update.mockResolvedValue({});
-      // Final re-read returns SUBMITTED (LIMIT orders are not immediately filled)
-      mockPrisma.order.findUnique.mockResolvedValue({
-        id: 'order-2',
-        symbol: 'TCS',
-        side: 'BUY',
-        orderType: 'LIMIT',
-        qty: 5,
-        price: 3500,
-        status: 'SUBMITTED',
-      });
+      // OMS submitOrder reads current state (PENDING), then final re-read returns SUBMITTED
+      mockPrisma.order.findUnique
+        .mockResolvedValueOnce({ id: 'order-2', symbol: 'TCS', status: 'PENDING', qty: 5, filledQty: 0 })
+        .mockResolvedValue({ id: 'order-2', symbol: 'TCS', side: 'BUY', orderType: 'LIMIT', qty: 5, price: 3500, status: 'SUBMITTED' });
+      mockPrisma.position.findFirst.mockResolvedValue(null);
 
       const result = await service.placeOrder('user1', {
         portfolioId: 'p1',
@@ -154,18 +151,19 @@ describe('TradeService', () => {
     });
 
     it('should average up existing position on BUY', async () => {
-      mockPrisma.portfolio.findUnique.mockResolvedValue({ id: 'p1', userId: 'user1', currentNav: 1000000 });
+      mockPrisma.portfolio.findUnique.mockResolvedValue({ id: 'p1', userId: 'user1', currentNav: 1000000, initialCapital: 1000000 });
       mockPrisma.order.create.mockResolvedValue({
         id: 'order-3',
+        symbol: 'RELIANCE',
         status: 'PENDING',
         side: 'BUY',
         orderType: 'MARKET',
+        qty: 10,
       });
-      // findFirst calls: 1) SHORT check in placeOrder, 2) SHORT check in handleBuyFill, 3) LONG check in openLongPosition
       mockPrisma.position.findFirst
-        .mockResolvedValueOnce(null)  // no SHORT to check margin
-        .mockResolvedValueOnce(null)  // no SHORT to cover
-        .mockResolvedValueOnce({      // existing LONG to average up
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
           id: 'pos-existing',
           qty: 10,
           avgEntryPrice: 2500,
@@ -174,9 +172,12 @@ describe('TradeService', () => {
         });
       mockPrisma.position.update.mockResolvedValue({});
       mockPrisma.order.update.mockResolvedValue({});
-      mockPrisma.order.findUnique.mockResolvedValue({
-        id: 'order-3', status: 'FILLED', side: 'BUY', orderType: 'MARKET',
-      });
+      // OMS state transitions: PENDING→SUBMITTED, then recordFill reads + SUBMITTED→FILLED, then final re-read
+      mockPrisma.order.findUnique
+        .mockResolvedValueOnce({ id: 'order-3', symbol: 'RELIANCE', status: 'PENDING', qty: 10, filledQty: 0 })
+        .mockResolvedValueOnce({ id: 'order-3', symbol: 'RELIANCE', status: 'SUBMITTED', qty: 10, filledQty: 0, avgFillPrice: null })
+        .mockResolvedValueOnce({ id: 'order-3', symbol: 'RELIANCE', status: 'SUBMITTED', qty: 10, filledQty: 0 })
+        .mockResolvedValue({ id: 'order-3', status: 'FILLED', side: 'BUY', orderType: 'MARKET' });
 
       await service.placeOrder('user1', {
         portfolioId: 'p1',
@@ -202,11 +203,11 @@ describe('TradeService', () => {
 
   describe('cancelOrder', () => {
     it('should cancel a pending order', async () => {
-      mockPrisma.order.findUnique.mockResolvedValue({
-        id: 'order-1',
-        status: 'PENDING',
-        portfolio: { userId: 'user1' },
-      });
+      // cancelOrder reads order, OMS.transition reads order, then final re-read
+      mockPrisma.order.findUnique
+        .mockResolvedValueOnce({ id: 'order-1', status: 'PENDING', portfolio: { userId: 'user1' } })
+        .mockResolvedValueOnce({ id: 'order-1', symbol: 'RELIANCE', status: 'PENDING' })
+        .mockResolvedValue({ id: 'order-1', status: 'CANCELLED' });
       mockPrisma.order.update.mockResolvedValue({ id: 'order-1', status: 'CANCELLED' });
 
       const result = await service.cancelOrder('order-1', 'user1');
@@ -292,8 +293,10 @@ describe('TradeService', () => {
         status: 'OPEN',
         openedAt: new Date(),
         strategyTag: null,
+        realizedPnl: 0,
         portfolio: { userId: 'user1' },
       });
+      mockPrisma.position.updateMany.mockResolvedValue({ count: 1 });
       mockPrisma.trade.create.mockResolvedValue({
         id: 'trade-1',
         grossPnl: 5000,

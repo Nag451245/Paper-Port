@@ -208,6 +208,8 @@ export class IntelligenceService {
       return {
         date: new Date().toISOString().split('T')[0],
         fiiNet: 0, diiNet: 0,
+        fiiBuy: 0, fiiSell: 0,
+        diiBuy: 0, diiSell: 0,
         message: 'FII/DII data temporarily unavailable.',
       };
     });
@@ -219,17 +221,16 @@ export class IntelligenceService {
       try {
         const rows = await niftyTraderFiiDii();
         if (rows && rows.length > 0) {
-          const flows = rows.slice(0, days).reverse().map((r: any) => ({
+          return rows.slice(0, days).reverse().map((r: any) => ({
             date: r.created_at?.split('T')[0] ?? '',
             fiiNet: r.fii_net_value ?? 0,
             diiNet: r.dii_net_value ?? 0,
             niftyPrice: r.last_trade_price ?? 0,
             niftyChange: r.change_per ?? 0,
           }));
-          return { daily_flows: flows };
         }
       } catch { /* fallback */ }
-      return { daily_flows: [] };
+      return [];
     });
   }
 

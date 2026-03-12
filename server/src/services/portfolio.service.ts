@@ -63,22 +63,34 @@ export class PortfolioService {
     let investedValue = 0;
     let unrealizedPnl = 0;
 
+    // Fetch all LTPs in parallel (with per-symbol timeout) to avoid sequential blocking
+    const ltpResults = await Promise.allSettled(
+      openPositions.map(async (pos) => {
+        try {
+          const quote = await this.marketData.getQuote(pos.symbol, pos.exchange ?? 'NSE');
+          return { symbol: pos.symbol, ltp: quote.ltp };
+        } catch {
+          return { symbol: pos.symbol, ltp: 0 };
+        }
+      })
+    );
+    const ltpMap = new Map<string, number>();
+    for (const r of ltpResults) {
+      if (r.status === 'fulfilled' && r.value.ltp > 0) {
+        ltpMap.set(r.value.symbol, r.value.ltp);
+      }
+    }
+
     for (const pos of openPositions) {
       const entryPrice = Number(pos.avgEntryPrice);
       if (pos.side === 'LONG') {
         investedValue += entryPrice * pos.qty;
       } else {
-        // SHORT: margin is blocked as collateral
         const rate = (pos.exchange ?? 'NSE') === 'MCX' ? 0.10 : (pos.exchange ?? 'NSE') === 'CDS' ? 0.05 : 0.25;
         investedValue += entryPrice * pos.qty * rate;
       }
 
-      let ltp = 0;
-      try {
-        const quote = await this.marketData.getQuote(pos.symbol, pos.exchange ?? 'NSE');
-        ltp = quote.ltp;
-      } catch { /* use 0 -- unrealized stays 0 for this position */ }
-
+      const ltp = ltpMap.get(pos.symbol) ?? 0;
       if (ltp > 0) {
         const posUnrealized = pos.side === 'SHORT'
           ? (entryPrice - ltp) * pos.qty

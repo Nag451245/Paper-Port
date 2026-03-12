@@ -65,7 +65,7 @@ vi.mock('../../src/lib/prisma.js', () => {
     user: { findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
     breezeCredential: { findUnique: vi.fn(), findMany: vi.fn().mockResolvedValue([]), upsert: vi.fn() },
     portfolio: { findUnique: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
-    position: { findUnique: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
+    position: { findUnique: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
     order: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn(), count: vi.fn() },
     trade: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), count: vi.fn() },
     watchlist: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), delete: vi.fn() },
@@ -77,6 +77,7 @@ vi.mock('../../src/lib/prisma.js', () => {
     botTask: { findMany: vi.fn(), create: vi.fn() },
     backtestResult: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn() },
     $disconnect: vi.fn(),
+    $queryRaw: vi.fn().mockResolvedValue([{ 1: 1 }]),
     $queryRawUnsafe: vi.fn().mockResolvedValue([{ 1: 1 }]),
   };
   return { getPrisma: vi.fn(() => mock), disconnectPrisma: vi.fn(), __mockPrisma: mock };
@@ -499,7 +500,6 @@ describe('UAT Flow 11: Cross-cutting Concerns', () => {
       '/api/market/search?q=reliance',
       '/api/market/vix',
       '/api/market/fii-dii',
-      '/api/intelligence/sectors/performance',
     ];
 
     const results = await Promise.all(

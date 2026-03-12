@@ -670,21 +670,17 @@ export class TradeService {
     return price * qty * rate;
   }
 
-  private async safeUpdateNav(portfolioId: string, currentNav: number, delta: number): Promise<void> {
+  private async safeUpdateNav(portfolioId: string, currentNav: number, delta: number, db?: any): Promise<void> {
+    const prisma = db ?? this.prisma;
     const newNav = currentNav + delta;
     if (!isFinite(newNav) || isNaN(newNav)) {
       log.error({ currentNav, delta, newNav }, 'CRITICAL: NAV update would produce invalid value');
       throw new TradeError(`P&L calculation produced invalid NAV. Trade aborted.`, 500);
     }
     if (newNav < 0) {
-      log.error({ currentNav, delta, newNav, portfolioId }, 'CRITICAL: NAV would go negative — clamping to 0');
-      await this.prisma.portfolio.update({
-        where: { id: portfolioId },
-        data: { currentNav: 0 },
-      });
-      return;
+      log.warn({ currentNav, delta, newNav, portfolioId }, 'NAV going negative — margin overdraft in paper trading, allowing it');
     }
-    await this.prisma.portfolio.update({
+    await prisma.portfolio.update({
       where: { id: portfolioId },
       data: { currentNav: newNav },
     });
@@ -697,16 +693,10 @@ export class TradeService {
     costs: CostBreakdown,
   ) {
     await this.prisma.$transaction(async (tx) => {
-      const origPrisma = this.prisma;
-      (this as any).prisma = tx;
-      try {
-        if (input.side === 'BUY') {
-          await this.handleBuyFill(orderId, input, fillPrice, costs);
-        } else {
-          await this.handleSellFill(orderId, input, fillPrice, costs);
-        }
-      } finally {
-        (this as any).prisma = origPrisma;
+      if (input.side === 'BUY') {
+        await this.handleBuyFill(orderId, input, fillPrice, costs, tx);
+      } else {
+        await this.handleSellFill(orderId, input, fillPrice, costs, tx);
       }
     });
   }
@@ -716,9 +706,11 @@ export class TradeService {
     input: PlaceOrderInput,
     fillPrice: number,
     costs: CostBreakdown,
+    db?: Parameters<Parameters<PrismaClient['$transaction']>[0]>[0],
   ) {
+    const prisma = db ?? this.prisma;
     // First check if there's a SHORT position to cover
-    const existingShort = await this.prisma.position.findFirst({
+    const existingShort = await prisma.position.findFirst({
       where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'SHORT', status: 'OPEN' },
     });
 
@@ -728,7 +720,7 @@ export class TradeService {
       const grossPnl = (entryPrice - fillPrice) * coverQty;
       const netPnl = grossPnl - costs.totalCost;
 
-      await this.prisma.trade.create({
+      await prisma.trade.create({
         data: {
           portfolioId: input.portfolioId,
           positionId: existingShort.id,
@@ -751,42 +743,34 @@ export class TradeService {
       const prevRealized = Number(existingShort.realizedPnl ?? 0);
       const cumulativeRealized = prevRealized + netPnl;
       if (remainingQty <= 0) {
-        await this.prisma.position.update({
+        await prisma.position.update({
           where: { id: existingShort.id },
           data: { status: 'CLOSED', realizedPnl: cumulativeRealized, closedAt: new Date() },
         });
       } else {
-        await this.prisma.position.update({
+        await prisma.position.update({
           where: { id: existingShort.id },
           data: { qty: remainingQty, realizedPnl: cumulativeRealized },
         });
       }
 
-      // Release blocked margin + settle P&L.  Cost to cover = buyback price * qty + costs.
-      // Margin released = original margin on covered qty.
-      const portfolio = await this.prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
+      const portfolio = await prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
       if (portfolio) {
         const marginReleased = this.shortMarginRequired(entryPrice, coverQty, input.exchange ?? 'NSE');
-        const coverCost = fillPrice * coverQty + costs.totalCost;
-        // Net cash change: margin comes back, cover cost goes out, P&L settles
-        // = marginReleased - coverCost + (entryPrice * coverQty)
-        // Simplified: entryPrice*qty was received when shorting; now we pay back fillPrice*qty
         const cashChange = marginReleased + netPnl;
-        await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), cashChange);
+        await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), cashChange, prisma);
       }
 
-      await this.prisma.order.update({ where: { id: orderId }, data: { positionId: existingShort.id } });
+      await prisma.order.update({ where: { id: orderId }, data: { positionId: existingShort.id } });
 
-      // If BUY qty exceeds SHORT qty, open a LONG with remainder
       const excessQty = input.qty - coverQty;
       if (excessQty > 0) {
-        await this.openLongPosition(orderId, input, fillPrice, costs, excessQty);
+        await this.openLongPosition(orderId, input, fillPrice, costs, excessQty, prisma);
       }
       return;
     }
 
-    // No SHORT to cover -- open or add to LONG position
-    await this.openLongPosition(orderId, input, fillPrice, costs, input.qty);
+    await this.openLongPosition(orderId, input, fillPrice, costs, input.qty, prisma);
   }
 
   private async openLongPosition(
@@ -795,8 +779,10 @@ export class TradeService {
     fillPrice: number,
     costs: CostBreakdown,
     qty: number,
+    db?: any,
   ) {
-    const existingLong = await this.prisma.position.findFirst({
+    const prisma = db ?? this.prisma;
+    const existingLong = await prisma.position.findFirst({
       where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'LONG', status: 'OPEN' },
     });
 
@@ -806,13 +792,13 @@ export class TradeService {
       const newQty = oldQty + qty;
       const newAvg = (oldAvg * oldQty + fillPrice * qty) / newQty;
 
-      await this.prisma.position.update({
+      await prisma.position.update({
         where: { id: existingLong.id },
         data: { qty: newQty, avgEntryPrice: newAvg },
       });
-      await this.prisma.order.update({ where: { id: orderId }, data: { positionId: existingLong.id } });
+      await prisma.order.update({ where: { id: orderId }, data: { positionId: existingLong.id } });
     } else {
-      const position = await this.prisma.position.create({
+      const position = await prisma.position.create({
         data: {
           portfolioId: input.portfolioId,
           instrumentToken: input.instrumentToken,
@@ -824,13 +810,13 @@ export class TradeService {
           strategyTag: input.strategyTag,
         },
       });
-      await this.prisma.order.update({ where: { id: orderId }, data: { positionId: position.id } });
+      await prisma.order.update({ where: { id: orderId }, data: { positionId: position.id } });
     }
 
-    const portfolio = await this.prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
+    const portfolio = await prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
     if (portfolio) {
       const purchaseCost = fillPrice * qty + costs.totalCost;
-      await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), -purchaseCost);
+      await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), -purchaseCost, prisma);
     }
   }
 
@@ -839,9 +825,10 @@ export class TradeService {
     input: PlaceOrderInput,
     fillPrice: number,
     costs: CostBreakdown,
+    db?: any,
   ) {
-    // First check if there's a LONG position to close
-    const existingLong = await this.prisma.position.findFirst({
+    const prisma = db ?? this.prisma;
+    const existingLong = await prisma.position.findFirst({
       where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'LONG', status: 'OPEN' },
     });
 
@@ -851,7 +838,7 @@ export class TradeService {
       const grossPnl = (fillPrice - entryPrice) * closeQty;
       const netPnl = grossPnl - costs.totalCost;
 
-      await this.prisma.trade.create({
+      await prisma.trade.create({
         data: {
           portfolioId: input.portfolioId,
           positionId: existingLong.id,
@@ -874,35 +861,33 @@ export class TradeService {
       const prevRealized = Number(existingLong.realizedPnl ?? 0);
       const cumulativeRealized = prevRealized + netPnl;
       if (remainingQty <= 0) {
-        await this.prisma.position.update({
+        await prisma.position.update({
           where: { id: existingLong.id },
           data: { status: 'CLOSED', realizedPnl: cumulativeRealized, closedAt: new Date() },
         });
       } else {
-        await this.prisma.position.update({
+        await prisma.position.update({
           where: { id: existingLong.id },
           data: { qty: remainingQty, realizedPnl: cumulativeRealized },
         });
       }
 
-      const portfolio = await this.prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
+      const portfolio = await prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
       if (portfolio) {
         const saleProceeds = fillPrice * closeQty - costs.totalCost;
-        await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), saleProceeds);
+        await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), saleProceeds, prisma);
       }
 
-      await this.prisma.order.update({ where: { id: orderId }, data: { positionId: existingLong.id } });
+      await prisma.order.update({ where: { id: orderId }, data: { positionId: existingLong.id } });
 
-      // If SELL qty exceeds LONG qty, open a SHORT with remainder
       const excessQty = input.qty - closeQty;
       if (excessQty > 0) {
-        await this.openShortPosition(orderId, input, fillPrice, costs, excessQty);
+        await this.openShortPosition(orderId, input, fillPrice, costs, excessQty, prisma);
       }
       return;
     }
 
-    // No LONG to close -- open a SHORT position
-    await this.openShortPosition(orderId, input, fillPrice, costs, input.qty);
+    await this.openShortPosition(orderId, input, fillPrice, costs, input.qty, prisma);
   }
 
   private async openShortPosition(
@@ -911,8 +896,10 @@ export class TradeService {
     fillPrice: number,
     costs: CostBreakdown,
     qty: number,
+    db?: any,
   ) {
-    const existingShort = await this.prisma.position.findFirst({
+    const prisma = db ?? this.prisma;
+    const existingShort = await prisma.position.findFirst({
       where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'SHORT', status: 'OPEN' },
     });
 
@@ -922,13 +909,13 @@ export class TradeService {
       const newQty = oldQty + qty;
       const newAvg = (oldAvg * oldQty + fillPrice * qty) / newQty;
 
-      await this.prisma.position.update({
+      await prisma.position.update({
         where: { id: existingShort.id },
         data: { qty: newQty, avgEntryPrice: newAvg },
       });
-      await this.prisma.order.update({ where: { id: orderId }, data: { positionId: existingShort.id } });
+      await prisma.order.update({ where: { id: orderId }, data: { positionId: existingShort.id } });
     } else {
-      const position = await this.prisma.position.create({
+      const position = await prisma.position.create({
         data: {
           portfolioId: input.portfolioId,
           instrumentToken: input.instrumentToken,
@@ -940,15 +927,14 @@ export class TradeService {
           strategyTag: input.strategyTag,
         },
       });
-      await this.prisma.order.update({ where: { id: orderId }, data: { positionId: position.id } });
+      await prisma.order.update({ where: { id: orderId }, data: { positionId: position.id } });
     }
 
-    // SHORT: only block margin as collateral — no premium added to cash in paper trading
-    const portfolio = await this.prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
+    const portfolio = await prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
     if (portfolio) {
       const marginBlocked = this.shortMarginRequired(fillPrice, qty, input.exchange ?? 'NSE');
       const cashChange = -(marginBlocked + costs.totalCost);
-      await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), cashChange);
+      await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), cashChange, prisma);
     }
   }
 
@@ -978,7 +964,8 @@ export class TradeService {
   }
 
   async listOrders(userId: string, params: { status?: string; page?: number; limit?: number } = {}) {
-    const { status, page = 1, limit = 50 } = params;
+    const { status, page = 1, limit: rawLimit = 50 } = params;
+    const limit = Math.min(Math.max(1, rawLimit), 200);
 
     const portfolios = await this.prisma.portfolio.findMany({
       where: { userId },
@@ -1218,7 +1205,8 @@ export class TradeService {
   }
 
   async listTrades(userId: string, params: { page?: number; limit?: number; fromDate?: string; toDate?: string; symbol?: string } = {}) {
-    const { page = 1, limit = 50, fromDate, toDate, symbol } = params;
+    const { page = 1, limit: rawLimit = 50, fromDate, toDate, symbol } = params;
+    const limit = Math.min(Math.max(1, rawLimit), 200);
 
     const portfolios = await this.prisma.portfolio.findMany({
       where: { userId },

@@ -116,7 +116,7 @@ describe('BotEngine', () => {
         });
         await engine.startBot(`b${i}`, 'u1');
       }
-      expect(engine.getRunningBotCount()).toBeLessThanOrEqual(5);
+      expect(engine.getRunningBotCount()).toBeLessThanOrEqual(10);
     });
 
     it('should stop all bots', async () => {

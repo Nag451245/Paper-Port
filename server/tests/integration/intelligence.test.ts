@@ -16,6 +16,7 @@ vi.mock('../../src/lib/prisma.js', () => {
     aIAgentConfig: { findUnique: vi.fn(), create: vi.fn(), upsert: vi.fn() },
     aITradeSignal: { findUnique: vi.fn(), findMany: vi.fn(), count: vi.fn(), update: vi.fn() },
     $disconnect: vi.fn(),
+    $queryRaw: vi.fn().mockResolvedValue([{ 1: 1 }]),
   };
   return { getPrisma: vi.fn(() => mock), disconnectPrisma: vi.fn(), __mockPrisma: mock };
 });
@@ -57,10 +58,14 @@ const endpoints = [
   { path: '/api/intelligence/earnings/event-impact', isArray: true },
 ];
 
+function authHeaders(userId = 'test-user') {
+  return { authorization: `Bearer ${app.jwt.sign({ sub: userId })}` };
+}
+
 describe('Intelligence Routes Integration', () => {
   for (const endpoint of endpoints) {
     it(`GET ${endpoint.path} should return 200`, async () => {
-      const res = await app.inject({ method: 'GET', url: endpoint.path });
+      const res = await app.inject({ method: 'GET', url: endpoint.path, headers: authHeaders() });
 
       expect(res.statusCode).toBe(200);
 

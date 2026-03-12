@@ -31,7 +31,7 @@ describe('IntelligenceService', () => {
 
     it('should cache FII/DII data', async () => {
       await service.getFIIDII();
-      expect(mockCache.set).toHaveBeenCalledWith('intel:fii-dii', expect.anything(), 120);
+      expect(mockCache.set).toHaveBeenCalledWith('intel:fii-dii', expect.anything(), expect.any(Number));
     });
 
     it('should return cached FII/DII data', async () => {

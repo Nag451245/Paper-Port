@@ -17,7 +17,7 @@ const envSchema = z.object({
   BREEZE_API_KEY: z.string().default(''),
   BREEZE_SECRET_KEY: z.string().default(''),
   BREEZE_SESSION_TOKEN: z.string().default(''),
-  JWT_SECRET: z.string().min(1),
+  JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters for security'),
   JWT_ALGORITHM: z.string().default('HS256'),
   JWT_EXPIRES_IN: z.string().default('24h'),
   ENCRYPTION_KEY: z.string().min(16, 'ENCRYPTION_KEY must be at least 16 characters'),
