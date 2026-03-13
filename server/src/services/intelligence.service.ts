@@ -342,30 +342,44 @@ export class IntelligenceService {
           const spot = chain.spotPrice ?? chain.underlyingValue ?? 0;
           const strikes = chain.strikes as any[];
 
-          // Collect IV from both call and put sides, using max(callIV, putIV) per strike
-          const ivs = strikes
-            .map((s: any) => {
-              const civ = s.callIV ?? 0;
-              const piv = s.putIV ?? 0;
-              return Math.max(civ, piv);
-            })
-            .filter((iv: number) => iv > 0);
+          // ATM IV: find the strike closest to spot
+          let currentIV = 0;
+          if (spot > 0) {
+            const atm = strikes.reduce((best: any, s: any) =>
+              Math.abs(s.strike - spot) < Math.abs(best.strike - spot) ? s : best
+            , strikes[0]);
+            currentIV = Math.max(atm.callIV ?? 0, atm.putIV ?? 0);
+          }
+          if (currentIV <= 0) {
+            const ivs = strikes.map((s: any) => Math.max(s.callIV ?? 0, s.putIV ?? 0)).filter((v: number) => v > 0);
+            currentIV = ivs.length > 0 ? ivs[Math.floor(ivs.length / 2)] : 0;
+          }
 
-          if (ivs.length > 0) {
-            // ATM IV: find the strike closest to spot, else use median
-            let currentIV: number;
-            if (spot > 0) {
-              const atm = strikes.reduce((best: any, s: any) =>
-                Math.abs(s.strike - spot) < Math.abs(best.strike - spot) ? s : best
-              , strikes[0]);
-              currentIV = Math.max(atm.callIV ?? 0, atm.putIV ?? 0) || ivs[Math.floor(ivs.length / 2)];
+          if (currentIV > 0) {
+            // Use near-ATM strikes only (±10 from ATM) for a meaningful percentile.
+            // Far OTM strikes have inflated IV due to the volatility smile, which would
+            // always push ATM IV to the 0th percentile if the full chain were used.
+            const atmIdx = spot > 0
+              ? strikes.reduce((bi: number, s: any, i: number) =>
+                  Math.abs(s.strike - spot) < Math.abs(strikes[bi].strike - spot) ? i : bi, 0)
+              : Math.floor(strikes.length / 2);
+            const lo = Math.max(0, atmIdx - 10);
+            const hi = Math.min(strikes.length, atmIdx + 11);
+            const nearAtm = strikes.slice(lo, hi);
+            const nearIvs = nearAtm
+              .map((s: any) => Math.max(s.callIV ?? 0, s.putIV ?? 0))
+              .filter((v: number) => v > 0)
+              .sort((a: number, b: number) => a - b);
+
+            let ivPercentile: number;
+            if (nearIvs.length >= 3) {
+              const rank = nearIvs.filter(v => v < currentIV).length;
+              ivPercentile = Math.round((rank / nearIvs.length) * 100);
             } else {
-              currentIV = ivs[Math.floor(ivs.length / 2)];
+              // Too few near-ATM IVs; estimate from typical annual VIX range (10-35)
+              ivPercentile = Math.min(100, Math.max(0, Math.round(((currentIV - 10) / 25) * 100)));
             }
 
-            const sorted = [...ivs].sort((a, b) => a - b);
-            const rank = sorted.filter(v => v < currentIV).length;
-            const ivPercentile = Math.round((rank / sorted.length) * 100);
             return { symbol, currentIV: Math.round(currentIV * 100) / 100, ivPercentile, ivRank: ivPercentile };
           }
         }
@@ -1020,8 +1034,8 @@ export class IntelligenceService {
     for (const st of strikes) {
       let pain = 0;
       for (const s2 of strikes) {
-        if (s2.strike < st.strike) pain += (st.strike - s2.strike) * s2.putOI;
-        if (s2.strike > st.strike) pain += (s2.strike - st.strike) * s2.callOI;
+        if (s2.strike < st.strike) pain += (st.strike - s2.strike) * s2.callOI;
+        if (s2.strike > st.strike) pain += (s2.strike - st.strike) * s2.putOI;
       }
       if (pain < minPain) { minPain = pain; maxPain = st.strike; }
     }
@@ -1039,10 +1053,13 @@ export class IntelligenceService {
       clearTimeout(timer);
       if (res.ok) {
         const data = await res.json() as any;
-        if (data && !data.error && data.strikes?.length > 0) {
-          console.log(`[Intelligence] ${symbol} chain → Breeze Bridge (${data.strikes.length} strikes)`);
+        if (data?.strikes?.length > 0) {
+          console.log(`[Intelligence] ${symbol} chain → Breeze Bridge (${data.strikes.length} strikes, pcr=${data.pcr})`);
           return data;
         }
+        console.log(`[Intelligence] ${symbol} Bridge returned ${data?.strikes?.length ?? 0} strikes, error=${data?.error}`);
+      } else {
+        console.log(`[Intelligence] ${symbol} Bridge HTTP ${res.status}`);
       }
     } catch (err) {
       console.warn(`[Intelligence] ${symbol} Bridge chain error: ${(err as Error)?.message}`);

@@ -316,7 +316,7 @@ export default function FnOAnalytics() {
         }
       }
 
-      // Option chain
+      // Option chain — also serves as fallback for PCR and IV Percentile
       if (results[6].status === 'fulfilled') {
         const d = results[6].value.data as any;
         if (d?.strikes?.length > 0) {
@@ -325,7 +325,42 @@ export default function FnOAnalytics() {
           setSpotPrice(d.spotPrice ?? d.underlyingValue ?? 0);
           setExpiry(d.expiry ?? '');
           if (d.maxPain > 0) setMaxPainValue(d.maxPain);
-          if (d.pcr >= 0 && pcrValue === 0) setPcrValue(d.pcr);
+
+          // Fallback: update PCR card if intelligence API didn't provide it
+          if (typeof d.pcr === 'number' && d.pcr >= 0) {
+            setPcrValue(prev => prev || d.pcr);
+            setMarketCards(prev => {
+              const current = prev.find(c => c.label === 'Overall PCR');
+              if (current && current.value === '—') {
+                const interp = d.pcr > 1.3 ? 'Bullish' : d.pcr > 1.0 ? 'Moderately Bullish'
+                  : d.pcr < 0.7 ? 'Bearish' : d.pcr < 1.0 ? 'Moderately Bearish' : 'Neutral';
+                return prev.map(c => c.label === 'Overall PCR'
+                  ? { ...c, value: d.pcr.toFixed(2), change: 0, points: interp } : c);
+              }
+              return prev;
+            });
+          }
+
+          // Fallback: compute IV percentile from chain if intelligence API didn't provide it
+          if (ivPercentileData.ivPercentile === 0 && d.spotPrice > 0) {
+            const strikes = d.strikes as any[];
+            const atm = strikes.reduce((best: any, s: any) =>
+              Math.abs(s.strike - d.spotPrice) < Math.abs(best.strike - d.spotPrice) ? s : best, strikes[0]);
+            const currentIV = Math.max(atm?.callIV ?? 0, atm?.putIV ?? 0);
+            if (currentIV > 0) {
+              // Use near-ATM strikes for a meaningful percentile
+              const atmIdx = strikes.indexOf(atm);
+              const lo = Math.max(0, atmIdx - 10);
+              const hi = Math.min(strikes.length, atmIdx + 11);
+              const nearIvs = strikes.slice(lo, hi)
+                .map((s: any) => Math.max(s.callIV ?? 0, s.putIV ?? 0))
+                .filter((v: number) => v > 0).sort((a: number, b: number) => a - b);
+              const pct = nearIvs.length >= 3
+                ? Math.round((nearIvs.filter(v => v < currentIV).length / nearIvs.length) * 100)
+                : Math.min(100, Math.max(0, Math.round(((currentIV - 10) / 25) * 100)));
+              setIvPercentileData({ currentIV: Math.round(currentIV * 100) / 100, ivPercentile: pct });
+            }
+          }
         }
       }
 
@@ -373,13 +408,16 @@ export default function FnOAnalytics() {
   const strikeDivisor = spotPrice > 40000 ? 100 : 50;
   const atmStrike = useMemo(() => Math.round(spotPrice / strikeDivisor) * strikeDivisor, [spotPrice, strikeDivisor]);
 
-  // IV Smile: strikes near ATM with their call and put IV
+  // IV Smile: strikes near ATM — show all near-ATM strikes that have any data
   const ivSmile = useMemo(() => {
     if (optionChain.length === 0 || spotPrice === 0) return [];
     const atmIdx = optionChain.findIndex(s => s.strike >= atmStrike);
+    if (atmIdx < 0) return [];
     const start = Math.max(0, atmIdx - 8);
     const end = Math.min(optionChain.length, atmIdx + 9);
-    return optionChain.slice(start, end).filter(s => s.callIV > 0 || s.putIV > 0);
+    return optionChain.slice(start, end).filter(s =>
+      s.callIV > 0 || s.putIV > 0 || s.callLTP > 0 || s.putLTP > 0 || s.callOI > 0 || s.putOI > 0
+    );
   }, [optionChain, atmStrike, spotPrice]);
 
   // OI Heatmap: 10 strikes around ATM

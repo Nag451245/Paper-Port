@@ -1426,8 +1426,8 @@ export class MarketDataService {
       for (const st of strikes) {
         let pain = 0;
         for (const s2 of strikes) {
-          if (s2.strike < st.strike) pain += (st.strike - s2.strike) * s2.putOI;
-          if (s2.strike > st.strike) pain += (s2.strike - st.strike) * s2.callOI;
+          if (s2.strike < st.strike) pain += (st.strike - s2.strike) * s2.callOI;
+          if (s2.strike > st.strike) pain += (s2.strike - st.strike) * s2.putOI;
         }
         if (pain < minPain) { minPain = pain; maxPainStrike = st.strike; }
       }

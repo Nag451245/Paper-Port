@@ -658,14 +658,11 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
                         effective_expiry = alt_exp
                         break
 
-            if not result or result.get("Status") != 200 or result.get("Error"):
+            records = result.get("Success", []) if result and isinstance(result.get("Success"), list) else []
+            if not records:
                 err_msg = result.get("Error") if result else "no result"
                 status = result.get("Status") if result else None
-                print(f"[Breeze Bridge] {symbol} {r} API error: Status={status}, Error={err_msg}")
-                continue
-
-            records = result.get("Success", [])
-            if not isinstance(records, list):
+                print(f"[Breeze Bridge] {symbol} {r}: no records (Status={status}, Error={err_msg})")
                 continue
 
             if records and not logged_sample:
@@ -754,9 +751,9 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
 
         # Calculate time to expiry
         tte_days = 7
-        if expiry:
+        if effective_expiry:
             try:
-                exp_dt = datetime.strptime(expiry, "%Y-%m-%d")
+                exp_dt = datetime.strptime(effective_expiry, "%Y-%m-%d")
                 now = datetime.now().replace(hour=15, minute=30)
                 tte_days = max(0.5, (exp_dt - now).total_seconds() / 86400.0)
             except ValueError:
@@ -805,9 +802,9 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
             pain = 0
             for s2 in strikes:
                 if s2["strike"] < st["strike"]:
-                    pain += (st["strike"] - s2["strike"]) * s2["putOI"]
+                    pain += (st["strike"] - s2["strike"]) * s2["callOI"]
                 if s2["strike"] > st["strike"]:
-                    pain += (s2["strike"] - st["strike"]) * s2["callOI"]
+                    pain += (s2["strike"] - st["strike"]) * s2["putOI"]
             if pain < min_pain:
                 min_pain = pain
                 max_pain_strike = st["strike"]
