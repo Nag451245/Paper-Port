@@ -304,12 +304,15 @@ pub fn compute(data: Value) -> Result<Value, String> {
             -0.8  // deeply overbought — mean-reversion sell
         } else if rsi > thresholds.rsi_overbought {
             -0.5  // overbought — sell
-        } else if rsi > 55.0 {
-            0.3   // mild bullish
-        } else if rsi < 45.0 {
-            -0.3  // mild bearish
         } else {
-            0.0   // neutral zone 45-55
+            // Proportional vote in the mid-range (oversold..overbought)
+            let mid = (thresholds.rsi_oversold + thresholds.rsi_overbought) / 2.0;
+            let half_range = (thresholds.rsi_overbought - thresholds.rsi_oversold) / 2.0;
+            if half_range > 0.0 {
+                ((rsi - mid) / half_range * 0.4).max(-0.4).min(0.4)
+            } else {
+                0.0
+            }
         };
 
         // --- Vote: MACD (weight: 0.10) ---
@@ -419,13 +422,15 @@ pub fn compute(data: Value) -> Result<Value, String> {
             + momentum_vote * effective_weights.6
             + volume_vote * effective_weights.7;
 
-        // Agreement bonus: only when 7+ votes align strongly
+        // Agreement bonus: when most votes align, boost confidence
         let votes_arr = [ema_vote, rsi_vote, macd_vote, st_vote, bb_vote, vwap_vote, momentum_vote, volume_vote];
-        let bullish_count = votes_arr.iter().filter(|&&v| v > 0.2).count();
-        let bearish_count = votes_arr.iter().filter(|&&v| v < -0.2).count();
+        let bullish_count = votes_arr.iter().filter(|&&v| v > 0.1).count();
+        let bearish_count = votes_arr.iter().filter(|&&v| v < -0.1).count();
         let agreement_bonus = if bullish_count >= 7 || bearish_count >= 7 {
-            0.08
+            0.12
         } else if bullish_count >= 6 || bearish_count >= 6 {
+            0.08
+        } else if bullish_count >= 5 || bearish_count >= 5 {
             0.04
         } else {
             0.0
@@ -438,18 +443,20 @@ pub fn compute(data: Value) -> Result<Value, String> {
             composite
         };
 
-        // Volatility factor: high vol = reduction, low vol = no boost
+        // Volatility factor
         let vol_factor = if atr > 0.0 && close > 0.0 {
             let vol_pct = atr / close;
             if vol_pct > 0.03 { -0.05 }
+            else if vol_pct < 0.01 { 0.03 }
             else { 0.0 }
         } else { 0.0 };
 
-        // Liquidity factor: only penalize low liquidity
-        let liq_factor = if volume_ratio < 0.5 { -0.05 }
+        // Liquidity factor
+        let liq_factor = if volume_ratio > 2.0 { 0.05 }
+            else if volume_ratio < 0.5 { -0.05 }
             else { 0.0 };
 
-        let composite = composite + breakout_score * 0.05 + vol_factor + liq_factor;
+        let composite = composite + breakout_score * 0.08 + vol_factor + liq_factor;
 
         let (direction, confidence) = if composite > 0.0 {
             ("BUY".to_string(), composite.min(1.0))

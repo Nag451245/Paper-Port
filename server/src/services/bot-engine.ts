@@ -1634,11 +1634,11 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
       }
     }
 
-    for (const sig of prioritized.slice(0, 3)) {
+    for (const sig of prioritized.slice(0, 5)) {
       const gptApproved = await this.gptValidateSignal(sig, bot, userId);
 
-      const finalConfidence = gptApproved ? sig.confidence : sig.confidence * 0.8;
-      const execute = shouldAutoExecute && finalConfidence >= 0.45;
+      const finalConfidence = gptApproved ? sig.confidence : sig.confidence * 0.9;
+      const execute = shouldAutoExecute && finalConfidence >= 0.35;
 
       const gateScores = this.deriveGateScores(finalConfidence, sig.indicators, sig.votes, { source: 'rust-engine', gptApproved });
 
@@ -1709,7 +1709,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         where: {
           userId,
           status: 'PENDING',
-          compositeScore: { gte: 0.65 },
+          compositeScore: { gte: 0.45 },
           createdAt: { gte: oneHourAgo },
           expiresAt: { gt: new Date() },
           signalType: { in: ['BUY', 'SELL'] },
@@ -2215,8 +2215,10 @@ INSTRUCTIONS:
         ? [...new Set(positions.map(p => p.symbol))]
         : ['NIFTY 50', 'RELIANCE', 'TCS', 'HDFCBANK', 'GOLD', 'USDINR'];
 
-      const todayStart = new Date();
-      todayStart.setHours(0, 0, 0, 0);
+      // Use IST (UTC+5:30) for today boundary to avoid timezone-related over-counting
+      const nowIST = new Date(Date.now() + 5.5 * 3600_000);
+      const todayStart = new Date(Date.UTC(nowIST.getUTCFullYear(), nowIST.getUTCMonth(), nowIST.getUTCDate()) - 5.5 * 3600_000);
+
       const todayExecutedCount = await this.prisma.aITradeSignal.count({
         where: { userId, createdAt: { gte: todayStart }, status: 'EXECUTED' },
       });
@@ -2263,8 +2265,8 @@ INSTRUCTIONS:
             } catch { /* risk computation failed, continue */ }
           }
 
-          for (const sig of rustSignals.slice(0, 3)) {
-            if (sig.confidence < (config.minSignalScore || 0.35)) continue;
+          for (const sig of rustSignals.slice(0, 5)) {
+            if (sig.confidence < (config.minSignalScore || 0.30)) continue;
             if (sig.direction !== 'BUY' && sig.direction !== 'SELL') continue;
 
             if (riskData && riskData.max_drawdown_percent > 10) continue;

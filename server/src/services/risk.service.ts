@@ -29,25 +29,24 @@ export interface RiskConfig {
 }
 
 const DEFAULT_CONFIG: RiskConfig = {
-  maxPositionPct: 1,        // Max 1% of capital per position (tightened from 10%)
-  maxDailyDrawdownPct: 0.1, // Max 0.1% daily loss (tightened from 3%)
-  maxOpenPositions: 5,      // Max 5 open positions (tightened from 10)
-  maxSymbolConcentration: 1, // 1 position per symbol
-  maxOrderValue: 100_000,   // Tightened
-  maxSectorConcentrationPct: 20,
-  maxCorrelatedPositions: 3, // Max 3 in same sector
-  marginUtilizationLimitPct: 50,
+  maxPositionPct: 5,         // Max 5% of capital per position
+  maxDailyDrawdownPct: 2.0,  // Max 2% daily loss before circuit breaker
+  maxOpenPositions: 15,      // Max 15 open positions
+  maxSymbolConcentration: 2, // 2 positions per symbol (LONG + SHORT allowed)
+  maxOrderValue: 500_000,
+  maxSectorConcentrationPct: 30,
+  maxCorrelatedPositions: 5,
+  marginUtilizationLimitPct: 60,
   maxVolumeParticipationPct: 5,
-  // Tight per-trade risk
-  maxStopLossPctPerPosition: 0.5, // Stop loss at 0.5% of capital max
-  maxSimultaneousRiskPct: 2.0,    // Never risk more than 2% simultaneously
-  maxSameSectorPositions: 3,
-  maxCorrelationBetweenPositions: 0.5,
-  weeklyLossLimitPct: 0.3,        // 0.3% weekly loss → reduce size 50%
-  consecutiveLossPauseCount: 3,   // 3 consecutive losses → pause 30min
-  dailyLossPauseCount: 5,         // 5 losses in a day → stop for the day
-  consecutiveLosingDaysReduceSize: 2, // 2 losing days → reduce 50%
-  consecutiveLosingDaysHalt: 5,       // 5 losing days → halt auto-trading
+  maxStopLossPctPerPosition: 2.0,
+  maxSimultaneousRiskPct: 5.0,
+  maxSameSectorPositions: 5,
+  maxCorrelationBetweenPositions: 0.7,
+  weeklyLossLimitPct: 3.0,
+  consecutiveLossPauseCount: 5,  // 5 consecutive losses → pause 30min
+  dailyLossPauseCount: 10,      // 10 losses in a day → stop for the day
+  consecutiveLosingDaysReduceSize: 3,
+  consecutiveLosingDaysHalt: 7,
 };
 
 // Aggressive config that allows wider limits (for users who opt in)
@@ -228,9 +227,9 @@ export class RiskService {
       violations.push(`Already ${symbolPositions} open positions in ${symbol} (max ${cfg.maxSymbolConcentration})`);
     }
 
-    // Rule 5: Daily drawdown circuit breaker
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    // Rule 5: Daily drawdown circuit breaker (IST boundary)
+    const nowIST = new Date(Date.now() + 5.5 * 3600_000);
+    const todayStart = new Date(Date.UTC(nowIST.getUTCFullYear(), nowIST.getUTCMonth(), nowIST.getUTCDate()) - 5.5 * 3600_000);
 
     const todayTrades = await this.prisma.trade.findMany({
       where: {
@@ -413,10 +412,9 @@ export class RiskService {
 
     // 12b: Consecutive losses — hard pause is enforced by Rule 0 above
 
-    // Rule 13: Weekly loss limit
-    const weekStart = new Date();
-    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
-    weekStart.setHours(0, 0, 0, 0);
+    // Rule 13: Weekly loss limit (IST boundary)
+    const weekNowIST = new Date(Date.now() + 5.5 * 3600_000);
+    const weekStart = new Date(Date.UTC(weekNowIST.getUTCFullYear(), weekNowIST.getUTCMonth(), weekNowIST.getUTCDate() - weekNowIST.getUTCDay()) - 5.5 * 3600_000);
 
     const weekTrades = await this.prisma.trade.findMany({
       where: { portfolioId: portfolio.id, exitTime: { gte: weekStart } },

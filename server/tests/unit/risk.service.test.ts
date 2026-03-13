@@ -54,8 +54,8 @@ describe('RiskService', () => {
     it('should compute correct position size from risk budget', () => {
       const result = riskService.computePositionSize(1_000_000, 500, 495);
       expect(result.qty).toBeGreaterThan(0);
-      expect(result.riskPct).toBeLessThanOrEqual(0.5);
-      expect(result.positionValue).toBeLessThanOrEqual(10_000); // 1% of 1M
+      expect(result.riskPct).toBeLessThanOrEqual(2.0);
+      expect(result.positionValue).toBeLessThanOrEqual(50_000); // 5% of 1M
     });
 
     it('should return zero qty for invalid inputs', () => {
@@ -64,21 +64,21 @@ describe('RiskService', () => {
     });
 
     it('should cap position at maxPositionPct', () => {
-      // Very tight stop = large qty, but capped at 1% of capital
+      // Very tight stop = large qty, but capped at 5% of capital
       const result = riskService.computePositionSize(1_000_000, 100, 99.99);
-      expect(result.positionValue).toBeLessThanOrEqual(10_000);
+      expect(result.positionValue).toBeLessThanOrEqual(50_000);
     });
 
     it('should respect maxOrderValue', () => {
       const result = riskService.computePositionSize(100_000_000, 10, 9);
-      expect(result.positionValue).toBeLessThanOrEqual(100_000);
+      expect(result.positionValue).toBeLessThanOrEqual(500_000);
     });
   });
 
   describe('preTradeCheck — circuit breakers', () => {
-    it('should block trades after 3+ consecutive losses (30-min pause)', async () => {
-      // Rule 0: checkConsecutiveLossPause triggers first when 3+ consecutive losses
-      const losses = Array.from({ length: 4 }, () => ({
+    it('should block trades after 5+ consecutive losses (30-min pause)', async () => {
+      // Rule 0: checkConsecutiveLossPause triggers first when 5+ consecutive losses
+      const losses = Array.from({ length: 6 }, () => ({
         netPnl: -100,
         exitTime: new Date(),
       }));
@@ -113,7 +113,7 @@ describe('RiskService', () => {
     });
 
     it('should block after consecutive losing days', async () => {
-      const losingDays = Array.from({ length: 6 }, () => ({ netPnl: -500 }));
+      const losingDays = Array.from({ length: 8 }, () => ({ netPnl: -500 }));
       mockPrisma.dailyPnlRecord.findMany.mockResolvedValue(losingDays);
       mockPrisma.trade.findMany.mockResolvedValue([]);
 
@@ -124,9 +124,9 @@ describe('RiskService', () => {
   });
 
   describe('preTradeCheck — daily drawdown', () => {
-    it('should block at 0.1% drawdown on 1M capital', async () => {
-      // 0.1% of 1M = 1000
-      const trades = [{ netPnl: -1500, exitTime: new Date() }];
+    it('should block at 2% drawdown on 1M capital', async () => {
+      // 2% of 1M = 20,000
+      const trades = [{ netPnl: -25000, exitTime: new Date() }];
       mockPrisma.trade.findMany.mockResolvedValue(trades);
       mockPrisma.dailyPnlRecord.findMany.mockResolvedValue([]);
 
@@ -146,8 +146,8 @@ describe('RiskService', () => {
     });
 
     it('should return 0.5 after weekly loss limit hit', async () => {
-      // 0.3% of 1M = 3000
-      const trades = [{ netPnl: -5000 }];
+      // 3% of 1M = 30000
+      const trades = [{ netPnl: -35000 }];
       mockPrisma.trade.findMany.mockResolvedValue(trades);
       mockPrisma.dailyPnlRecord.findMany.mockResolvedValue([]);
 
@@ -167,7 +167,7 @@ describe('RiskService', () => {
     });
 
     it('should force-close all positions when limit breached', async () => {
-      mockPrisma.trade.findMany.mockResolvedValue([{ netPnl: -2000 }]);
+      mockPrisma.trade.findMany.mockResolvedValue([{ netPnl: -25000 }]);
       mockPrisma.position.findMany.mockResolvedValue([
         { id: 'pos-1', symbol: 'TCS', avgEntryPrice: 100 },
         { id: 'pos-2', symbol: 'INFY', avgEntryPrice: 200 },
