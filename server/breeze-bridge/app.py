@@ -617,18 +617,19 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
         breeze_code = _resolve_stock_code(symbol)
         sides = [right_filter] if right_filter else ["call", "put"]
 
+        # Always use expiry_date + empty strike_price to get ALL contracts.
+        # This eliminates the need for hardcoded/guessed strike prices.
+        effective_expiry = expiry or _next_expiry_date()
+
         for r in sides:
             params = {
                 "stock_code": breeze_code,
                 "exchange_code": "NFO",
                 "product_type": "options",
                 "right": r,
+                "expiry_date": f"{effective_expiry}T06:00:00.000Z",
+                "strike_price": "",
             }
-            if expiry:
-                params["expiry_date"] = f"{expiry}T06:00:00.000Z"
-                params["strike_price"] = ""
-            else:
-                params["strike_price"] = _guess_strike(symbol)
 
             print(f"[Breeze Bridge] {symbol}({breeze_code}) {r}: calling API with params={params}")
             result = _call_with_timeout(breeze_instance.get_option_chain_quotes, **params)
@@ -641,35 +642,21 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
             n = len(result.get("Success", []) if result and isinstance(result.get("Success"), list) else [])
             print(f"[Breeze Bridge] {symbol}({breeze_code}) {r}: Status={result.get('Status') if result else None}, Records={n}, Error={result.get('Error','') if result else 'None'}")
 
+            # If the computed expiry didn't work, try adjacent Tuesdays
             if not _has_data and not expiry:
-                # Strategy: try with expiry_date + empty strike to get ALL strikes
-                next_exp = _next_expiry_date()
-                if next_exp:
-                    params["expiry_date"] = f"{next_exp}T06:00:00.000Z"
-                    params["strike_price"] = ""
-                    print(f"[Breeze Bridge] {symbol} {r}: retry with expiry={next_exp} + empty strike")
+                for offset_days in [7, -7, 14]:
+                    alt_exp = (datetime.strptime(effective_expiry, "%Y-%m-%d") + timedelta(days=offset_days)).strftime("%Y-%m-%d")
+                    params["expiry_date"] = f"{alt_exp}T06:00:00.000Z"
+                    print(f"[Breeze Bridge] {symbol} {r}: retry with alt expiry={alt_exp}")
                     result = _call_with_timeout(breeze_instance.get_option_chain_quotes, **params)
                     _has_data = (
                         result and result.get("Status") == 200
                         and isinstance(result.get("Success"), list)
                         and len(result.get("Success", [])) > 0
                     )
-
-                if not _has_data:
-                    guess = _guess_strike(symbol)
-                    if guess:
-                        base = int(guess)
-                        step = _get_strike_step(symbol.upper())
-                        retry_params = {**params}
-                        retry_params.pop("expiry_date", None)
-                        for offset_mult in [0, -5, 5, -10, 10, -20, 20, -30, 30]:
-                            alt_strike = str(base + offset_mult * step)
-                            retry_params["strike_price"] = alt_strike
-                            result = _call_with_timeout(breeze_instance.get_option_chain_quotes, **retry_params)
-                            if result and result.get("Status") == 200 and result.get("Success"):
-                                print(f"[Breeze Bridge] {symbol} {r}: found data at strike {alt_strike}")
-                                _has_data = True
-                                break
+                    if _has_data:
+                        effective_expiry = alt_exp
+                        break
 
             if not result or result.get("Status") != 200 or result.get("Error"):
                 err_msg = result.get("Error") if result else "no result"
@@ -1011,7 +998,7 @@ def get_expiries(symbol):
         sym = symbol.upper()
         breeze_code = _resolve_stock_code(sym)
 
-        # Best strategy: use next expiry + empty strike to get ALL contracts
+        # Use expiry_date + empty strike to get ALL contracts for nearest expiry
         next_exp = _next_expiry_date()
         result = _call_with_timeout(breeze_instance.get_option_chain_quotes,
             stock_code=breeze_code, exchange_code="NFO",
@@ -1020,24 +1007,16 @@ def get_expiries(symbol):
         )
 
         if not result or result.get("Status") != 200 or not result.get("Success"):
-            # Fallback: try with guessed strike (no expiry)
-            strike = _guess_strike(sym)
-            result = _call_with_timeout(breeze_instance.get_option_chain_quotes,
-                stock_code=breeze_code, exchange_code="NFO",
-                product_type="options", right="call", strike_price=strike,
-            )
-
-        if not result or result.get("Status") != 200 or not result.get("Success"):
-            base = int(_guess_strike(sym) or "0")
-            step = _get_strike_step(sym)
-            for offset_mult in [-5, 5, -10, 10, -20, 20]:
-                alt_strike = str(base + offset_mult * step)
+            # Try adjacent Tuesdays in case computed date is a holiday
+            for offset_days in [7, -7, 14]:
+                alt_exp = (datetime.strptime(next_exp, "%Y-%m-%d") + timedelta(days=offset_days)).strftime("%Y-%m-%d")
                 result = _call_with_timeout(breeze_instance.get_option_chain_quotes,
                     stock_code=breeze_code, exchange_code="NFO",
-                    product_type="options", right="call", strike_price=alt_strike,
+                    product_type="options", right="call",
+                    expiry_date=f"{alt_exp}T06:00:00.000Z", strike_price="",
                 )
                 if result and result.get("Status") == 200 and result.get("Success"):
-                    print(f"[Breeze Bridge] Expiries {sym}: succeeded with alternate strike {alt_strike}")
+                    print(f"[Breeze Bridge] Expiries {sym}: succeeded with alt expiry {alt_exp}")
                     break
 
         if not result or result.get("Status") != 200:
