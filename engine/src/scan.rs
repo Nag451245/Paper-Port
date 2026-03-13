@@ -881,11 +881,11 @@ pub fn compute(data: Value) -> Result<Value, String> {
     }
 
     // === 8. EXPIRY DAY OPTIONS — theta/gamma mispricing near expiry ===
-    // NSE expiry schedule (effective 2024+):
-    //   NIFTY 50    → Monday (weekly)
-    //   BANKNIFTY   → Wednesday (weekly)
-    //   FINNIFTY    → Tuesday (weekly)
-    //   Monthly expiry remains last Thursday of the month for all indices.
+    // NSE expiry schedule (effective September 2025):
+    //   ALL NSE indices (NIFTY, BANKNIFTY, MIDCPNIFTY, NIFTYNXT50) → Tuesday (weekly)
+    //   Monthly/quarterly expiry → last Tuesday of the month
+    // BSE:
+    //   SENSEX → Thursday (weekly), last Thursday of month (monthly)
     let dow_zeller = if let Some(ref date_str) = input.current_date {
         let parts: Vec<&str> = date_str.split('-').collect();
         if parts.len() == 3 {
@@ -908,14 +908,11 @@ pub fn compute(data: Value) -> Result<Value, String> {
             let sym_upper = sym_data.symbol.to_uppercase();
 
             let is_expiry_for_symbol = match sym_upper.as_str() {
-                "NIFTY" => dow == 2,      // Monday
-                "BANKNIFTY" => dow == 4,   // Wednesday
-                "FINNIFTY" => dow == 3,    // Tuesday
+                "NIFTY" | "BANKNIFTY" | "FINNIFTY" | "MIDCPNIFTY" | "NIFTYNXT50" => dow == 3, // Tuesday (NSE)
+                "SENSEX" => dow == 5, // Thursday (BSE)
                 _ => continue,
             };
-            // Monthly expiry (last Thursday) applies to all indices
-            let is_monthly_expiry = dow == 5; // Thursday
-            if !is_expiry_for_symbol && !is_monthly_expiry {
+            if !is_expiry_for_symbol {
                 continue;
             }
             let n = sym_data.candles.len();
@@ -1377,14 +1374,14 @@ mod tests {
 
     #[test]
     fn test_expiry_day_nifty_signals() {
-        // 2026-03-05 is a Thursday (expiry day)
+        // 2026-03-03 is a Tuesday (NSE weekly expiry since Sep 2025)
         let nifty: Vec<f64> = (0..30).map(|i| 22000.0 + (i as f64 * 10.0).sin() * 50.0).collect();
         let data: Vec<(f64, f64)> = nifty.iter().map(|&c| (c, 100000.0)).collect();
         let candles = make_candles_with_volume(&data);
         let input = json!({
             "symbols": [{ "symbol": "NIFTY", "candles": serde_json::to_value(&candles).unwrap() }],
             "aggressiveness": "low",
-            "current_date": "2026-03-05"
+            "current_date": "2026-03-03"
         });
         let result = run_scan(input);
         let signals = result.get("signals").unwrap().as_array().unwrap();
@@ -1395,13 +1392,12 @@ mod tests {
                     .unwrap_or(false)
             })
             .collect();
-        // On expiry day with NIFTY data, should generate theta/gamma signals
         assert!(!expiry_signals.is_empty(), "expiry day should produce expiry signals for NIFTY");
     }
 
     #[test]
     fn test_non_expiry_day_no_expiry_signals() {
-        // 2026-03-04 is a Wednesday (not expiry)
+        // 2026-03-04 is a Wednesday (not a Tuesday — not expiry)
         let nifty: Vec<f64> = (0..30).map(|_| 22000.0).collect();
         let data: Vec<(f64, f64)> = nifty.iter().map(|&c| (c, 100000.0)).collect();
         let candles = make_candles_with_volume(&data);

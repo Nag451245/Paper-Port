@@ -868,10 +868,11 @@ export class IntelligenceService {
 
     const today = new Date();
     const dayOfWeek = today.getDay();
-    const daysUntilThursday = (4 - dayOfWeek + 7) % 7 || 7;
-    const nextThursday = new Date(today);
-    nextThursday.setDate(today.getDate() + (dayOfWeek <= 4 ? (4 - dayOfWeek) : daysUntilThursday));
-    const expiryDate = nextThursday.toISOString().split('T')[0] + 'T06:00:00.000Z';
+    // NSE weekly expiry moved to Tuesday (effective Sep 2025)
+    const daysUntilTuesday = (2 - dayOfWeek + 7) % 7 || 7;
+    const nextTuesday = new Date(today);
+    nextTuesday.setDate(today.getDate() + (dayOfWeek <= 2 ? (2 - dayOfWeek) : daysUntilTuesday));
+    const expiryDate = nextTuesday.toISOString().split('T')[0] + 'T06:00:00.000Z';
 
     const payload = JSON.stringify({
       stock_code: symbol.toUpperCase() === 'NIFTY' ? 'NIFTY' : symbol,

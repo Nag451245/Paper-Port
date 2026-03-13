@@ -372,14 +372,14 @@ describe('MarketDataService', () => {
       expect(s25000.putLTP).toBe(26);
     });
 
-    it('getNextExpiry should return a valid Thursday date', () => {
+    it('getNextExpiry should return a valid Tuesday date', () => {
       const svc = service as any;
       const expiry = svc.getNextExpiry();
 
       expect(expiry).toMatch(/^\d{4}-\d{2}-\d{2}T06:00:00\.000Z$/);
 
       const d = new Date(expiry);
-      expect(d.getUTCDay()).toBe(4); // Thursday
+      expect(d.getUTCDay()).toBe(2); // Tuesday (NSE weekly expiry since Sep 2025)
       expect(d.getTime()).toBeGreaterThanOrEqual(Date.now() - 86400000);
     });
   });

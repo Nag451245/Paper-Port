@@ -2208,13 +2208,14 @@ export class MarketDataService {
   private getNextExpiry(): string {
     const now = new Date();
     const day = now.getDay();
-    let daysUntilThursday = (4 - day + 7) % 7;
-    if (daysUntilThursday === 0) {
+    // NSE weekly expiry moved to Tuesday (effective Sep 2025)
+    let daysUntilTuesday = (2 - day + 7) % 7;
+    if (daysUntilTuesday === 0) {
       const hours = now.getHours();
-      if (hours >= 15) daysUntilThursday = 7;
+      if (hours >= 15) daysUntilTuesday = 7;
     }
     const expiry = new Date(now);
-    expiry.setDate(expiry.getDate() + daysUntilThursday);
+    expiry.setDate(expiry.getDate() + daysUntilTuesday);
     const y = expiry.getFullYear();
     const m = String(expiry.getMonth() + 1).padStart(2, '0');
     const d = String(expiry.getDate()).padStart(2, '0');
