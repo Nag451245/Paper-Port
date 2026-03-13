@@ -24,7 +24,7 @@ beforeAll(async () => {
   const { buildApp } = await import('../../src/app.js');
   app = await buildApp({ logger: false });
   await app.ready();
-});
+}, 30_000);
 
 afterAll(async () => {
   globalThis.fetch = originalFetch;

@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { riskApi } from '@/services/api';
 import { useRiskAlerts } from '@/hooks/useTradeUpdates';
+import { formatINRCompact } from '@/lib/utils';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -29,10 +30,7 @@ function num(v: any): number {
 }
 
 function fmtINR(v: number): string {
-  if (Math.abs(v) >= 10000000) return `₹${(v / 10000000).toFixed(2)}Cr`;
-  if (Math.abs(v) >= 100000) return `₹${(v / 100000).toFixed(1)}L`;
-  if (Math.abs(v) >= 1000) return `₹${(v / 1000).toFixed(1)}K`;
-  return `₹${v.toFixed(2)}`;
+  return formatINRCompact(v);
 }
 
 function pnlColor(v: number): string {

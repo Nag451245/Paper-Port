@@ -174,6 +174,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     done();
   });
 
+  let breezeBridgeHealthy: boolean | null = null;
+
   app.get('/health', async () => {
     const checks: Record<string, string> = {};
 
@@ -188,6 +190,15 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       checks.engine = isEngineAvailable() ? 'ok' : 'not_installed';
     } catch {
       checks.engine = 'error';
+    }
+
+    try {
+      const resp = await fetch(`${env.BREEZE_BRIDGE_URL}/health`, { signal: AbortSignal.timeout(3000) });
+      checks.breeze_bridge = resp.ok ? 'ok' : 'unhealthy';
+      breezeBridgeHealthy = resp.ok;
+    } catch {
+      checks.breeze_bridge = 'unreachable';
+      breezeBridgeHealthy = false;
     }
 
     const overall = checks.database === 'ok' && checks.engine === 'ok' ? 'ok'
@@ -414,6 +425,19 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     } catch (err: any) {
       console.error('[startup] Rust engine check failed:', err.message, '— bots will use Gemini AI only');
     }
+  });
+
+  app.addHook('onReady', () => {
+    fetch(`${env.BREEZE_BRIDGE_URL}/health`, { signal: AbortSignal.timeout(5000) })
+      .then(resp => {
+        breezeBridgeHealthy = resp.ok;
+        if (resp.ok) console.log(`[Breeze Bridge] Connected at ${env.BREEZE_BRIDGE_URL}`);
+        else console.warn(`[Breeze Bridge] Unhealthy — HTTP ${resp.status}. Market data and order placement may be limited.`);
+      })
+      .catch(() => {
+        breezeBridgeHealthy = false;
+        console.warn(`[Breeze Bridge] UNREACHABLE at ${env.BREEZE_BRIDGE_URL} — market data will be limited. Ensure the Python bridge is running.`);
+      });
   });
 
   // Bridge key events to WebSocket for real-time UI updates

@@ -51,8 +51,22 @@ impl Default for VoteWeights {
     }
 }
 
+fn normalize_weights(w: &mut VoteWeights) {
+    let sum = w.ema + w.rsi + w.macd + w.supertrend + w.bollinger + w.vwap + w.momentum + w.volume;
+    if sum > 0.0 {
+        w.ema /= sum;
+        w.rsi /= sum;
+        w.macd /= sum;
+        w.supertrend /= sum;
+        w.bollinger /= sum;
+        w.vwap /= sum;
+        w.momentum /= sum;
+        w.volume /= sum;
+    }
+}
+
 fn apply_regime_weights(base: &VoteWeights, regime: &str) -> VoteWeights {
-    match regime {
+    let mut w = match regime {
         "trending" => VoteWeights {
             ema: base.ema * 1.5, rsi: base.rsi * 0.7, macd: base.macd * 1.3,
             supertrend: base.supertrend * 1.4, bollinger: base.bollinger * 0.8,
@@ -69,7 +83,9 @@ fn apply_regime_weights(base: &VoteWeights, regime: &str) -> VoteWeights {
             vwap: base.vwap, momentum: base.momentum * 0.7, volume: base.volume * 1.3,
         },
         _ => base.clone(),
-    }
+    };
+    normalize_weights(&mut w);
+    w
 }
 
 struct ResolvedPeriods {
@@ -805,8 +821,8 @@ pub fn compute(data: Value) -> Result<Value, String> {
                     direction: "SELL".into(),
                     confidence: round3(pairs_conf),
                     entry: round2(last_a),
-                    stop_loss: round2(last_a * 1.01),
-                    target: round2(last_a * 0.995),
+                    stop_loss: round2(last_a * 1.015),
+                    target: round2(last_a * 0.97),
                     indicators: dummy_ind.clone(),
                     votes: dummy_votes.clone(),
                     strategy: Some(format!("pairs:{}_{}", sym_a, sym_b)),
@@ -816,8 +832,8 @@ pub fn compute(data: Value) -> Result<Value, String> {
                     direction: "BUY".into(),
                     confidence: round3(pairs_conf),
                     entry: round2(last_b),
-                    stop_loss: round2(last_b * 0.99),
-                    target: round2(last_b * 1.005),
+                    stop_loss: round2(last_b * 0.985),
+                    target: round2(last_b * 1.03),
                     indicators: dummy_ind,
                     votes: dummy_votes,
                     strategy: Some(format!("pairs:{}_{}", sym_a, sym_b)),
@@ -843,8 +859,8 @@ pub fn compute(data: Value) -> Result<Value, String> {
                     direction: "BUY".into(),
                     confidence: round3(pairs_conf),
                     entry: round2(last_a),
-                    stop_loss: round2(last_a * 0.99),
-                    target: round2(last_a * 1.005),
+                    stop_loss: round2(last_a * 0.985),
+                    target: round2(last_a * 1.03),
                     indicators: dummy_ind.clone(),
                     votes: dummy_votes.clone(),
                     strategy: Some(format!("pairs:{}_{}", sym_a, sym_b)),
@@ -854,8 +870,8 @@ pub fn compute(data: Value) -> Result<Value, String> {
                     direction: "SELL".into(),
                     confidence: round3(pairs_conf),
                     entry: round2(last_b),
-                    stop_loss: round2(last_b * 1.01),
-                    target: round2(last_b * 0.995),
+                    stop_loss: round2(last_b * 1.015),
+                    target: round2(last_b * 0.97),
                     indicators: dummy_ind,
                     votes: dummy_votes,
                     strategy: Some(format!("pairs:{}_{}", sym_a, sym_b)),
@@ -865,33 +881,41 @@ pub fn compute(data: Value) -> Result<Value, String> {
     }
 
     // === 8. EXPIRY DAY OPTIONS — theta/gamma mispricing near expiry ===
-    // Detect if today is near a weekly (Thursday) or monthly expiry.
-    // On expiry days, index options (NIFTY/BANKNIFTY) have accelerated theta decay,
-    // creating opportunities in straddle/strangle selling or directional gamma plays.
-    let is_expiry_day = if let Some(ref date_str) = input.current_date {
-        // NSE weekly expiry = Thursday; monthly expiry = last Thursday of month
+    // NSE expiry schedule (effective 2024+):
+    //   NIFTY 50    → Monday (weekly)
+    //   BANKNIFTY   → Wednesday (weekly)
+    //   FINNIFTY    → Tuesday (weekly)
+    //   Monthly expiry remains last Thursday of the month for all indices.
+    let dow_zeller = if let Some(ref date_str) = input.current_date {
         let parts: Vec<&str> = date_str.split('-').collect();
         if parts.len() == 3 {
             let day: u32 = parts[2].parse().unwrap_or(0);
             let month: u32 = parts[1].parse().unwrap_or(0);
             let year: i32 = parts[0].parse().unwrap_or(0);
-            // Simple day-of-week calculation (Zeller's formula)
             if year > 0 && month > 0 && day > 0 {
                 let (y, m) = if month <= 2 { (year - 1, month + 12) } else { (year, month) };
                 let dow = (day as i32 + (13 * (m as i32 + 1)) / 5 + y + y / 4 - y / 100 + y / 400) % 7;
                 // Zeller: 0=Sat, 1=Sun, 2=Mon, 3=Tue, 4=Wed, 5=Thu, 6=Fri
-                dow == 5 // Thursday = expiry day
-            } else { false }
-        } else { false }
+                Some(dow)
+            } else { None }
+        } else { None }
     } else {
-        false
+        None
     };
 
-    if is_expiry_day {
-        // On expiry day, generate signals for index symbols with special theta/gamma logic
+    if let Some(dow) = dow_zeller {
         for sym_data in &input.symbols {
             let sym_upper = sym_data.symbol.to_uppercase();
-            if sym_upper != "NIFTY" && sym_upper != "BANKNIFTY" && sym_upper != "FINNIFTY" {
+
+            let is_expiry_for_symbol = match sym_upper.as_str() {
+                "NIFTY" => dow == 2,      // Monday
+                "BANKNIFTY" => dow == 4,   // Wednesday
+                "FINNIFTY" => dow == 3,    // Tuesday
+                _ => continue,
+            };
+            // Monthly expiry (last Thursday) applies to all indices
+            let is_monthly_expiry = dow == 5; // Thursday
+            if !is_expiry_for_symbol && !is_monthly_expiry {
                 continue;
             }
             let n = sym_data.candles.len();

@@ -121,11 +121,13 @@ let daemonRL: ReadlineInterface | null = null;
 const pendingRequests = new Map<string, { resolve: (v: EngineResponse) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 let daemonReady = false;
 
-// Circuit breaker: stop respawning if daemon crashes too often
+// Circuit breaker: stop respawning if daemon crashes too often, with automatic cooldown reset
 let crashCount = 0;
 let lastCrashTime = 0;
+let circuitOpenSince = 0;
 const MAX_CRASHES = 5;
 const CRASH_WINDOW_MS = 60_000;
+const CIRCUIT_COOLDOWN_MS = 5 * 60_000;
 
 function checkCircuitBreaker(): boolean {
   const now = Date.now();
@@ -133,8 +135,14 @@ function checkCircuitBreaker(): boolean {
     crashCount = 0;
   }
   if (crashCount >= MAX_CRASHES) {
-    console.error(`[rust-engine] Circuit breaker open: ${crashCount} crashes in ${CRASH_WINDOW_MS / 1000}s. Not respawning.`);
-    return false;
+    if (circuitOpenSince === 0) circuitOpenSince = now;
+    if (now - circuitOpenSince < CIRCUIT_COOLDOWN_MS) {
+      console.error(`[rust-engine] Circuit breaker open: ${crashCount} crashes in ${CRASH_WINDOW_MS / 1000}s. Cooldown ${Math.round((CIRCUIT_COOLDOWN_MS - (now - circuitOpenSince)) / 1000)}s remaining.`);
+      return false;
+    }
+    crashCount = 0;
+    circuitOpenSince = 0;
+    console.log('[rust-engine] Circuit breaker reset after cooldown — retrying daemon');
   }
   return true;
 }
@@ -640,12 +648,13 @@ export async function engineIVSurface(data: IVSurfaceInput): Promise<IVSurfaceRe
 export async function engineScan(data: {
   symbols: Array<{
     symbol: string;
-    candles: Array<{ close: number; high: number; low: number; volume: number }>;
+    candles: Array<{ open?: number; close: number; high: number; low: number; volume: number; timestamp?: string }>;
   }>;
   aggressiveness?: 'high' | 'medium' | 'low';
   strategy_params?: Record<string, unknown>;
   vote_weights?: Record<string, number>;
   regime?: string;
+  current_date?: string;
 }): Promise<ScanResult> {
   const res = await runEngine('scan', data);
   if (!res.success) throw new Error(res.error ?? 'Scan computation failed');
@@ -958,4 +967,14 @@ export async function isKillSwitchActive(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+export function _getCircuitBreakerState() {
+  return { crashCount, lastCrashTime, circuitOpenSince, MAX_CRASHES, CRASH_WINDOW_MS, CIRCUIT_COOLDOWN_MS };
+}
+
+export function _resetCircuitBreakerForTesting() {
+  crashCount = 0;
+  lastCrashTime = 0;
+  circuitOpenSince = 0;
 }

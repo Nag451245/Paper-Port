@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Activity,
@@ -9,6 +9,7 @@ import {
   ChevronDown,
   Wifi,
   WifiOff,
+  AlertCircle,
 } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth';
 import { useMarketDataStore } from '@/stores/market-data';
@@ -16,15 +17,29 @@ import { useMarketDataStore } from '@/stores/market-data';
 export default function TopBar() {
   const { user, logout } = useAuthStore();
   const { indices, vix, isMarketOpen, fetchIndices, fetchVIX, checkMarketStatus } = useMarketDataStore();
+  const [bridgeStatus, setBridgeStatus] = useState<'ok' | 'unhealthy' | 'unknown'>('unknown');
 
   useEffect(() => {
     fetchIndices();
     fetchVIX();
     checkMarketStatus();
+
+    const checkBridge = async () => {
+      try {
+        const res = await fetch('/health');
+        if (res.ok) {
+          const data = await res.json();
+          setBridgeStatus(data.checks?.breeze_bridge === 'ok' ? 'ok' : 'unhealthy');
+        }
+      } catch { setBridgeStatus('unhealthy'); }
+    };
+    checkBridge();
+
     const interval = setInterval(() => {
       fetchIndices();
       fetchVIX();
       checkMarketStatus();
+      checkBridge();
     }, 60_000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -71,6 +86,17 @@ export default function TopBar() {
           </>
         )}
       </div>
+
+      {bridgeStatus === 'unhealthy' && (
+        <Link
+          to="/settings"
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-amber-200 bg-amber-50 text-xs flex-shrink-0 hover:bg-amber-100 transition-colors"
+          title="Breeze API session not active. Click to configure."
+        >
+          <AlertCircle className="w-3 h-3 text-amber-600" />
+          <span className="text-amber-700 font-medium hidden sm:inline">Breeze Offline</span>
+        </Link>
+      )}
 
       {/* Index tickers */}
       <div className="hidden lg:flex items-center gap-4 ml-2 overflow-x-auto">

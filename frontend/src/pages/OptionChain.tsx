@@ -95,7 +95,7 @@ function isMarketOpen(): boolean {
   return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
 }
 
-const REFRESH_MARKET = 3_000;
+const REFRESH_MARKET = 15_000;
 const REFRESH_OFF = 60_000;
 const STRIKES_AROUND_ATM = 20;
 
@@ -329,9 +329,19 @@ export default function OptionChain() {
             </div>
           )}
           {error && (
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-3 py-1 text-xs font-medium text-red-700 border border-red-200">
-              <AlertCircle className="h-3.5 w-3.5" /> {error}
-            </span>
+            <div className="inline-flex items-center gap-2 rounded-lg bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 border border-amber-200">
+              <AlertCircle className="h-3.5 w-3.5 text-amber-600 flex-shrink-0" />
+              <span>{error}</span>
+              <button
+                onClick={() => { setError(null); fetchData(symbol); }}
+                className="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-700 transition text-xs font-semibold"
+              >
+                <RefreshCcw className="h-3 w-3" /> Retry
+              </button>
+              {error.includes('session') && (
+                <a href="/settings" className="ml-1 text-amber-700 underline hover:text-amber-900 text-xs font-semibold">Settings</a>
+              )}
+            </div>
           )}
         </div>
       </div>

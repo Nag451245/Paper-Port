@@ -664,12 +664,21 @@ export default function StrategyBuilder() {
             <p className="text-xs text-amber-700 leading-relaxed mb-3">
               Option chain data requires a valid ICICI Breeze API session. Please enter your session key to access live option chain data, expiry dates, and strategy building features.
             </p>
-            <a
-              href="/settings"
-              className="inline-flex items-center gap-2 px-4 py-2 bg-amber-600 text-white text-xs font-semibold rounded-lg hover:bg-amber-500 transition shadow-sm"
-            >
-              Go to Settings — Enter Breeze Session Key
-            </a>
+            <div className="flex items-center gap-3">
+              <a
+                href="/settings"
+                className="inline-flex items-center gap-2 px-4 py-2 bg-amber-600 text-white text-xs font-semibold rounded-lg hover:bg-amber-500 transition shadow-sm"
+              >
+                Go to Settings — Enter Breeze Session Key
+              </a>
+              <button
+                onClick={() => { setSessionError(false); }}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-slate-100 text-slate-700 text-xs font-semibold rounded-lg hover:bg-slate-200 transition"
+              >
+                <RefreshCcw className="w-3.5 h-3.5" />
+                Retry
+              </button>
+            </div>
           </div>
         </div>
       )}

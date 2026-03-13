@@ -64,7 +64,7 @@ export const useAIAgentStore = create<AIAgentState>((set) => ({
           rustEngine: Boolean(raw.rustEngine ?? false),
         },
       });
-    } catch { /* silently fail */ }
+    } catch (err) { console.warn('[AI Agent] Status fetch failed:', (err as Error)?.message); }
   },
 
   startAgent: async () => {

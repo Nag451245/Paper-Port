@@ -157,7 +157,6 @@ export class BotEngine {
   private scanInProgress = false;
   private _killSwitchActive = false;
   private cycleInProgress = new Set<string>();
-  private cycleCandles = new Map<string, any[]>();
   private rollingAccuracy = new Map<string, RollingAccuracy>();
   private tickInterval = DEFAULT_TICK_INTERVAL;
   private signalInterval = DEFAULT_SIGNAL_INTERVAL;
@@ -718,11 +717,18 @@ export class BotEngine {
 
     const start = Date.now();
     try {
-      const { gainers, losers } = await this.marketData.getTopMovers(15);
+      let { gainers, losers } = await this.marketData.getTopMovers(15);
 
       if (gainers.length === 0 && losers.length === 0) {
-        this.scanInProgress = false;
-        return;
+        const FALLBACK_NIFTY50 = [
+          'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN', 'BHARTIARTL',
+          'KOTAKBANK', 'ITC', 'LT', 'AXISBANK', 'BAJFINANCE', 'WIPRO', 'HCLTECH',
+          'MARUTI', 'TATAMOTORS', 'SUNPHARMA', 'TITAN',
+        ];
+        log.warn('Scraper returned no movers — using NIFTY 50 fallback watchlist');
+        gainers = FALLBACK_NIFTY50.map(symbol => ({
+          symbol, name: symbol, ltp: 0, change: 0, changePercent: 0, volume: 0,
+        }));
       }
 
       const allMovers = [
@@ -739,7 +745,7 @@ export class BotEngine {
         // --- Rust engine path ---
         const candleData: Array<{
           symbol: string;
-          candles: Array<{ close: number; high: number; low: number; volume: number }>;
+          candles: Array<{ open: number; close: number; high: number; low: number; volume: number }>;
           mover: typeof uniqueSymbols[0];
         }> = [];
 
@@ -757,7 +763,7 @@ export class BotEngine {
               candleData.push({
                 symbol: mover.symbol,
                 candles: bars.slice(-50).map(b => ({
-                  close: b.close, high: b.high, low: b.low, volume: b.volume,
+                  open: b.open, close: b.close, high: b.high, low: b.low, volume: b.volume,
                 })),
                 mover,
               });
@@ -769,7 +775,8 @@ export class BotEngine {
           const scanInput = candleData.map(d => ({ symbol: d.symbol, candles: d.candles }));
           let rustSignals: ScanSignal[] = [];
           try {
-            const result = await engineScan({ symbols: scanInput, aggressiveness: 'high' });
+            const todayStr = new Date().toISOString().split('T')[0];
+            const result = await engineScan({ symbols: scanInput, aggressiveness: 'high', current_date: todayStr });
             rustSignals = result.signals ?? [];
           } catch { /* scan failed */ }
 
@@ -1375,13 +1382,13 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
   private async fetchCandles(
     symbols: string[],
     userId: string,
-  ): Promise<Array<{ symbol: string; candles: Array<{ close: number; high: number; low: number; volume: number }> }>> {
+  ): Promise<Array<{ symbol: string; candles: Array<{ open: number; close: number; high: number; low: number; volume: number }> }>> {
     const now = new Date();
     const toDate = now.toISOString().split('T')[0];
     const twoDaysAgo = new Date(now.getTime() - 2 * 86_400_000);
     const fromDate = twoDaysAgo.toISOString().split('T')[0];
 
-    const results: Array<{ symbol: string; candles: Array<{ close: number; high: number; low: number; volume: number }> }> = [];
+    const results: Array<{ symbol: string; candles: Array<{ open: number; close: number; high: number; low: number; volume: number }> }> = [];
 
     for (const sym of symbols.slice(0, MAX_CANDLE_SYMBOLS)) {
       try {
@@ -1391,6 +1398,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           results.push({
             symbol: sym,
             candles: last50.map(b => ({
+              open: b.open,
               close: b.close,
               high: b.high,
               low: b.low,
@@ -2251,6 +2259,7 @@ INSTRUCTIONS:
               aggressiveness: aggressiveness as any,
               strategy_params: Object.keys(agentStrategyParams).length > 0 ? agentStrategyParams : undefined,
               regime: agentRegime ?? undefined,
+              current_date: new Date().toISOString().split('T')[0],
             });
             rustSignals = scanResult.signals ?? [];
             log.info({ signalCount: rustSignals.length, regime: agentRegime }, 'Agent Rust scan completed');

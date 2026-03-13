@@ -27,6 +27,7 @@ import {
 import { usePortfolioStore } from '@/stores/portfolio';
 import { portfolioApi, marketApi } from '@/services/api';
 import type { RiskMetrics } from '@/types';
+import { formatINR as sharedFormatINR } from '@/lib/utils';
 
 const SECTOR_COLORS = ['#4f46e5', '#22c55e', '#eab308', '#ef4444', '#a855f7', '#06b6d4', '#f97316', '#ec4899'];
 
@@ -37,7 +38,7 @@ function safeNum(val: unknown, fallback = 0): number {
 }
 
 function formatINR(val: number): string {
-  return val.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+  return sharedFormatINR(val, 0).replace('₹', '');
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */

@@ -15,6 +15,7 @@ import { usePortfolioStore } from '@/stores/portfolio';
 import { useAIAgentStore } from '@/stores/ai-agent';
 import { useMarketDataStore } from '@/stores/market-data';
 import { tradingApi } from '@/services/api';
+import { formatINR, formatINRCompact } from '@/lib/utils';
 import { liveSocket } from '@/services/websocket';
 
 export default function Dashboard() {
@@ -30,7 +31,7 @@ export default function Dashboard() {
         const trades = Array.isArray(data) ? data : (data as any)?.trades ?? (data as any)?.items ?? [];
         setTodayTrades(trades);
       })
-      .catch(() => {});
+      .catch((err) => { console.warn('[Dashboard] Failed to load trades:', err?.message); });
   }, []);
 
   useEffect(() => {
@@ -154,13 +155,13 @@ export default function Dashboard() {
             <div className="space-y-3">
               <div>
                 <p className="text-xs text-slate-500">Net Asset Value</p>
-                <p className="text-2xl font-bold font-mono text-slate-900">₹{(summary?.totalNav ?? 0).toLocaleString('en-IN')}</p>
+                <p className="text-2xl font-bold font-mono text-slate-900">{formatINR(summary?.totalNav ?? 0)}</p>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="bg-slate-50 rounded-xl p-2.5">
                   <p className="text-xs text-slate-500">Day P&L</p>
                   <p className={`text-lg font-semibold font-mono ${(summary?.dayPnl ?? 0) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                    {(summary?.dayPnl ?? 0) >= 0 ? '+' : ''}₹{(summary?.dayPnl ?? 0).toLocaleString('en-IN')}
+                    {(summary?.dayPnl ?? 0) >= 0 ? '+' : ''}{formatINR(summary?.dayPnl ?? 0)}
                   </p>
                   <p className={`text-xs font-mono ${(summary?.dayPnlPercent ?? 0) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                     {(summary?.dayPnlPercent ?? 0) >= 0 ? '+' : ''}{(summary?.dayPnlPercent ?? 0).toFixed(2)}%
@@ -169,7 +170,7 @@ export default function Dashboard() {
                 <div className="bg-slate-50 rounded-xl p-2.5">
                   <p className="text-xs text-slate-500">Total P&L</p>
                   <p className={`text-lg font-semibold font-mono ${(summary?.totalPnl ?? 0) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                    {(summary?.totalPnl ?? 0) >= 0 ? '+' : ''}₹{(summary?.totalPnl ?? 0).toLocaleString('en-IN')}
+                    {(summary?.totalPnl ?? 0) >= 0 ? '+' : ''}{formatINR(summary?.totalPnl ?? 0)}
                   </p>
                   <p className={`text-xs font-mono ${(summary?.totalPnlPercent ?? 0) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                     {(summary?.totalPnlPercent ?? 0) >= 0 ? '+' : ''}{(summary?.totalPnlPercent ?? 0).toFixed(2)}%
@@ -355,12 +356,12 @@ export default function Dashboard() {
                     <div>
                       <p className="font-medium text-slate-800">{trade.symbol}</p>
                       <p className="text-slate-400">
-                        {trade.side ?? trade.direction} · {trade.qty ?? trade.quantity} @ ₹{Number(trade.entryPrice ?? trade.price ?? 0).toFixed(2)}
+                        {trade.side ?? trade.direction} · {trade.qty ?? trade.quantity} @ {formatINR(Number(trade.entryPrice ?? trade.price ?? 0))}
                       </p>
                     </div>
                     <div className="text-right">
                       <p className={`font-mono font-semibold ${pnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                        {pnl >= 0 ? '+' : ''}₹{pnl.toFixed(0)}
+                        {pnl >= 0 ? '+' : ''}{formatINR(pnl)}
                       </p>
                       <p className="text-slate-400">{trade.status ?? 'EXECUTED'}</p>
                     </div>

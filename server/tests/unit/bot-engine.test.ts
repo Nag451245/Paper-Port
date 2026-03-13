@@ -157,5 +157,76 @@ describe('BotEngine', () => {
       await engine.startAgent('u1');
       engine.stopAgent('u1');
     });
+
+    it('should track active agent count', async () => {
+      expect(engine.getActiveAgentCount()).toBe(0);
+      await engine.startAgent('u1');
+      expect(engine.getActiveAgentCount()).toBe(1);
+      engine.stopAgent('u1');
+      expect(engine.getActiveAgentCount()).toBe(0);
+    });
+  });
+
+  describe('kill switch', () => {
+    it('should report kill switch state', () => {
+      expect(engine.killSwitchActive).toBe(false);
+    });
+  });
+
+  describe('market scan fallback', () => {
+    it('should have isScannerRunning method', () => {
+      expect(typeof engine.isScannerRunning).toBe('function');
+      expect(engine.isScannerRunning()).toBe(false);
+    });
+
+    it('should have getLastScanResult method returning null initially', () => {
+      expect(engine.getLastScanResult()).toBeNull();
+    });
+  });
+
+  describe('isRunning state', () => {
+    it('should report not running when no bots, agents, or scanner active', () => {
+      expect(engine.isRunning()).toBe(false);
+    });
+
+    it('should report running when a bot is started', async () => {
+      mockPrisma.tradingBot.findUnique.mockResolvedValue({
+        id: 'b1', userId: 'u1', status: 'RUNNING', role: 'SCANNER',
+        assignedSymbols: 'RELIANCE', name: 'Test Bot',
+      });
+      await engine.startBot('b1', 'u1');
+      expect(engine.isRunning()).toBe(true);
+      engine.stopBot('b1');
+      expect(engine.isRunning()).toBe(false);
+    });
+
+    it('should report running when an agent is started', async () => {
+      await engine.startAgent('u1');
+      expect(engine.isRunning()).toBe(true);
+      engine.stopAgent('u1');
+      expect(engine.isRunning()).toBe(false);
+    });
+  });
+
+  describe('stopAll', () => {
+    it('should stop all bots and agents', async () => {
+      mockPrisma.tradingBot.findUnique.mockResolvedValue({
+        id: 'b1', userId: 'u1', status: 'RUNNING', role: 'SCANNER',
+        assignedSymbols: 'RELIANCE', name: 'Test Bot',
+      });
+      await engine.startBot('b1', 'u1');
+      await engine.startAgent('u1');
+      expect(engine.isRunning()).toBe(true);
+      engine.stopAll();
+      expect(engine.getRunningBotCount()).toBe(0);
+      expect(engine.getActiveAgentCount()).toBe(0);
+    });
+  });
+
+  describe('tick interval', () => {
+    it('should allow setting tick interval', () => {
+      expect(typeof engine.setTickInterval).toBe('function');
+      engine.setTickInterval(60_000);
+    });
   });
 });

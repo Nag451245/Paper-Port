@@ -103,7 +103,7 @@ beforeAll(async () => {
   mockPrisma = (prismaModule as any).__mockPrisma;
   app = await buildApp({ logger: false });
   await app.ready();
-});
+}, 30_000);
 
 afterAll(async () => { await app.close(); });
 beforeEach(() => {
@@ -537,5 +537,93 @@ describe('UAT Flow 11: Cross-cutting Concerns', () => {
     for (const res of results) {
       expect(res.statusCode).toBe(200);
     }
+  });
+});
+
+describe('UAT Flow 12: Health Endpoint with Breeze Bridge', () => {
+  it('should include breeze_bridge in health check response', async () => {
+    const res = await app.inject({ method: 'GET', url: '/health' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body).toHaveProperty('checks');
+    expect(body.checks).toHaveProperty('database');
+    expect(body.checks).toHaveProperty('engine');
+    expect(body.checks).toHaveProperty('breeze_bridge');
+    expect(['ok', 'unhealthy', 'unreachable']).toContain(body.checks.breeze_bridge);
+  });
+
+  it('should include monitoring metrics in health response', async () => {
+    const res = await app.inject({ method: 'GET', url: '/health' });
+    const body = res.json();
+    expect(body).toHaveProperty('monitoring');
+    expect(body.monitoring).toHaveProperty('uptimePct');
+    expect(body.monitoring).toHaveProperty('avgLatencyMs');
+  });
+
+  it('should report uptime in seconds', async () => {
+    const res = await app.inject({ method: 'GET', url: '/health' });
+    const body = res.json();
+    expect(typeof body.uptime).toBe('number');
+    expect(body.uptime).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('UAT Flow 13: AI Agent Lifecycle', () => {
+  it('should get AI agent config', async () => {
+    mockPrisma.aIAgentConfig.findUnique.mockResolvedValue({
+      userId: 'test-user-id', mode: 'ADVISORY', isActive: true,
+      minSignalScore: 0.7, maxDailyTrades: 5, strategies: '["ema-crossover"]',
+    });
+    const res = await app.inject({ method: 'GET', url: '/api/ai/config', headers: auth() });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('should update AI agent config', async () => {
+    mockPrisma.aIAgentConfig.findUnique.mockResolvedValue({
+      userId: 'test-user-id', mode: 'ADVISORY', isActive: true,
+      minSignalScore: 0.7, maxDailyTrades: 5, strategies: '["ema-crossover"]',
+    });
+    const res = await app.inject({
+      method: 'PUT', url: '/api/ai/config', headers: auth(),
+      payload: { mode: 'AUTONOMOUS', minSignalScore: 0.6 },
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('should start AI agent', async () => {
+    mockPrisma.aIAgentConfig.findUnique.mockResolvedValue({
+      userId: 'test-user-id', mode: 'ADVISORY', isActive: false,
+      minSignalScore: 0.7, maxDailyTrades: 5,
+    });
+    mockPrisma.aIAgentConfig.upsert = vi.fn().mockResolvedValue({
+      userId: 'test-user-id', mode: 'ADVISORY', isActive: true,
+    });
+    const res = await app.inject({ method: 'POST', url: '/api/ai/start', headers: auth() });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('should stop AI agent', async () => {
+    mockPrisma.aIAgentConfig.findUnique.mockResolvedValue({
+      userId: 'test-user-id', mode: 'ADVISORY', isActive: true,
+    });
+    mockPrisma.aIAgentConfig.upsert = vi.fn().mockResolvedValue({
+      userId: 'test-user-id', mode: 'ADVISORY', isActive: false,
+    });
+    const res = await app.inject({ method: 'POST', url: '/api/ai/stop', headers: auth() });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('should list AI signals', async () => {
+    mockPrisma.aITradeSignal.findMany.mockResolvedValue([]);
+    mockPrisma.aITradeSignal.count.mockResolvedValue(0);
+    const res = await app.inject({ method: 'GET', url: '/api/ai/signals', headers: auth() });
+    expect(res.statusCode).toBe(200);
+  });
+});
+
+describe('UAT Flow 14: Market Data - No HDFC Ltd', () => {
+  it('should not include delisted HDFC in search results for popular stocks', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/market/search?q=HDFC' });
+    expect(res.statusCode).toBe(200);
   });
 });

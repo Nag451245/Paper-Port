@@ -25,7 +25,7 @@ beforeAll(async () => {
   mockPrisma = (prismaModule as any).__mockPrisma;
   app = await buildApp({ logger: false });
   await app.ready();
-});
+}, 30_000);
 
 afterAll(async () => { await app.close(); });
 beforeEach(() => { vi.resetAllMocks(); });

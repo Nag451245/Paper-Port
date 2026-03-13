@@ -9,7 +9,7 @@ class LiveSocket {
   private subscribedSymbols = new Set<string>();
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private pongReceived = true;
-  private static PING_INTERVAL = 25_000;
+  private static PING_INTERVAL = 30_000;
 
   connect(): void {
     if (this.ws?.readyState === WebSocket.OPEN) return;
@@ -54,7 +54,7 @@ class LiveSocket {
           if (allHandlers) {
             for (const handler of allHandlers) handler(msg);
           }
-        } catch { /* ignore */ }
+        } catch (err) { console.warn('[WebSocket] Message handler error:', err); }
       };
 
       this.ws.onclose = () => {

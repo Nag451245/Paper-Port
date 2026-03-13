@@ -105,46 +105,45 @@ export class PriceFeedService {
       batches.push(subscribedSymbols.slice(i, i + MAX_SYMBOLS_PER_BATCH));
     }
 
-    for (const batch of batches) {
-      await Promise.allSettled(
-        batch.map(async symbol => {
-          try {
-            const quote = await this.marketData.getQuote(symbol);
-            if (quote.ltp <= 0) return;
+    await Promise.allSettled(
+      batches.map(batch =>
+        Promise.allSettled(
+          batch.map(async symbol => {
+            try {
+              const quote = await this.marketData.getQuote(symbol);
+              if (quote.ltp <= 0) return;
 
-            const prev = this.lastPrices.get(symbol);
-            const changed = !prev || prev.ltp !== quote.ltp || prev.volume !== quote.volume;
+              const prev = this.lastPrices.get(symbol);
+              const changed = !prev || prev.ltp !== quote.ltp || prev.volume !== quote.volume;
 
-            if (changed) {
-              const now = Date.now();
-              const priceData = {
-                ltp: quote.ltp,
-                change: quote.change,
-                changePercent: quote.changePercent,
-                volume: quote.volume,
-                timestamp: new Date().toISOString(),
-              };
+              if (changed) {
+                const now = Date.now();
+                const priceData = {
+                  ltp: quote.ltp,
+                  change: quote.change,
+                  changePercent: quote.changePercent,
+                  volume: quote.volume,
+                  timestamp: new Date().toISOString(),
+                };
 
-              wsHub.broadcastPriceUpdate(symbol, priceData);
-              this.lastPrices.set(symbol, { ltp: quote.ltp, volume: quote.volume, timestamp: now });
+                wsHub.broadcastPriceUpdate(symbol, priceData);
+                this.lastPrices.set(symbol, { ltp: quote.ltp, volume: quote.volume, timestamp: now });
 
-              // Feed tick into the data pipeline (Redis Streams)
-              this.dataPipeline?.publishTick(symbol, quote.ltp, quote.volume, now).catch(err => pfLog.warn({ err, symbol }, 'Failed to publish tick to pipeline'));
+                this.dataPipeline?.publishTick(symbol, quote.ltp, quote.volume, now).catch(err => pfLog.warn({ err, symbol }, 'Failed to publish tick to pipeline'));
 
-              // Aggregate into 5-minute candles and persist to CandleStore
-              this.updateCandleBuilder(symbol, quote.ltp, quote.volume, now);
+                this.updateCandleBuilder(symbol, quote.ltp, quote.volume, now);
 
-              // Emit tick event for event bus consumers
-              emit('market-data', {
-                type: 'TICK_RECEIVED', symbol, ltp: quote.ltp,
-                change: quote.change, volume: quote.volume,
-                timestamp: priceData.timestamp,
-              }).catch(err => pfLog.warn({ err, symbol }, 'Failed to emit TICK_RECEIVED event'));
-            }
-          } catch {}
-        })
-      );
-    }
+                emit('market-data', {
+                  type: 'TICK_RECEIVED', symbol, ltp: quote.ltp,
+                  change: quote.change, volume: quote.volume,
+                  timestamp: priceData.timestamp,
+                }).catch(err => pfLog.warn({ err, symbol }, 'Failed to emit TICK_RECEIVED event'));
+              }
+            } catch {}
+          })
+        )
+      )
+    );
   }
 
   private async persistUnrealizedPnl(): Promise<void> {

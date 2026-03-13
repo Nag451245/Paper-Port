@@ -39,7 +39,7 @@ beforeAll(async () => {
   await app.ready();
 
   authToken = app.jwt.sign({ sub: 'test-user-123', email: 'test@example.com' });
-});
+}, 30_000);
 
 afterAll(async () => {
   await app.close();

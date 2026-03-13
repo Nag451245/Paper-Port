@@ -44,7 +44,7 @@ function isMarketOpen(): boolean {
   return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
 }
 
-const REFRESH_MARKET = 2_000;
+const REFRESH_MARKET = 15_000;
 const REFRESH_OFF = 5 * 60_000;
 
 function fmtCr(n: number): string {
@@ -212,6 +212,7 @@ export default function FnOAnalytics() {
   const [isLiveData, setIsLiveData] = useState(false);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [dataError, setDataError] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const fetchAll = useCallback(async (silent = false) => {
@@ -343,8 +344,16 @@ export default function FnOAnalytics() {
         if (d?.maxPain > 0) { anySuccess = true; setMaxPainValue(d.maxPain); }
       }
 
-      if (anySuccess) { setIsLiveData(true); setLastUpdated(new Date()); }
-    } catch { /* silent fail */ }
+      if (anySuccess) {
+        setIsLiveData(true);
+        setLastUpdated(new Date());
+        setDataError(null);
+      } else if (!silent) {
+        setDataError('Unable to fetch F&O data. The Breeze API session may have expired — check Settings.');
+      }
+    } catch {
+      if (!silent) setDataError('Failed to connect to market data services. Please check your connection.');
+    }
     finally { if (!silent) setLoading(false); }
   }, [selectedIndex, pcrValue]);
 
@@ -445,6 +454,20 @@ export default function FnOAnalytics() {
 
   return (
     <div className="space-y-6 pb-8">
+      {dataError && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Shield className="h-5 w-5 text-amber-600 flex-shrink-0" />
+            <p className="text-sm text-amber-800">{dataError}</p>
+          </div>
+          <button
+            onClick={() => { setDataError(null); fetchAll(); }}
+            className="text-sm font-medium text-amber-700 hover:text-amber-900 underline flex-shrink-0"
+          >
+            Retry
+          </button>
+        </div>
+      )}
       {/* Page header */}
       <div className="flex items-center justify-between">
         <div>

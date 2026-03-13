@@ -102,7 +102,7 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
         ? allPositions.filter((p: any) => !p.portfolioId || p.portfolioId === activeId)
         : allPositions;
       set({ positions: filtered });
-    } catch { /* silent */ }
+    } catch (err) { console.warn('[Portfolio] Positions fetch failed:', (err as Error)?.message); }
   },
 
   fetchOrders: async () => {
@@ -110,7 +110,7 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
       const { data } = await tradingApi.listOrders();
       const orders = Array.isArray(data) ? data : (data as any)?.orders ?? [];
       set({ orders });
-    } catch { /* silent */ }
+    } catch (err) { console.warn('[Portfolio] Orders fetch failed:', (err as Error)?.message); }
   },
 
   cancelOrder: async (id) => {

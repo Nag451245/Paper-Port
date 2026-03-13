@@ -86,7 +86,6 @@ const POPULAR_NSE_STOCKS: [string, string][] = [
   ['BAJAJFINSV', 'Bajaj Finserv Ltd'],
   ['ULTRACEMCO', 'UltraTech Cement Ltd'],
   ['NESTLEIND', 'Nestle India Ltd'],
-  ['HDFC', 'HDFC Ltd'],
   ['DRREDDY', 'Dr. Reddys Laboratories Ltd'],
   ['DIVISLAB', 'Divis Laboratories Ltd'],
   ['CIPLA', 'Cipla Ltd'],
