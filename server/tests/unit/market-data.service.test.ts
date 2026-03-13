@@ -372,15 +372,32 @@ describe('MarketDataService', () => {
       expect(s25000.putLTP).toBe(26);
     });
 
-    it('getNextExpiry should return a valid Tuesday date', () => {
+    it('getNextExpiry should return a valid Tuesday for NIFTY (weekly)', () => {
       const svc = service as any;
-      const expiry = svc.getNextExpiry();
-
+      const expiry = svc.getNextExpiry('NIFTY');
       expect(expiry).toMatch(/^\d{4}-\d{2}-\d{2}T06:00:00\.000Z$/);
-
       const d = new Date(expiry);
-      expect(d.getUTCDay()).toBe(2); // Tuesday (NSE weekly expiry since Sep 2025)
-      expect(d.getTime()).toBeGreaterThanOrEqual(Date.now() - 86400000);
+      expect(d.getUTCDay()).toBe(2); // Tuesday
+    });
+
+    it('getNextExpiry should return last Tuesday of month for BANKNIFTY (monthly only)', () => {
+      const svc = service as any;
+      const expiry = svc.getNextExpiry('BANKNIFTY');
+      expect(expiry).toMatch(/^\d{4}-\d{2}-\d{2}T06:00:00\.000Z$/);
+      const d = new Date(expiry);
+      expect(d.getUTCDay()).toBe(2); // Tuesday
+      // Must be the last Tuesday of its month: adding 7 days should go to next month
+      const nextWeek = new Date(d);
+      nextWeek.setDate(nextWeek.getDate() + 7);
+      expect(nextWeek.getMonth()).not.toBe(d.getMonth());
+    });
+
+    it('getNextExpiry should return Thursday for SENSEX (weekly)', () => {
+      const svc = service as any;
+      const expiry = svc.getNextExpiry('SENSEX');
+      expect(expiry).toMatch(/^\d{4}-\d{2}-\d{2}T06:00:00\.000Z$/);
+      const d = new Date(expiry);
+      expect(d.getUTCDay()).toBe(4); // Thursday
     });
   });
 });

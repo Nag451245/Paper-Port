@@ -881,12 +881,11 @@ pub fn compute(data: Value) -> Result<Value, String> {
     }
 
     // === 8. EXPIRY DAY OPTIONS — theta/gamma mispricing near expiry ===
-    // NSE expiry schedule (effective September 2025):
-    //   ALL NSE indices (NIFTY, BANKNIFTY, MIDCPNIFTY, NIFTYNXT50) → Tuesday (weekly)
-    //   Monthly/quarterly expiry → last Tuesday of the month
-    // BSE:
-    //   SENSEX → Thursday (weekly), last Thursday of month (monthly)
-    let dow_zeller = if let Some(ref date_str) = input.current_date {
+    // SEBI Nov 2024 rules: only ONE weekly expiry per exchange.
+    //   NIFTY:   weekly Tuesday (NSE)
+    //   SENSEX:  weekly Thursday (BSE)
+    //   All others (BANKNIFTY, FINNIFTY, MIDCPNIFTY, stocks): monthly only — last Tuesday
+    let date_info = if let Some(ref date_str) = input.current_date {
         let parts: Vec<&str> = date_str.split('-').collect();
         if parts.len() == 3 {
             let day: u32 = parts[2].parse().unwrap_or(0);
@@ -896,20 +895,30 @@ pub fn compute(data: Value) -> Result<Value, String> {
                 let (y, m) = if month <= 2 { (year - 1, month + 12) } else { (year, month) };
                 let dow = (day as i32 + (13 * (m as i32 + 1)) / 5 + y + y / 4 - y / 100 + y / 400) % 7;
                 // Zeller: 0=Sat, 1=Sun, 2=Mon, 3=Tue, 4=Wed, 5=Thu, 6=Fri
-                Some(dow)
+                // Check if this is the LAST occurrence of this weekday in the month
+                let days_in_month = match month {
+                    1|3|5|7|8|10|12 => 31u32,
+                    4|6|9|11 => 30,
+                    2 => if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 29 } else { 28 },
+                    _ => 30,
+                };
+                let is_last_of_weekday = day + 7 > days_in_month;
+                Some((dow, is_last_of_weekday))
             } else { None }
         } else { None }
     } else {
         None
     };
 
-    if let Some(dow) = dow_zeller {
+    if let Some((dow, is_last_of_weekday)) = date_info {
         for sym_data in &input.symbols {
             let sym_upper = sym_data.symbol.to_uppercase();
 
             let is_expiry_for_symbol = match sym_upper.as_str() {
-                "NIFTY" | "BANKNIFTY" | "FINNIFTY" | "MIDCPNIFTY" | "NIFTYNXT50" => dow == 3, // Tuesday (NSE)
-                "SENSEX" => dow == 5, // Thursday (BSE)
+                "NIFTY" => dow == 3,            // Weekly Tuesday
+                "SENSEX" => dow == 5,           // Weekly Thursday
+                "BANKNIFTY" | "FINNIFTY" | "MIDCPNIFTY" | "NIFTYNXT50" =>
+                    dow == 3 && is_last_of_weekday, // Monthly: last Tuesday only
                 _ => continue,
             };
             if !is_expiry_for_symbol {

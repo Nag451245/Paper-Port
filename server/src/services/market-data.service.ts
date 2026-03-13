@@ -2079,7 +2079,7 @@ export class MarketDataService {
     const breeze = await this.getBreezeSDK();
     if (!breeze) return null;
 
-    const expiry = expiryDate ? `${expiryDate}T06:00:00.000Z` : this.getNextExpiry();
+    const expiry = expiryDate ? `${expiryDate}T06:00:00.000Z` : this.getNextExpiry(symbol);
 
     const allStrikes: Map<number, any> = new Map();
     let spotPrice = 0;
@@ -2240,21 +2240,50 @@ export class MarketDataService {
     }
   }
 
-  private getNextExpiry(): string {
+  private getNextExpiry(symbol?: string): string {
     const now = new Date();
-    const day = now.getDay();
-    // NSE weekly expiry moved to Tuesday (effective Sep 2025)
-    let daysUntilTuesday = (2 - day + 7) % 7;
-    if (daysUntilTuesday === 0) {
-      const hours = now.getHours();
-      if (hours >= 15) daysUntilTuesday = 7;
+    const sym = (symbol ?? '').toUpperCase();
+    const fmt = (d: Date) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${dd}T06:00:00.000Z`;
+    };
+
+    // SEBI Nov 2024: only NIFTY (NSE) and SENSEX (BSE) have weekly expiry.
+    // Everything else (BANKNIFTY, FINNIFTY, stocks) is monthly only.
+    if (sym === 'SENSEX') {
+      // BSE SENSEX: weekly Thursday
+      const day = now.getDay();
+      let daysUntil = (4 - day + 7) % 7; // Thursday = 4
+      if (daysUntil === 0 && now.getHours() >= 15) daysUntil = 7;
+      const expiry = new Date(now);
+      expiry.setDate(expiry.getDate() + daysUntil);
+      return fmt(expiry);
     }
-    const expiry = new Date(now);
-    expiry.setDate(expiry.getDate() + daysUntilTuesday);
-    const y = expiry.getFullYear();
-    const m = String(expiry.getMonth() + 1).padStart(2, '0');
-    const d = String(expiry.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}T06:00:00.000Z`;
+
+    if (sym === 'NIFTY' || sym === '') {
+      // NSE NIFTY: weekly Tuesday (default for unknown symbols)
+      const day = now.getDay();
+      let daysUntil = (2 - day + 7) % 7; // Tuesday = 2
+      if (daysUntil === 0 && now.getHours() >= 15) daysUntil = 7;
+      const expiry = new Date(now);
+      expiry.setDate(expiry.getDate() + daysUntil);
+      return fmt(expiry);
+    }
+
+    // All others: monthly — last Tuesday of the month
+    const lastTuesday = (y: number, m: number) => {
+      const d = new Date(y, m + 1, 0); // last day of month
+      while (d.getDay() !== 2) d.setDate(d.getDate() - 1); // Tuesday = 2
+      return d;
+    };
+    let exp = lastTuesday(now.getFullYear(), now.getMonth());
+    if (exp < now || (exp.toDateString() === now.toDateString() && now.getHours() >= 15)) {
+      const nextMonth = now.getMonth() + 1;
+      exp = lastTuesday(now.getFullYear() + (nextMonth > 11 ? 1 : 0), nextMonth % 12);
+    }
+    return fmt(exp);
   }
 
   private parseOptionsChain(symbol: string, data: any, targetExpiry?: string) {

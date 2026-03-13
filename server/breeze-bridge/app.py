@@ -619,7 +619,7 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
 
         # Always use expiry_date + empty strike_price to get ALL contracts.
         # This eliminates the need for hardcoded/guessed strike prices.
-        effective_expiry = expiry or _next_expiry_date()
+        effective_expiry = expiry or _next_expiry_date(symbol)
 
         for r in sides:
             params = {
@@ -949,15 +949,59 @@ def _guess_strike(symbol):
     return result
 
 
-def _next_expiry_date():
-    """Return the next NSE expiry date as YYYY-MM-DD (Tuesday since Sep 2025)."""
+_WEEKLY_SYMBOLS = {"NIFTY"}
+_BSE_WEEKLY_SYMBOLS = {"SENSEX"}
+
+
+def _last_weekday_of_month(year, month, weekday):
+    """Return the last occurrence of a weekday (0=Mon..6=Sun) in given month."""
+    import calendar
+    last_day = calendar.monthrange(year, month)[1]
+    d = datetime(year, month, last_day)
+    while d.weekday() != weekday:
+        d -= timedelta(days=1)
+    return d
+
+
+def _next_expiry_date(symbol=None):
+    """Return the next expiry date as YYYY-MM-DD, based on SEBI rules (Nov 2024+).
+
+    Weekly expiry (only these):
+      - NIFTY: every Tuesday (NSE)
+      - SENSEX: every Thursday (BSE)
+    Monthly expiry (everything else):
+      - BANKNIFTY, FINNIFTY, MIDCPNIFTY, stock options: last Tuesday of month
+    """
     now = datetime.now()
-    dow = now.weekday()  # Monday=0, Tuesday=1, ...
-    days_until_tuesday = (1 - dow) % 7
-    if days_until_tuesday == 0 and now.hour >= 15:
-        days_until_tuesday = 7
-    exp = now + timedelta(days=days_until_tuesday)
-    return exp.strftime("%Y-%m-%d")
+    sym = (symbol or "").upper()
+
+    if sym in _BSE_WEEKLY_SYMBOLS:
+        # SENSEX: weekly Thursday
+        dow = now.weekday()
+        days_until = (3 - dow) % 7  # Thursday = weekday 3
+        if days_until == 0 and now.hour >= 15:
+            days_until = 7
+        return (now + timedelta(days=days_until)).strftime("%Y-%m-%d")
+
+    if sym in _WEEKLY_SYMBOLS or sym == "":
+        # NIFTY (or unknown — default to weekly Tuesday)
+        dow = now.weekday()
+        days_until = (1 - dow) % 7  # Tuesday = weekday 1
+        if days_until == 0 and now.hour >= 15:
+            days_until = 7
+        return (now + timedelta(days=days_until)).strftime("%Y-%m-%d")
+
+    # Everything else: monthly — last Tuesday of the month
+    last_tue = _last_weekday_of_month(now.year, now.month, 1)  # Tuesday = weekday 1
+    if last_tue.date() < now.date() or (last_tue.date() == now.date() and now.hour >= 15):
+        # This month's expiry has passed; use next month
+        next_month = now.month + 1
+        next_year = now.year
+        if next_month > 12:
+            next_month = 1
+            next_year += 1
+        last_tue = _last_weekday_of_month(next_year, next_month, 1)
+    return last_tue.strftime("%Y-%m-%d")
 
 
 def _get_strike_step(symbol):
@@ -999,7 +1043,7 @@ def get_expiries(symbol):
         breeze_code = _resolve_stock_code(sym)
 
         # Use expiry_date + empty strike to get ALL contracts for nearest expiry
-        next_exp = _next_expiry_date()
+        next_exp = _next_expiry_date(sym)
         result = _call_with_timeout(breeze_instance.get_option_chain_quotes,
             stock_code=breeze_code, exchange_code="NFO",
             product_type="options", right="call",
