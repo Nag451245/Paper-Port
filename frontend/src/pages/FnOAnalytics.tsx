@@ -284,7 +284,7 @@ export default function FnOAnalytics() {
       if (results[3].status === 'fulfilled') {
         const d = results[3].value.data as any;
         const pcr = d?.pcr ?? d?.value;
-        if (typeof pcr === 'number' && pcr > 0) {
+        if (typeof pcr === 'number' && pcr >= 0 && d?.interpretation !== 'Data unavailable — configure Breeze API in Settings') {
           anySuccess = true;
           setPcrValue(pcr);
           setMarketCards(prev => prev.map(c =>
@@ -325,7 +325,7 @@ export default function FnOAnalytics() {
           setSpotPrice(d.spotPrice ?? d.underlyingValue ?? 0);
           setExpiry(d.expiry ?? '');
           if (d.maxPain > 0) setMaxPainValue(d.maxPain);
-          if (d.pcr > 0 && pcrValue === 0) setPcrValue(d.pcr);
+          if (d.pcr >= 0 && pcrValue === 0) setPcrValue(d.pcr);
         }
       }
 

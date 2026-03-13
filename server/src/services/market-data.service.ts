@@ -34,6 +34,20 @@ const FETCH_TIMEOUT_MS = 10_000;
 const BREEZE_TIMEOUT_MS = 20_000;
 const BREEZE_BRIDGE_URL = env.BREEZE_BRIDGE_URL;
 
+const BREEZE_STOCK_CODES: Record<string, string> = {
+  NIFTY: 'NIFTY', BANKNIFTY: 'CNXBAN', FINNIFTY: 'NIFFIN',
+  MIDCPNIFTY: 'NIFSEL', NIFTYNXT50: 'NIFNEX', SENSEX: 'SENSEX',
+  RELIANCE: 'RELIND', HDFCBANK: 'HDFBAN', ICICIBANK: 'ICIBAN',
+  INFY: 'INFTEC', SBIN: 'STABAN', HINDUNILVR: 'HINLEV',
+  BHARTIARTL: 'BHAAIR', KOTAKBANK: 'KOTMAH', LT: 'LARTOU',
+  AXISBANK: 'AXIBAN', BAJFINANCE: 'BAJFI', HCLTECH: 'HCLTEC',
+  TATAMOTORS: 'TATMOT', SUNPHARMA: 'SUNPHA', TITAN: 'TITIND',
+  ASIANPAINT: 'ASIPAI', ADANIENT: 'ADAENT', TATASTEEL: 'TATSTE',
+  POWERGRID: 'POWGRI', JSWSTEEL: 'JSWSTE', 'M&M': 'MAHMAH',
+  BAJAJFINSV: 'BAFINS', ULTRACEMCO: 'ULTCEM', NESTLEIND: 'NESIND',
+  DRREDDY: 'DRREDD', DIVISLAB: 'DIVLAB', HEROMOTOCO: 'HERHON',
+};
+
 // Parse F&O option symbol like NIFTY20260310248000CE → { underlying: 'NIFTY', expiry: '2026-03-10', strike: 24800, type: 'CE' }
 const FNO_SYMBOL_REGEX = /^([A-Z]+?)(\d{4})(\d{2})(\d{2})(\d+)(CE|PE)$/;
 
@@ -1235,8 +1249,16 @@ export class MarketDataService {
       } catch (err) {
         console.log(`[Expiries] ${symbol} → Breeze Python Bridge error: ${err}`);
       }
-      // Bridge active but no expiries — not a session error
-      return { expiries: [] };
+
+      // Bridge returned no expiries — try getting them from the full option chain
+      try {
+        const chainResult = await this.fetchFromBreezeBridge(symbol);
+        if (chainResult?.expiries?.length > 0) {
+          console.log(`[Expiries] ${symbol} → extracted from Bridge chain: ${chainResult.expiries.join(', ')}`);
+          if (this.cache) await this.cache.set(cacheKey, chainResult.expiries, 3600);
+          return { expiries: chainResult.expiries };
+        }
+      } catch { /* fall through */ }
     }
 
     // Fallback: NSE India - authoritative source with ALL expiry dates
@@ -1295,15 +1317,13 @@ export class MarketDataService {
           if (this.cache) await this.cache.set(cacheKey, bridgeResult, 10);
           return bridgeResult;
         }
-        console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Bridge returned 0 strikes`);
+        console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Bridge returned 0 strikes, trying fallbacks`);
       } catch (err) {
         console.log(`[OptionChain] ${symbol} → Breeze Python Bridge error: ${err}`);
       }
-      // Bridge is active but no data — don't flag as sessionError
-      return { symbol, strikes: [], expiry: expiry ?? '', expiries: [] };
     }
 
-    // Fallback: NSE India
+    // Fallback 1: NSE India
     try {
       const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX'].includes(symbol.toUpperCase());
       const url = isIndex
@@ -1321,7 +1341,21 @@ export class MarketDataService {
       }
     } catch { /* NSE blocked from cloud */ }
 
-    // No bridge, no NSE — session error
+    // Fallback 2: NiftyTrader
+    try {
+      const niftyTraderResult = await this.fetchOptionsChainFromNiftyTrader(symbol, expiry);
+      if (niftyTraderResult && niftyTraderResult.strikes && niftyTraderResult.strikes.length > 0) {
+        console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → NiftyTrader (${niftyTraderResult.strikes.length} strikes)`);
+        if (this.cache) await this.cache.set(cacheKey, niftyTraderResult, 60);
+        return niftyTraderResult;
+      }
+    } catch { /* NiftyTrader unavailable */ }
+
+    // All sources exhausted
+    if (bridgeActive) {
+      console.log(`[OptionChain] ${symbol} → Bridge active but all sources returned 0 strikes`);
+      return { symbol, strikes: [], expiry: expiry ?? '', expiries: [] };
+    }
     console.log(`[OptionChain] ${symbol} → No Breeze bridge session, no fallback`);
     return { symbol, strikes: [], expiry: expiry ?? '', expiries: [], sessionError: true,
       message: 'Breeze API session not active. Please generate a session in Settings.' };
@@ -2052,8 +2086,9 @@ export class MarketDataService {
 
     for (const right of ['call', 'put'] as const) {
       try {
+        const breezeCode = BREEZE_STOCK_CODES[symbol.toUpperCase()] ?? symbol.toUpperCase();
         const body: Record<string, string> = {
-          stock_code: symbol,
+          stock_code: breezeCode,
           exchange_code: 'NFO',
           product_type: 'options',
           expiry_date: expiry,

@@ -642,25 +642,33 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
             print(f"[Breeze Bridge] {symbol}({breeze_code}) {r}: Status={result.get('Status') if result else None}, Records={n}, Error={result.get('Error','') if result else 'None'}")
 
             if not _has_data and not expiry:
-                guess = _guess_strike(symbol)
-                if guess:
-                    base = int(guess)
-                    step = _get_strike_step(symbol.upper())
-                    params["strike_price"] = str(base)
-                    print(f"[Breeze Bridge] {symbol} {r}: retry with ATM strike {base}")
+                # Strategy: try with expiry_date + empty strike to get ALL strikes
+                next_exp = _next_expiry_date()
+                if next_exp:
+                    params["expiry_date"] = f"{next_exp}T06:00:00.000Z"
+                    params["strike_price"] = ""
+                    print(f"[Breeze Bridge] {symbol} {r}: retry with expiry={next_exp} + empty strike")
                     result = _call_with_timeout(breeze_instance.get_option_chain_quotes, **params)
                     _has_data = (
                         result and result.get("Status") == 200
                         and isinstance(result.get("Success"), list)
                         and len(result.get("Success", [])) > 0
                     )
-                    if not _has_data:
-                        for offset_mult in [-5, 5, -10, 10]:
+
+                if not _has_data:
+                    guess = _guess_strike(symbol)
+                    if guess:
+                        base = int(guess)
+                        step = _get_strike_step(symbol.upper())
+                        retry_params = {**params}
+                        retry_params.pop("expiry_date", None)
+                        for offset_mult in [0, -5, 5, -10, 10, -20, 20, -30, 30]:
                             alt_strike = str(base + offset_mult * step)
-                            params["strike_price"] = alt_strike
-                            result = _call_with_timeout(breeze_instance.get_option_chain_quotes, **params)
+                            retry_params["strike_price"] = alt_strike
+                            result = _call_with_timeout(breeze_instance.get_option_chain_quotes, **retry_params)
                             if result and result.get("Status") == 200 and result.get("Success"):
                                 print(f"[Breeze Bridge] {symbol} {r}: found data at strike {alt_strike}")
+                                _has_data = True
                                 break
 
             if not result or result.get("Status") != 200 or result.get("Error"):
@@ -935,10 +943,10 @@ def _guess_strike(symbol):
         atm = round(spot / step) * step
         return str(int(atm))
 
-    # 4. Hardcoded fallback — updated periodically, better than nothing
+    # 4. Hardcoded fallback — updated Mar 2026
     fallback = {
-        "NIFTY": "23800", "BANKNIFTY": "55700", "FINNIFTY": "25000",
-        "MIDCPNIFTY": "13000", "NIFTYNXT50": "24000", "SENSEX": "78000",
+        "NIFTY": "23200", "BANKNIFTY": "53800", "FINNIFTY": "25000",
+        "MIDCPNIFTY": "13000", "NIFTYNXT50": "24000", "SENSEX": "74400",
         "RELIANCE": "1250", "TCS": "3400", "HDFCBANK": "1800", "INFY": "1550",
         "ICICIBANK": "1350", "SBIN": "750", "BHARTIARTL": "1700", "KOTAKBANK": "1950",
         "ITC": "420", "LT": "3300", "AXISBANK": "1100", "BAJFINANCE": "8500",
@@ -952,6 +960,17 @@ def _guess_strike(symbol):
     if result:
         print(f"[Breeze Bridge] Using fallback strike {result} for {sym} (live sources unavailable)")
     return result
+
+
+def _next_expiry_date():
+    """Return the next NSE expiry date as YYYY-MM-DD (Tuesday since Sep 2025)."""
+    now = datetime.now()
+    dow = now.weekday()  # Monday=0, Tuesday=1, ...
+    days_until_tuesday = (1 - dow) % 7
+    if days_until_tuesday == 0 and now.hour >= 15:
+        days_until_tuesday = 7
+    exp = now + timedelta(days=days_until_tuesday)
+    return exp.strftime("%Y-%m-%d")
 
 
 def _get_strike_step(symbol):
@@ -991,17 +1010,27 @@ def get_expiries(symbol):
     try:
         sym = symbol.upper()
         breeze_code = _resolve_stock_code(sym)
-        strike = _guess_strike(sym)
+
+        # Best strategy: use next expiry + empty strike to get ALL contracts
+        next_exp = _next_expiry_date()
         result = _call_with_timeout(breeze_instance.get_option_chain_quotes,
             stock_code=breeze_code, exchange_code="NFO",
-            product_type="options", right="call", strike_price=strike,
+            product_type="options", right="call",
+            expiry_date=f"{next_exp}T06:00:00.000Z", strike_price="",
         )
 
-        # Retry with alternative strikes if first attempt fails
         if not result or result.get("Status") != 200 or not result.get("Success"):
-            base = int(strike) if strike else 0
+            # Fallback: try with guessed strike (no expiry)
+            strike = _guess_strike(sym)
+            result = _call_with_timeout(breeze_instance.get_option_chain_quotes,
+                stock_code=breeze_code, exchange_code="NFO",
+                product_type="options", right="call", strike_price=strike,
+            )
+
+        if not result or result.get("Status") != 200 or not result.get("Success"):
+            base = int(_guess_strike(sym) or "0")
             step = _get_strike_step(sym)
-            for offset_mult in [-5, 5, -10, 10]:
+            for offset_mult in [-5, 5, -10, 10, -20, 20]:
                 alt_strike = str(base + offset_mult * step)
                 result = _call_with_timeout(breeze_instance.get_option_chain_quotes,
                     stock_code=breeze_code, exchange_code="NFO",

@@ -8,6 +8,20 @@ import { engineGreeks, isEngineAvailable } from '../lib/rust-engine.js';
 const CACHE_TTL = 120;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
+const BREEZE_STOCK_CODES: Record<string, string> = {
+  NIFTY: 'NIFTY', BANKNIFTY: 'CNXBAN', FINNIFTY: 'NIFFIN',
+  MIDCPNIFTY: 'NIFSEL', NIFTYNXT50: 'NIFNEX', SENSEX: 'SENSEX',
+  RELIANCE: 'RELIND', HDFCBANK: 'HDFBAN', ICICIBANK: 'ICIBAN',
+  INFY: 'INFTEC', SBIN: 'STABAN', HINDUNILVR: 'HINLEV',
+  BHARTIARTL: 'BHAAIR', KOTAKBANK: 'KOTMAH', LT: 'LARTOU',
+  AXISBANK: 'AXIBAN', BAJFINANCE: 'BAJFI', HCLTECH: 'HCLTEC',
+  TATAMOTORS: 'TATMOT', SUNPHARMA: 'SUNPHA', TITAN: 'TITIND',
+  ASIANPAINT: 'ASIPAI', ADANIENT: 'ADAENT', TATASTEEL: 'TATSTE',
+  POWERGRID: 'POWGRI', JSWSTEEL: 'JSWSTE', 'M&M': 'MAHMAH',
+  BAJAJFINSV: 'BAFINS', ULTRACEMCO: 'ULTCEM', NESTLEIND: 'NESIND',
+  DRREDDY: 'DRREDD', DIVISLAB: 'DIVLAB', HEROMOTOCO: 'HERHON',
+};
+
 let nseCookies = '';
 let nseCookieExpiry = 0;
 let cookieFetchPromise: Promise<void> | null = null;
@@ -244,13 +258,14 @@ export class IntelligenceService {
     return this.cached(`intel:pcr:${symbol}`, async () => {
       try {
         const chain = await this.fetchOptionsChainDeduped(symbol);
-        if (chain && chain.pcr > 0) {
+        if (chain && chain.strikes?.length > 0) {
+          const pcr = chain.pcr ?? 0;
           let interpretation = 'Neutral';
-          if (chain.pcr > 1.3) interpretation = 'Bullish';
-          else if (chain.pcr > 1.0) interpretation = 'Moderately Bullish';
-          else if (chain.pcr < 0.7) interpretation = 'Bearish';
-          else if (chain.pcr < 1.0) interpretation = 'Moderately Bearish';
-          return { symbol, pcr: chain.pcr, interpretation };
+          if (pcr > 1.3) interpretation = 'Bullish';
+          else if (pcr > 1.0) interpretation = 'Moderately Bullish';
+          else if (pcr < 0.7) interpretation = 'Bearish';
+          else if (pcr < 1.0) interpretation = 'Moderately Bearish';
+          return { symbol, pcr, interpretation };
         }
       } catch { /* fallback */ }
       return { symbol, pcr: 0, interpretation: 'Data unavailable — configure Breeze API in Settings' };
@@ -289,15 +304,34 @@ export class IntelligenceService {
       try {
         const chain = await this.fetchOptionsChainDeduped(symbol);
         if (chain?.strikes?.length > 0) {
-          const ivs = chain.strikes
-            .filter((s: any) => (s.callIV ?? 0) > 0)
-            .map((s: any) => s.callIV as number);
+          const spot = chain.spotPrice ?? chain.underlyingValue ?? 0;
+          const strikes = chain.strikes as any[];
+
+          // Collect IV from both call and put sides, using max(callIV, putIV) per strike
+          const ivs = strikes
+            .map((s: any) => {
+              const civ = s.callIV ?? 0;
+              const piv = s.putIV ?? 0;
+              return Math.max(civ, piv);
+            })
+            .filter((iv: number) => iv > 0);
+
           if (ivs.length > 0) {
-            const currentIV = ivs[Math.floor(ivs.length / 2)];
+            // ATM IV: find the strike closest to spot, else use median
+            let currentIV: number;
+            if (spot > 0) {
+              const atm = strikes.reduce((best: any, s: any) =>
+                Math.abs(s.strike - spot) < Math.abs(best.strike - spot) ? s : best
+              , strikes[0]);
+              currentIV = Math.max(atm.callIV ?? 0, atm.putIV ?? 0) || ivs[Math.floor(ivs.length / 2)];
+            } else {
+              currentIV = ivs[Math.floor(ivs.length / 2)];
+            }
+
             const sorted = [...ivs].sort((a, b) => a - b);
-            const rank = sorted.findIndex(v => v >= currentIV);
+            const rank = sorted.filter(v => v < currentIV).length;
             const ivPercentile = Math.round((rank / sorted.length) * 100);
-            return { symbol, currentIV, ivPercentile, ivRank: ivPercentile };
+            return { symbol, currentIV: Math.round(currentIV * 100) / 100, ivPercentile, ivRank: ivPercentile };
           }
         }
       } catch { /* fallback */ }
@@ -874,8 +908,10 @@ export class IntelligenceService {
     nextTuesday.setDate(today.getDate() + (dayOfWeek <= 2 ? (2 - dayOfWeek) : daysUntilTuesday));
     const expiryDate = nextTuesday.toISOString().split('T')[0] + 'T06:00:00.000Z';
 
+    const breezeCode = BREEZE_STOCK_CODES[symbol.toUpperCase()] ?? symbol.toUpperCase();
+
     const payload = JSON.stringify({
-      stock_code: symbol.toUpperCase() === 'NIFTY' ? 'NIFTY' : symbol,
+      stock_code: breezeCode,
       exchange_code: 'NFO',
       expiry_date: expiryDate,
       product_type: 'Options',
@@ -896,7 +932,7 @@ export class IntelligenceService {
     const callData = JSON.parse(res.data);
 
     const putPayload = JSON.stringify({
-      stock_code: symbol.toUpperCase() === 'NIFTY' ? 'NIFTY' : symbol,
+      stock_code: breezeCode,
       exchange_code: 'NFO',
       expiry_date: expiryDate,
       product_type: 'Options',
@@ -965,46 +1001,31 @@ export class IntelligenceService {
   }
 
   private async fetchOptionsChain(symbol: string): Promise<any> {
+    // Primary: Python Breeze Bridge (correct symbol mapping, IV computation, Greeks)
+    try {
+      const bridgeUrl = `${env.BREEZE_BRIDGE_URL}/option-chain/${encodeURIComponent(symbol.toUpperCase())}`;
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 20_000);
+      const res = await fetch(bridgeUrl, { signal: ac.signal });
+      clearTimeout(timer);
+      if (res.ok) {
+        const data = await res.json() as any;
+        if (data && !data.error && data.strikes?.length > 0) {
+          console.log(`[Intelligence] ${symbol} chain → Breeze Bridge (${data.strikes.length} strikes)`);
+          return data;
+        }
+      }
+    } catch (err) {
+      console.warn(`[Intelligence] ${symbol} Bridge chain error: ${(err as Error)?.message}`);
+    }
+
+    // Fallback: direct Breeze REST API (legacy path)
     try {
       const breezeResult = await this.fetchOptionsChainFromBreeze(symbol);
       if (breezeResult) return breezeResult;
-    } catch { /* fall through to NSE */ }
+    } catch { /* fall through */ }
 
-    const indexSymbol = symbol.toUpperCase() === 'NIFTY' ? 'NIFTY' : symbol;
-    const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'].includes(indexSymbol);
-    const endpoint = isIndex ? 'option-chain-indices' : 'option-chain-equities';
-    const url = `https://www.nseindia.com/api/${endpoint}?symbol=${encodeURIComponent(indexSymbol)}`;
-
-    const data = await nseFetch(url);
-    if (!data?.records?.data) return null;
-
-    const records = data.records;
-    const expiry = records.expiryDates?.[0] ?? '';
-    const allData = records.data.filter((d: any) => d.expiryDate === expiry);
-
-    const strikes = allData.map((d: any) => ({
-      strike: d.strikePrice,
-      callOI: d.CE?.openInterest ?? 0, callOIChange: d.CE?.changeinOpenInterest ?? 0,
-      callLTP: d.CE?.lastPrice ?? 0, callIV: d.CE?.impliedVolatility ?? 0,
-      putOI: d.PE?.openInterest ?? 0, putOIChange: d.PE?.changeinOpenInterest ?? 0,
-      putLTP: d.PE?.lastPrice ?? 0, putIV: d.PE?.impliedVolatility ?? 0,
-    }));
-
-    const totalCallOI = strikes.reduce((s: number, st: any) => s + st.callOI, 0);
-    const totalPutOI = strikes.reduce((s: number, st: any) => s + st.putOI, 0);
-    const pcr = totalCallOI > 0 ? Math.round((totalPutOI / totalCallOI) * 100) / 100 : 0;
-
-    let maxPain = 0, minPain = Infinity;
-    for (const st of strikes) {
-      let pain = 0;
-      for (const s2 of strikes) {
-        if (s2.strike < st.strike) pain += (st.strike - s2.strike) * s2.putOI;
-        if (s2.strike > st.strike) pain += (s2.strike - st.strike) * s2.callOI;
-      }
-      if (pain < minPain) { minPain = pain; maxPain = st.strike; }
-    }
-
-    return { strikes, pcr, maxPain, totalCallOI, totalPutOI, expiry };
+    return null;
   }
 
   // ── Greeks (uses Rust engine or JS fallback) ──
