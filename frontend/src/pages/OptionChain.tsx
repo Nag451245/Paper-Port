@@ -333,7 +333,7 @@ export default function OptionChain() {
               <AlertCircle className="h-3.5 w-3.5 text-amber-600 flex-shrink-0" />
               <span>{error}</span>
               <button
-                onClick={() => { setError(null); fetchData(symbol); }}
+                onClick={() => { setError(''); fetchData(symbol); }}
                 className="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-700 transition text-xs font-semibold"
               >
                 <RefreshCcw className="h-3 w-3" /> Retry

@@ -15,7 +15,7 @@ import { usePortfolioStore } from '@/stores/portfolio';
 import { useAIAgentStore } from '@/stores/ai-agent';
 import { useMarketDataStore } from '@/stores/market-data';
 import { tradingApi } from '@/services/api';
-import { formatINR, formatINRCompact } from '@/lib/utils';
+import { formatINR } from '@/lib/utils';
 import { liveSocket } from '@/services/websocket';
 
 export default function Dashboard() {

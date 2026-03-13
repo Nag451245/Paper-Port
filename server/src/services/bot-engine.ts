@@ -728,6 +728,7 @@ export class BotEngine {
         log.warn('Scraper returned no movers — using NIFTY 50 fallback watchlist');
         gainers = FALLBACK_NIFTY50.map(symbol => ({
           symbol, name: symbol, ltp: 0, change: 0, changePercent: 0, volume: 0,
+          open: 0, high: 0, low: 0, previousClose: 0,
         }));
       }
 
