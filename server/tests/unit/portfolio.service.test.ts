@@ -4,8 +4,11 @@ import { PortfolioService, PortfolioError } from '../../src/services/portfolio.s
 vi.mock('../../src/services/market-data.service.js', () => ({
   MarketDataService: vi.fn().mockImplementation(() => ({
     getQuote: vi.fn().mockImplementation((symbol: string) => {
-      const prices: Record<string, number> = { RELIANCE: 3000, TCS: 1400 };
-      return Promise.resolve({ ltp: prices[symbol] ?? 0 });
+      const quotes: Record<string, { ltp: number; change: number }> = {
+        RELIANCE: { ltp: 3000, change: 50 },
+        TCS: { ltp: 1400, change: -10 },
+      };
+      return Promise.resolve(quotes[symbol] ?? { ltp: 0, change: 0 });
     }),
   })),
 }));
@@ -131,7 +134,9 @@ describe('PortfolioService', () => {
       expect(summary.totalPnl).toBe(108000);
       expect(summary.totalPnlPercent).toBeCloseTo(10.8, 1);
       expect(summary.investedValue).toBe(55000);
-      expect(summary.dayPnl).toBe(3000);
+      // dayPnl uses quote.change (today's price movement), not total unrealized:
+      // RELIANCE change=50 * qty=10 = 500, TCS change=-10 * qty=20 = -200 → 300
+      expect(summary.dayPnl).toBe(300);
     });
   });
 

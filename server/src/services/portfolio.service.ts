@@ -60,6 +60,7 @@ export class PortfolioService {
 
     let investedValue = 0;
     let unrealizedPnl = 0;
+    let todayUnrealizedChange = 0;
 
     const quoteTimeout = (promise: Promise<any>, ms = 5_000) =>
       Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))]);
@@ -67,15 +68,18 @@ export class PortfolioService {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
-    // Fetch LTPs and today's trades in parallel
-    const [ltpResults, todayTrades] = await Promise.all([
+    const [quoteResults, todayTrades] = await Promise.all([
       Promise.allSettled(
         openPositions.map(async (pos: any) => {
           try {
             const quote = await quoteTimeout(this.marketData.getQuote(pos.symbol, pos.exchange ?? 'NSE'));
-            return { symbol: pos.symbol, ltp: (quote as any).ltp };
+            return {
+              symbol: pos.symbol,
+              ltp: Number((quote as any).ltp ?? 0),
+              change: Number((quote as any).change ?? 0),
+            };
           } catch {
-            return { symbol: pos.symbol, ltp: 0 };
+            return { symbol: pos.symbol, ltp: 0, change: 0 };
           }
         })
       ),
@@ -85,10 +89,10 @@ export class PortfolioService {
       }),
     ]);
 
-    const ltpMap = new Map<string, number>();
-    for (const r of ltpResults) {
+    const quoteMap = new Map<string, { ltp: number; change: number }>();
+    for (const r of quoteResults) {
       if (r.status === 'fulfilled' && r.value.ltp > 0) {
-        ltpMap.set(r.value.symbol, r.value.ltp);
+        quoteMap.set(r.value.symbol, { ltp: r.value.ltp, change: r.value.change });
       }
     }
 
@@ -101,26 +105,33 @@ export class PortfolioService {
         investedValue += entryPrice * pos.qty * rate;
       }
 
-      const ltp = ltpMap.get(pos.symbol) ?? 0;
-      if (ltp > 0) {
+      const q = quoteMap.get(pos.symbol);
+      if (q && q.ltp > 0) {
         const posUnrealized = pos.side === 'SHORT'
-          ? (entryPrice - ltp) * pos.qty
-          : (ltp - entryPrice) * pos.qty;
+          ? (entryPrice - q.ltp) * pos.qty
+          : (q.ltp - entryPrice) * pos.qty;
         unrealizedPnl += posUnrealized;
+
+        const posDayChange = pos.side === 'SHORT'
+          ? -q.change * pos.qty
+          : q.change * pos.qty;
+        todayUnrealizedChange += posDayChange;
       }
     }
 
     const todayRealizedPnl = todayTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
-    const dayPnl = unrealizedPnl + todayRealizedPnl;
+    const dayPnl = todayRealizedPnl + todayUnrealizedChange;
 
     const totalNav = availableCash + investedValue + unrealizedPnl;
     const totalPnl = totalNav - initialCapital;
     const totalPnlPercent = initialCapital > 0 ? (totalPnl / initialCapital) * 100 : 0;
 
+    const startOfDayNav = totalNav - dayPnl;
+
     return {
       totalNav,
       dayPnl,
-      dayPnlPercent: totalNav > 0 ? (dayPnl / totalNav) * 100 : 0,
+      dayPnlPercent: startOfDayNav > 0 ? (dayPnl / startOfDayNav) * 100 : 0,
       totalPnl,
       totalPnlPercent,
       investedValue,
@@ -302,34 +313,31 @@ export class PortfolioService {
       dayMap[day] = (dayMap[day] || 0) + Number(t.netPnl);
     }
 
-    // Include today's unrealized P&L (realized is already in dayMap from trades above)
+    // Include today's unrealized *change* (not total unrealized) using quote.change
     try {
       const openPositions = await this.prisma.position.findMany({
         where: { portfolioId, status: 'OPEN' },
-        select: { side: true, qty: true, avgEntryPrice: true, symbol: true, exchange: true },
+        select: { side: true, qty: true, symbol: true, exchange: true },
       });
-      const ltpResults = await Promise.allSettled(
+      const quoteResults = await Promise.allSettled(
         openPositions.map(async (pos) => {
           try {
             const quote = await this.marketData.getQuote(pos.symbol, pos.exchange ?? 'NSE');
-            return { symbol: pos.symbol, ltp: quote.ltp, side: pos.side, qty: pos.qty, avgEntryPrice: pos.avgEntryPrice };
+            return { symbol: pos.symbol, change: Number(quote.change ?? 0), side: pos.side, qty: pos.qty };
           } catch {
-            return { symbol: pos.symbol, ltp: 0, side: pos.side, qty: pos.qty, avgEntryPrice: pos.avgEntryPrice };
+            return { symbol: pos.symbol, change: 0, side: pos.side, qty: pos.qty };
           }
         })
       );
-      let unrealizedPnl = 0;
-      for (const r of ltpResults) {
-        if (r.status !== 'fulfilled' || r.value.ltp <= 0) continue;
-        const { ltp, side, qty, avgEntryPrice } = r.value;
-        const entryPrice = Number(avgEntryPrice);
-        unrealizedPnl += side === 'LONG'
-          ? (ltp - entryPrice) * qty
-          : (entryPrice - ltp) * qty;
+      let todayUnrealizedChange = 0;
+      for (const r of quoteResults) {
+        if (r.status !== 'fulfilled' || r.value.change === 0) continue;
+        const { change, side, qty } = r.value;
+        todayUnrealizedChange += side === 'LONG' ? change * qty : -change * qty;
       }
-      if (unrealizedPnl !== 0) {
+      if (todayUnrealizedChange !== 0) {
         const today = new Date().toISOString().split('T')[0];
-        dayMap[today] = (dayMap[today] || 0) + unrealizedPnl;
+        dayMap[today] = (dayMap[today] || 0) + todayUnrealizedChange;
       }
     } catch { /* skip */ }
 

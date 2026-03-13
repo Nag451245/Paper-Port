@@ -24,7 +24,7 @@ function getBreezeConnectClass(): any {
   return BreezeConnect;
 }
 
-const CACHE_TTL_QUOTE = 15;
+const CACHE_TTL_QUOTE = 60;
 const CACHE_TTL_HISTORY_INTRADAY = 30;
 const CACHE_TTL_HISTORY = 300;
 const CACHE_TTL_OPTION_CHAIN = 15;
