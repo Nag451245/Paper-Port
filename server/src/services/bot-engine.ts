@@ -775,21 +775,47 @@ export class BotEngine {
 
           signals = rustSignals.map(sig => {
             const mover = moverMap.get(sig.symbol);
+            const liveLtp = mover?.ltp ?? 0;
+            const atr = sig.indicators?.atr ?? 0;
+
+            // Recalculate entry/target/stop using live LTP when available
+            const effectiveEntry = liveLtp > 0 ? liveLtp : sig.entry;
+            let effectiveTarget = sig.target;
+            let effectiveStopLoss = sig.stop_loss;
+
+            if (liveLtp > 0 && atr > 0) {
+              if (sig.direction === 'BUY') {
+                effectiveStopLoss = Number((liveLtp - 1.5 * atr).toFixed(2));
+                effectiveTarget = Number((liveLtp + 2.5 * atr).toFixed(2));
+              } else {
+                effectiveStopLoss = Number((liveLtp + 1.5 * atr).toFixed(2));
+                effectiveTarget = Number((liveLtp - 2.5 * atr).toFixed(2));
+              }
+            }
+
+            // Validate signal coherence: BUY target must be above LTP, SELL target below
+            let valid = true;
+            if (liveLtp > 0) {
+              if (sig.direction === 'BUY' && effectiveTarget <= liveLtp) valid = false;
+              if (sig.direction === 'SELL' && effectiveTarget >= liveLtp) valid = false;
+            }
+
             return {
               symbol: sig.symbol,
               name: mover?.name ?? sig.symbol,
               direction: sig.direction,
               confidence: sig.confidence,
-              ltp: mover?.ltp ?? sig.entry,
+              ltp: liveLtp > 0 ? liveLtp : sig.entry,
               changePercent: mover?.changePercent ?? 0,
-              entry: sig.entry,
-              stopLoss: sig.stop_loss,
-              target: sig.target,
+              entry: Number(effectiveEntry.toFixed(2)),
+              stopLoss: effectiveStopLoss,
+              target: effectiveTarget,
               indicators: sig.indicators,
               votes: sig.votes,
               moverType: (mover as any)?.moverType ?? 'gainer',
+              _valid: valid,
             };
-          });
+          }).filter(sig => sig._valid);
         }
       }
 

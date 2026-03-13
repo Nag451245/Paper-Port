@@ -92,7 +92,7 @@ export default function AIAgentPanel() {
       fetchSignals();
       fetchCapitalRules();
       fetchScan();
-    }, 30_000);
+    }, 15_000);
     return () => clearInterval(poll);
   }, [fetchConfig, fetchStatus, fetchSignals, fetchStrategies, fetchCapitalRules, fetchScan]);
 

@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AIAgentService, AIAgentError } from '../services/ai-agent.service.js';
 import type { OrderManagementService } from '../services/oms.service.js';
+import { MarketDataService } from '../services/market-data.service.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
 
@@ -140,9 +141,26 @@ export async function aiRoutes(app: FastifyInstance): Promise<void> {
     const engine = (app as any).botEngine;
     if (!engine) return reply.send({ scanning: false, result: null });
 
+    const scanResult = engine.getLastScanResult();
+
+    // Enrich signals with live LTP on every poll
+    if (scanResult?.signals?.length > 0) {
+      const marketData = new MarketDataService();
+      const ltpPromises = scanResult.signals.map(async (sig: any) => {
+        try {
+          const quote = await marketData.getQuote(sig.symbol, 'NSE');
+          if (quote.ltp > 0) {
+            sig.ltp = quote.ltp;
+            sig.changePercent = quote.changePercent ?? sig.changePercent;
+          }
+        } catch { /* keep existing ltp */ }
+      });
+      await Promise.allSettled(ltpPromises);
+    }
+
     return reply.send({
       scanning: engine.isScannerRunning(),
-      result: engine.getLastScanResult(),
+      result: scanResult,
     });
   });
 
