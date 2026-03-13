@@ -115,12 +115,11 @@ describe('PortfolioService', () => {
         userId: 'user1',
         initialCapital: 1000000,
         currentNav: 1050000,
-        positions: [],
+        positions: [
+          { symbol: 'RELIANCE', exchange: 'NSE', side: 'LONG', avgEntryPrice: 2500, qty: 10 },
+          { symbol: 'TCS', exchange: 'NSE', side: 'LONG', avgEntryPrice: 1500, qty: 20 },
+        ],
       });
-      mockPrisma.position.findMany.mockResolvedValue([
-        { symbol: 'RELIANCE', exchange: 'NSE', side: 'LONG', avgEntryPrice: 2500, qty: 10 },
-        { symbol: 'TCS', exchange: 'NSE', side: 'LONG', avgEntryPrice: 1500, qty: 20 },
-      ]);
       // Mock today's trades (for day P&L realized component)
       mockPrisma.trade.findMany.mockResolvedValue([]);
 

@@ -13,26 +13,28 @@ export class WatchlistService {
       orderBy: { createdAt: 'desc' },
     });
 
-    // Enrich items with live price data (best effort, non-blocking)
-    for (const wl of watchlists) {
-      const enriched = await Promise.all(
-        wl.items.map(async (item) => {
-          try {
-            const quote = await this.marketData.getQuote(item.symbol, item.exchange);
-            return {
-              ...item,
-              ltp: quote.ltp,
-              change: quote.change,
-              changePercent: quote.changePercent,
-              volume: quote.volume ?? 0,
-            };
-          } catch {
-            return { ...item, ltp: 0, change: 0, changePercent: 0, volume: 0 };
-          }
-        }),
-      );
-      (wl as any).items = enriched;
-    }
+    // Enrich all watchlist items in parallel (best effort, non-blocking)
+    await Promise.all(
+      watchlists.map(async (wl) => {
+        const enriched = await Promise.all(
+          wl.items.map(async (item) => {
+            try {
+              const quote = await this.marketData.getQuote(item.symbol, item.exchange);
+              return {
+                ...item,
+                ltp: quote.ltp,
+                change: quote.change,
+                changePercent: quote.changePercent,
+                volume: quote.volume ?? 0,
+              };
+            } catch {
+              return { ...item, ltp: 0, change: 0, changePercent: 0, volume: 0 };
+            }
+          }),
+        );
+        (wl as any).items = enriched;
+      })
+    );
 
     return watchlists;
   }

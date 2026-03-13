@@ -56,24 +56,35 @@ export class PortfolioService {
     const initialCapital = Number(portfolio.initialCapital);
     const availableCash = Number(portfolio.currentNav);
 
-    const openPositions = await this.prisma.position.findMany({
-      where: { portfolioId, status: 'OPEN' },
-    });
+    const openPositions = (portfolio as any).positions ?? [];
 
     let investedValue = 0;
     let unrealizedPnl = 0;
 
-    // Fetch all LTPs in parallel (with per-symbol timeout) to avoid sequential blocking
-    const ltpResults = await Promise.allSettled(
-      openPositions.map(async (pos) => {
-        try {
-          const quote = await this.marketData.getQuote(pos.symbol, pos.exchange ?? 'NSE');
-          return { symbol: pos.symbol, ltp: quote.ltp };
-        } catch {
-          return { symbol: pos.symbol, ltp: 0 };
-        }
-      })
-    );
+    const quoteTimeout = (promise: Promise<any>, ms = 5_000) =>
+      Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))]);
+
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    // Fetch LTPs and today's trades in parallel
+    const [ltpResults, todayTrades] = await Promise.all([
+      Promise.allSettled(
+        openPositions.map(async (pos: any) => {
+          try {
+            const quote = await quoteTimeout(this.marketData.getQuote(pos.symbol, pos.exchange ?? 'NSE'));
+            return { symbol: pos.symbol, ltp: (quote as any).ltp };
+          } catch {
+            return { symbol: pos.symbol, ltp: 0 };
+          }
+        })
+      ),
+      this.prisma.trade.findMany({
+        where: { portfolioId, exitTime: { gte: todayStart } },
+        select: { netPnl: true },
+      }),
+    ]);
+
     const ltpMap = new Map<string, number>();
     for (const r of ltpResults) {
       if (r.status === 'fulfilled' && r.value.ltp > 0) {
@@ -99,13 +110,6 @@ export class PortfolioService {
       }
     }
 
-    // Day P&L = unrealized P&L on open positions + realized P&L from today's closed trades
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const todayTrades = await this.prisma.trade.findMany({
-      where: { portfolioId, exitTime: { gte: todayStart } },
-      select: { netPnl: true },
-    });
     const todayRealizedPnl = todayTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
     const dayPnl = unrealizedPnl + todayRealizedPnl;
 
@@ -300,22 +304,28 @@ export class PortfolioService {
 
     // Include today's unrealized P&L (realized is already in dayMap from trades above)
     try {
-      const portfolio = await this.getById(portfolioId, userId);
       const openPositions = await this.prisma.position.findMany({
         where: { portfolioId, status: 'OPEN' },
         select: { side: true, qty: true, avgEntryPrice: true, symbol: true, exchange: true },
       });
-      let unrealizedPnl = 0;
-      for (const pos of openPositions) {
-        const entryPrice = Number(pos.avgEntryPrice);
-        try {
-          const quote = await this.marketData.getQuote(pos.symbol, pos.exchange ?? 'NSE');
-          if (quote.ltp > 0) {
-            unrealizedPnl += pos.side === 'LONG'
-              ? (quote.ltp - entryPrice) * pos.qty
-              : (entryPrice - quote.ltp) * pos.qty;
+      const ltpResults = await Promise.allSettled(
+        openPositions.map(async (pos) => {
+          try {
+            const quote = await this.marketData.getQuote(pos.symbol, pos.exchange ?? 'NSE');
+            return { symbol: pos.symbol, ltp: quote.ltp, side: pos.side, qty: pos.qty, avgEntryPrice: pos.avgEntryPrice };
+          } catch {
+            return { symbol: pos.symbol, ltp: 0, side: pos.side, qty: pos.qty, avgEntryPrice: pos.avgEntryPrice };
           }
-        } catch { /* skip */ }
+        })
+      );
+      let unrealizedPnl = 0;
+      for (const r of ltpResults) {
+        if (r.status !== 'fulfilled' || r.value.ltp <= 0) continue;
+        const { ltp, side, qty, avgEntryPrice } = r.value;
+        const entryPrice = Number(avgEntryPrice);
+        unrealizedPnl += side === 'LONG'
+          ? (ltp - entryPrice) * qty
+          : (entryPrice - ltp) * qty;
       }
       if (unrealizedPnl !== 0) {
         const today = new Date().toISOString().split('T')[0];

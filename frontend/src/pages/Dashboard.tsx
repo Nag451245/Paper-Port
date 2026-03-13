@@ -34,13 +34,15 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    fetchPortfolios();
-    fetchStatus();
-    fetchBriefing();
-    fetchWatchlists();
-    fetchVIX();
-    fetchIndices();
-    loadTodayTrades();
+    Promise.all([
+      fetchPortfolios(),
+      fetchStatus(),
+      fetchBriefing(),
+      fetchWatchlists(),
+      fetchVIX(),
+      fetchIndices(),
+      loadTodayTrades(),
+    ]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
