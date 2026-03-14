@@ -64,6 +64,7 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
           dayPnlPercent: Number(raw.dayPnlPercent ?? raw.day_pnl_pct ?? 0),
           totalPnl: Number(raw.totalPnl ?? raw.total_pnl ?? 0),
           totalPnlPercent: Number(raw.totalPnlPercent ?? raw.total_pnl_pct ?? 0),
+          unrealizedPnl: Number(raw.unrealizedPnl ?? raw.unrealized_pnl ?? 0),
           investedValue: Number(raw.investedValue ?? raw.invested_value ?? 0),
           currentValue: Number(raw.currentValue ?? raw.totalNav ?? fallbackNav),
           availableMargin: Number(raw.availableMargin ?? raw.available_margin ?? fallbackNav),

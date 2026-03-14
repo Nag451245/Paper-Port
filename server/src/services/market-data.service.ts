@@ -24,7 +24,8 @@ function getBreezeConnectClass(): any {
   return BreezeConnect;
 }
 
-const CACHE_TTL_QUOTE = 60;
+const CACHE_TTL_QUOTE_MARKET_OPEN = 60;
+const CACHE_TTL_QUOTE_MARKET_CLOSED = 3600;
 const CACHE_TTL_HISTORY_INTRADAY = 30;
 const CACHE_TTL_HISTORY = 300;
 const CACHE_TTL_OPTION_CHAIN = 15;
@@ -32,6 +33,21 @@ const CACHE_TTL_SEARCH = 3600;
 const CACHE_TTL_INDICES = 60;
 const FETCH_TIMEOUT_MS = 10_000;
 const BREEZE_TIMEOUT_MS = 20_000;
+
+function isIndianMarketOpen(): boolean {
+  const now = new Date();
+  const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const day = ist.getDay();
+  if (day === 0 || day === 6) return false;
+  const hours = ist.getHours();
+  const minutes = ist.getMinutes();
+  const timeInMinutes = hours * 60 + minutes;
+  return timeInMinutes >= 555 && timeInMinutes <= 930;
+}
+
+function getQuoteCacheTTL(): number {
+  return isIndianMarketOpen() ? CACHE_TTL_QUOTE_MARKET_OPEN : CACHE_TTL_QUOTE_MARKET_CLOSED;
+}
 const BREEZE_BRIDGE_URL = env.BREEZE_BRIDGE_URL;
 
 const BREEZE_STOCK_CODES: Record<string, string> = {
@@ -512,7 +528,7 @@ export class MarketDataService {
     if (optionInfo || exchange === 'NFO') {
       const fnoQuote = await this.fetchFnOQuote(symbol, optionInfo);
       if (fnoQuote && fnoQuote.ltp > 0) {
-        if (this.cache) await this.cache.set(cacheKey, fnoQuote, CACHE_TTL_QUOTE);
+        if (this.cache) await this.cache.set(cacheKey, fnoQuote, getQuoteCacheTTL());
         return fnoQuote;
       }
       return fnoQuote ?? this.emptyQuote(symbol, exchange);
@@ -520,34 +536,34 @@ export class MarketDataService {
 
     if (exchange === 'MCX') {
       const quote = await this.getMCXQuote(symbol);
-      if (this.cache) await this.cache.set(cacheKey, quote, CACHE_TTL_QUOTE);
+      if (this.cache) await this.cache.set(cacheKey, quote, getQuoteCacheTTL());
       return quote;
     }
 
     if (exchange === 'CDS') {
       const quote = await this.getCDSQuote(symbol);
-      if (this.cache) await this.cache.set(cacheKey, quote, CACHE_TTL_QUOTE);
+      if (this.cache) await this.cache.set(cacheKey, quote, getQuoteCacheTTL());
       return quote;
     }
 
     // PRIMARY: Breeze Bridge live quote (real-time LTP from broker)
     const breezeQuote = await this.fetchLiveFromBreezeBridge(symbol, exchange);
     if (breezeQuote && breezeQuote.ltp > 0) {
-      if (this.cache) await this.cache.set(cacheKey, breezeQuote, CACHE_TTL_QUOTE);
+      if (this.cache) await this.cache.set(cacheKey, breezeQuote, getQuoteCacheTTL());
       return breezeQuote;
     }
 
     // Fallback 1: NSE direct scraping (real-time during market hours)
     const nseQuote = await this.fetchFromNSE(symbol);
     if (nseQuote && nseQuote.ltp > 0) {
-      if (this.cache) await this.cache.set(cacheKey, nseQuote, CACHE_TTL_QUOTE);
+      if (this.cache) await this.cache.set(cacheKey, nseQuote, getQuoteCacheTTL());
       return nseQuote;
     }
 
     // Fallback 2: Yahoo Finance (may return daily close, not live LTP)
     const yahooQuote = await this.fetchFromYahoo(symbol, exchange);
     if (yahooQuote && yahooQuote.ltp > 0) {
-      if (this.cache) await this.cache.set(cacheKey, yahooQuote, CACHE_TTL_QUOTE);
+      if (this.cache) await this.cache.set(cacheKey, yahooQuote, getQuoteCacheTTL());
       return yahooQuote;
     }
 
@@ -575,7 +591,7 @@ export class MarketDataService {
           askQty: 0,
           timestamp: latest.timestamp ?? new Date().toISOString(),
         };
-        if (this.cache) await this.cache.set(cacheKey, historicalQuote, CACHE_TTL_QUOTE);
+        if (this.cache) await this.cache.set(cacheKey, historicalQuote, getQuoteCacheTTL());
         return historicalQuote;
       }
     } catch { /* Breeze historical fallback failed */ }

@@ -125,10 +125,11 @@ export default function PortfolioPage() {
     (activePortfolio as any)?.initialCapital ?? activePortfolio?.capital ?? (activePortfolio as any)?.initial_capital,
     1000000,
   );
-  const totalPnl = summary ? safeNum(summary.totalPnl) : nav - initCap;
-  const totalPnlPct = summary ? safeNum(summary.totalPnlPercent) : (initCap > 0 ? (totalPnl / initCap) * 100 : 0);
+  const totalPnl = summary ? safeNum(summary.totalPnl) : 0;
+  const totalPnlPct = summary ? safeNum(summary.totalPnlPercent) : 0;
   const dayPnl = safeNum(summary?.dayPnl);
   const dayPnlPct = safeNum(summary?.dayPnlPercent);
+  const unrealizedPnl = safeNum(summary?.unrealizedPnl);
   const investedValue = safeNum(summary?.investedValue);
   const availableMargin = safeNum(summary?.availableMargin);
 
@@ -154,7 +155,7 @@ export default function PortfolioPage() {
 
       {activePortfolio && (
         <div className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-xl p-5 shadow-lg">
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
             <div>
               <p className="text-xs text-indigo-200 uppercase">Portfolio</p>
               <p className="text-lg font-bold">{(activePortfolio as any).name || 'Default'}</p>
@@ -168,10 +169,16 @@ export default function PortfolioPage() {
               <p className="text-lg font-bold font-mono">₹{formatINR(initCap)}</p>
             </div>
             <div>
-              <p className="text-xs text-indigo-200 uppercase">Total P&L</p>
+              <p className="text-xs text-indigo-200 uppercase">Realized P&L</p>
               <p className={`text-lg font-bold font-mono ${totalPnl >= 0 ? '' : 'text-red-200'}`}>
                 {totalPnl >= 0 ? '+' : ''}₹{formatINR(totalPnl)}
                 <span className="text-xs ml-1">({totalPnlPct >= 0 ? '+' : ''}{totalPnlPct.toFixed(2)}%)</span>
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-indigo-200 uppercase">Unrealized P&L</p>
+              <p className={`text-lg font-bold font-mono ${unrealizedPnl >= 0 ? '' : 'text-red-200'}`}>
+                {unrealizedPnl >= 0 ? '+' : ''}₹{formatINR(unrealizedPnl)}
               </p>
             </div>
             <div>

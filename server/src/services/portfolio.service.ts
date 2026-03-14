@@ -7,6 +7,7 @@ export interface PortfolioSummary {
   dayPnlPercent: number;
   totalPnl: number;
   totalPnlPercent: number;
+  unrealizedPnl: number;
   investedValue: number;
   currentValue: number;
   availableMargin: number;
@@ -55,46 +56,47 @@ export class PortfolioService {
     const portfolio = await this.getById(portfolioId, userId);
     const initialCapital = Number(portfolio.initialCapital);
     const availableCash = Number(portfolio.currentNav);
-
     const openPositions = (portfolio as any).positions ?? [];
-
-    let investedValue = 0;
-    let unrealizedPnl = 0;
-    let todayUnrealizedChange = 0;
-
-    const quoteTimeout = (promise: Promise<any>, ms = 5_000) =>
-      Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))]);
 
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
-    const [quoteResults, todayTrades] = await Promise.all([
-      Promise.allSettled(
-        openPositions.map(async (pos: any) => {
-          try {
-            const quote = await quoteTimeout(this.marketData.getQuote(pos.symbol, pos.exchange ?? 'NSE'));
-            return {
-              symbol: pos.symbol,
-              ltp: Number((quote as any).ltp ?? 0),
-              change: Number((quote as any).change ?? 0),
-            };
-          } catch {
-            return { symbol: pos.symbol, ltp: 0, change: 0 };
-          }
-        })
-      ),
+    const [allTrades, todayTrades, ltpResults] = await Promise.all([
+      this.prisma.trade.findMany({
+        where: { portfolioId },
+        select: { netPnl: true },
+      }),
       this.prisma.trade.findMany({
         where: { portfolioId, exitTime: { gte: todayStart } },
         select: { netPnl: true },
       }),
+      Promise.allSettled(
+        openPositions.map(async (pos: any) => {
+          try {
+            const quote = await Promise.race([
+              this.marketData.getQuote(pos.symbol, pos.exchange ?? 'NSE'),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5_000)),
+            ]) as any;
+            return { symbol: pos.symbol, ltp: Number(quote.ltp ?? 0) };
+          } catch {
+            return { symbol: pos.symbol, ltp: 0 };
+          }
+        })
+      ),
     ]);
 
-    const quoteMap = new Map<string, { ltp: number; change: number }>();
-    for (const r of quoteResults) {
+    const totalRealizedPnl = allTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
+    const todayRealizedPnl = todayTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
+
+    const ltpMap = new Map<string, number>();
+    for (const r of ltpResults) {
       if (r.status === 'fulfilled' && r.value.ltp > 0) {
-        quoteMap.set(r.value.symbol, { ltp: r.value.ltp, change: r.value.change });
+        ltpMap.set(r.value.symbol, r.value.ltp);
       }
     }
+
+    let investedValue = 0;
+    let unrealizedPnl = 0;
 
     for (const pos of openPositions) {
       const entryPrice = Number(pos.avgEntryPrice);
@@ -105,35 +107,23 @@ export class PortfolioService {
         investedValue += entryPrice * pos.qty * rate;
       }
 
-      const q = quoteMap.get(pos.symbol);
-      if (q && q.ltp > 0) {
-        const posUnrealized = pos.side === 'SHORT'
-          ? (entryPrice - q.ltp) * pos.qty
-          : (q.ltp - entryPrice) * pos.qty;
-        unrealizedPnl += posUnrealized;
-
-        const posDayChange = pos.side === 'SHORT'
-          ? -q.change * pos.qty
-          : q.change * pos.qty;
-        todayUnrealizedChange += posDayChange;
+      const ltp = ltpMap.get(pos.symbol) ?? 0;
+      if (ltp > 0) {
+        unrealizedPnl += pos.side === 'SHORT'
+          ? (entryPrice - ltp) * pos.qty
+          : (ltp - entryPrice) * pos.qty;
       }
     }
 
-    const todayRealizedPnl = todayTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
-    const dayPnl = todayRealizedPnl + todayUnrealizedChange;
-
     const totalNav = availableCash + investedValue + unrealizedPnl;
-    const totalPnl = totalNav - initialCapital;
-    const totalPnlPercent = initialCapital > 0 ? (totalPnl / initialCapital) * 100 : 0;
-
-    const startOfDayNav = totalNav - dayPnl;
 
     return {
       totalNav,
-      dayPnl,
-      dayPnlPercent: startOfDayNav > 0 ? (dayPnl / startOfDayNav) * 100 : 0,
-      totalPnl,
-      totalPnlPercent,
+      dayPnl: todayRealizedPnl,
+      dayPnlPercent: initialCapital > 0 ? (todayRealizedPnl / initialCapital) * 100 : 0,
+      totalPnl: totalRealizedPnl,
+      totalPnlPercent: initialCapital > 0 ? (totalRealizedPnl / initialCapital) * 100 : 0,
+      unrealizedPnl,
       investedValue,
       currentValue: totalNav,
       availableMargin: availableCash,
@@ -312,34 +302,6 @@ export class PortfolioService {
       const day = t.exitTime.toISOString().split('T')[0];
       dayMap[day] = (dayMap[day] || 0) + Number(t.netPnl);
     }
-
-    // Include today's unrealized *change* (not total unrealized) using quote.change
-    try {
-      const openPositions = await this.prisma.position.findMany({
-        where: { portfolioId, status: 'OPEN' },
-        select: { side: true, qty: true, symbol: true, exchange: true },
-      });
-      const quoteResults = await Promise.allSettled(
-        openPositions.map(async (pos) => {
-          try {
-            const quote = await this.marketData.getQuote(pos.symbol, pos.exchange ?? 'NSE');
-            return { symbol: pos.symbol, change: Number(quote.change ?? 0), side: pos.side, qty: pos.qty };
-          } catch {
-            return { symbol: pos.symbol, change: 0, side: pos.side, qty: pos.qty };
-          }
-        })
-      );
-      let todayUnrealizedChange = 0;
-      for (const r of quoteResults) {
-        if (r.status !== 'fulfilled' || r.value.change === 0) continue;
-        const { change, side, qty } = r.value;
-        todayUnrealizedChange += side === 'LONG' ? change * qty : -change * qty;
-      }
-      if (todayUnrealizedChange !== 0) {
-        const today = new Date().toISOString().split('T')[0];
-        dayMap[today] = (dayMap[today] || 0) + todayUnrealizedChange;
-      }
-    } catch { /* skip */ }
 
     return Object.entries(dayMap)
       .sort(([a], [b]) => a.localeCompare(b))

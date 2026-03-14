@@ -127,7 +127,9 @@ describe('Portfolio Routes Integration', () => {
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body.totalNav).toBe(1050000);
-      expect(body.totalPnl).toBe(50000);
+      // totalPnl is realized-only (from closed trades); no trades → 0
+      expect(body.totalPnl).toBe(0);
+      expect(body.unrealizedPnl).toBe(0);
     });
   });
 

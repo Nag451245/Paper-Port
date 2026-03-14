@@ -40,6 +40,7 @@ export interface PortfolioSummary {
   dayPnlPercent: number;
   totalPnl: number;
   totalPnlPercent: number;
+  unrealizedPnl: number;
   investedValue: number;
   currentValue: number;
   availableMargin: number;

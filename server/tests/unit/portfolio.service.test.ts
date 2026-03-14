@@ -112,7 +112,7 @@ describe('PortfolioService', () => {
   });
 
   describe('getSummary', () => {
-    it('should calculate summary from positions', async () => {
+    it('should compute NAV from positions and realized P&L from trades only', async () => {
       mockPrisma.portfolio.findUnique.mockResolvedValue({
         id: 'p1',
         userId: 'user1',
@@ -123,7 +123,6 @@ describe('PortfolioService', () => {
           { symbol: 'TCS', exchange: 'NSE', side: 'LONG', avgEntryPrice: 1500, qty: 20 },
         ],
       });
-      // Mock today's trades (for day P&L realized component)
       mockPrisma.trade.findMany.mockResolvedValue([]);
 
       const summary = await service.getSummary('p1', 'user1');
@@ -131,12 +130,38 @@ describe('PortfolioService', () => {
       // unrealizedPnl: RELIANCE (3000-2500)*10=5000, TCS (1400-1500)*20=-2000 → 3000
       // totalNav = cash(1050000) + invested(55000) + unrealizedPnl(3000) = 1108000
       expect(summary.totalNav).toBe(1108000);
-      expect(summary.totalPnl).toBe(108000);
-      expect(summary.totalPnlPercent).toBeCloseTo(10.8, 1);
       expect(summary.investedValue).toBe(55000);
-      // dayPnl uses quote.change (today's price movement), not total unrealized:
-      // RELIANCE change=50 * qty=10 = 500, TCS change=-10 * qty=20 = -200 → 300
-      expect(summary.dayPnl).toBe(300);
+      expect(summary.unrealizedPnl).toBe(3000);
+      // P&L is purely from closed trades — no trades closed → zero
+      expect(summary.totalPnl).toBe(0);
+      expect(summary.totalPnlPercent).toBe(0);
+      expect(summary.dayPnl).toBe(0);
+      expect(summary.dayPnlPercent).toBe(0);
+    });
+
+    it('should include only closed trades in realized P&L', async () => {
+      mockPrisma.portfolio.findUnique.mockResolvedValue({
+        id: 'p1',
+        userId: 'user1',
+        initialCapital: 1000000,
+        currentNav: 950000,
+        positions: [],
+      });
+      // Both findMany calls (all trades + today trades) get the same mock
+      mockPrisma.trade.findMany.mockResolvedValue([
+        { netPnl: 5000 },
+        { netPnl: -2000 },
+        { netPnl: 8000 },
+      ]);
+
+      const summary = await service.getSummary('p1', 'user1');
+
+      // totalPnl = sum of all closed trades: 5000 + (-2000) + 8000 = 11000
+      expect(summary.totalPnl).toBe(11000);
+      expect(summary.totalPnlPercent).toBeCloseTo(1.1, 1);
+      // dayPnl = same trades (mock returns same for both queries)
+      expect(summary.dayPnl).toBe(11000);
+      expect(summary.unrealizedPnl).toBe(0);
     });
   });
 
