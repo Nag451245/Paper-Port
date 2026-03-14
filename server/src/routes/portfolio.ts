@@ -31,6 +31,21 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
       },
     });
 
+    const portfolioIds = portfolios.map(p => p.id);
+
+    const allTrades = await prisma.trade.findMany({
+      where: { portfolioId: { in: portfolioIds } },
+      select: { portfolioId: true, netPnl: true },
+    });
+
+    const pnlByPortfolio = new Map<string, number>();
+    let totalRealizedPnl = 0;
+    for (const t of allTrades) {
+      const pnl = Number(t.netPnl);
+      totalRealizedPnl += pnl;
+      pnlByPortfolio.set(t.portfolioId, (pnlByPortfolio.get(t.portfolioId) ?? 0) + pnl);
+    }
+
     let totalCapital = 0, totalCash = 0, totalInvestedValue = 0, totalOpenPositions = 0, totalTrades = 0;
     for (const p of portfolios) {
       totalCapital += Number(p.initialCapital);
@@ -53,29 +68,29 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
       portfolioCount: portfolios.length,
       totalCapital: Number(totalCapital.toFixed(2)),
       totalNav: Number(totalNav.toFixed(2)),
-      totalPnl: Number((totalNav - totalCapital).toFixed(2)),
-      totalPnlPct: totalCapital > 0 ? Number((((totalNav - totalCapital) / totalCapital) * 100).toFixed(2)) : 0,
+      totalPnl: Number(totalRealizedPnl.toFixed(2)),
+      totalPnlPct: totalCapital > 0 ? Number(((totalRealizedPnl / totalCapital) * 100).toFixed(2)) : 0,
       totalOpenPositions,
       totalTrades,
       portfolios: portfolios.map(p => {
+        const pRealizedPnl = pnlByPortfolio.get(p.id) ?? 0;
         let pInvested = 0;
         for (const pos of p.positions) {
           const ep = Number(pos.avgEntryPrice);
           if (pos.side === 'LONG') {
             pInvested += ep * pos.qty;
           } else {
-            const rate = (pos as any).exchange === 'MCX' ? 0.10 : (pos as any).exchange === 'CDS' ? 0.05 : 0.25;
+            const rate = pos.exchange === 'MCX' ? 0.10 : pos.exchange === 'CDS' ? 0.05 : 0.25;
             pInvested += ep * pos.qty * rate;
           }
         }
-        const pNav = Number(p.currentNav) + pInvested;
         return {
           id: p.id,
           name: p.name,
           isDefault: p.isDefault,
           capital: Number(p.initialCapital),
-          nav: Number(pNav.toFixed(2)),
-          pnl: Number((pNav - Number(p.initialCapital)).toFixed(2)),
+          nav: Number((Number(p.currentNav) + pInvested).toFixed(2)),
+          pnl: Number(pRealizedPnl.toFixed(2)),
           openPositions: p.positions.length,
           trades: p._count.trades,
         };

@@ -1029,8 +1029,11 @@ export default function StrategyBuilder() {
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-bold text-slate-700">{strat.strategyTag?.replace('STRAT:', '') || 'Strategy'}</span>
                         <span className="text-[10px] text-slate-400">{legs.length} legs</span>
-                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${strat.totalPnl >= 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}`}>
-                          P&L: {strat.totalPnl >= 0 ? '+' : ''}₹{Number(strat.totalPnl || 0).toFixed(0)}
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${(strat.realizedPnl ?? 0) >= 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}`}>
+                          Realized: {(strat.realizedPnl ?? 0) >= 0 ? '+' : ''}₹{Number(strat.realizedPnl || 0).toFixed(0)}
+                        </span>
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${(strat.unrealizedPnl ?? 0) >= 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}`}>
+                          Unrealized: {(strat.unrealizedPnl ?? 0) >= 0 ? '+' : ''}₹{Number(strat.unrealizedPnl || 0).toFixed(0)}
                         </span>
                       </div>
                       <div className="flex items-center gap-1.5">

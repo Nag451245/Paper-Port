@@ -162,7 +162,6 @@ export class TargetTracker {
     });
     const portfolioIds = portfolios.map(p => p.id);
 
-    // Realized P&L from closed trades today
     const trades = await this.prisma.trade.findMany({
       where: {
         portfolioId: { in: portfolioIds },
@@ -172,17 +171,7 @@ export class TargetTracker {
     });
     const realizedPnl = trades.reduce((sum, t) => sum + Number(t.netPnl), 0);
 
-    // Unrealized P&L from open positions (already tracked in position records)
-    const openPositions = await this.prisma.position.findMany({
-      where: {
-        portfolioId: { in: portfolioIds },
-        status: 'OPEN',
-      },
-      select: { unrealizedPnl: true },
-    });
-    const unrealizedPnl = openPositions.reduce((sum, p) => sum + Number(p.unrealizedPnl), 0);
-
-    return Math.round((realizedPnl + unrealizedPnl) * 100) / 100;
+    return Math.round(realizedPnl * 100) / 100;
   }
 
   async recordDailyPnl(userId: string): Promise<void> {

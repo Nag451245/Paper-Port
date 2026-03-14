@@ -1057,17 +1057,19 @@ export class TradeService {
     const grouped: Record<string, {
       strategyTag: string;
       legs: typeof positions;
-      totalPnl: number;
+      realizedPnl: number;
+      unrealizedPnl: number;
       deployedAt: Date;
     }> = {};
 
     for (const pos of positions) {
       const tag = pos.strategyTag!;
       if (!grouped[tag]) {
-        grouped[tag] = { strategyTag: tag, legs: [], totalPnl: 0, deployedAt: pos.openedAt };
+        grouped[tag] = { strategyTag: tag, legs: [], realizedPnl: 0, unrealizedPnl: 0, deployedAt: pos.openedAt };
       }
       grouped[tag].legs.push(pos);
-      grouped[tag].totalPnl += Number(pos.unrealizedPnl ?? 0) + Number(pos.realizedPnl ?? 0);
+      grouped[tag].realizedPnl += Number(pos.realizedPnl ?? 0);
+      grouped[tag].unrealizedPnl += Number(pos.unrealizedPnl ?? 0);
       if (pos.openedAt < grouped[tag].deployedAt) {
         grouped[tag].deployedAt = pos.openedAt;
       }

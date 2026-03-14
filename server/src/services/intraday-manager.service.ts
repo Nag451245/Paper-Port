@@ -138,11 +138,11 @@ export class IntradayManager {
       });
 
       const unrealizedPnl = openPositions.reduce((s, p) => s + Number(p.unrealizedPnl ?? 0), 0);
-      const totalDayPnl = realizedPnl + unrealizedPnl;
-      const drawdownPct = capital > 0 ? Math.abs(Math.min(totalDayPnl, 0)) / capital * 100 : 0;
+      const combinedExposure = realizedPnl + unrealizedPnl;
+      const drawdownPct = capital > 0 ? Math.abs(Math.min(combinedExposure, 0)) / capital * 100 : 0;
 
-      if (totalDayPnl < 0 && drawdownPct >= this.maxDrawdownPct) {
-        log.warn({ userId: pf.userId, drawdownPct, totalDayPnl, limit: this.maxDrawdownPct },
+      if (combinedExposure < 0 && drawdownPct >= this.maxDrawdownPct) {
+        log.warn({ userId: pf.userId, drawdownPct, realizedPnl, unrealizedPnl, limit: this.maxDrawdownPct },
           'CIRCUIT BREAKER TRIGGERED');
 
         this.circuitBreakerTriggered = true;
@@ -163,7 +163,6 @@ export class IntradayManager {
             symbol: 'PORTFOLIO',
             details: JSON.stringify({
               drawdownPct,
-              totalDayPnl,
               realizedPnl,
               unrealizedPnl,
               positionsClosed: openPositions.length,
@@ -174,13 +173,13 @@ export class IntradayManager {
         wsHub.broadcastToUser(pf.userId, {
           type: 'circuit_breaker',
           drawdownPct: drawdownPct.toFixed(2),
-          totalLoss: totalDayPnl.toFixed(0),
+          totalLoss: combinedExposure.toFixed(0),
           message: `CIRCUIT BREAKER: Drawdown ${drawdownPct.toFixed(1)}% hit. All positions squared off. Trading halted for the day.`,
         });
 
         wsHub.broadcastNotification(pf.userId, {
           title: 'Circuit Breaker Triggered',
-          message: `Daily loss of ₹${Math.abs(totalDayPnl).toFixed(0)} (${drawdownPct.toFixed(1)}%) exceeded ${this.maxDrawdownPct}% limit. All positions closed.`,
+          message: `Daily loss of ₹${Math.abs(combinedExposure).toFixed(0)} (${drawdownPct.toFixed(1)}%) exceeded ${this.maxDrawdownPct}% limit. All positions closed.`,
           notificationType: 'error',
         });
 

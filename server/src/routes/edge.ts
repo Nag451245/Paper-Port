@@ -163,7 +163,8 @@ export async function edgeRoutes(app: FastifyInstance) {
       }
     }
     const totalNav = cashNav + investedValue + unrealizedPnl;
-    const totalReturn = ((totalNav - initialCapital) / initialCapital) * 100;
+    const totalRealizedPnl = trades.reduce((s: number, t: any) => s + Number(t.netPnl), 0);
+    const totalReturn = initialCapital > 0 ? (totalRealizedPnl / initialCapital) * 100 : 0;
 
     const wins = trades.filter((t: any) => Number(t.netPnl) > 0);
     const losses = trades.filter((t: any) => Number(t.netPnl) < 0);
@@ -195,6 +196,8 @@ export async function edgeRoutes(app: FastifyInstance) {
       summary: {
         totalTrades: trades.length,
         totalReturn: Number(totalReturn.toFixed(2)),
+        realizedPnl: Number(totalRealizedPnl.toFixed(2)),
+        unrealizedPnl: Number(unrealizedPnl.toFixed(2)),
         winRate: Number(winRate.toFixed(1)),
         profitFactor: Number(profitFactor.toFixed(2)),
         maxDrawdown: Number(maxDD.toFixed(2)),
