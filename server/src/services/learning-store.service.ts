@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, rmSync } from 'fs';
-import { resolve, join } from 'path';
+import { resolve, join, relative } from 'path';
+import { gzipSync, gunzipSync } from 'zlib';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import type { PrismaClient } from '@prisma/client';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -134,6 +136,121 @@ export class LearningStoreService {
       fileCount,
       oldestDate,
     };
+  }
+
+  async exportAll(userId: string, prisma: PrismaClient): Promise<Buffer> {
+    const files: Record<string, unknown> = {};
+    this.collectFiles(LEARNING_DIR, LEARNING_DIR, files);
+
+    const [tradeJournals, learningInsights, eodReports, dailyPnlRecords, decisionAudits] = await Promise.all([
+      prisma.tradeJournal.findMany({ where: { userId } }),
+      prisma.learningInsight.findMany({ where: { userId } }),
+      prisma.eODReport.findMany({ where: { userId } }),
+      prisma.dailyPnlRecord.findMany({ where: { userId } }),
+      prisma.decisionAudit.findMany({ where: { userId } }),
+    ]);
+
+    const payload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      files,
+      db: { tradeJournals, learningInsights, eodReports, dailyPnlRecords, decisionAudits },
+    };
+
+    return gzipSync(JSON.stringify(payload), { level: 9 });
+  }
+
+  async importAll(userId: string, prisma: PrismaClient, gzBuffer: Buffer): Promise<{ filesRestored: number; dbRecords: number }> {
+    const raw = gunzipSync(gzBuffer).toString('utf-8');
+    const payload = JSON.parse(raw);
+    if (payload.version !== 1) throw new Error('Unsupported export version');
+
+    let filesRestored = 0;
+    if (payload.files) {
+      for (const [relPath, content] of Object.entries(payload.files)) {
+        const fullPath = join(LEARNING_DIR, relPath);
+        ensureDir(dirname(fullPath));
+        writeFileSync(fullPath, JSON.stringify(content));
+        filesRestored++;
+      }
+    }
+
+    let dbRecords = 0;
+    const db = payload.db ?? {};
+
+    if (db.tradeJournals?.length) {
+      for (const j of db.tradeJournals) {
+        try {
+          await prisma.tradeJournal.upsert({
+            where: { tradeId: j.tradeId },
+            create: { ...j, userId },
+            update: { aiBriefing: j.aiBriefing, signalQualityReview: j.signalQualityReview, marketContext: j.marketContext, exitAnalysis: j.exitAnalysis, improvementSuggestion: j.improvementSuggestion },
+          });
+          dbRecords++;
+        } catch { /* skip if trade FK missing */ }
+      }
+    }
+
+    if (db.learningInsights?.length) {
+      for (const i of db.learningInsights) {
+        await prisma.learningInsight.upsert({
+          where: { userId_date: { userId, date: new Date(i.date) } },
+          create: { userId, date: new Date(i.date), marketRegime: i.marketRegime, topWinningStrategies: i.topWinningStrategies, topLosingStrategies: i.topLosingStrategies, paramAdjustments: i.paramAdjustments, narrative: i.narrative },
+          update: { marketRegime: i.marketRegime, topWinningStrategies: i.topWinningStrategies, topLosingStrategies: i.topLosingStrategies, paramAdjustments: i.paramAdjustments, narrative: i.narrative },
+        });
+        dbRecords++;
+      }
+    }
+
+    if (db.eodReports?.length) {
+      for (const r of db.eodReports) {
+        await prisma.eODReport.upsert({
+          where: { userId_date: { userId, date: new Date(r.date) } },
+          create: { userId, date: new Date(r.date), totalPnl: r.totalPnl, targetPnl: r.targetPnl, targetAchieved: r.targetAchieved, tradesSummary: r.tradesSummary, falsePositives: r.falsePositives, decisionsReview: r.decisionsReview, improvements: r.improvements, marketContext: r.marketContext, riskEvents: r.riskEvents },
+          update: { totalPnl: r.totalPnl, targetPnl: r.targetPnl, targetAchieved: r.targetAchieved, tradesSummary: r.tradesSummary, falsePositives: r.falsePositives, decisionsReview: r.decisionsReview, improvements: r.improvements, marketContext: r.marketContext, riskEvents: r.riskEvents },
+        });
+        dbRecords++;
+      }
+    }
+
+    if (db.dailyPnlRecords?.length) {
+      for (const d of db.dailyPnlRecords) {
+        await prisma.dailyPnlRecord.upsert({
+          where: { userId_date: { userId, date: new Date(d.date) } },
+          create: { userId, date: new Date(d.date), grossPnl: d.grossPnl, netPnl: d.netPnl, tradeCount: d.tradeCount, winCount: d.winCount, lossCount: d.lossCount, status: d.status },
+          update: { grossPnl: d.grossPnl, netPnl: d.netPnl, tradeCount: d.tradeCount, winCount: d.winCount, lossCount: d.lossCount, status: d.status },
+        });
+        dbRecords++;
+      }
+    }
+
+    if (db.decisionAudits?.length) {
+      for (const a of db.decisionAudits) {
+        try {
+          await prisma.decisionAudit.create({
+            data: { userId, symbol: a.symbol, decisionType: a.decisionType, direction: a.direction, confidence: a.confidence, signalSource: a.signalSource, marketDataSnapshot: a.marketDataSnapshot, riskChecks: a.riskChecks, reasoning: a.reasoning, outcome: a.outcome, entryPrice: a.entryPrice, exitPrice: a.exitPrice, pnl: a.pnl, predictionAccuracy: a.predictionAccuracy },
+          });
+          dbRecords++;
+        } catch { /* skip duplicates */ }
+      }
+    }
+
+    return { filesRestored, dbRecords };
+  }
+
+  private collectFiles(baseDir: string, currentDir: string, result: Record<string, unknown>): void {
+    if (!existsSync(currentDir)) return;
+    for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
+      const fullPath = join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        this.collectFiles(baseDir, fullPath, result);
+      } else if (entry.name.endsWith('.json')) {
+        const relPath = relative(baseDir, fullPath).replace(/\\/g, '/');
+        try {
+          result[relPath] = JSON.parse(readFileSync(fullPath, 'utf-8'));
+        } catch { /* skip corrupted */ }
+      }
+    }
   }
 
   private checkAndPrune(): void {

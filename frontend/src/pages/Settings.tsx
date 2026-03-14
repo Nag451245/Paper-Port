@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Key,
   Wallet,
@@ -14,8 +14,11 @@ import {
   Clock,
   Shield,
   RefreshCw,
+  Download,
+  Upload,
+  Database,
 } from 'lucide-react';
-import { breezeApi, portfolioApi, telegramApi } from '@/services/api';
+import { breezeApi, portfolioApi, telegramApi, learningApi } from '@/services/api';
 import type { BreezeCredentialStatus } from '@/types';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -569,6 +572,9 @@ export default function Settings() {
             </div>
           </section>
 
+          {/* Data Management */}
+          <DataManagementSection />
+
           {/* Telegram & Mobile Notifications */}
           <section className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm">
             <div className="flex items-center gap-2 mb-4">
@@ -699,6 +705,109 @@ export default function Settings() {
         </>
       )}
     </div>
+  );
+}
+
+function DataManagementSection() {
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [exportInfo, setExportInfo] = useState<{ size: string; date: string } | null>(null);
+  const [importResult, setImportResult] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const handleExport = async () => {
+    setExporting(true);
+    setError('');
+    try {
+      const { data } = await learningApi.exportData();
+      const blob = data as Blob;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const dateStr = new Date().toISOString().split('T')[0];
+      a.href = url;
+      a.download = `capital-guard-learning-${dateStr}.cgdata.gz`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      const sizeKB = (blob.size / 1024).toFixed(1);
+      setExportInfo({ size: `${sizeKB} KB`, date: new Date().toLocaleString('en-IN') });
+    } catch (err: any) {
+      setError(err?.response?.data?.error || err?.message || 'Export failed');
+    }
+    setExporting(false);
+  };
+
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    setError('');
+    setImportResult(null);
+    try {
+      const { data } = await learningApi.importData(file);
+      const d = (data as any).data;
+      setImportResult(`Restored ${d.filesRestored} files and ${d.dbRecords} database records.`);
+    } catch (err: any) {
+      setError(err?.response?.data?.error || err?.message || 'Import failed');
+    }
+    setImporting(false);
+    if (fileRef.current) fileRef.current.value = '';
+  };
+
+  return (
+    <section className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm">
+      <div className="flex items-center gap-2 mb-4">
+        <Database className="w-5 h-5 text-violet-500" />
+        <h2 className="text-lg font-semibold text-slate-900">Data Management</h2>
+      </div>
+      <p className="text-xs text-slate-500 mb-4">
+        Export all learning insights, trade journals, EOD reports, daily P&L records, and decision audits as a compressed file. Import them back to restore data on another instance.
+      </p>
+
+      {error && (
+        <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600 flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          {error}
+        </div>
+      )}
+      {importResult && (
+        <div className="mb-3 p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-sm text-emerald-600 flex items-center gap-2">
+          <CheckCircle className="w-4 h-4 shrink-0" />
+          {importResult}
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-3">
+        <button
+          onClick={handleExport}
+          disabled={exporting}
+          className="flex items-center gap-2 px-4 py-2.5 bg-violet-600 hover:bg-violet-500 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+          Export Data
+        </button>
+
+        <label className="flex items-center gap-2 px-4 py-2.5 bg-slate-700 hover:bg-slate-600 text-white text-sm font-semibold rounded-lg transition-colors cursor-pointer disabled:opacity-50">
+          {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+          Import Data
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".gz,.cgdata.gz"
+            onChange={handleImport}
+            disabled={importing}
+            className="hidden"
+          />
+        </label>
+      </div>
+
+      {exportInfo && (
+        <div className="mt-3 text-xs text-slate-500">
+          Last export: {exportInfo.date} ({exportInfo.size})
+        </div>
+      )}
+    </section>
   );
 }
 

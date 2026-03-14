@@ -1,12 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { commandApi } from '@/services/api';
+import { useBotActivity, type TimelineItem } from '@/hooks/useBotActivity';
 
-interface Message {
+interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   createdAt: string;
-  metadata?: string;
+  intent?: string;
 }
 
 interface DashboardData {
@@ -62,39 +63,74 @@ interface DashboardData {
   }>;
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    ACTIVE: 'bg-green-500/10 text-green-400 border-green-500/20',
-    TARGET_HIT: 'bg-teal-500/10 text-teal-400 border-teal-500/20',
-    LOSS_LIMIT: 'bg-red-500/10 text-red-400 border-red-500/20',
-    PAUSED: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
-    REVIEW_REQUIRED: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
-  };
+type UnifiedItem =
+  | { kind: 'chat'; data: ChatMessage }
+  | { kind: 'activity'; data: TimelineItem };
+
+const ACTIVITY_ICONS: Record<TimelineItem['type'], { icon: string; color: string; bg: string }> = {
+  bot_scan: { icon: '📡', color: 'text-violet-400', bg: 'border-violet-500/30 bg-violet-500/5' },
+  bot_decision: { icon: '🧠', color: 'text-blue-400', bg: 'border-blue-500/30 bg-blue-500/5' },
+  signal: { icon: '⚡', color: 'text-amber-400', bg: 'border-amber-500/30 bg-amber-500/5' },
+  trade: { icon: '💹', color: 'text-emerald-400', bg: 'border-emerald-500/30 bg-emerald-500/5' },
+  risk_alert: { icon: '🛡️', color: 'text-red-400', bg: 'border-red-500/30 bg-red-500/5' },
+  system: { icon: '⚙️', color: 'text-slate-400', bg: 'border-slate-600/30 bg-slate-600/5' },
+};
+
+function formatTime(iso: string) {
+  return new Date(iso).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+}
+
+const pnlColor = (v: number) => v >= 0 ? 'text-green-400' : 'text-red-400';
+
+function ActivityCard({ item }: { item: TimelineItem }) {
+  const [expanded, setExpanded] = useState(false);
+  const config = ACTIVITY_ICONS[item.type];
+
   return (
-    <span className={`px-2 py-0.5 text-xs font-medium rounded border ${colors[status] || 'bg-slate-700 text-slate-300'}`}>
-      {status.replace(/_/g, ' ')}
-    </span>
+    <div
+      className={`rounded-lg border px-3 py-2 cursor-pointer transition-colors ${config.bg} hover:brightness-110`}
+      onClick={() => setExpanded(!expanded)}
+    >
+      <div className="flex items-start gap-2">
+        <span className="text-base mt-0.5 shrink-0">{config.icon}</span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 text-xs mb-0.5">
+            <span className={`font-semibold ${config.color}`}>{item.botName}</span>
+            <span className="text-slate-500">{formatTime(item.timestamp)}</span>
+          </div>
+          <p className="text-sm text-slate-300 leading-snug">{item.summary}</p>
+          {expanded && item.details && (
+            <pre className="mt-2 text-[10px] text-slate-500 bg-slate-800/50 rounded p-2 overflow-x-auto">
+              {JSON.stringify(item.details, null, 2)}
+            </pre>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
-function AggressionIndicator({ level }: { level: string }) {
-  const config: Record<string, { color: string; label: string }> = {
-    high: { color: 'text-red-400', label: 'HIGH' },
-    medium: { color: 'text-yellow-400', label: 'MEDIUM' },
-    low: { color: 'text-green-400', label: 'LOW' },
-    none: { color: 'text-slate-400', label: 'NONE' },
-  };
-  const c = config[level] || config.none;
-  return <span className={`text-xs font-bold ${c.color}`}>{c.label}</span>;
-}
+const SUGGESTIONS = [
+  'What\'s the status?',
+  'How are the bots doing?',
+  'Show pending signals',
+  'Start scanning',
+  'Make 2% daily on 10 lakh',
+  'Show today\'s report',
+];
 
 export default function CommandCenter() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+
+  const { items: botActivityItems } = useBotActivity();
 
   const loadDashboard = useCallback(async () => {
     try {
@@ -106,7 +142,11 @@ export default function CommandCenter() {
   const loadMessages = useCallback(async () => {
     try {
       const res = await commandApi.getMessages(50);
-      setMessages((res.data as Message[]).reverse());
+      setChatMessages(
+        (res.data as ChatMessage[])
+          .reverse()
+          .map(m => ({ ...m, intent: m.intent ?? (typeof (m as any).metadata === 'string' ? JSON.parse((m as any).metadata)?.intent : undefined) }))
+      );
     } catch { /* ignore */ }
   }, []);
 
@@ -117,29 +157,39 @@ export default function CommandCenter() {
   }, [loadDashboard, loadMessages]);
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    if (autoScroll) {
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages, botActivityItems, autoScroll]);
+
+  const handleScroll = useCallback(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    setAutoScroll(atBottom);
+  }, []);
 
   const sendMessage = async () => {
     const msg = input.trim();
     if (!msg || sending) return;
 
-    setMessages(prev => [...prev, { id: `temp-${Date.now()}`, role: 'user', content: msg, createdAt: new Date().toISOString() }]);
+    const tempMsg: ChatMessage = { id: `temp-${Date.now()}`, role: 'user', content: msg, createdAt: new Date().toISOString() };
+    setChatMessages(prev => [...prev, tempMsg]);
     setInput('');
     setSending(true);
 
     try {
       const res = await commandApi.chat(msg);
-      setMessages(prev => [...prev, {
+      setChatMessages(prev => [...prev, {
         id: `resp-${Date.now()}`,
         role: 'assistant',
         content: res.data.content,
         createdAt: new Date().toISOString(),
-        metadata: JSON.stringify({ intent: res.data.intent }),
+        intent: res.data.intent,
       }]);
       await loadDashboard();
     } catch (err: any) {
-      setMessages(prev => [...prev, {
+      setChatMessages(prev => [...prev, {
         id: `err-${Date.now()}`,
         role: 'assistant',
         content: `Error: ${err?.response?.data?.error || err?.message || 'Something went wrong'}`,
@@ -150,9 +200,25 @@ export default function CommandCenter() {
     }
   };
 
+  const unified: UnifiedItem[] = [];
+  const chatCopy = [...chatMessages];
+  const actCopy = [...botActivityItems].reverse();
+  let ci = 0, ai = 0;
+
+  while (ci < chatCopy.length || ai < actCopy.length) {
+    const cTime = ci < chatCopy.length ? new Date(chatCopy[ci].createdAt).getTime() : Infinity;
+    const aTime = ai < actCopy.length ? new Date(actCopy[ai].timestamp).getTime() : Infinity;
+    if (cTime <= aTime && ci < chatCopy.length) {
+      unified.push({ kind: 'chat', data: chatCopy[ci++] });
+    } else if (ai < actCopy.length) {
+      unified.push({ kind: 'activity', data: actCopy[ai++] });
+    } else {
+      break;
+    }
+  }
+
   const target = dashboard?.target;
   const risk = dashboard?.risk;
-  const pnlColor = (v: number) => v >= 0 ? 'text-green-400' : 'text-red-400';
 
   if (loading) {
     return (
@@ -163,52 +229,91 @@ export default function CommandCenter() {
   }
 
   return (
-    <div className="h-[calc(100vh-4rem)] flex gap-4 p-4">
-      {/* Left: Chat Panel */}
+    <div className="h-[calc(100vh-4rem)] flex gap-3 p-3">
+      {/* ── Left: Unified Timeline ── */}
       <div className="flex-1 flex flex-col bg-slate-900 rounded-xl border border-slate-700/50 overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-700/50 bg-slate-800/50">
-          <h2 className="text-sm font-semibold text-white">Command Center</h2>
-          <p className="text-xs text-slate-400">Set targets, check progress, and control your trading bots</p>
+        <div className="px-4 py-3 border-b border-slate-700/50 bg-slate-800/50 flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-bold text-white tracking-wide">Mission Control</h2>
+            <p className="text-[10px] text-slate-500 mt-0.5">
+              Chat + real-time bot activity
+              {botActivityItems.length > 0 && <span className="ml-2 text-violet-400">{botActivityItems.length} live events</span>}
+            </p>
+          </div>
+          <button
+            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+            className="lg:hidden text-xs text-slate-400 hover:text-white px-2 py-1 rounded border border-slate-700"
+          >
+            {sidebarCollapsed ? 'Show Panel' : 'Hide Panel'}
+          </button>
         </div>
 
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
-          {messages.length === 0 && (
-            <div className="text-center py-12">
-              <p className="text-slate-400 text-sm mb-4">Start by telling me your trading goals</p>
-              <div className="flex flex-wrap gap-2 justify-center">
-                {[
-                  'Make 2% daily on 10 lakh capital',
-                  'How are bots doing today?',
-                  'Show today\'s report',
-                  'What\'s the status?',
-                ].map(suggestion => (
+        {/* Timeline */}
+        <div
+          ref={timelineRef}
+          className="flex-1 overflow-y-auto p-4 space-y-2.5"
+          onScroll={handleScroll}
+        >
+          {unified.length === 0 && (
+            <div className="text-center py-16">
+              <div className="w-16 h-16 rounded-full bg-slate-800 flex items-center justify-center mx-auto mb-4">
+                <span className="text-3xl">🎯</span>
+              </div>
+              <p className="text-slate-400 text-sm mb-1 font-medium">Welcome to Mission Control</p>
+              <p className="text-slate-500 text-xs mb-6">Chat with your AI trading system. Bot activity will appear here in real-time.</p>
+              <div className="flex flex-wrap gap-2 justify-center max-w-lg mx-auto">
+                {SUGGESTIONS.map(s => (
                   <button
-                    key={suggestion}
-                    onClick={() => { setInput(suggestion); }}
+                    key={s}
+                    onClick={() => setInput(s)}
                     className="px-3 py-1.5 text-xs rounded-full bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50 transition-colors"
                   >
-                    {suggestion}
+                    {s}
                   </button>
                 ))}
               </div>
             </div>
           )}
 
-          {messages.map(msg => (
-            <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap ${
-                msg.role === 'user'
-                  ? 'bg-teal-600/20 text-teal-100 border border-teal-500/20'
-                  : 'bg-slate-800 text-slate-200 border border-slate-700/50'
-              }`}>
-                {msg.content}
-                <div className="text-[10px] text-slate-500 mt-1">
-                  {new Date(msg.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+          {unified.map((item, idx) => {
+            if (item.kind === 'chat') {
+              const msg = item.data;
+              const isUser = msg.role === 'user';
+              return (
+                <div key={msg.id ?? idx} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[80%] rounded-xl px-3.5 py-2.5 text-sm ${
+                    isUser
+                      ? 'bg-teal-600/20 text-teal-100 border border-teal-500/20 rounded-br-sm'
+                      : 'bg-slate-800 text-slate-200 border border-slate-700/50 rounded-bl-sm'
+                  }`}>
+                    <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed">{msg.content}</pre>
+                    <div className="flex items-center gap-2 mt-1.5">
+                      <span className="text-[10px] text-slate-500">{formatTime(msg.createdAt)}</span>
+                      {!isUser && msg.intent && msg.intent !== 'general_chat' && (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-700/50 text-slate-400 font-mono">
+                          {msg.intent}
+                        </span>
+                      )}
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
-          ))}
+              );
+            } else {
+              return <ActivityCard key={item.data.id ?? idx} item={item.data} />;
+            }
+          })}
+
+          {!autoScroll && (
+            <button
+              onClick={() => {
+                setAutoScroll(true);
+                chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+              }}
+              className="fixed bottom-24 left-1/2 -translate-x-1/2 px-4 py-1.5 text-xs bg-teal-600 text-white rounded-full shadow-lg hover:bg-teal-500 z-10"
+            >
+              New messages
+            </button>
+          )}
           <div ref={chatEndRef} />
         </div>
 
@@ -220,160 +325,143 @@ export default function CommandCenter() {
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendMessage()}
-              placeholder="Set targets, check progress, control bots..."
-              className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-teal-500 focus:border-teal-500"
+              placeholder="Ask about bots, signals, targets... or give commands"
+              className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-teal-500 focus:border-teal-500"
               disabled={sending}
             />
             <button
               onClick={sendMessage}
               disabled={sending || !input.trim()}
-              className="px-4 py-2 bg-teal-600 hover:bg-teal-500 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-medium rounded-lg transition-colors"
+              className="px-5 py-2.5 bg-teal-600 hover:bg-teal-500 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-medium rounded-lg transition-colors"
             >
-              {sending ? '...' : 'Send'}
+              {sending ? (
+                <span className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              ) : 'Send'}
             </button>
           </div>
         </div>
       </div>
 
-      {/* Right: Dashboard Panels */}
-      <div className="w-[400px] flex flex-col gap-4 overflow-y-auto">
+      {/* ── Right: Context Sidebar ── */}
+      <div className={`w-[360px] flex flex-col gap-3 overflow-y-auto shrink-0 transition-all ${sidebarCollapsed ? 'hidden lg:flex' : 'flex'}`}>
+
         {/* Target Progress */}
         <div className="bg-slate-900 rounded-xl border border-slate-700/50 p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-white">Target Progress</h3>
-            {target && <StatusBadge status={target.status} />}
-          </div>
-
+          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Target Progress</h3>
           {target ? (
             <>
-              <div className="grid grid-cols-3 gap-2 mb-3">
-                <div className="text-center">
-                  <p className="text-[10px] text-slate-500 uppercase">Capital</p>
-                  <p className="text-sm font-bold text-white">{(target.capitalBase / 100000).toFixed(1)}L</p>
-                </div>
-                <div className="text-center">
-                  <p className="text-[10px] text-slate-500 uppercase">Target</p>
-                  <p className="text-sm font-bold text-green-400">+{target.profitTargetAbs.toFixed(0)}</p>
-                </div>
-                <div className="text-center">
-                  <p className="text-[10px] text-slate-500 uppercase">Max Loss</p>
-                  <p className="text-sm font-bold text-red-400">-{target.maxLossAbs.toFixed(0)}</p>
-                </div>
+              <div className="flex items-center justify-between mb-2">
+                <span className={`text-lg font-bold font-mono ${pnlColor(target.currentPnl)}`}>
+                  {target.currentPnl >= 0 ? '+' : ''}₹{target.currentPnl.toFixed(0)}
+                </span>
+                <span className={`text-xs px-2 py-0.5 rounded border ${
+                  target.status === 'ACTIVE' ? 'bg-green-500/10 text-green-400 border-green-500/20'
+                    : target.status === 'TARGET_HIT' ? 'bg-teal-500/10 text-teal-400 border-teal-500/20'
+                    : target.status === 'LOSS_LIMIT' ? 'bg-red-500/10 text-red-400 border-red-500/20'
+                    : 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20'
+                }`}>{target.status.replace(/_/g, ' ')}</span>
               </div>
-
-              {/* Progress Bar */}
-              <div className="mb-3">
-                <div className="flex justify-between text-xs mb-1">
-                  <span className={pnlColor(target.currentPnl)}>
-                    {target.currentPnl >= 0 ? '+' : ''}{target.currentPnl.toFixed(0)}
-                  </span>
-                  <span className="text-slate-500">{target.progressPct.toFixed(0)}%</span>
-                </div>
-                <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all duration-500 ${
-                      target.currentPnl >= 0 ? 'bg-green-500' : 'bg-red-500'
-                    }`}
-                    style={{ width: `${Math.min(Math.abs(target.progressPct), 100)}%` }}
-                  />
-                </div>
+              <div className="flex justify-between text-[10px] text-slate-500 mb-1">
+                <span>₹0</span>
+                <span>Target: ₹{target.profitTargetAbs.toFixed(0)}</span>
               </div>
-
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-slate-400">Aggression: <AggressionIndicator level={target.aggression} /></span>
-                <span className="text-slate-400">{target.instruments}</span>
+              <div className="h-2 bg-slate-700 rounded-full overflow-hidden mb-2">
+                <div
+                  className={`h-full rounded-full transition-all duration-500 ${target.currentPnl >= 0 ? 'bg-green-500' : 'bg-red-500'}`}
+                  style={{ width: `${Math.min(Math.abs(target.progressPct), 100)}%` }}
+                />
               </div>
-
-              {target.consecutiveLossDays > 0 && (
-                <div className="mt-2 px-2 py-1 bg-orange-500/10 border border-orange-500/20 rounded text-xs text-orange-400">
-                  {target.consecutiveLossDays} consecutive loss day{target.consecutiveLossDays > 1 ? 's' : ''}
-                </div>
-              )}
-
-              {!target.tradingAllowed && target.reason && (
-                <div className="mt-2 px-2 py-1 bg-red-500/10 border border-red-500/20 rounded text-xs text-red-400">
-                  {target.reason}
-                </div>
-              )}
+              <div className="flex items-center justify-between text-[10px] text-slate-500">
+                <span>Max Loss: -₹{target.maxLossAbs.toFixed(0)}</span>
+                <span>{target.instruments}</span>
+              </div>
             </>
           ) : (
-            <p className="text-xs text-slate-500">No active target. Use the chat to set one.</p>
+            <p className="text-xs text-slate-500">No active target. Say "Make 2% daily on 10L" to set one.</p>
           )}
         </div>
 
         {/* Risk Meter */}
         {risk && (
           <div className="bg-slate-900 rounded-xl border border-slate-700/50 p-4">
-            <h3 className="text-sm font-semibold text-white mb-3">Risk Status</h3>
+            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Risk</h3>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <p className="text-[10px] text-slate-500 uppercase">Risk Score</p>
+                <p className="text-[10px] text-slate-500">Score</p>
                 <p className={`text-lg font-bold ${risk.riskScore > 70 ? 'text-red-400' : risk.riskScore > 40 ? 'text-yellow-400' : 'text-green-400'}`}>
-                  {risk.riskScore}/100
+                  {risk.riskScore}<span className="text-xs text-slate-500">/100</span>
                 </p>
               </div>
               <div>
-                <p className="text-[10px] text-slate-500 uppercase">Day P&L</p>
-                <p className={`text-lg font-bold ${pnlColor(risk.dayPnl)}`}>
+                <p className="text-[10px] text-slate-500">Day P&L</p>
+                <p className={`text-lg font-bold font-mono ${pnlColor(risk.dayPnl)}`}>
                   {risk.dayPnl >= 0 ? '+' : ''}{risk.dayPnl.toFixed(0)}
                 </p>
               </div>
               <div>
-                <p className="text-[10px] text-slate-500 uppercase">Positions</p>
+                <p className="text-[10px] text-slate-500">Positions</p>
                 <p className="text-sm font-medium text-white">{risk.openPositions}</p>
               </div>
               <div>
-                <p className="text-[10px] text-slate-500 uppercase">Drawdown</p>
+                <p className="text-[10px] text-slate-500">Drawdown</p>
                 <p className="text-sm font-medium text-white">{risk.dayDrawdownPct.toFixed(1)}%</p>
               </div>
             </div>
             {risk.circuitBreakerActive && (
-              <div className="mt-2 px-2 py-1 bg-red-500/10 border border-red-500/20 rounded text-xs text-red-400">
+              <div className="mt-2 px-2 py-1 bg-red-500/10 border border-red-500/20 rounded text-[10px] text-red-400 font-medium">
                 Circuit breaker active
               </div>
             )}
           </div>
         )}
 
-        {/* Active Bots */}
+        {/* Bot Fleet */}
         {dashboard?.bots && dashboard.bots.length > 0 && (
           <div className="bg-slate-900 rounded-xl border border-slate-700/50 p-4">
-            <h3 className="text-sm font-semibold text-white mb-3">Active Bots ({dashboard.bots.length})</h3>
+            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
+              Bot Fleet ({dashboard.bots.length})
+            </h3>
             <div className="space-y-2">
               {dashboard.bots.map(bot => (
-                <div key={bot.id} className="flex items-center justify-between py-1.5 border-b border-slate-800 last:border-0">
-                  <div>
-                    <p className="text-xs font-medium text-white">{bot.name}</p>
-                    <p className="text-[10px] text-slate-500">{bot.lastAction || 'Idle'}</p>
+                <div key={bot.id} className="flex items-center gap-2 py-1.5 border-b border-slate-800 last:border-0">
+                  <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-medium text-white truncate">{bot.name}</p>
+                      <span className={`text-xs font-bold font-mono ${pnlColor(Number(bot.totalPnl))}`}>
+                        {Number(bot.totalPnl) >= 0 ? '+' : ''}{Number(bot.totalPnl).toFixed(0)}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-slate-500 truncate">{bot.lastAction || 'Idle'}</p>
                   </div>
-                  <span className={`text-xs font-bold ${pnlColor(Number(bot.totalPnl))}`}>
-                    {Number(bot.totalPnl) >= 0 ? '+' : ''}{Number(bot.totalPnl).toFixed(0)}
-                  </span>
                 </div>
               ))}
             </div>
           </div>
         )}
 
-        {/* Recent Signals */}
+        {/* Today's Signals */}
         {dashboard?.todaySignals && dashboard.todaySignals.length > 0 && (
           <div className="bg-slate-900 rounded-xl border border-slate-700/50 p-4">
-            <h3 className="text-sm font-semibold text-white mb-3">Today's Signals ({dashboard.todaySignals.length})</h3>
-            <div className="space-y-2 max-h-60 overflow-y-auto">
-              {dashboard.todaySignals.slice(0, 10).map(sig => (
-                <div key={sig.id} className="flex items-center justify-between py-1.5 border-b border-slate-800 last:border-0">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className={`text-xs font-bold ${sig.signalType === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>
-                        {sig.signalType}
-                      </span>
-                      <span className="text-xs text-white">{sig.symbol}</span>
-                    </div>
-                    <p className="text-[10px] text-slate-500 truncate">{sig.rationale}</p>
+            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
+              Signals ({dashboard.todaySignals.length})
+            </h3>
+            <div className="space-y-1.5 max-h-48 overflow-y-auto">
+              {dashboard.todaySignals.slice(0, 8).map(sig => (
+                <div key={sig.id} className="flex items-center justify-between py-1 text-xs">
+                  <div className="flex items-center gap-1.5">
+                    <span className={`font-bold ${sig.signalType === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>
+                      {sig.signalType}
+                    </span>
+                    <span className="text-white">{sig.symbol}</span>
                   </div>
-                  <div className="text-right ml-2 shrink-0">
-                    <p className="text-xs font-medium text-slate-300">{(sig.compositeScore * 100).toFixed(0)}%</p>
-                    <p className={`text-[10px] ${sig.status === 'EXECUTED' ? 'text-green-400' : 'text-slate-500'}`}>{sig.status}</p>
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-400 font-mono">{(sig.compositeScore * 100).toFixed(0)}%</span>
+                    <span className={`text-[10px] px-1 py-0.5 rounded ${
+                      sig.status === 'EXECUTED' ? 'bg-green-500/10 text-green-400'
+                        : sig.status === 'REJECTED' ? 'bg-red-500/10 text-red-400'
+                        : 'bg-amber-500/10 text-amber-400'
+                    }`}>{sig.status}</span>
                   </div>
                 </div>
               ))}
@@ -381,17 +469,40 @@ export default function CommandCenter() {
           </div>
         )}
 
-        {/* Recent P&L History */}
+        {/* Quick Actions */}
+        <div className="bg-slate-900 rounded-xl border border-slate-700/50 p-4">
+          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Quick Actions</h3>
+          <div className="grid grid-cols-2 gap-2">
+            {[
+              { label: 'Start Scanner', cmd: 'Start scanning' },
+              { label: 'Stop Scanner', cmd: 'Stop the scanner' },
+              { label: 'Start Agent', cmd: 'Start the AI agent' },
+              { label: 'Stop Agent', cmd: 'Stop the agent' },
+              { label: 'Check Progress', cmd: 'How are we doing?' },
+              { label: 'Pause Trading', cmd: 'Stop all trading' },
+            ].map(a => (
+              <button
+                key={a.cmd}
+                onClick={() => { setInput(a.cmd); }}
+                className="px-2 py-1.5 text-[10px] font-medium rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50 transition-colors"
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* P&L History */}
         {dashboard?.recentPnl && dashboard.recentPnl.length > 0 && (
           <div className="bg-slate-900 rounded-xl border border-slate-700/50 p-4">
-            <h3 className="text-sm font-semibold text-white mb-3">P&L History</h3>
-            <div className="space-y-1.5">
+            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">P&L History</h3>
+            <div className="space-y-1">
               {dashboard.recentPnl.map((day, i) => (
                 <div key={i} className="flex items-center justify-between text-xs py-1 border-b border-slate-800 last:border-0">
-                  <span className="text-slate-400">{new Date(day.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</span>
-                  <div className="flex items-center gap-3">
-                    <span className="text-slate-500">{day.winCount}W/{day.lossCount}L</span>
-                    <span className={`font-bold ${pnlColor(day.netPnl)}`}>
+                  <span className="text-slate-500">{new Date(day.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-600 text-[10px]">{day.winCount}W/{day.lossCount}L</span>
+                    <span className={`font-bold font-mono ${pnlColor(day.netPnl)}`}>
                       {day.netPnl >= 0 ? '+' : ''}{day.netPnl.toFixed(0)}
                     </span>
                   </div>

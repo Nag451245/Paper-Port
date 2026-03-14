@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { TargetTracker } from '../services/target-tracker.service.js';
 import { EODReviewService } from '../services/eod-review.service.js';
 import { RiskService } from '../services/risk.service.js';
+import { AIAgentService } from '../services/ai-agent.service.js';
 import { chatCompletionJSON } from '../lib/openai.js';
 import { getPrisma } from '../lib/prisma.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
@@ -17,6 +18,7 @@ export default async function commandCenterRoutes(app: FastifyInstance) {
   const targetTracker = new TargetTracker(prisma);
   const eodReview = new EODReviewService(prisma);
   const riskService = new RiskService(prisma);
+  const aiAgentService = new AIAgentService(prisma);
 
   app.addHook('preHandler', authenticate);
 
@@ -26,38 +28,51 @@ export default async function commandCenterRoutes(app: FastifyInstance) {
     const { message } = request.body as { message: string };
     if (!message?.trim()) return reply.code(400).send({ error: 'Message required' });
 
-    // Store user message
     await prisma.commandMessage.create({
       data: { userId, role: 'user', content: message },
     });
 
-    // Parse intent via Gemini
     let intent: ChatIntent;
     try {
       intent = await chatCompletionJSON<ChatIntent>({
         messages: [
           {
             role: 'system',
-            content: `You are a trading command center assistant. Parse the user's message and determine intent.
+            content: `You are an AI trading operations assistant for "Mission Control". Parse the user's message and determine intent.
 Return JSON:
 {
-  "intent": "set_target" | "check_progress" | "stop_trading" | "resume_trading" | "show_report" | "change_instruments" | "status" | "general_chat",
+  "intent": "set_target" | "check_progress" | "stop_trading" | "resume_trading" | "show_report" | "change_instruments" | "status" | "bot_status" | "bot_instruct" | "explain_decision" | "list_signals" | "execute_signal" | "reject_signal" | "start_scanner" | "stop_scanner" | "start_agent" | "stop_agent" | "general_chat",
   "params": {
     For set_target: { "capitalBase": number, "profitTargetPct": number, "maxLossPct": number, "instruments": "ALL"|"EQUITY"|"FNO", "type": "DAILY"|"WEEKLY" }
     For change_instruments: { "instruments": "ALL"|"EQUITY"|"FNO" }
     For show_report: { "date": "YYYY-MM-DD" } (optional)
+    For bot_instruct: { "botName": string, "instruction": string }
+    For explain_decision: { "symbol": string }
+    For execute_signal: { "signalId": string, "symbol": string }
+    For reject_signal: { "signalId": string, "all": boolean }
     For general_chat: {}
   },
   "response": "Natural language response to show the user"
 }
 
 Examples:
-- "Make 2% daily on 10 lakh" -> set_target with capitalBase=1000000, profitTargetPct=2
+- "Make 2% daily on 10 lakh" -> set_target
 - "How are we doing today?" -> check_progress
 - "Stop all trading" -> stop_trading
 - "Show today's report" -> show_report
-- "Only trade F&O" -> change_instruments with instruments="FNO"
-- "Resume trading" -> resume_trading`,
+- "Only trade F&O" -> change_instruments
+- "Resume trading" -> resume_trading
+- "How are the bots doing?" -> bot_status
+- "Tell Scanner Bot to focus on IT sector" -> bot_instruct
+- "Why did you buy RELIANCE?" -> explain_decision with symbol="RELIANCE"
+- "Show pending signals" -> list_signals
+- "Execute the RELIANCE signal" -> execute_signal with symbol="RELIANCE"
+- "Reject all pending signals" -> reject_signal with all=true
+- "Start scanning" -> start_scanner
+- "Stop the scanner" -> stop_scanner
+- "Start the AI agent" -> start_agent
+- "Stop the agent" -> stop_agent
+- "What's the status?" -> status`,
           },
           { role: 'user', content: message },
         ],
@@ -70,7 +85,6 @@ Examples:
 
     let responseContent = intent.response;
 
-    // Execute intent
     try {
       switch (intent.intent) {
         case 'set_target': {
@@ -81,13 +95,7 @@ Examples:
           const instruments = p.instruments || 'ALL';
           const type = p.type || 'DAILY';
 
-          await targetTracker.createTarget(userId, {
-            type,
-            capitalBase,
-            profitTargetPct,
-            maxLossPct,
-            instruments,
-          });
+          await targetTracker.createTarget(userId, { type, capitalBase, profitTargetPct, maxLossPct, instruments });
 
           const profitAbs = capitalBase * (profitTargetPct / 100);
           const lossAbs = capitalBase * (maxLossPct / 100);
@@ -121,9 +129,7 @@ Examples:
         }
 
         case 'show_report': {
-          const reportDate = (intent.params as any).date
-            ? new Date((intent.params as any).date)
-            : new Date();
+          const reportDate = (intent.params as any).date ? new Date((intent.params as any).date) : new Date();
           const report = await eodReview.getReport(userId, reportDate);
           if (report) {
             const review = JSON.parse(report.decisionsReview as string);
@@ -138,10 +144,7 @@ Examples:
           const instruments = (intent.params as any).instruments || 'ALL';
           const target = await targetTracker.getActiveTarget(userId);
           if (target) {
-            await prisma.tradingTarget.update({
-              where: { id: target.id },
-              data: { instruments },
-            });
+            await prisma.tradingTarget.update({ where: { id: target.id }, data: { instruments } });
             responseContent = `Instruments updated to: ${instruments}. Bots will now focus on ${instruments === 'ALL' ? 'equity, F&O, and strategies' : instruments.toLowerCase()} trading.`;
           } else {
             responseContent = 'No active target. Set a target first.';
@@ -156,8 +159,7 @@ Examples:
             where: { userId, status: 'RUNNING' },
             select: { name: true, lastAction: true, totalPnl: true },
           });
-
-          responseContent = `System Status:\n`;
+          responseContent = 'System Status:\n';
           if (progress) {
             responseContent += `Target: ₹${progress.profitTargetAbs.toFixed(0)}/day | P&L: ₹${progress.currentPnl.toFixed(0)} | Aggression: ${progress.aggression}\n`;
           }
@@ -168,12 +170,175 @@ Examples:
           });
           break;
         }
+
+        case 'bot_status': {
+          const bots = await prisma.tradingBot.findMany({
+            where: { userId },
+            select: { id: true, name: true, role: true, status: true, lastAction: true, lastActionAt: true, totalPnl: true, winRate: true, totalTrades: true },
+          });
+          if (bots.length === 0) {
+            responseContent = 'No bots configured. Create bots from the Bot Team page.';
+          } else {
+            responseContent = `Bot Fleet (${bots.length} bots):\n`;
+            for (const b of bots) {
+              const pnl = Number(b.totalPnl);
+              const wr = Number(b.winRate);
+              responseContent += `\n${b.name} [${b.role}] — ${b.status}\n`;
+              responseContent += `  P&L: ${pnl >= 0 ? '+' : ''}₹${pnl.toFixed(0)} | Win Rate: ${(wr * 100).toFixed(0)}% | Trades: ${b.totalTrades}\n`;
+              responseContent += `  Last: ${b.lastAction || 'No activity'}\n`;
+            }
+          }
+          break;
+        }
+
+        case 'bot_instruct': {
+          const p = intent.params as any;
+          const botName = p.botName || '';
+          const instruction = p.instruction || message;
+          const bot = await prisma.tradingBot.findFirst({
+            where: { userId, name: { contains: botName, mode: 'insensitive' } },
+          });
+          if (bot) {
+            const assignUpdate: Record<string, unknown> = { lastAction: `Instructed: ${instruction}`, lastActionAt: new Date() };
+            if (/focus|sector|symbol|only trade/i.test(instruction)) {
+              assignUpdate.assignedSymbols = instruction;
+            }
+            await prisma.tradingBot.update({ where: { id: bot.id }, data: assignUpdate });
+            responseContent = `Instruction sent to ${bot.name}: "${instruction}". The bot will adapt on its next cycle.`;
+          } else {
+            responseContent = `No bot found matching "${botName}". Available bots: ${(await prisma.tradingBot.findMany({ where: { userId }, select: { name: true } })).map(b => b.name).join(', ') || 'none'}`;
+          }
+          break;
+        }
+
+        case 'explain_decision': {
+          const symbol = ((intent.params as any).symbol || '').toUpperCase();
+          const recentTrade = await prisma.trade.findFirst({
+            where: { portfolio: { userId }, symbol: { contains: symbol } },
+            orderBy: { entryTime: 'desc' },
+            select: { symbol: true, side: true, qty: true, entryPrice: true, exitPrice: true, netPnl: true, strategyTag: true, entryTime: true, exitTime: true },
+          });
+          const recentSignal = await prisma.aITradeSignal.findFirst({
+            where: { userId, symbol: { contains: symbol } },
+            orderBy: { createdAt: 'desc' },
+            select: { symbol: true, signalType: true, rationale: true, compositeScore: true, status: true, createdAt: true },
+          });
+          if (recentTrade) {
+            const pnl = Number(recentTrade.netPnl);
+            responseContent = `Last trade for ${recentTrade.symbol}:\n${recentTrade.side} ${recentTrade.qty} @ ₹${Number(recentTrade.entryPrice).toFixed(2)}`;
+            if (recentTrade.exitPrice) responseContent += ` → ₹${Number(recentTrade.exitPrice).toFixed(2)}`;
+            responseContent += `\nP&L: ${pnl >= 0 ? '+' : ''}₹${pnl.toFixed(0)} | Strategy: ${recentTrade.strategyTag || 'manual'}`;
+          }
+          if (recentSignal) {
+            responseContent += `\n\nLast signal: ${recentSignal.signalType} ${recentSignal.symbol} (${(Number(recentSignal.compositeScore) * 100).toFixed(0)}% confidence)\nRationale: ${recentSignal.rationale}\nStatus: ${recentSignal.status}`;
+          }
+          if (!recentTrade && !recentSignal) {
+            responseContent = `No recent trades or signals found for "${symbol}".`;
+          }
+          break;
+        }
+
+        case 'list_signals': {
+          const signals = await prisma.aITradeSignal.findMany({
+            where: { userId, status: 'PENDING' },
+            orderBy: { createdAt: 'desc' },
+            take: 10,
+            select: { id: true, symbol: true, signalType: true, compositeScore: true, rationale: true, createdAt: true },
+          });
+          if (signals.length === 0) {
+            responseContent = 'No pending signals. The AI agent will generate signals during market hours.';
+          } else {
+            responseContent = `Pending Signals (${signals.length}):\n`;
+            signals.forEach((s, i) => {
+              responseContent += `\n${i + 1}. ${s.signalType} ${s.symbol} — ${(Number(s.compositeScore) * 100).toFixed(0)}% confidence\n   ${s.rationale}\n   ID: ${s.id.slice(0, 8)}`;
+            });
+          }
+          break;
+        }
+
+        case 'execute_signal': {
+          const p = intent.params as any;
+          let signal;
+          if (p.signalId) {
+            signal = await prisma.aITradeSignal.findFirst({ where: { id: { startsWith: p.signalId }, userId, status: 'PENDING' } });
+          } else if (p.symbol) {
+            signal = await prisma.aITradeSignal.findFirst({ where: { userId, status: 'PENDING', symbol: { contains: p.symbol.toUpperCase() } }, orderBy: { createdAt: 'desc' } });
+          }
+          if (signal) {
+            try {
+              await aiAgentService.executeSignal(signal.id, userId);
+              responseContent = `Signal executed: ${signal.signalType} ${signal.symbol} (${(Number(signal.compositeScore) * 100).toFixed(0)}% confidence)`;
+            } catch (err) {
+              responseContent = `Failed to execute signal: ${(err as Error).message}`;
+            }
+          } else {
+            responseContent = 'No matching pending signal found.';
+          }
+          break;
+        }
+
+        case 'reject_signal': {
+          const p = intent.params as any;
+          if (p.all) {
+            const result = await prisma.aITradeSignal.updateMany({ where: { userId, status: 'PENDING' }, data: { status: 'REJECTED' } });
+            responseContent = `Rejected ${result.count} pending signal(s).`;
+          } else if (p.signalId) {
+            await prisma.aITradeSignal.updateMany({ where: { id: { startsWith: p.signalId }, userId, status: 'PENDING' }, data: { status: 'REJECTED' } });
+            responseContent = 'Signal rejected.';
+          } else {
+            responseContent = 'Specify a signal ID or say "reject all pending signals".';
+          }
+          break;
+        }
+
+        case 'start_scanner': {
+          const engine = (app as any).botEngine;
+          if (engine) {
+            await engine.startMarketScan(userId);
+            responseContent = 'Market scanner started. Scanning NSE, MCX & CDS markets every 5 minutes.';
+          } else {
+            responseContent = 'Bot engine not available.';
+          }
+          break;
+        }
+
+        case 'stop_scanner': {
+          const engine = (app as any).botEngine;
+          if (engine) {
+            engine.stopMarketScan();
+            responseContent = 'Market scanner stopped.';
+          } else {
+            responseContent = 'Bot engine not available.';
+          }
+          break;
+        }
+
+        case 'start_agent': {
+          await aiAgentService.startAgent(userId);
+          const engine = (app as any).botEngine;
+          if (engine) {
+            engine.startAgent(userId);
+            engine.startMarketScan(userId);
+          }
+          responseContent = 'AI Agent started. It will scan markets, generate signals, and trade based on your configured mode.';
+          break;
+        }
+
+        case 'stop_agent': {
+          await aiAgentService.stopAgent(userId);
+          const engine = (app as any).botEngine;
+          if (engine) {
+            engine.stopAgent(userId);
+            engine.stopMarketScan();
+          }
+          responseContent = 'AI Agent stopped. No new signals will be generated.';
+          break;
+        }
       }
     } catch (err) {
       responseContent = `Error: ${(err as Error).message}`;
     }
 
-    // Store assistant response
     await prisma.commandMessage.create({
       data: {
         userId,
@@ -243,5 +408,29 @@ Examples:
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
+  });
+
+  // ── Bot activity history ──
+  app.get('/activity', async (request) => {
+    const userId = getUserId(request);
+    const limit = Number((request.query as any).limit) || 50;
+    const messages = await prisma.botMessage.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      include: {
+        fromBot: { select: { id: true, name: true, role: true } },
+      },
+    });
+    return messages.map(m => ({
+      id: m.id,
+      botId: m.fromBotId,
+      botName: m.fromBot?.name ?? 'System',
+      botRole: m.fromBot?.role ?? 'SYSTEM',
+      activityType: m.messageType,
+      summary: m.content,
+      details: m.metadataJson ? JSON.parse(m.metadataJson) : null,
+      createdAt: m.createdAt.toISOString(),
+    }));
   });
 }

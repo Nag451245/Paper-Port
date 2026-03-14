@@ -390,6 +390,14 @@ export const learningApi = {
   getRegimeTimeline: (days = 30) => api.get(`/learning/regime-timeline?days=${days}`),
   getCalibration: () => api.get('/learning/calibration'),
   triggerNightly: () => api.post('/learning/trigger-nightly'),
+  exportData: () => api.get('/learning/export', { responseType: 'blob' }),
+  importData: (file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    return api.post('/learning/import', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
 };
 
 // ─── Telegram Notifications ─────────────────────────────────────────
@@ -431,6 +439,8 @@ export const commandApi = {
     api.get<any>(`/command/reports/${date}`),
   getMessages: (limit = 50) =>
     api.get<any[]>('/command/messages', { params: { limit } }),
+  getActivity: (limit = 50) =>
+    api.get<any[]>('/command/activity', { params: { limit } }),
 };
 
 // ─── Risk & Position Management ────────────────────────────────────

@@ -135,6 +135,21 @@ class WebSocketHub {
     this.broadcastToUser(userId, { type: 'bot_message', ...message });
   }
 
+  broadcastBotActivity(userId: string, activity: {
+    botId: string;
+    botName: string;
+    activityType: 'scan_complete' | 'signal_generated' | 'trade_executed' |
+                  'risk_blocked' | 'decision_made' | 'status_change';
+    summary: string;
+    details?: Record<string, unknown>;
+  }): void {
+    this.broadcastToUser(userId, {
+      type: 'bot_activity',
+      ...activity,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   broadcastNotification(userId: string, notification: { title: string; message: string; notificationType: string }): void {
     this.broadcastToUser(userId, { type: 'notification', ...notification });
   }

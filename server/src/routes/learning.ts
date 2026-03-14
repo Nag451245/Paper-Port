@@ -1,11 +1,14 @@
 import type { FastifyInstance } from 'fastify';
+import type { MultipartFile } from '@fastify/multipart';
 import { getPrisma } from '../lib/prisma.js';
 import { LearningEngine } from '../services/learning-engine.js';
+import { LearningStoreService } from '../services/learning-store.service.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 
 export async function learningRoutes(app: FastifyInstance): Promise<void> {
   const prisma = getPrisma();
   const learningEngine = new LearningEngine(prisma);
+  const learningStore = new LearningStoreService();
 
   app.addHook('onRequest', authenticate);
 
@@ -162,5 +165,38 @@ export async function learningRoutes(app: FastifyInstance): Promise<void> {
 
     const result = await learningEngine.runNightlyLearning();
     return { data: result };
+  });
+
+  app.get('/export', async (request, reply) => {
+    const userId = getUserId(request);
+    const gzBuffer = await learningStore.exportAll(userId, prisma);
+    const dateStr = new Date().toISOString().split('T')[0];
+
+    return reply
+      .header('Content-Type', 'application/gzip')
+      .header('Content-Disposition', `attachment; filename=capital-guard-learning-${dateStr}.cgdata.gz`)
+      .header('Content-Length', gzBuffer.length)
+      .send(gzBuffer);
+  });
+
+  app.post('/import', async (request, reply) => {
+    const userId = getUserId(request);
+    const file: MultipartFile | undefined = await request.file();
+    if (!file) throw app.httpErrors.badRequest('No file uploaded');
+
+    const chunks: Buffer[] = [];
+    for await (const chunk of file.file) {
+      chunks.push(chunk as Buffer);
+    }
+    const gzBuffer = Buffer.concat(chunks);
+
+    const result = await learningStore.importAll(userId, prisma, gzBuffer);
+    return reply.send({
+      data: {
+        message: 'Import complete',
+        filesRestored: result.filesRestored,
+        dbRecords: result.dbRecords,
+      },
+    });
   });
 }

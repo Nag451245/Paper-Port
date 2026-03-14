@@ -13,6 +13,7 @@ import { RiskService } from './risk.service.js';
 import { TWAPExecutor, selectOrderType } from './twap-executor.service.js';
 import { ExitCoordinator } from './exit-coordinator.service.js';
 import { emit } from '../lib/event-bus.js';
+import { wsHub } from '../lib/websocket.js';
 import { createChildLogger } from '../lib/logger.js';
 import { env } from '../config.js';
 
@@ -500,6 +501,13 @@ export class BotEngine {
               content: `⚠️ Strategy **${strategyId}** auto-paused. Rolling accuracy: ${(entry.accuracy * 100).toFixed(0)}% (last ${entry.outcomes.length} trades). Threshold: ${AUTO_PAUSE_ACCURACY * 100}%.`,
             },
           });
+          wsHub.broadcastBotActivity(userId, {
+            botId,
+            botName: bot?.name ?? 'Bot',
+            activityType: 'status_change',
+            summary: `Auto-paused: ${strategyId} rolling accuracy ${(entry.accuracy * 100).toFixed(0)}% below ${AUTO_PAUSE_ACCURACY * 100}% threshold`,
+            details: { strategyId, accuracy: entry.accuracy, threshold: AUTO_PAUSE_ACCURACY },
+          });
           return true;
         }
       }
@@ -952,6 +960,18 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         topLosers: losers.slice(0, 10),
         scanDurationMs: Date.now() - start,
       };
+
+      if (this.scannerUserId) {
+        const dur = ((Date.now() - start) / 1000).toFixed(1);
+        const topSigs = this.lastScanResult.signals.slice(0, 3).map(s => s.symbol).join(', ');
+        wsHub.broadcastBotActivity(this.scannerUserId, {
+          botId: 'scanner',
+          botName: 'Market Scanner',
+          activityType: 'scan_complete',
+          summary: `Scanned ${uniqueSymbols.length} stocks in ${dur}s — ${signals.length} signal(s) found${topSigs ? `: ${topSigs}` : ''}`,
+          details: { scannedCount: uniqueSymbols.length, signalCount: signals.length, durationSec: dur, topSignals: topSigs },
+        });
+      }
     } catch {
       /* scan cycle failed — will retry */
     } finally {
@@ -1495,6 +1515,15 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
             });
             rustSignals = scanResult.signals ?? [];
             log.info({ botId, signalCount: rustSignals.length, regime }, 'Rust scan completed');
+            if (rustSignals.length > 0) {
+              wsHub.broadcastBotActivity(userId, {
+                botId,
+                botName: bot.name,
+                activityType: 'scan_complete',
+                summary: `Rust engine scan: ${rustSignals.length} signal(s) found (regime: ${regime ?? 'unknown'})`,
+                details: { signalCount: rustSignals.length, regime, symbols: rustSignals.map(s => s.symbol) },
+              });
+            }
           } catch (err) {
             console.error(`[BotEngine] Bot ${botId}: Rust scan error:`, (err as Error).message);
             rustSignals = [];
@@ -1690,6 +1719,15 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
               : `Failed ${sig.direction} ${sig.symbol}: ${result.message}`,
           },
         });
+        wsHub.broadcastBotActivity(userId, {
+          botId,
+          botName: bot.name,
+          activityType: result.success ? 'trade_executed' : 'risk_blocked',
+          summary: result.success
+            ? `Executed ${sig.direction} ${sig.symbol} @ ₹${sig.entry} (${(sig.confidence * 100).toFixed(0)}% confidence)`
+            : `Blocked ${sig.direction} ${sig.symbol}: ${result.message}`,
+          details: { symbol: sig.symbol, direction: sig.direction, entry: sig.entry, stopLoss: sig.stop_loss, target: sig.target, confidence: sig.confidence },
+        });
       } else {
         await this.prisma.botMessage.create({
           data: {
@@ -1698,6 +1736,13 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
             messageType: 'signal',
             content: `${sig.direction} Signal: ${sig.symbol} @ ₹${sig.entry} (${(finalConfidence * 100).toFixed(0)}% confidence) | SL: ₹${sig.stop_loss} | Target: ₹${sig.target}`,
           },
+        });
+        wsHub.broadcastBotActivity(userId, {
+          botId,
+          botName: bot.name,
+          activityType: 'signal_generated',
+          summary: `${sig.direction} signal: ${sig.symbol} @ ₹${sig.entry} (${(finalConfidence * 100).toFixed(0)}% confidence) | SL: ₹${sig.stop_loss} | Target: ₹${sig.target}`,
+          details: { symbol: sig.symbol, direction: sig.direction, entry: sig.entry, stopLoss: sig.stop_loss, target: sig.target, confidence: finalConfidence },
         });
       }
     }
@@ -2564,6 +2609,13 @@ Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted
     const riskResult = await this.riskService.preTradeCheck(bot.userId, signal.symbol, signal.direction, 1, estimatedPrice);
     if (!riskResult.allowed) {
       log.info({ symbol: signal.symbol, violations: riskResult.violations }, 'Pipeline signal rejected by risk');
+      wsHub.broadcastBotActivity(bot.userId, {
+        botId: bot.botId,
+        botName: 'Pipeline',
+        activityType: 'risk_blocked',
+        summary: `${signal.direction} ${signal.symbol} blocked by risk: ${riskResult.violations?.join(', ') ?? 'limit exceeded'}`,
+        details: { symbol: signal.symbol, direction: signal.direction, violations: riskResult.violations },
+      });
       return;
     }
 
@@ -2623,6 +2675,13 @@ Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted
         strategyTag: `PIPELINE_${signal.strategy}`,
       });
       log.info({ symbol: signal.symbol, qty, ltp, confidence: signal.confidence }, 'Pipeline BUY signal executed');
+      wsHub.broadcastBotActivity(bot.userId, {
+        botId: bot.botId,
+        botName: 'Pipeline',
+        activityType: 'trade_executed',
+        summary: `BUY ${signal.symbol}: ${qty} shares @ ₹${ltp.toFixed(2)} (confidence: ${(signal.confidence * 100).toFixed(0)}%)`,
+        details: { symbol: signal.symbol, qty, ltp, confidence: signal.confidence, strategy: signal.strategy },
+      });
     } catch (err) {
       log.error({ err, symbol: signal.symbol }, 'Failed to execute pipeline signal');
     }

@@ -4,6 +4,7 @@ import jwt from '@fastify/jwt';
 import sensible from '@fastify/sensible';
 import rateLimit from '@fastify/rate-limit';
 import helmet from '@fastify/helmet';
+import multipart from '@fastify/multipart';
 import { env } from './config.js';
 import { authRoutes } from './routes/auth.js';
 import { portfolioRoutes } from './routes/portfolio.js';
@@ -111,6 +112,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(jwt, {
     secret: env.JWT_SECRET,
     sign: { expiresIn: env.JWT_EXPIRES_IN },
+  });
+
+  await app.register(multipart, {
+    limits: { fileSize: 50 * 1024 * 1024 },
   });
 
   app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_req, body, done) => {

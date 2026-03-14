@@ -44,3 +44,6 @@ server/bin/
 
 # Local Netlify folder
 .netlify
+
+# Learning data (runtime)
+learning/
