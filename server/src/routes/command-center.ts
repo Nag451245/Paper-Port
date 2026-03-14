@@ -83,7 +83,7 @@ Examples:
       intent = { intent: 'general_chat', params: {}, response: 'I understand. Let me help you with that.' };
     }
 
-    let responseContent = intent.response;
+    let responseContent = intent.response || 'I understand your request. Let me help you with that.';
 
     try {
       switch (intent.intent) {
@@ -334,19 +334,42 @@ Examples:
           responseContent = 'AI Agent stopped. No new signals will be generated.';
           break;
         }
+
+        default: {
+          if (!responseContent || responseContent === 'I understand your request. Let me help you with that.') {
+            const recentTrades = await prisma.trade.findMany({
+              where: { portfolio: { userId } },
+              orderBy: { exitTime: 'desc' },
+              take: 20,
+              select: { symbol: true, side: true, netPnl: true, exitTime: true, strategyTag: true },
+            });
+            if (recentTrades.length > 0) {
+              const totalPnl = recentTrades.reduce((s, t) => s + Number(t.netPnl), 0);
+              const wins = recentTrades.filter(t => Number(t.netPnl) > 0).length;
+              responseContent = `Here's a quick summary of your recent trading:\n\nLast ${recentTrades.length} trades: ${wins} wins, ${recentTrades.length - wins} losses\nTotal P&L: ${totalPnl >= 0 ? '+' : ''}₹${totalPnl.toFixed(0)}\nWin rate: ${((wins / recentTrades.length) * 100).toFixed(0)}%\n\nFor a detailed breakdown, say "show today's report" or "check progress". To review bot performance, try "how are the bots doing?"`;
+            } else {
+              responseContent = 'No recent trading activity found. Set a target to get started — try "Make 1% daily on 10 lakh".';
+            }
+          }
+          break;
+        }
       }
     } catch (err) {
       responseContent = `Error: ${(err as Error).message}`;
     }
 
-    await prisma.commandMessage.create({
-      data: {
-        userId,
-        role: 'assistant',
-        content: responseContent,
-        metadata: JSON.stringify({ intent: intent.intent, params: intent.params }),
-      },
-    });
+    try {
+      await prisma.commandMessage.create({
+        data: {
+          userId,
+          role: 'assistant',
+          content: responseContent,
+          metadata: JSON.stringify({ intent: intent.intent, params: intent.params }),
+        },
+      });
+    } catch (err) {
+      console.error('[CommandCenter] Failed to save response:', (err as Error).message);
+    }
 
     return { role: 'assistant', content: responseContent, intent: intent.intent };
   });
