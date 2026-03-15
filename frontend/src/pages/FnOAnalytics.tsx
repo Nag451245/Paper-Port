@@ -467,14 +467,16 @@ export default function FnOAnalytics() {
     };
   }, [expiry, vixData, maxPainValue, spotPrice, optionChain, atmStrike]);
 
-  // Support / Resistance from OI — filter to strikes within ±5% of spot
-  // to avoid far-OTM hedging strikes skewing the levels
+  // Support / Resistance from OI — use same near-ATM range as heatmap
+  // ±15 strikes from ATM gives actionable intraday levels
   const nearATMChain = useMemo(() => {
-    if (spotPrice === 0) return optionChain;
-    const lo = spotPrice * 0.95;
-    const hi = spotPrice * 1.05;
-    return optionChain.filter(s => s.strike >= lo && s.strike <= hi);
-  }, [optionChain, spotPrice]);
+    if (optionChain.length === 0 || spotPrice === 0) return optionChain;
+    const atmIdx = optionChain.findIndex(s => s.strike >= atmStrike);
+    if (atmIdx < 0) return optionChain;
+    const start = Math.max(0, atmIdx - 15);
+    const end = Math.min(optionChain.length, atmIdx + 16);
+    return optionChain.slice(start, end);
+  }, [optionChain, spotPrice, atmStrike]);
 
   const topCallOIStrike = useMemo(() => {
     let max = 0, strike = 0;
