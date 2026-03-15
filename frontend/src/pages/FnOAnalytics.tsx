@@ -467,18 +467,26 @@ export default function FnOAnalytics() {
     };
   }, [expiry, vixData, maxPainValue, spotPrice, optionChain, atmStrike]);
 
-  // Support / Resistance from OI
+  // Support / Resistance from OI — filter to strikes within ±5% of spot
+  // to avoid far-OTM hedging strikes skewing the levels
+  const nearATMChain = useMemo(() => {
+    if (spotPrice === 0) return optionChain;
+    const lo = spotPrice * 0.95;
+    const hi = spotPrice * 1.05;
+    return optionChain.filter(s => s.strike >= lo && s.strike <= hi);
+  }, [optionChain, spotPrice]);
+
   const topCallOIStrike = useMemo(() => {
     let max = 0, strike = 0;
-    for (const s of optionChain) { if (s.callOI > max) { max = s.callOI; strike = s.strike; } }
+    for (const s of nearATMChain) { if (s.callOI > max) { max = s.callOI; strike = s.strike; } }
     return strike;
-  }, [optionChain]);
+  }, [nearATMChain]);
 
   const topPutOIStrike = useMemo(() => {
     let max = 0, strike = 0;
-    for (const s of optionChain) { if (s.putOI > max) { max = s.putOI; strike = s.strike; } }
+    for (const s of nearATMChain) { if (s.putOI > max) { max = s.putOI; strike = s.strike; } }
     return strike;
-  }, [optionChain]);
+  }, [nearATMChain]);
 
   // Narrative
   const narrative = useMemo(
