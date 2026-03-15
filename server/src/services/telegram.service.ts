@@ -1,16 +1,79 @@
 import type { PrismaClient } from '@prisma/client';
 
 const TELEGRAM_API = 'https://api.telegram.org/bot';
+const POLL_INTERVAL = 10_000;
 
 export class TelegramService {
   private botToken: string | null;
+  private lastUpdateId = 0;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private prisma: PrismaClient) {
     this.botToken = process.env.TELEGRAM_BOT_TOKEN ?? null;
+    if (this.botToken) this.startPolling();
   }
 
   get isConfigured(): boolean {
     return !!this.botToken;
+  }
+
+  stopPolling(): void {
+    if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
+  }
+
+  private startPolling(): void {
+    this.pollTimer = setInterval(() => this.pollUpdates(), POLL_INTERVAL);
+    this.pollUpdates();
+  }
+
+  private async pollUpdates(): Promise<void> {
+    if (!this.botToken) return;
+    try {
+      const res = await fetch(
+        `${TELEGRAM_API}${this.botToken}/getUpdates?offset=${this.lastUpdateId + 1}&timeout=0&allowed_updates=["message"]`,
+      );
+      const data = await res.json() as {
+        ok: boolean;
+        result?: Array<{
+          update_id: number;
+          message?: { chat: { id: number; first_name?: string }; text?: string };
+        }>;
+      };
+      if (!data.ok || !data.result) return;
+
+      for (const update of data.result) {
+        this.lastUpdateId = update.update_id;
+        const msg = update.message;
+        if (!msg?.text) continue;
+
+        const chatId = String(msg.chat.id);
+        const name = msg.chat.first_name ?? 'there';
+
+        if (msg.text === '/start') {
+          await this.sendMessage(chatId,
+            `👋 Hello ${name}!\n\n` +
+            `Your <b>Chat ID</b> is:\n<code>${chatId}</code>\n\n` +
+            `📋 Copy this number, go to <b>PaperPort Settings → Telegram</b>, paste it, and click <b>Connect</b>.`,
+          );
+        } else if (msg.text === '/status') {
+          const user = await this.prisma.user.findFirst({
+            where: { telegramChatId: chatId },
+            select: { fullName: true, notifyTelegram: true },
+          });
+          if (user) {
+            await this.sendMessage(chatId,
+              `✅ Connected as <b>${user.fullName}</b>\nNotifications: ${user.notifyTelegram ? 'ON' : 'OFF'}`,
+            );
+          } else {
+            await this.sendMessage(chatId,
+              `⚠️ Not connected to any PaperPort account.\nPaste your Chat ID (<code>${chatId}</code>) in Settings to connect.`,
+            );
+          }
+        }
+      }
+    } catch {
+      // silent — poll will retry
+    }
   }
 
   async sendMessage(chatId: string, text: string, parseMode: 'HTML' | 'Markdown' = 'HTML'): Promise<boolean> {
