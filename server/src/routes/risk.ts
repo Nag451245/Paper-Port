@@ -90,15 +90,18 @@ export async function riskRoutes(app: FastifyInstance): Promise<void> {
 
   // ── Intraday Management ──
   app.post('/intraday/square-off-all', async (request, reply) => {
-    const results = await intradayManager.squareOffAllIntraday();
+    const userId = getUserId(request);
+    const results = await intradayManager.squareOffAllIntraday(userId);
     return reply.send({ squaredOff: results.length, details: results });
   });
 
   app.post('/intraday/square-off/:positionId', async (request, reply) => {
+    const userId = getUserId(request);
     const { positionId } = request.params as any;
     try {
-      const result = await intradayManager.squareOffPosition(positionId);
-      return reply.send(result ?? { error: 'Position not found' });
+      const result = await intradayManager.squareOffPosition(positionId, 'Manual square-off', userId);
+      if (!result) return reply.code(404).send({ error: 'Position not found or not owned by you' });
+      return reply.send(result);
     } catch (err: any) {
       return reply.code(400).send({ error: err.message });
     }
@@ -195,10 +198,20 @@ export async function riskRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/stop-loss/update', async (request, reply) => {
+    const userId = getUserId(request);
     const { positionId, newStopPrice } = request.body as any;
     if (!positionId || !newStopPrice) {
       return reply.code(400).send({ error: 'positionId and newStopPrice required' });
     }
+
+    const position = await prisma.position.findUnique({
+      where: { id: positionId },
+      include: { portfolio: { select: { userId: true } } },
+    });
+    if (!position || position.portfolio.userId !== userId) {
+      return reply.code(404).send({ error: 'Position not found or not owned by you' });
+    }
+
     const monitor = (app as any).stopLossMonitor;
     if (!monitor) return reply.code(503).send({ error: 'Stop-loss monitor not active' });
     monitor.updateStopLoss(positionId, Number(newStopPrice));
@@ -218,7 +231,7 @@ export async function riskRoutes(app: FastifyInstance): Promise<void> {
 
     botEngine.activateKillSwitch();
 
-    const squaredOff = await intradayManager.squareOffAllIntraday();
+    const squaredOff = await intradayManager.squareOffAllIntraday(userId);
 
     await audit.log('KILL_SWITCH_ACTIVATED', 'System', undefined, userId, {
       squaredOffCount: squaredOff.length,

@@ -131,7 +131,9 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
     try {
       const { portfolioId } = request.params as { portfolioId: string };
       const userId = getUserId(request);
-      const summary = await service.getSummary(portfolioId, userId);
+      const priceFeed = (app as any).priceFeedService;
+      const priceCache = priceFeed?.getAllLastPrices?.() ?? undefined;
+      const summary = await service.getSummary(portfolioId, userId, priceCache);
       return reply.send(summary);
     } catch (err) {
       if (err instanceof PortfolioError) return reply.code(err.statusCode).send({ error: err.message });

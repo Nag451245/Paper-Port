@@ -52,7 +52,12 @@ export class PortfolioService {
     return portfolio;
   }
 
-  async getSummary(portfolioId: string, userId: string): Promise<PortfolioSummary> {
+  /**
+   * @param priceCache — pre-fetched LTP map (symbol → price) from PriceFeedService.
+   *   Symbols found here skip the Breeze bridge round-trip entirely.
+   *   Symbols NOT found fall back to individual getQuote() calls with a 5s timeout.
+   */
+  async getSummary(portfolioId: string, userId: string, priceCache?: Record<string, number>): Promise<PortfolioSummary> {
     const portfolio = await this.getById(portfolioId, userId);
     const initialCapital = Number(portfolio.initialCapital);
     const availableCash = Number(portfolio.currentNav);
@@ -60,6 +65,10 @@ export class PortfolioService {
 
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
+
+    const uncachedPositions = priceCache
+      ? openPositions.filter((pos: any) => !(pos.symbol in priceCache) || priceCache[pos.symbol] <= 0)
+      : openPositions;
 
     const [allTrades, todayTrades, ltpResults] = await Promise.all([
       this.prisma.trade.findMany({
@@ -71,7 +80,7 @@ export class PortfolioService {
         select: { netPnl: true },
       }),
       Promise.allSettled(
-        openPositions.map(async (pos: any) => {
+        uncachedPositions.map(async (pos: any) => {
           try {
             const quote = await Promise.race([
               this.marketData.getQuote(pos.symbol, pos.exchange ?? 'NSE'),
@@ -89,6 +98,13 @@ export class PortfolioService {
     const todayRealizedPnl = todayTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
 
     const ltpMap = new Map<string, number>();
+
+    if (priceCache) {
+      for (const [sym, ltp] of Object.entries(priceCache)) {
+        if (ltp > 0) ltpMap.set(sym, ltp);
+      }
+    }
+
     for (const r of ltpResults) {
       if (r.status === 'fulfilled' && r.value.ltp > 0) {
         ltpMap.set(r.value.symbol, r.value.ltp);

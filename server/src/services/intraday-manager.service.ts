@@ -192,19 +192,27 @@ export class IntradayManager {
    * Square off ALL open positions at EOD. Delivery-tagged positions are excluded
    * (they survive overnight). Everything else — AI-BOT, RUST_ENGINE, ML_SCORED,
    * INTRADAY, etc. — gets closed.
+   *
+   * @param userId — when provided, only positions belonging to this user are closed.
+   *                  When omitted (system calls like EOD timer), all users' positions are closed.
    */
-  async squareOffAllIntraday(): Promise<SquareOffResult[]> {
+  async squareOffAllIntraday(userId?: string): Promise<SquareOffResult[]> {
+    const portfolioFilter = userId
+      ? { portfolio: { userId } }
+      : {};
+
     const openPositions = await this.prisma.position.findMany({
       where: {
         status: 'OPEN',
         NOT: { strategyTag: { contains: 'DELIVERY' } },
+        ...portfolioFilter,
       },
       include: { portfolio: { select: { userId: true } } },
     });
 
     if (openPositions.length === 0) return [];
 
-    log.info({ count: openPositions.length }, 'Squaring off all non-delivery positions at EOD');
+    log.info({ count: openPositions.length, userId: userId ?? 'ALL' }, 'Squaring off non-delivery positions');
     const results: SquareOffResult[] = [];
 
     for (const pos of openPositions) {
@@ -219,13 +227,22 @@ export class IntradayManager {
     return results;
   }
 
-  async squareOffPosition(positionId: string, reason = 'Manual square-off'): Promise<SquareOffResult | null> {
+  /**
+   * @param userId — when provided, verifies the position belongs to this user
+   *                  before executing. Returns null if ownership check fails.
+   */
+  async squareOffPosition(positionId: string, reason = 'Manual square-off', userId?: string): Promise<SquareOffResult | null> {
     const position = await this.prisma.position.findUnique({
       where: { id: positionId },
       include: { portfolio: { select: { userId: true } } },
     });
 
     if (!position || position.status !== 'OPEN') return null;
+
+    if (userId && position.portfolio.userId !== userId) {
+      log.warn({ positionId, requestedBy: userId, ownedBy: position.portfolio.userId }, 'IDOR blocked: position ownership mismatch');
+      return null;
+    }
 
     let exitPrice = Number(position.avgEntryPrice);
 
