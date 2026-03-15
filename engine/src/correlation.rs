@@ -36,6 +36,48 @@ struct PairAnalysis {
     hedge_ratio: f64,
     hurst_exponent: f64,
     is_mean_reverting: bool,
+    kalman_confidence: f64,
+}
+
+struct KalmanState {
+    beta: f64,
+    p: f64,
+    q: f64,
+    r: f64,
+}
+
+impl KalmanState {
+    fn new() -> Self {
+        KalmanState {
+            beta: 1.0,
+            p: 1.0,
+            q: 0.0001,
+            r: 0.01,
+        }
+    }
+
+    fn update(&mut self, x: f64, y: f64) -> f64 {
+        self.p += self.q;
+
+        let k = self.p * x / (x * self.p * x + self.r);
+        let innovation = y - self.beta * x;
+        self.beta += k * innovation;
+        self.p = (1.0 - k * x) * self.p;
+
+        self.beta
+    }
+}
+
+fn kalman_hedge_ratio(prices_a: &[f64], prices_b: &[f64]) -> (f64, Vec<f64>, f64) {
+    let mut kf = KalmanState::new();
+    let mut hedge_ratios = Vec::with_capacity(prices_a.len());
+
+    for i in 0..prices_a.len() {
+        let ratio = kf.update(prices_b[i], prices_a[i]);
+        hedge_ratios.push(ratio);
+    }
+
+    (kf.beta, hedge_ratios, kf.p)
 }
 
 pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -60,8 +102,8 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
 
         let corr = pearson_correlation(a, b);
 
-        let hedge = ols_slope(&log_b, &log_a);
-        let spread: Vec<f64> = (0..n).map(|i| log_a[i] - hedge * log_b[i]).collect();
+        let (hedge, hedge_history, hedge_uncertainty) = kalman_hedge_ratio(&log_a, &log_b);
+        let spread: Vec<f64> = (0..n).map(|i| log_a[i] - hedge_history[i] * log_b[i]).collect();
 
         let spread_mean = spread.iter().sum::<f64>() / n as f64;
         let spread_var = spread.iter().map(|s| (s - spread_mean).powi(2)).sum::<f64>() / n as f64;
@@ -102,6 +144,7 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
             hedge_ratio: round4(hedge),
             hurst_exponent: round4(hurst),
             is_mean_reverting: is_mr,
+            kalman_confidence: round4(1.0 / (1.0 + hedge_uncertainty)),
         });
     }
 
@@ -282,5 +325,18 @@ mod tests {
         })).unwrap();
         let out: CorrelationResult = serde_json::from_value(result).unwrap();
         assert_eq!(out.pairs.len(), 0, "pairs with <20 prices should be skipped");
+    }
+
+    #[test]
+    fn test_kalman_hedge_ratio_adapts() {
+        let a: Vec<f64> = (1..=100).map(|i| (100.0 + i as f64 * 0.5).ln()).collect();
+        let b: Vec<f64> = (1..=100).map(|i| (200.0 + i as f64 * 1.0).ln()).collect();
+        let (hedge, history, uncertainty) = kalman_hedge_ratio(&a, &b);
+        assert!(hedge > 0.0, "hedge ratio should be positive");
+        assert!(history.len() == 100, "should have 100 hedge ratio estimates");
+        assert!(uncertainty < 1.0, "uncertainty should decrease over time");
+        let early_var: f64 = history[..10].windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f64>();
+        let late_var: f64 = history[90..].windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f64>();
+        assert!(late_var <= early_var + 0.01, "later estimates should be more stable");
     }
 }

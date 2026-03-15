@@ -167,3 +167,135 @@ export interface CalibrateResponse {
 export async function mlCalibrate(req: CalibrateRequest): Promise<CalibrateResponse> {
   return mlFetch<CalibrateResponse>('/calibrate', req);
 }
+
+export interface MLPredictReturnsResponse {
+  predictions: number[];
+  confidence: number;
+  available: boolean;
+}
+
+export interface MLRLActionResponse {
+  action: number;
+  rl_suggestion?: number;
+  mode: string;
+  available: boolean;
+}
+
+export async function mlRLAction(state: Record<string, number>): Promise<MLRLActionResponse> {
+  const resp = await fetch(`${ML_SERVICE_URL}/rl-action`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state }),
+    signal: AbortSignal.timeout(3000),
+  });
+  if (!resp.ok) return { action: 0.1, mode: 'unavailable', available: false };
+  return resp.json() as Promise<MLRLActionResponse>;
+}
+
+export async function mlPredictReturns(features: Record<string, number>[]): Promise<MLPredictReturnsResponse> {
+  const resp = await fetch(`${ML_SERVICE_URL}/predict-returns`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ features }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!resp.ok) return { predictions: [0], confidence: 0, available: false };
+  return resp.json() as Promise<MLPredictReturnsResponse>;
+}
+
+export interface MLSequenceScoreResponse {
+  probability: number;
+  embedding: number[];
+  available: boolean;
+}
+
+export async function mlScoreSequence(bars: Array<Record<string, number>>): Promise<MLSequenceScoreResponse> {
+  try {
+    const resp = await fetch(`${ML_SERVICE_URL}/score-sequence`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bars, seq_len: 60 }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!resp.ok) return { probability: 0.5, embedding: [], available: false };
+    return resp.json() as Promise<MLSequenceScoreResponse>;
+  } catch {
+    return { probability: 0.5, embedding: [], available: false };
+  }
+}
+
+export interface MLTFTScoreResponse {
+  probability: number;
+  expected_return: number;
+  attention_weights: number[];
+  feature_importance: Record<string, number>;
+  available: boolean;
+}
+
+export async function mlScoreTFT(
+  staticFeatures: Record<string, number>,
+  sequence: Array<Record<string, number>>,
+): Promise<MLTFTScoreResponse> {
+  try {
+    const resp = await fetch(`${ML_SERVICE_URL}/score-tft`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ static_features: staticFeatures, sequence, seq_len: 30 }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!resp.ok) return { probability: 0.5, expected_return: 0, attention_weights: [], feature_importance: {}, available: false };
+    return resp.json() as Promise<MLTFTScoreResponse>;
+  } catch {
+    return { probability: 0.5, expected_return: 0, attention_weights: [], feature_importance: {}, available: false };
+  }
+}
+
+export interface MLEnsembleScoreResponse {
+  ensemble_probability: number;
+  model_weights: Record<string, number>;
+  disagreement_score: number;
+  confidence: number;
+  available: boolean;
+}
+
+export async function mlEnsembleScore(modelOutputs: Record<string, number>): Promise<MLEnsembleScoreResponse> {
+  try {
+    const resp = await fetch(`${ML_SERVICE_URL}/ensemble-score`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model_outputs: modelOutputs }),
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!resp.ok) return { ensemble_probability: 0.5, model_weights: {}, disagreement_score: 0, confidence: 0.5, available: false };
+    return resp.json() as Promise<MLEnsembleScoreResponse>;
+  } catch {
+    return { ensemble_probability: 0.5, model_weights: {}, disagreement_score: 0, confidence: 0.5, available: false };
+  }
+}
+
+export interface MLOnlineUpdateResponse {
+  status: string;
+  sgd_updates: number;
+  xgb_updates: number;
+  trade_id: string;
+  drift_detected: boolean;
+}
+
+export async function mlOnlineUpdate(
+  features: Record<string, number>,
+  outcome: number,
+  tradeId: string,
+): Promise<MLOnlineUpdateResponse> {
+  try {
+    const resp = await fetch(`${ML_SERVICE_URL}/online-update`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ features, outcome, trade_id: tradeId }),
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!resp.ok) return { status: 'failed', sgd_updates: 0, xgb_updates: 0, trade_id: tradeId, drift_detected: false };
+    return resp.json() as Promise<MLOnlineUpdateResponse>;
+  } catch {
+    return { status: 'failed', sgd_updates: 0, xgb_updates: 0, trade_id: tradeId, drift_detected: false };
+  }
+}

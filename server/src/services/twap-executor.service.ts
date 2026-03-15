@@ -166,18 +166,125 @@ export class TWAPExecutor {
   }
 
   async executeVWAP(config: VWAPConfig): Promise<ReturnType<TWAPExecutor['executeTWAP']>> {
+    const executionId = `vwap_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const execution = { config, slices: [] as SliceResult[], cancelled: false };
+    this.activeExecutions.set(executionId, execution);
+
     const volumeProfile = config.volumeProfile ?? this.getDefaultVolumeProfile(config.numSlices);
     const totalWeight = volumeProfile.reduce((a, b) => a + b, 0);
     const normalizedWeights = volumeProfile.map(w => w / totalWeight);
 
-    const sliceQtys = normalizedWeights.map(w => Math.max(1, Math.round(w * config.totalQty)));
-    const sliceSum = sliceQtys.reduce((a, b) => a + b, 0);
-    if (sliceSum !== config.totalQty) {
-      sliceQtys[sliceQtys.length - 1] += config.totalQty - sliceSum;
+    const quote = await this.marketData.getQuote(config.symbol, config.exchange);
+    const idealPrice = quote.ltp;
+    const decisionPrice = idealPrice;
+
+    if (idealPrice <= 0) {
+      throw new Error(`Cannot start adaptive VWAP: no price for ${config.symbol}`);
     }
 
-    log.info({ symbol: config.symbol, sliceQtys }, 'VWAP execution with volume-weighted slices');
-    return this.executeTWAP({ ...config, numSlices: sliceQtys.length });
+    const intervalMs = (config.durationMinutes * 60_000) / config.numSlices;
+    let remainingQty = config.totalQty;
+    let prevVolume = quote.volume ?? 0;
+    let expectedCumVolume = 0;
+    let actualCumVolume = 0;
+
+    log.info({ executionId, symbol: config.symbol, totalQty: config.totalQty, numSlices: config.numSlices }, 'Adaptive VWAP started');
+
+    for (let i = 0; i < config.numSlices; i++) {
+      if (execution.cancelled || remainingQty <= 0) break;
+      if (!this.calendar.isMarketOpen(config.exchange)) {
+        log.warn({ executionId, sliceIndex: i }, 'Market closed — stopping VWAP');
+        break;
+      }
+
+      let baseSliceQty = Math.max(1, Math.round(normalizedWeights[i] * config.totalQty));
+
+      try {
+        const currentQuote = await this.marketData.getQuote(config.symbol, config.exchange);
+        const currentPrice = currentQuote.ltp;
+        const currentVolume = currentQuote.volume ?? prevVolume;
+        const volumeDelta = Math.max(0, currentVolume - prevVolume);
+
+        expectedCumVolume += normalizedWeights[i] * (currentVolume > 0 ? currentVolume : 100000);
+        actualCumVolume += volumeDelta;
+
+        const volumeRatio = expectedCumVolume > 0 ? actualCumVolume / expectedCumVolume : 1.0;
+        const volumeAdj = Math.max(0.5, Math.min(2.0, volumeRatio));
+
+        let priceUrgency = 1.0;
+        const priceMovePct = (currentPrice - decisionPrice) / decisionPrice;
+        if ((config.side === 'BUY' && priceMovePct > 0.005) || (config.side === 'SELL' && priceMovePct < -0.005)) {
+          priceUrgency = 1.5;
+        } else if ((config.side === 'BUY' && priceMovePct < -0.003) || (config.side === 'SELL' && priceMovePct > 0.003)) {
+          priceUrgency = 0.7;
+        }
+
+        let adaptedQty = Math.round(baseSliceQty * volumeAdj * priceUrgency);
+        adaptedQty = Math.min(adaptedQty, remainingQty);
+        adaptedQty = Math.max(1, adaptedQty);
+
+        const limitPrice = config.side === 'BUY'
+          ? currentPrice * (1 + 0.001)
+          : currentPrice * (1 - 0.001);
+
+        const orderInput: TWAPPlaceOrderInput = {
+          portfolioId: config.portfolioId,
+          symbol: config.symbol,
+          side: config.side,
+          orderType: 'LIMIT',
+          qty: adaptedQty,
+          price: Number(limitPrice.toFixed(2)),
+          instrumentToken: config.symbol,
+          exchange: config.exchange,
+          strategyTag: config.strategyTag,
+        };
+
+        const order = await this.tradeService.placeOrder(config.userId, orderInput);
+        const fillPrice = Number(order.avgFillPrice ?? limitPrice);
+
+        execution.slices.push({
+          sliceIndex: i, qty: adaptedQty, price: fillPrice,
+          status: 'FILLED', timestamp: new Date().toISOString(),
+        });
+
+        remainingQty -= adaptedQty;
+        prevVolume = currentVolume;
+
+        log.info({
+          executionId, sliceIndex: i, baseQty: baseSliceQty, adaptedQty,
+          volumeAdj: volumeAdj.toFixed(2), priceUrgency: priceUrgency.toFixed(2),
+          fillPrice, remainingQty,
+        }, 'Adaptive VWAP slice filled');
+      } catch (err) {
+        execution.slices.push({
+          sliceIndex: i, qty: baseSliceQty, price: 0,
+          status: 'FAILED', timestamp: new Date().toISOString(),
+        });
+        log.error({ executionId, sliceIndex: i, err }, 'Adaptive VWAP slice failed');
+      }
+
+      if (i < config.numSlices - 1 && remainingQty > 0) {
+        await new Promise(resolve => setTimeout(resolve, intervalMs));
+      }
+    }
+
+    const filledSlices = execution.slices.filter(s => s.status === 'FILLED');
+    const totalFilled = filledSlices.reduce((s, sl) => s + sl.qty, 0);
+    const totalCost = filledSlices.reduce((s, sl) => s + sl.qty * sl.price, 0);
+    const avgFillPrice = totalFilled > 0 ? totalCost / totalFilled : 0;
+    const slippageBps = idealPrice > 0 ? Math.abs(avgFillPrice - idealPrice) / idealPrice * 10000 : 0;
+
+    this.activeExecutions.delete(executionId);
+
+    emit('execution', {
+      type: 'ORDER_FILLED', userId: config.userId, orderId: executionId,
+      symbol: config.symbol, fillPrice: avgFillPrice, qty: totalFilled,
+      slippageBps: Number(slippageBps.toFixed(2)),
+    }).catch(err => log.error({ err, executionId }, 'Failed to emit VWAP ORDER_FILLED event'));
+
+    log.info({ executionId, totalFilled, avgFillPrice, slippageBps: slippageBps.toFixed(2) }, 'Adaptive VWAP completed');
+
+    return { executionId, slices: execution.slices, avgFillPrice, totalFilled, idealPrice, slippageBps: Number(slippageBps.toFixed(2)) };
   }
 
   private getDefaultVolumeProfile(numSlices: number): number[] {
@@ -267,7 +374,9 @@ export function selectOrderType(params: {
   avgDailyVolume: number;
   confidence: number;
   spreadPct: number;
-}): { orderType: 'MARKET' | 'LIMIT' | 'TWAP' | 'VWAP'; reason: string; estimatedImpactBps: number } {
+  urgency?: number;
+  stealth?: boolean;
+}): { orderType: 'MARKET' | 'LIMIT' | 'TWAP' | 'VWAP' | 'IS' | 'POV' | 'ICEBERG' | 'SNIPER'; reason: string; estimatedImpactBps: number } {
   const { qty, ltp, avgDailyVolume, confidence, spreadPct } = params;
   const participationRate = avgDailyVolume > 0 ? qty / avgDailyVolume : 0;
 
@@ -276,6 +385,21 @@ export function selectOrderType(params: {
   const impactBps = avgDailyVolume > 0
     ? round2(0.8 * dailyVol * Math.sqrt(participationRate) * 10000)
     : 0;
+
+  const urgency = params.urgency ?? 0;
+  const stealth = params.stealth ?? false;
+
+  if (urgency > 0.7 && participationRate > 0.01) {
+    return { orderType: 'IS', reason: `High urgency (${urgency.toFixed(1)}) with ${(participationRate * 100).toFixed(2)}% participation — IS to minimize shortfall`, estimatedImpactBps: impactBps };
+  }
+
+  if (urgency < 0.3 && participationRate > 0.02 && qty * ltp > 500_000) {
+    return { orderType: 'SNIPER', reason: `Low urgency large order — Sniper to seek natural liquidity`, estimatedImpactBps: impactBps };
+  }
+
+  if (stealth && participationRate > 0.005) {
+    return { orderType: 'POV', reason: `Stealth mode — POV at ${(participationRate * 100).toFixed(2)}% to stay invisible`, estimatedImpactBps: impactBps };
+  }
 
   // High participation (>2%) — use VWAP for volume-weighted distribution
   if (participationRate > 0.02) {
@@ -290,6 +414,10 @@ export function selectOrderType(params: {
   // Mid-cap with noticeable estimated impact (>5 bps) — use TWAP regardless
   if (impactBps > 5 && qty * ltp > 50_000) {
     return { orderType: 'TWAP', reason: `Estimated market impact ${impactBps.toFixed(1)} bps — TWAP to reduce slippage`, estimatedImpactBps: impactBps };
+  }
+
+  if (qty * ltp > 200_000 && participationRate > 0.005) {
+    return { orderType: 'ICEBERG', reason: `Large order — Iceberg to hide full size`, estimatedImpactBps: impactBps };
   }
 
   if (confidence >= 0.7) {

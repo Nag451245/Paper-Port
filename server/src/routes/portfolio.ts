@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { PortfolioService, PortfolioError } from '../services/portfolio.service.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
+import { MetricsService } from '../services/metrics.service.js';
 
 const createSchema = z.object({
   name: z.string().min(1),
@@ -133,7 +134,9 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
       const userId = getUserId(request);
       const priceFeed = (app as any).priceFeedService;
       const priceCache = priceFeed?.getAllLastPrices?.() ?? undefined;
+      const summaryStart = Date.now();
       const summary = await service.getSummary(portfolioId, userId, priceCache);
+      MetricsService.getInstance().recordSummaryFetchDuration(Date.now() - summaryStart);
       return reply.send(summary);
     } catch (err) {
       if (err instanceof PortfolioError) return reply.code(err.statusCode).send({ error: err.message });

@@ -3,6 +3,9 @@ import { TargetTracker } from './target-tracker.service.js';
 import { getRedis } from '../lib/redis.js';
 import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
+import { MarginCalculatorService } from './margin-calculator.service.js';
+import { PositionLimitsService } from './position-limits.service.js';
+import { MetricsService } from './metrics.service.js';
 
 const log = createChildLogger('RiskService');
 
@@ -81,9 +84,13 @@ export interface RiskCheck {
 
 export class RiskService {
   private targetTracker: TargetTracker;
+  private marginCalculator: MarginCalculatorService;
+  private positionLimits: PositionLimitsService;
 
   constructor(private prisma: PrismaClient) {
     this.targetTracker = new TargetTracker(prisma);
+    this.marginCalculator = new MarginCalculatorService();
+    this.positionLimits = new PositionLimitsService();
   }
 
   async enforceTargetRisk(
@@ -244,6 +251,7 @@ export class RiskService {
 
     if (dayPnl < 0 && dayDrawdownPct >= cfg.maxDailyDrawdownPct) {
       violations.push(`Daily loss ${dayDrawdownPct.toFixed(1)}% exceeds circuit breaker ${cfg.maxDailyDrawdownPct}%`);
+      MetricsService.getInstance().recordCircuitBreakerActivation();
       emit('risk', {
         type: 'CIRCUIT_BREAKER_TRIGGERED', userId,
         reason: `Daily drawdown ${dayDrawdownPct.toFixed(2)}% >= ${cfg.maxDailyDrawdownPct}%`,
@@ -457,6 +465,53 @@ export class RiskService {
       warnings.push(`${openPositions}/${cfg.maxOpenPositions} positions used`);
     }
 
+    // Rule 15: Margin sufficiency check
+    try {
+      const margin = this.marginCalculator.calculateMarginRequired({
+        symbol,
+        qty,
+        price,
+        side: side as 'BUY' | 'SELL',
+        segment: 'EQ',
+        exchange: 'NSE',
+      });
+      const availableCapital = Number(portfolio.currentNav);
+      const sufficiency = this.marginCalculator.checkMarginSufficiency(userId, margin.totalRequired, availableCapital);
+      if (!sufficiency.sufficient) {
+        violations.push(`MARGIN: Insufficient margin — required ₹${margin.totalRequired.toFixed(0)}, available ₹${availableCapital.toFixed(0)}, shortfall ₹${sufficiency.shortfall.toFixed(0)}`);
+      } else if (sufficiency.utilizationPct > 80) {
+        warnings.push(`Margin utilization at ${sufficiency.utilizationPct.toFixed(1)}% — approaching limit`);
+      }
+    } catch (err) {
+      log.warn({ err, symbol }, 'Margin check failed — allowing trade');
+    }
+
+    // Rule 16: Position limit check
+    try {
+      const positionsForLimitCheck = await this.prisma.position.findMany({
+        where: { portfolioId: portfolio.id, status: 'OPEN', symbol },
+        select: { qty: true },
+      });
+      const currentPositionQty = positionsForLimitCheck
+        .reduce((sum: number, p: any) => sum + Math.abs(p.qty), 0);
+      const limitResult = this.positionLimits.checkPositionLimit({
+        symbol,
+        exchange: 'NSE',
+        segment: 'EQ',
+        proposedQty: qty,
+        currentQty: currentPositionQty,
+        userId,
+      });
+      if (!limitResult.allowed) {
+        violations.push(`POSITION_LIMIT: ${limitResult.reason}`);
+      }
+      if (limitResult.isBanPeriod) {
+        violations.push(`BAN_PERIOD: ${symbol} is in ban period — no fresh positions allowed`);
+      }
+    } catch (err) {
+      log.warn({ err, symbol }, 'Position limit check failed — allowing trade');
+    }
+
     // Log risk event if violations exist
     if (violations.length > 0) {
       await this.prisma.riskEvent.create({
@@ -476,6 +531,11 @@ export class RiskService {
         type: 'RISK_VIOLATION', userId, symbol,
         violations, severity: 'critical',
       }).catch(err => log.error({ err, userId, symbol }, 'Failed to emit RISK_VIOLATION event'));
+    }
+
+    if (violations.length > 0) {
+      const metrics = MetricsService.getInstance();
+      metrics.recordRiskViolation(violations[0].split(':')[0] ?? 'UNKNOWN');
     }
 
     return {

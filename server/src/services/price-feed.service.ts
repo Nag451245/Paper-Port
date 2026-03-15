@@ -5,6 +5,8 @@ import { MarketCalendar } from './market-calendar.js';
 import { emit } from '../lib/event-bus.js';
 import type { DataPipelineService } from './data-pipeline.service.js';
 import { createChildLogger } from '../lib/logger.js';
+import { TickStoreService } from './tick-store.service.js';
+import { OrderBookService } from './order-book.service.js';
 
 const pfLog = createChildLogger('PriceFeed');
 const FEED_INTERVAL_MS = 2_000;
@@ -31,17 +33,22 @@ export class PriceFeedService {
   private lastPrices = new Map<string, { ltp: number; volume: number; timestamp: number }>();
   private candleBuilders = new Map<string, CandleBuilder>();
   private running = false;
+  private tickStore: TickStoreService;
+  private orderBook: OrderBookService;
 
   constructor(prisma?: PrismaClient, dataPipeline?: DataPipelineService) {
     this.marketData = new MarketDataService();
     this.calendar = new MarketCalendar();
     this.prisma = prisma ?? new PrismaClient();
     this.dataPipeline = dataPipeline ?? null;
+    this.tickStore = new TickStoreService();
+    this.orderBook = new OrderBookService();
   }
 
   start(): void {
     if (this.intervalHandle) return;
     this.running = true;
+    this.tickStore.startAutoFlush();
 
     console.log(`[PriceFeed] Starting — broadcasting every ${FEED_INTERVAL_MS}ms`);
 
@@ -68,6 +75,7 @@ export class PriceFeedService {
       clearInterval(this.pnlPersistHandle);
       this.pnlPersistHandle = null;
     }
+    this.tickStore.stopAutoFlush();
     console.log('[PriceFeed] Stopped');
   }
 
@@ -88,6 +96,9 @@ export class PriceFeedService {
     }
     return out;
   }
+
+  getTickStore(): TickStoreService { return this.tickStore; }
+  getOrderBook(): OrderBookService { return this.orderBook; }
 
   private async tick(): Promise<void> {
     const subscribedSymbols = wsHub.getSubscribedSymbols();
@@ -132,6 +143,8 @@ export class PriceFeedService {
                 this.dataPipeline?.publishTick(symbol, quote.ltp, quote.volume, now).catch(err => pfLog.warn({ err, symbol }, 'Failed to publish tick to pipeline'));
 
                 this.updateCandleBuilder(symbol, quote.ltp, quote.volume, now);
+                this.tickStore.append(symbol, 'NSE', quote.ltp, undefined, undefined, undefined, undefined, quote.volume, new Date(now));
+                this.orderBook.updateFromTick(symbol, quote.ltp, undefined, undefined, undefined, undefined, quote.volume);
 
                 emit('market-data', {
                   type: 'TICK_RECEIVED', symbol, ltp: quote.ltp,

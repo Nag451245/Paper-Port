@@ -3,143 +3,184 @@ import { createChildLogger } from '../lib/logger.js';
 
 const log = createChildLogger('UniverseSelector');
 
-const SECTOR_MAP: Record<string, string> = {
-  'RELIANCE': 'Energy', 'ONGC': 'Energy', 'BPCL': 'Energy', 'IOC': 'Energy', 'GAIL': 'Energy', 'PETRONET': 'Energy', 'IGL': 'Energy', 'MGL': 'Energy',
-  'TCS': 'IT', 'INFY': 'IT', 'WIPRO': 'IT', 'HCLTECH': 'IT', 'TECHM': 'IT', 'LTIM': 'IT', 'PERSISTENT': 'IT', 'COFORGE': 'IT', 'MPHASIS': 'IT', 'LTTS': 'IT', 'TATAELXSI': 'IT', 'KPITTECH': 'IT',
-  'HDFCBANK': 'Banking', 'ICICIBANK': 'Banking', 'SBIN': 'Banking', 'KOTAKBANK': 'Banking', 'AXISBANK': 'Banking',
-  'BANKBARODA': 'Banking', 'PNB': 'Banking', 'INDUSINDBK': 'Banking', 'FEDERALBNK': 'Banking', 'IDFCFIRSTB': 'Banking', 'AUBANK': 'Banking', 'BANDHANBNK': 'Banking', 'CANBK': 'Banking', 'RBLBANK': 'Banking',
-  'HINDUNILVR': 'FMCG', 'ITC': 'FMCG', 'NESTLEIND': 'FMCG', 'BRITANNIA': 'FMCG', 'DABUR': 'FMCG',
-  'MARICO': 'FMCG', 'TATACONSUM': 'FMCG', 'COLPAL': 'FMCG', 'GODREJCP': 'FMCG',
-  'SUNPHARMA': 'Pharma', 'DRREDDY': 'Pharma', 'CIPLA': 'Pharma', 'DIVISLAB': 'Pharma', 'APOLLOHOSP': 'Pharma',
-  'LUPIN': 'Pharma', 'AUROPHARMA': 'Pharma', 'BIOCON': 'Pharma', 'TORNTPHARM': 'Pharma', 'ALKEM': 'Pharma', 'IPCALAB': 'Pharma', 'ZYDUSLIFE': 'Pharma', 'MAXHEALTH': 'Pharma',
-  'TATAMOTORS': 'Auto', 'MARUTI': 'Auto', 'M&M': 'Auto', 'BAJAJ-AUTO': 'Auto', 'HEROMOTOCO': 'Auto', 'EICHERMOT': 'Auto', 'MOTHERSON': 'Auto', 'ESCORTS': 'Auto', 'MRF': 'Auto', 'BALKRISIND': 'Auto',
-  'TATASTEEL': 'Metals', 'JSWSTEEL': 'Metals', 'HINDALCO': 'Metals', 'VEDL': 'Metals', 'COALINDIA': 'Metals', 'SAIL': 'Metals', 'JINDALSTEL': 'Metals', 'NMDC': 'Metals',
-  'LT': 'Infra', 'ADANIENT': 'Infra', 'ADANIPORTS': 'Infra', 'ULTRACEMCO': 'Infra', 'GRASIM': 'Infra', 'SIEMENS': 'Infra', 'ABB': 'Infra', 'HAL': 'Infra', 'BEL': 'Infra', 'BHEL': 'Infra',
-  'NTPC': 'Power', 'POWERGRID': 'Power', 'TATAPOWER': 'Power', 'NHPC': 'Power', 'ADANIGREEN': 'Power', 'SJVN': 'Power', 'PFC': 'Power', 'RECLTD': 'Power',
-  'BAJFINANCE': 'Finance', 'BAJAJFINSV': 'Finance', 'SBILIFE': 'Finance', 'HDFCLIFE': 'Finance',
-  'CHOLAFIN': 'Finance', 'MUTHOOTFIN': 'Finance', 'MANAPPURAM': 'Finance', 'LICI': 'Finance', 'ICICIGI': 'Finance', 'ICICIPRULI': 'Finance', 'ABCAPITAL': 'Finance', 'SHRIRAMFIN': 'Finance',
-  'TITAN': 'Consumer', 'ASIANPAINT': 'Consumer', 'PIDILITIND': 'Consumer', 'TRENT': 'Consumer', 'DMART': 'Consumer', 'PAGEIND': 'Consumer', 'BATAINDIA': 'Consumer', 'JUBLFOOD': 'Consumer',
-  'HAVELLS': 'Consumer', 'VOLTAS': 'Consumer', 'CROMPTON': 'Consumer', 'POLYCAB': 'Consumer', 'BERGEPAINT': 'Consumer',
-  'BHARTIARTL': 'Telecom', 'IDEA': 'Telecom',
-  'DLF': 'Realty', 'GODREJPROP': 'Realty', 'OBEROIRLTY': 'Realty', 'PRESTIGE': 'Realty', 'LODHA': 'Realty',
-  'ZOMATO': 'Digital', 'NAUKRI': 'Digital', 'PAYTM': 'Digital', 'POLICYBZR': 'Digital', 'DELHIVERY': 'Digital',
-  'IRCTC': 'Transport', 'CONCOR': 'Transport', 'IRFC': 'Transport',
-  'DEEPAKNTR': 'Chemicals', 'ATUL': 'Chemicals', 'PIIND': 'Chemicals', 'SRF': 'Chemicals', 'UPL': 'Chemicals', 'CLEAN': 'Chemicals',
-};
-
-const NIFTY_50 = [
-  'RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK', 'HINDUNILVR', 'SBIN', 'BHARTIARTL',
-  'KOTAKBANK', 'ITC', 'LT', 'AXISBANK', 'BAJFINANCE', 'TATAMOTORS', 'MARUTI', 'SUNPHARMA',
-  'TITAN', 'NTPC', 'WIPRO', 'ASIANPAINT', 'HCLTECH', 'ULTRACEMCO', 'POWERGRID', 'NESTLEIND',
-  'TATASTEEL', 'JSWSTEEL', 'ADANIENT', 'ADANIPORTS', 'BAJAJFINSV', 'GRASIM', 'TECHM',
-  'DRREDDY', 'CIPLA', 'BRITANNIA', 'HINDALCO', 'M&M', 'EICHERMOT', 'DIVISLAB', 'COALINDIA',
-  'TATACONSUM', 'HEROMOTOCO', 'SBILIFE', 'HDFCLIFE', 'INDUSINDBK', 'APOLLOHOSP',
-  'BAJAJ-AUTO', 'ONGC', 'BPCL', 'TATAPOWER', 'SHRIRAMFIN',
-];
-
-const NIFTY_NEXT_50 = [
-  'BANKBARODA', 'PNB', 'CANBK', 'IDFCFIRSTB', 'FEDERALBNK', 'AUBANK',
-  'TRENT', 'ZOMATO', 'JIOFIN', 'DMART', 'PIDILITIND', 'GODREJCP', 'DABUR', 'MARICO', 'COLPAL',
-  'HAVELLS', 'VOLTAS', 'SIEMENS', 'ABB', 'BHEL', 'HAL', 'BEL', 'IRCTC',
-  'IOC', 'GAIL', 'SAIL', 'VEDL', 'JINDALSTEL', 'NMDC',
-  'DLF', 'GODREJPROP', 'PIIND', 'UPL', 'SRF', 'BERGEPAINT',
-  'ICICIGI', 'ICICIPRULI', 'MAXHEALTH', 'LICI', 'MUTHOOTFIN', 'CHOLAFIN',
-  'LTIM', 'PERSISTENT', 'COFORGE', 'POLYCAB',
-  'LUPIN', 'AUROPHARMA', 'TORNTPHARM', 'ZYDUSLIFE',
-];
-
-interface UniverseConfig {
-  maxPerSector: number;
-  minAvgDailyVolume: number;
-  maxSymbols: number;
+export interface UniverseCriteria {
+  minAvgVolume?: number;
+  maxSpreadBps?: number;
+  sectors?: string[];
+  excludeSectors?: string[];
+  momentumFilter?: 'TOP_N' | 'BOTTOM_N';
+  momentumN?: number;
+  exchange?: string;
 }
 
-const DEFAULT_CONFIG: UniverseConfig = {
-  maxPerSector: 8,
-  minAvgDailyVolume: 100_000,
-  maxSymbols: 60,
-};
+export interface UniverseEntry {
+  symbol: string;
+  exchange: string;
+  sector?: string;
+  avgVolume: number;
+  spreadBps: number;
+  relativeStrength: number;
+  reason: string;
+}
 
 export class UniverseSelectorService {
   constructor(private prisma: PrismaClient) {}
 
-  async refreshUniverse(userId: string, config?: Partial<UniverseConfig>): Promise<{
-    added: string[];
-    removed: string[];
-    total: number;
-  }> {
-    const cfg = { ...DEFAULT_CONFIG, ...config };
+  async select(criteria: UniverseCriteria): Promise<UniverseEntry[]> {
+    const exchange = criteria.exchange ?? 'NSE';
+    const lookbackDays = 20;
+    const since = new Date();
+    since.setDate(since.getDate() - lookbackDays);
 
-    // NIFTY 50 + NIFTY Next 50 as the base liquid universe
-    const allStocks = [...NIFTY_50, ...NIFTY_NEXT_50];
-    const candidates = allStocks.map(symbol => ({
-      symbol,
-      sector: SECTOR_MAP[symbol] ?? 'Other',
-      avgVolume: 500_000,
-    }));
-
-    // Diversify by sector
-    const sectorCounts: Record<string, number> = {};
-    const selected: typeof candidates = [];
-
-    for (const c of candidates) {
-      const count = sectorCounts[c.sector] ?? 0;
-      if (count >= cfg.maxPerSector) continue;
-      if (c.avgVolume < cfg.minAvgDailyVolume) continue;
-      sectorCounts[c.sector] = count + 1;
-      selected.push(c);
-      if (selected.length >= cfg.maxSymbols) break;
-    }
-
-    // Get current universe
-    const existing = await this.prisma.tradingUniverse.findMany({
-      where: { userId },
-      select: { symbol: true },
+    const recentBars = await this.prisma.historicalBar.findMany({
+      where: {
+        exchange,
+        timeframe: '1d',
+        timestamp: { gte: since },
+      },
+      orderBy: { timestamp: 'asc' },
     });
-    const existingSymbols = new Set(existing.map((e: { symbol: string }) => e.symbol));
-    const newSymbols = new Set(selected.map(s => s.symbol));
 
-    const removed: string[] = [];
-    for (const sym of existingSymbols) {
-      if (!newSymbols.has(sym)) {
-        await this.prisma.tradingUniverse.deleteMany({ where: { userId, symbol: sym } });
-        removed.push(sym);
+    const barsBySymbol = new Map<string, Array<{ close: number; volume: bigint; timestamp: Date }>>();
+    for (const bar of recentBars) {
+      if (!barsBySymbol.has(bar.symbol)) barsBySymbol.set(bar.symbol, []);
+      barsBySymbol.get(bar.symbol)!.push({
+        close: bar.close,
+        volume: bar.volume,
+        timestamp: bar.timestamp,
+      });
+    }
+
+    const tickSince = new Date();
+    tickSince.setDate(tickSince.getDate() - 5);
+
+    const recentTicks = await this.prisma.tick.findMany({
+      where: {
+        exchange,
+        timestamp: { gte: tickSince },
+        bid: { not: null },
+        ask: { not: null },
+      },
+      select: { symbol: true, bid: true, ask: true, ltp: true },
+    });
+
+    const spreadBySymbol = new Map<string, number[]>();
+    for (const tick of recentTicks) {
+      if (tick.bid != null && tick.ask != null && tick.ltp > 0) {
+        if (!spreadBySymbol.has(tick.symbol)) spreadBySymbol.set(tick.symbol, []);
+        spreadBySymbol.get(tick.symbol)!.push(((tick.ask - tick.bid) / tick.ltp) * 10_000);
       }
     }
 
-    const added: string[] = [];
-    for (const c of selected) {
-      if (!existingSymbols.has(c.symbol)) {
-        await this.prisma.tradingUniverse.create({
-          data: {
-            userId,
-            symbol: c.symbol,
-            exchange: 'NSE',
-            sector: c.sector,
-            reason: 'NIFTY50_liquid',
-            avgVolume: c.avgVolume,
-          },
-        }).catch(err => log.warn({ err, symbol: c.symbol }, 'Failed to insert trading universe symbol'));
-        added.push(c.symbol);
+    const entries: UniverseEntry[] = [];
+
+    for (const [symbol, bars] of barsBySymbol) {
+      if (bars.length < 5) continue;
+
+      const totalVolume = bars.reduce((s, b) => s + Number(b.volume), 0);
+      const avgVolume = totalVolume / bars.length;
+
+      if (criteria.minAvgVolume && avgVolume < criteria.minAvgVolume) continue;
+
+      const spreads = spreadBySymbol.get(symbol);
+      let avgSpreadBps = 0;
+      if (spreads && spreads.length > 0) {
+        avgSpreadBps = spreads.reduce((s, v) => s + v, 0) / spreads.length;
+      }
+
+      if (criteria.maxSpreadBps && avgSpreadBps > criteria.maxSpreadBps) continue;
+
+      const sortedBars = [...bars].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+      const oldest = sortedBars[0];
+      const newest = sortedBars[sortedBars.length - 1];
+      const relativeStrength = oldest.close > 0
+        ? (newest.close / oldest.close - 1)
+        : 0;
+
+      const reasons: string[] = [];
+      reasons.push(`avgVol=${Math.round(avgVolume).toLocaleString()}`);
+      if (avgSpreadBps > 0) reasons.push(`spread=${avgSpreadBps.toFixed(1)}bps`);
+      reasons.push(`rs=${(relativeStrength * 100).toFixed(1)}%`);
+
+      entries.push({
+        symbol,
+        exchange,
+        avgVolume,
+        spreadBps: avgSpreadBps,
+        relativeStrength,
+        reason: reasons.join(', '),
+      });
+    }
+
+    let filtered = entries;
+
+    if (criteria.sectors && criteria.sectors.length > 0) {
+      const sectorSet = new Set(criteria.sectors.map(s => s.toUpperCase()));
+      filtered = filtered.filter(e => e.sector && sectorSet.has(e.sector.toUpperCase()));
+    }
+
+    if (criteria.excludeSectors && criteria.excludeSectors.length > 0) {
+      const excludeSet = new Set(criteria.excludeSectors.map(s => s.toUpperCase()));
+      filtered = filtered.filter(e => !e.sector || !excludeSet.has(e.sector.toUpperCase()));
+    }
+
+    if (criteria.momentumFilter && criteria.momentumN) {
+      filtered.sort((a, b) => b.relativeStrength - a.relativeStrength);
+      if (criteria.momentumFilter === 'TOP_N') {
+        filtered = filtered.slice(0, criteria.momentumN);
+      } else {
+        filtered = filtered.slice(-criteria.momentumN);
       }
     }
 
-    log.info({ userId, added: added.length, removed: removed.length, total: selected.length }, 'Universe refreshed');
+    log.info({
+      exchange,
+      totalSymbols: barsBySymbol.size,
+      passedFilter: filtered.length,
+    }, 'Universe selection complete');
 
-    return { added, removed, total: selected.length };
+    return filtered;
   }
 
-  async getUniverse(userId: string): Promise<string[]> {
-    const records = await this.prisma.tradingUniverse.findMany({
-      where: { userId },
-      select: { symbol: true },
-      orderBy: { addedAt: 'asc' },
+  async refreshUniverse(userId: string, criteria: UniverseCriteria): Promise<UniverseEntry[]> {
+    const selected = await this.select(criteria);
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.tradingUniverse.deleteMany({ where: { userId } });
+
+      if (selected.length > 0) {
+        await tx.tradingUniverse.createMany({
+          data: selected.map(entry => ({
+            userId,
+            symbol: entry.symbol,
+            exchange: entry.exchange,
+            sector: entry.sector ?? null,
+            reason: entry.reason,
+            avgVolume: entry.avgVolume,
+            addedAt: new Date(),
+          })),
+        });
+      }
     });
 
-    if (records.length === 0) {
-      return [...NIFTY_50, ...NIFTY_NEXT_50.slice(0, 10)];
-    }
+    log.info({ userId, count: selected.length }, 'Trading universe refreshed');
+    return selected;
+  }
 
-    return records.map((r: { symbol: string }) => r.symbol);
+  async getUserUniverse(userId: string): Promise<UniverseEntry[]> {
+    const records = await this.prisma.tradingUniverse.findMany({
+      where: { userId },
+      orderBy: { addedAt: 'desc' },
+    });
+
+    return records.map(r => ({
+      symbol: r.symbol,
+      exchange: r.exchange,
+      sector: r.sector ?? undefined,
+      avgVolume: r.avgVolume ? Number(r.avgVolume) : 0,
+      spreadBps: 0,
+      relativeStrength: 0,
+      reason: r.reason ?? '',
+    }));
   }
 }

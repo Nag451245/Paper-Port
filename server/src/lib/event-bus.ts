@@ -36,7 +36,8 @@ export type SystemEvent =
   | { type: 'MARKET_CLOSE'; exchange: string; timestamp: string }
   | { type: 'PHASE_CHANGE'; from: string; to: string; timestamp: string }
   | { type: 'KILL_SWITCH_ACTIVATED'; userId: string; timestamp: string }
-  | { type: 'KILL_SWITCH_DEACTIVATED'; userId: string; timestamp: string };
+  | { type: 'KILL_SWITCH_DEACTIVATED'; userId: string; timestamp: string }
+  | { type: 'LEARNING_UPDATE'; userId: string; symbol: string; outcome: string; intradayWinRate: number; totalIntradayTrades: number };
 
 export type AppEvent = MarketDataEvent | SignalEvent | ExecutionEvent | RiskEvent | SystemEvent;
 

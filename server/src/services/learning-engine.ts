@@ -5,10 +5,16 @@ import type { PrismaClient } from '@prisma/client';
 import { chatCompletionJSON, chatCompletion } from '../lib/openai.js';
 import { MarketDataService } from './market-data.service.js';
 import { engineOptimize, engineFeatureStore, engineMLScore, isEngineAvailable, type OptimizeInput } from '../lib/rust-engine.js';
-import { isMLServiceAvailable, mlTrain, mlDetectRegime, mlAllocate } from '../lib/ml-service-client.js';
+import { isMLServiceAvailable, mlTrain, mlDetectRegime, mlAllocate, mlOnlineUpdate, mlEnsembleScore } from '../lib/ml-service-client.js';
 import { LearningStoreService } from './learning-store.service.js';
 import { getRedis } from '../lib/redis.js';
 import { createChildLogger } from '../lib/logger.js';
+import { emit } from '../lib/event-bus.js';
+import { getPrisma } from '../lib/prisma.js';
+import { MarketMemoryService } from './market-memory.service.js';
+import { FeaturePipelineService } from './feature-pipeline.service.js';
+import { LessonsEngineService } from './lessons-engine.service.js';
+import { DecisionFusionService } from './decision-fusion.service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -35,6 +41,12 @@ export class LearningEngine {
   private marketData = new MarketDataService();
   private learningStore = new LearningStoreService();
   private running = false;
+
+  private marketMemory = new MarketMemoryService();
+  private featurePipeline = new FeaturePipelineService();
+  private lessonsEngine = new LessonsEngineService();
+  private fusionService = new DecisionFusionService();
+  private intradayWinTracker: { wins: number; total: number } = { wins: 0, total: 0 };
 
   constructor(private prisma: PrismaClient) {}
 
@@ -233,6 +245,23 @@ export class LearningEngine {
           data: { outcomeTag },
         });
       }
+
+      // Online ML model update — incremental learning on each resolved trade
+      try {
+        const outcomeValue = outcomeTag === 'WIN' ? 1.0 : outcomeTag === 'BREAKEVEN' ? 0.5 : 0.0;
+        const features: Record<string, number> = {};
+        if ((signal as any).snapshot) {
+          const snap = typeof (signal as any).snapshot === 'string' ? JSON.parse((signal as any).snapshot) : (signal as any).snapshot;
+          for (const [k, v] of Object.entries(snap)) {
+            if (typeof v === 'number') features[k] = v;
+          }
+        }
+        if (Object.keys(features).length > 3) {
+          mlOnlineUpdate(features, outcomeValue, signal.id).catch(err =>
+            log.warn({ err, decisionId: signal.id }, 'Online ML update failed'),
+          );
+        }
+      } catch { /* non-critical */ }
     }
   }
 
@@ -1074,6 +1103,49 @@ Top losers: ${JSON.stringify(topLosers)}`,
           log.warn({ err: pyErr }, 'Python ML training failed (non-fatal, Rust model still active)');
         }
       }
+
+      // Retrain ensemble meta-learner with recent decision audit outcomes
+      try {
+        const recentDecisions = await this.prisma.decisionAudit.findMany({
+          where: {
+            userId,
+            outcome: { in: ['WIN', 'LOSS', 'BREAKEVEN'] },
+            createdAt: { gte: new Date(Date.now() - 60 * 86400_000) },
+          },
+          orderBy: { createdAt: 'asc' },
+          take: 500,
+        });
+
+        if (recentDecisions.length >= 30) {
+          const ensembleTrainingData = recentDecisions.map(d => {
+            const snap = typeof d.marketDataSnapshot === 'string' ? JSON.parse(d.marketDataSnapshot) : {};
+            return {
+              xgb_prob: Number(snap.pythonScore ?? snap.mlScore ?? 0.5),
+              lgb_prob: Number(snap.challengerScore ?? snap.pythonScore ?? 0.5),
+              lstm_prob: Number(snap.lstmProb ?? 0.5),
+              tft_prob: Number(snap.tftProb ?? 0.5),
+              return_pred: Number(snap.expectedReturn ?? 0),
+              online_prob: Number(snap.onlineProb ?? 0.5),
+              regime_id: snap.regime === 'TRENDING_UP' ? 0 : snap.regime === 'TRENDING_DOWN' ? 1 : snap.regime === 'VOLATILE' ? 3 : 2,
+              vix_level: Number(snap.vixLevel ?? 15),
+              outcome: d.outcome === 'WIN' ? 1.0 : d.outcome === 'BREAKEVEN' ? 0.5 : 0.0,
+            };
+          });
+
+          const ensembleResp = await fetch(`${process.env.ML_SERVICE_URL ?? 'http://localhost:8002'}/ensemble-train`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ training_data: ensembleTrainingData }),
+            signal: AbortSignal.timeout(30000),
+          });
+          if (ensembleResp.ok) {
+            const result = await ensembleResp.json();
+            log.info({ result }, 'Ensemble meta-learner retrained');
+          }
+        }
+      } catch (err) {
+        log.warn({ err }, 'Ensemble retraining failed — non-critical');
+      }
     } catch (err) {
       log.error({ err, userId }, 'ML scorer retraining failed');
     }
@@ -1334,6 +1406,63 @@ Top losers: ${JSON.stringify(topLosers)}`,
       this.intradayAlphaDecayCheck(userId, strategyTag).catch(err =>
         log.warn({ err }, 'Intraday alpha decay check failed'),
       );
+    }
+
+    // --- Intelligent Trading Brain: intraday learning ---
+    try {
+      const recentMemories = await getPrisma().marketMemory.findMany({
+        where: { userId, symbol: trade.symbol, outcome: null },
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+      });
+
+      if (recentMemories.length > 0) {
+        const memory = recentMemories[0];
+        const outcome = won ? 'WIN' : 'LOSS';
+        const pnlPct = trade.netPnl;
+        const holdingMinutes = Math.round((Date.now() - memory.timestamp.getTime()) / 60000);
+
+        const lesson = this.lessonsEngine.generateLesson({
+          symbol: trade.symbol,
+          signalDirection: memory.signalDirection,
+          signalStrategy: memory.signalStrategy,
+          niftyBand: memory.niftyBand,
+          vixLevel: memory.vixLevel,
+          regime: memory.regime,
+          outcome,
+          pnlPct,
+          holdingMinutes,
+          dayOfWeek: memory.dayOfWeek,
+          hourOfDay: memory.hourOfDay,
+          gapPct: memory.gapPct,
+          signalConfidence: memory.signalConfidence,
+        });
+
+        await this.marketMemory.resolveMemory(memory.id, outcome, pnlPct, holdingMinutes, lesson);
+        log.info({ symbol: trade.symbol, outcome, lesson: lesson.substring(0, 100) }, 'Market memory resolved with lesson');
+      }
+
+      this.intradayWinTracker.total++;
+      if (won) this.intradayWinTracker.wins++;
+
+      if (this.intradayWinTracker.total >= 5) {
+        const winRate = this.intradayWinTracker.wins / this.intradayWinTracker.total;
+        if (winRate < 0.4) {
+          await this.fusionService.updateThresholds(userId, 0.05);
+          log.warn({ userId, winRate, totalTrades: this.intradayWinTracker.total },
+            'Intraday win rate < 40% — raising decision fusion thresholds');
+        }
+      }
+
+      emit('system', {
+        type: 'LEARNING_UPDATE', userId,
+        symbol: trade.symbol, outcome: won ? 'WIN' : 'LOSS',
+        intradayWinRate: this.intradayWinTracker.total > 0
+          ? this.intradayWinTracker.wins / this.intradayWinTracker.total : 0.5,
+        totalIntradayTrades: this.intradayWinTracker.total,
+      }).catch(() => {});
+    } catch (err) {
+      log.warn({ err, symbol: trade.symbol }, 'Intraday learning extension failed');
     }
   }
 

@@ -14,7 +14,7 @@ import os
 import json
 import logging
 import time
-from typing import Optional
+from typing import Dict, Optional
 from contextlib import asynccontextmanager
 
 import numpy as np
@@ -26,6 +26,12 @@ from model_store import ModelStore
 from regime_detector import RegimeDetector
 from signal_scorer import SignalScorer
 from strategy_allocator import StrategyAllocator
+from return_predictor import ReturnPredictor, return_predictor
+from rl_execution import rl_agent
+from lstm_model import lstm_model
+from tft_model import tft_model
+from ensemble import ensemble_learner
+from online_learner import online_learner
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("MLService")
@@ -122,6 +128,57 @@ class AllocateResponse(BaseModel):
     capital_per_strategy: dict
     method: str
     exploration_rate: float
+
+
+class PredictReturnsRequest(BaseModel):
+    features: list[dict]
+
+
+class TrainReturnModelRequest(BaseModel):
+    training_data: list[dict]
+    walk_forward_days: int = 30
+    purge_gap_days: int = 5
+
+
+class RLActionRequest(BaseModel):
+    state: Dict
+
+
+class RLExperienceRequest(BaseModel):
+    state: Dict
+    action: float
+    reward: float
+    next_state: Dict
+    done: bool
+
+
+class SequenceScoreRequest(BaseModel):
+    bars: list[dict]
+    seq_len: int = 60
+
+class SequenceTrainRequest(BaseModel):
+    training_data: list[dict]
+    seq_len: int = 60
+
+class TFTScoreRequest(BaseModel):
+    static_features: Dict = Field(default_factory=dict)
+    sequence: list[dict] = Field(default_factory=list)
+    seq_len: int = 30
+
+class TFTTrainRequest(BaseModel):
+    training_data: list[dict]
+    seq_len: int = 30
+
+class EnsembleScoreRequest(BaseModel):
+    model_outputs: Dict
+
+class EnsembleTrainRequest(BaseModel):
+    training_data: list[dict]
+
+class OnlineUpdateRequest(BaseModel):
+    features: Dict
+    outcome: float
+    trade_id: str = ""
 
 
 # ── Endpoints ──
@@ -224,6 +281,103 @@ async def model_metadata(name: str):
     if meta is None:
         raise HTTPException(status_code=404, detail=f"Model '{name}' not found")
     return meta
+
+
+@app.post("/predict-returns")
+async def predict_returns(req: PredictReturnsRequest):
+    """Predict forward returns using gradient-boosted regression model."""
+    result = return_predictor.predict(req.features)
+    return result
+
+
+@app.post("/train-returns")
+async def train_returns(req: TrainReturnModelRequest):
+    """Train return prediction model with walk-forward validation and purge gap."""
+    result = return_predictor.train(
+        req.training_data,
+        walk_forward_days=req.walk_forward_days,
+        purge_gap_days=req.purge_gap_days,
+    )
+    return result
+
+
+@app.post("/rl-action")
+async def rl_action_endpoint(req: RLActionRequest):
+    result = rl_agent.get_action(req.state)
+    return result
+
+
+@app.post("/rl-experience")
+async def rl_experience(req: RLExperienceRequest):
+    rl_agent.store_experience(req.state, req.action, req.reward, req.next_state, req.done)
+    return {"status": "stored"}
+
+
+@app.post("/rl-train")
+async def rl_train():
+    result = rl_agent.train()
+    return result
+
+
+@app.get("/rl-shadow-log")
+async def rl_shadow_log():
+    return {"log": rl_agent.get_shadow_log()}
+
+
+# ── Deep Learning Endpoints ──
+
+
+@app.post("/score-sequence")
+async def score_sequence(req: SequenceScoreRequest):
+    result = lstm_model.score(req.bars, req.seq_len)
+    return result
+
+
+@app.post("/train-sequence")
+async def train_sequence(req: SequenceTrainRequest):
+    result = lstm_model.train(req.training_data, req.seq_len)
+    return result
+
+
+@app.post("/score-tft")
+async def score_tft(req: TFTScoreRequest):
+    result = tft_model.score(req.static_features, req.sequence, req.seq_len)
+    return result
+
+
+@app.post("/train-tft")
+async def train_tft(req: TFTTrainRequest):
+    result = tft_model.train(req.training_data, req.seq_len)
+    return result
+
+
+# ── Ensemble Endpoints ──
+
+
+@app.post("/ensemble-score")
+async def ensemble_score(req: EnsembleScoreRequest):
+    result = ensemble_learner.score(req.model_outputs)
+    return result
+
+
+@app.post("/ensemble-train")
+async def ensemble_train(req: EnsembleTrainRequest):
+    result = ensemble_learner.train(req.training_data)
+    return result
+
+
+# ── Online Learning Endpoints ──
+
+
+@app.post("/online-update")
+async def online_update(req: OnlineUpdateRequest):
+    result = online_learner.update(req.features, req.outcome, req.trade_id)
+    return result
+
+
+@app.get("/online-stats")
+async def online_stats():
+    return online_learner.get_stats()
 
 
 if __name__ == "__main__":

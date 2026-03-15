@@ -704,3 +704,150 @@ model RegimeHistory {
   @@index([date])
   @@map("regime_history")
 }
+
+// ─── System 2: Market Data Infrastructure ───────────────────────────
+
+model Tick {
+  id        BigInt   @id @default(autoincrement())
+  symbol    String
+  exchange  String   @default("NSE")
+  ltp       Float
+  bid       Float?
+  ask       Float?
+  bidQty    Int?
+  askQty    Int?
+  volume    BigInt
+  timestamp DateTime
+
+  @@index([symbol, timestamp])
+  @@map("ticks")
+}
+
+model HistoricalBar {
+  id        String   @id @default(uuid())
+  symbol    String
+  exchange  String   @default("NSE")
+  timeframe String   @default("1d")
+  open      Float
+  high      Float
+  low       Float
+  close     Float
+  volume    BigInt
+  adjClose  Float?   @map("adj_close")
+  timestamp DateTime
+
+  @@unique([symbol, exchange, timeframe, timestamp])
+  @@index([symbol, timestamp])
+  @@map("historical_bars")
+}
+
+model CorporateAction {
+  id         String   @id @default(uuid())
+  symbol     String
+  actionType String   @map("action_type")
+  ratio      Float?
+  exDate     DateTime @map("ex_date")
+  details    Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([symbol, exDate])
+  @@map("corporate_actions")
+}
+
+// ─── System 5: Observability ────────────────────────────────────────
+
+model AuditEntry {
+  id         BigInt   @id @default(autoincrement())
+  orderId    String?  @map("order_id")
+  positionId String?  @map("position_id")
+  userId     String   @map("user_id")
+  action     String
+  actor      String
+  beforeState Json?   @map("before_state")
+  afterState  Json?   @map("after_state")
+  reason     String?
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@index([orderId])
+  @@map("audit_trail")
+}
+
+// ─── System 7: Regulatory Compliance ────────────────────────────────
+
+model MarginRecord {
+  id            String   @id @default(uuid())
+  userId        String   @map("user_id")
+  symbol        String
+  exchange      String   @default("NSE")
+  segment       String   @default("EQ")
+  varMargin     Float    @map("var_margin")
+  elmMargin     Float    @map("elm_margin")
+  spanMargin    Float    @default(0) @map("span_margin")
+  totalRequired Float    @map("total_required")
+  peakUtilPct   Float    @default(0) @map("peak_util_pct")
+  snapshotAt    DateTime @default(now()) @map("snapshot_at")
+
+  @@index([userId, snapshotAt])
+  @@index([symbol])
+  @@map("margin_records")
+}
+
+model ContractNote {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  orderId      String   @map("order_id")
+  tradeDate    DateTime @map("trade_date")
+  symbol       String
+  exchange     String
+  side         String
+  qty          Int
+  price        Float
+  brokerage    Float
+  stt          Float
+  exchangeChg  Float    @map("exchange_charges")
+  gst          Float
+  sebiChg      Float    @map("sebi_charges")
+  stampDuty    Float    @map("stamp_duty")
+  totalCost    Float    @map("total_cost")
+  netAmount    Float    @map("net_amount")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([userId, tradeDate])
+  @@index([orderId])
+  @@map("contract_notes")
+}
+
+// ─── Intelligent Trading Brain ──────────────────────────────────────
+
+model MarketMemory {
+  id              String    @id @default(uuid())
+  userId          String    @map("user_id")
+  symbol          String
+  timestamp       DateTime
+  niftyLevel      Float     @map("nifty_level")
+  niftyBand       String    @map("nifty_band")
+  vixLevel        Float     @map("vix_level")
+  regime          String
+  dayOfWeek       Int       @map("day_of_week")
+  hourOfDay       Int       @map("hour_of_day")
+  gapPct          Float     @default(0) @map("gap_pct")
+  signalStrategy  String    @map("signal_strategy")
+  signalDirection String    @map("signal_direction")
+  signalConfidence Float    @map("signal_confidence")
+  outcome         String?
+  pnlPct          Float?    @map("pnl_pct")
+  holdingMinutes  Int?      @map("holding_minutes")
+  fingerprint     String
+  keyLevels       Json?     @map("key_levels")
+  marketSnapshot  Json?     @map("market_snapshot")
+  lessonsLearned  String?   @map("lessons_learned")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  resolvedAt      DateTime? @map("resolved_at")
+
+  @@index([userId, regime, niftyBand])
+  @@index([symbol, outcome])
+  @@index([userId, createdAt])
+  @@map("market_memory")
+}

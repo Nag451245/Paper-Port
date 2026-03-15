@@ -11,6 +11,15 @@ import { ExitCoordinator } from './exit-coordinator.service.js';
 import { DecisionAuditService } from './decision-audit.service.js';
 import { getRedis } from '../lib/redis.js';
 import { isKillSwitchActive } from '../lib/rust-engine.js';
+import { FillSimulatorService } from './fill-simulator.service.js';
+import { ExecutionEngineService } from './execution-engine.service.js';
+import { SmartOrderRouterService } from './smart-order-router.service.js';
+import { OrderBookService } from './order-book.service.js';
+import { MetricsService } from './metrics.service.js';
+import { POVExecutorService } from './pov-executor.service.js';
+import { SniperExecutorService } from './sniper-executor.service.js';
+import { ISExecutorService } from './is-executor.service.js';
+import { IcebergExecutor } from './iceberg-executor.service.js';
 type OrderSide = string;
 type OrderType = string;
 type Exchange = string;
@@ -137,57 +146,26 @@ function simulateExecution(
     };
   }
 
-  // Spread model: base spread by exchange, scaled by time-of-day
-  const baseSpreadBps: Record<string, number> = { MCX: 8, CDS: 5, NSE: 3, BSE: 4, NFO: 6 };
-  let spreadBps = baseSpreadBps[exchange] ?? 3;
+  const fillSim = new FillSimulatorService();
+  const marketState = { ltp: idealPrice, avgDailyVolume: 500_000 };
+  const result = fillSim.simulate(
+    { symbol: '', exchange: exchange ?? 'NSE', side, orderType: 'MARKET', qty, price: idealPrice },
+    marketState,
+  );
 
-  // Time-of-day widening: wider at open (9:15-9:45) and close (15:00-15:30)
-  const now = new Date();
-  const hour = now.getHours();
-  const minute = now.getMinutes();
-  const minuteOfDay = hour * 60 + minute;
-  if (minuteOfDay < 585 || minuteOfDay > 900) { // Before 9:45 or after 15:00
-    spreadBps *= 1.8;
-  } else if (minuteOfDay < 615) { // 9:45 - 10:15
-    spreadBps *= 1.3;
-  }
-
-  const spreadHalf = idealPrice * spreadBps / 20000;
-  const spreadAdjusted = side === 'BUY' ? idealPrice + spreadHalf : idealPrice - spreadHalf;
-
-  // Square-root market impact model: impact_bps = k * sqrt(participation_rate) * vol
-  const k = exchange === 'MCX' ? 0.15 : exchange === 'NFO' ? 0.12 : 0.10;
-  const estimatedDailyVolume = 500_000;
-  const participationRate = estimatedDailyVolume > 0 ? qty / estimatedDailyVolume : 0.01;
-  const estimatedVol = exchange === 'MCX' ? 0.025 : 0.018;
-  const impactBps = k * Math.sqrt(participationRate) * estimatedVol * 10000;
-
-  const slippageFactor = Math.min(qty * idealPrice / 5_000_000, 0.003);
-  const randomJitter = (Math.random() - 0.5) * 0.0005;
-  const totalSlippage = slippageFactor + impactBps / 10000 + Math.abs(randomJitter);
-  const slippageAmount = spreadAdjusted * totalSlippage;
-  const fillPrice = side === 'BUY'
-    ? spreadAdjusted + slippageAmount
-    : spreadAdjusted - slippageAmount;
-
-  const impactCost = Math.abs(fillPrice - idealPrice) * qty;
-
-  const liquidity = exchange === 'MCX' ? 0.85 : exchange === 'CDS' ? 0.80 : 0.95;
-  const fillRatio = Math.min(1, liquidity + Math.random() * (1 - liquidity));
-  const filledQty = Math.max(1, Math.round(qty * fillRatio));
-
-  const latencyMs = Math.round(15 + Math.random() * 50);
+  const fillRatio = qty > 0 ? result.fillQty / qty : 1;
+  const spreadCost = Math.abs(result.fillPrice - idealPrice) * result.fillQty;
 
   return {
     idealPrice: Number(idealPrice.toFixed(2)),
-    fillPrice: Number(fillPrice.toFixed(2)),
-    slippageBps: Number((totalSlippage * 10000).toFixed(1)),
-    spreadCost: Number((spreadHalf * 2 * qty).toFixed(2)),
-    impactCost: Number(impactCost.toFixed(2)),
-    filledQty,
+    fillPrice: result.fillPrice,
+    slippageBps: result.slippageBps,
+    spreadCost: Number(spreadCost.toFixed(2)),
+    impactCost: result.marketImpact,
+    filledQty: result.fillQty,
     requestedQty: qty,
     fillRatio: Number(fillRatio.toFixed(3)),
-    latencyMs,
+    latencyMs: result.latencyMs,
   };
 }
 
@@ -198,12 +176,17 @@ export class TradeService {
   private broker: BrokerAdapter | null = null;
   private oms: OrderManagementService | null = null;
   private _twapExecutor: any = null;
+  private fillSimulator = new FillSimulatorService();
+  private smartRouter: SmartOrderRouterService;
+  private executionEngine: ExecutionEngineService;
 
   constructor(private prisma: PrismaClient, oms?: OrderManagementService) {
     this.marketData = new MarketDataService();
     this.calendar = new MarketCalendar();
     this.riskService = new RiskService(prisma);
     this.oms = oms ?? new OrderManagementService(prisma);
+    this.smartRouter = new SmartOrderRouterService(new OrderBookService());
+    this.executionEngine = new ExecutionEngineService(this.fillSimulator);
 
     if (TRADING_MODE === 'LIVE') {
       this.broker = getBrokerAdapter('breeze');
@@ -223,6 +206,13 @@ export class TradeService {
   }
 
   isLiveMode(): boolean { return TRADING_MODE === 'LIVE' && !!this.broker; }
+
+  getExecutionStats(): { latency: ReturnType<ExecutionEngineService['getLatencyStats']>; queueDepth: number } {
+    return {
+      latency: this.executionEngine.getLatencyStats(),
+      queueDepth: this.executionEngine.getQueueDepth(),
+    };
+  }
 
   async executeLiveOrder(input: PlaceOrderInput): Promise<{ orderId: string; status: string; brokerOrderId?: string }> {
     if (!this.broker) throw new TradeError('Live broker not configured', 500);
@@ -369,7 +359,18 @@ export class TradeService {
       throw new TradeError('Portfolio not found', 404);
     }
 
-    const exchange = input.exchange ?? 'NSE';
+    let exchange = input.exchange ?? 'NSE';
+    if (!input.exchange) {
+      try {
+        const routeDecision = this.smartRouter.route({
+          symbol: input.symbol, side: input.side, qty: input.qty, price: input.price,
+        });
+        if (routeDecision.confidence > 0.6) {
+          exchange = routeDecision.exchange;
+          log.info({ symbol: input.symbol, exchange, reason: routeDecision.reason }, 'Smart router selected exchange');
+        }
+      } catch { /* fall through to default */ }
+    }
     const marketOpen = this.calendar.isMarketOpen(exchange);
 
     // STRICT RULE: No orders outside market hours — not even queued
@@ -475,6 +476,65 @@ export class TradeService {
               }, `${routing.orderType} execution completed`);
             }
             return twapResult as any;
+          }
+
+          if (routing.orderType === 'POV') {
+            const povExecutor = new POVExecutorService();
+            povExecutor.setTradeService({ placeOrder: (uid, inp) => this.placeOrder(uid, inp) });
+            povExecutor.setMarketData(this.marketData);
+            const result = await povExecutor.execute({
+              totalQty: input.qty, targetPct: 5, symbol: input.symbol,
+              side: input.side as 'BUY' | 'SELL', exchange: input.exchange ?? 'NSE',
+              portfolioId: input.portfolioId, userId,
+              maxDurationMinutes: 60, pollIntervalMs: 10000, minSliceQty: 1,
+              strategyTag: input.strategyTag,
+            });
+            log.info({ symbol: input.symbol, totalFilled: result.totalFilled, effectivePct: result.effectiveParticipationPct }, 'POV execution completed');
+            return result as any;
+          }
+
+          if (routing.orderType === 'SNIPER') {
+            const sniperExecutor = new SniperExecutorService();
+            sniperExecutor.setTradeService({ placeOrder: (uid, inp) => this.placeOrder(uid, inp) });
+            sniperExecutor.setMarketData(this.marketData);
+            const result = await sniperExecutor.execute({
+              totalQty: input.qty, symbol: input.symbol,
+              side: input.side as 'BUY' | 'SELL', exchange: input.exchange ?? 'NSE',
+              portfolioId: input.portfolioId, userId, depthThresholdMultiplier: 3.0,
+              maxDurationMinutes: 120, pollIntervalMs: 5000, maxSlicePct: 30,
+              strategyTag: input.strategyTag,
+            });
+            log.info({ symbol: input.symbol, totalFilled: result.totalFilled, opportunities: result.opportunitiesTaken }, 'Sniper execution completed');
+            return result as any;
+          }
+
+          if (routing.orderType === 'IS') {
+            const isExecutor = new ISExecutorService();
+            isExecutor.setTradeService({ placeOrder: (uid, inp) => this.placeOrder(uid, inp) });
+            isExecutor.setMarketData(this.marketData);
+            const avgDailyVolume = quote.volume ?? 100000;
+            const result = await isExecutor.execute({
+              totalQty: input.qty, symbol: input.symbol, side: input.side as 'BUY' | 'SELL',
+              exchange, portfolioId: input.portfolioId, userId,
+              decisionPrice: quote.ltp, urgency: 0.8, avgDailyVolume,
+              durationMinutes: 30, strategyTag: input.strategyTag,
+            });
+            log.info({ symbol: input.symbol, totalFilled: result.totalFilled, shortfallBps: result.totalShortfallBps }, 'IS execution completed');
+            return result as any;
+          }
+
+          if (routing.orderType === 'ICEBERG') {
+            const icebergExecutor = new IcebergExecutor();
+            icebergExecutor.setTradeService({ placeOrder: (uid, inp) => this.placeOrder(uid, inp) });
+            const result = await icebergExecutor.execute({
+              totalQty: input.qty, showQty: Math.max(1, Math.floor(input.qty / 5)),
+              randomizePct: 20, symbol: input.symbol, side: input.side as 'BUY' | 'SELL',
+              exchange, portfolioId: input.portfolioId, userId,
+              price: input.price, strategyTag: input.strategyTag,
+              maxDurationMinutes: 60, pollIntervalMs: 5000,
+            });
+            log.info({ symbol: input.symbol, totalFilled: result.totalFilled }, 'Iceberg execution completed');
+            return result as any;
           }
         }
       } catch (err) {
@@ -623,6 +683,8 @@ export class TradeService {
       },
     });
 
+    MetricsService.getInstance().recordOrderPlaced(input.side, input.orderType, TRADING_MODE);
+
     emit('execution', {
       type: 'ORDER_PLACED', userId, orderId: order.id,
       symbol: input.symbol, side: input.side, qty: input.qty, orderType: input.orderType,
@@ -653,6 +715,13 @@ export class TradeService {
         symbol: input.symbol, fillPrice, qty: effectiveQty,
         slippageBps: execSimResult?.slippageBps ?? 0,
       }).catch(err => log.error({ err, orderId: order.id }, 'Failed to emit ORDER_FILLED event'));
+
+      this.smartRouter.recordFillQuality(exchange, execSimResult?.slippageBps ?? 0);
+
+      if (execSimResult) {
+        MetricsService.getInstance().recordLatency(execSimResult.latencyMs);
+        this.executionEngine.getLatencyStats();
+      }
 
       wsHub.broadcastTradeExecution(userId, {
         symbol: input.symbol,

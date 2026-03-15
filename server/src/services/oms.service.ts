@@ -1,6 +1,8 @@
 import type { PrismaClient } from '@prisma/client';
 import { emit } from '../lib/event-bus.js';
 import { createChildLogger } from '../lib/logger.js';
+import { AuditTrailService } from './audit-trail.service.js';
+import { MetricsService } from './metrics.service.js';
 
 const log = createChildLogger('OMS');
 
@@ -43,8 +45,13 @@ export interface OrderTransition {
 
 export class OrderManagementService {
   private transitionLog: OrderTransition[] = [];
+  private auditTrail: AuditTrailService;
+  private metrics: MetricsService;
 
-  constructor(private prisma: PrismaClient) {}
+  constructor(private prisma: PrismaClient) {
+    this.auditTrail = new AuditTrailService();
+    this.metrics = MetricsService.getInstance();
+  }
 
   /**
    * Validate and execute a state transition on an order.
@@ -54,7 +61,7 @@ export class OrderManagementService {
     toState: OrderState,
     details?: { filledQty?: number; avgFillPrice?: number; reason?: string; slippageBps?: number },
   ): Promise<OrderTransition> {
-    const order = await this.prisma.order.findUnique({ where: { id: orderId } });
+    const order = await this.prisma.order.findUnique({ where: { id: orderId }, include: { portfolio: { select: { userId: true } } } });
     if (!order) throw new Error(`Order ${orderId} not found`);
 
     const fromState = order.status as OrderState;
@@ -120,6 +127,22 @@ export class OrderManagementService {
       filledQty: details?.filledQty,
       avgFillPrice: details?.avgFillPrice,
     }).catch(err => log.error({ err, orderId }, 'Failed to emit ORDER_STATE_CHANGE event'));
+
+    if (toState === 'FILLED') {
+      this.metrics.recordOrderFilled(order.side, 'PAPER');
+    } else if (toState === 'REJECTED') {
+      this.metrics.recordOrderRejected(details?.reason ?? 'unknown');
+    }
+
+    this.auditTrail.append({
+      orderId,
+      userId: order.portfolio?.userId ?? 'unknown',
+      action: toState === 'FILLED' ? 'ORDER_FILL' : toState === 'CANCELLED' ? 'ORDER_CANCEL' : toState === 'REJECTED' ? 'ORDER_REJECT' : 'ORDER_MODIFY',
+      actor: 'SYSTEM',
+      beforeState: { status: fromState },
+      afterState: { status: toState, ...details },
+      reason: details?.reason,
+    }).catch(err => log.warn({ err, orderId }, 'Failed to write audit trail'));
 
     return transition;
   }

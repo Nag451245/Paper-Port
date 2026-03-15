@@ -16,6 +16,14 @@ import { emit } from '../lib/event-bus.js';
 import { wsHub } from '../lib/websocket.js';
 import { createChildLogger } from '../lib/logger.js';
 import { env } from '../config.js';
+import { FeaturePipelineService } from './feature-pipeline.service.js';
+import { MarketMemoryService } from './market-memory.service.js';
+import { DecisionFusionService } from './decision-fusion.service.js';
+import { LessonsEngineService } from './lessons-engine.service.js';
+import { mlScore, isMLServiceAvailable, mlScoreSequence, mlScoreTFT, mlEnsembleScore, mlPredictReturns } from '../lib/ml-service-client.js';
+import { StrategyRegistry, type Bar as StrategyBar, type Signal as StrategySignal } from './strategy-sdk.js';
+import { RegimeDetectorService } from './regime-detector.service.js';
+import { PortfolioOptimizerService } from './portfolio-optimizer.service.js';
 
 const log = createChildLogger('BotEngine');
 
@@ -170,6 +178,8 @@ export class BotEngine {
   private riskService: RiskService;
   private twapExecutor: TWAPExecutor;
 
+  private portfolioOptimizer = new PortfolioOptimizerService();
+
   private cachedStrategyParams = new Map<string, Record<string, unknown>>();
   private paramsLastLoaded = 0;
 
@@ -180,6 +190,12 @@ export class BotEngine {
   private mlWeights: Record<string, unknown> | null = null;
   private abTestTracker = { rustCorrect: 0, pythonCorrect: 0, total: 0 };
 
+  private featurePipeline = new FeaturePipelineService();
+  private marketMemory = new MarketMemoryService();
+  private decisionFusion = new DecisionFusionService();
+  private lessonsEngine = new LessonsEngineService();
+  private regimeDetector: RegimeDetectorService;
+
   constructor(private prisma: PrismaClient, oms?: OrderManagementService) {
     this.tradeService = new TradeService(prisma, oms);
     this.targetTracker = new TargetTracker(prisma);
@@ -189,6 +205,7 @@ export class BotEngine {
     this.riskService = new RiskService(prisma);
     this.twapExecutor = new TWAPExecutor(prisma);
     this.twapExecutor.setTradeService(this.tradeService);
+    this.regimeDetector = new RegimeDetectorService(prisma);
     this._rustAvailable = isEngineAvailable();
     console.log(`[BotEngine] Initialized — Rust engine: ${this._rustAvailable ? 'AVAILABLE' : 'NOT FOUND (using Gemini AI only)'}`);
 
@@ -619,21 +636,17 @@ export class BotEngine {
   ): Promise<string | null> {
     try {
       if (candleData.length === 0 || candleData[0].candles.length < 20) return null;
-      const closes = candleData[0].candles.map((c: any) => c.close);
 
-      const shortEma = this.calcSimpleEma(closes, 10);
-      const longEma = this.calcSimpleEma(closes, 30);
-      const returns = closes.slice(1).map((c: number, i: number) => (c - closes[i]) / closes[i]);
-      const volatility = Math.sqrt(returns.reduce((s: number, r: number) => s + r * r, 0) / returns.length) * Math.sqrt(252);
+      const bars = candleData[0].candles.map((c: any) => ({
+        timestamp: new Date(c.timestamp ?? Date.now()),
+        open: c.open, high: c.high, low: c.low, close: c.close,
+        volume: c.volume ?? 0,
+      }));
 
-      const trend = shortEma > longEma ? 'up' : 'down';
-      const trendStrength = Math.abs(shortEma - longEma) / longEma;
-
-      if (volatility > 0.30) return 'volatile';
-      if (trendStrength > 0.02 && trend === 'up') return 'trending';
-      if (trendStrength > 0.02 && trend === 'down') return 'trending';
-      if (volatility < 0.12) return 'low_vol';
-      return 'mean_reverting';
+      const vixQuote = await this.marketData.getQuote('INDIA VIX').catch(() => ({ ltp: 15 }));
+      const result = await this.regimeDetector.detectHybrid(bars, vixQuote.ltp);
+      log.info({ regime: result.regime, confidence: result.confidence, source: result.source }, 'Hybrid regime detected');
+      return result.regime;
     } catch {
       return null;
     }
@@ -1056,14 +1069,45 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         const maxPerTrade = nav * kellyAllocation;
         const qty = ltp > 0 ? Math.max(1, Math.floor(maxPerTrade / ltp)) : 1;
 
+        let optimizedQty = qty;
+        try {
+          const positions = await this.prisma.position.findMany({
+            where: { portfolio: { userId }, status: 'OPEN' },
+            select: { symbol: true, side: true, qty: true, avgEntryPrice: true },
+          });
+          const optimized = this.portfolioOptimizer.optimizePosition(
+            { symbol, expectedReturn: (signalMeta?.confidence ?? 0.5) * 0.02, confidence: signalMeta?.confidence ?? 0.5, direction, currentWeight: 0 },
+            { capital: nav, positions: positions.map(p => ({ symbol: p.symbol, side: p.side, qty: p.qty, avgPrice: Number(p.avgEntryPrice) })), currentPrice: ltp > 0 ? ltp : nav * kellyAllocation },
+          );
+          if (optimized.adjustedQty > 0 && optimized.adjustedQty < qty) {
+            optimizedQty = optimized.adjustedQty;
+            log.info({ symbol, kellyQty: qty, optimizedQty, reason: optimized.reason }, 'Portfolio optimizer adjusted qty');
+          }
+        } catch (err) {
+          log.warn({ err, symbol }, 'Portfolio optimizer failed — using Kelly qty');
+        }
+
         // Enforce all risk limits before placing the order
-        const riskCheck = await this.riskService.preTradeCheck(userId, symbol, 'BUY', qty, ltp > 0 ? ltp : nav * kellyAllocation);
+        const riskCheck = await this.riskService.preTradeCheck(userId, symbol, 'BUY', optimizedQty, ltp > 0 ? ltp : nav * kellyAllocation);
         if (!riskCheck.allowed) {
           const msg = `RISK BLOCKED: ${riskCheck.violations.join('; ')}`;
           console.log(`[BotEngine] ${msg}`);
           if (auditId) {
             try { await this.decisionAudit.resolveDecision(auditId, { exitPrice: 0, pnl: 0, predictionAccuracy: 0, outcomeNotes: msg }); } catch {}
           }
+          try {
+            await this.marketMemory.recordMemory({
+              userId, symbol,
+              strategy: signalMeta?.signalSource ?? 'unknown',
+              direction, confidence: signalMeta?.confidence ?? 0,
+              conditions: {
+                niftyLevel: 22000, vixLevel: 15, regime: 'unknown',
+                dayOfWeek: new Date().getDay(), hourOfDay: new Date().getHours(), gapPct: 0,
+              },
+              fingerprint: '[]',
+              marketSnapshot: { riskBlocked: true, violations: riskCheck.violations },
+            }).then(memId => this.marketMemory.resolveMemory(memId, 'LOSS', 0, 0, `Risk blocked: ${riskCheck.violations.join('; ')}`));
+          } catch {}
           return { success: false, message: msg };
         }
         if (riskCheck.warnings.length > 0) {
@@ -1071,7 +1115,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         }
 
         const orderTypeDecision = selectOrderType({
-          qty,
+          qty: optimizedQty,
           ltp: ltp > 0 ? ltp : nav * kellyAllocation,
           avgDailyVolume: 500_000,
           confidence: signalMeta?.confidence ?? 0.5,
@@ -1079,12 +1123,12 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         });
         log.info({ symbol, orderType: orderTypeDecision.orderType, reason: orderTypeDecision.reason }, 'Order type selected');
 
-        if ((orderTypeDecision.orderType === 'TWAP' || orderTypeDecision.orderType === 'VWAP') && qty > 10) {
+        if ((orderTypeDecision.orderType === 'TWAP' || orderTypeDecision.orderType === 'VWAP') && optimizedQty > 10) {
           const execFn = orderTypeDecision.orderType === 'VWAP'
             ? this.twapExecutor.executeVWAP.bind(this.twapExecutor)
             : this.twapExecutor.executeTWAP.bind(this.twapExecutor);
           const twapResult = await execFn({
-            totalQty: qty, numSlices: Math.min(5, qty),
+            totalQty: optimizedQty, numSlices: Math.min(5, optimizedQty),
             durationMinutes: 10, maxDeviationPct: 1.0,
             symbol, side: 'BUY', exchange,
             portfolioId: portfolio.id, userId, strategyTag: this.resolveStrategyTag(signalMeta?.signalSource),
@@ -1099,7 +1143,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           symbol,
           side: 'BUY',
           orderType: orderTypeDecision.orderType === 'LIMIT' ? 'LIMIT' : 'MARKET',
-          qty,
+          qty: optimizedQty,
           price: orderTypeDecision.orderType === 'LIMIT' && ltp > 0 ? Number((ltp * 1.001).toFixed(2)) : undefined,
           instrumentToken: symbol,
           exchange,
@@ -1110,7 +1154,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           await this.updateBotTradeStats(botId, 0);
         }
 
-        return { success: true, message: `Bought ${qty} ${symbol} @ ₹${Number(order.avgFillPrice ?? 0).toFixed(2)}` };
+        return { success: true, message: `Bought ${optimizedQty} ${symbol} @ ₹${Number(order.avgFillPrice ?? 0).toFixed(2)}` };
       } else {
         // Check for existing LONG position to close
         const longPosition = await this.prisma.position.findFirst({
@@ -1207,6 +1251,19 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           if (auditId) {
             try { await this.decisionAudit.resolveDecision(auditId, { exitPrice: 0, pnl: 0, predictionAccuracy: 0, outcomeNotes: msg }); } catch {}
           }
+          try {
+            await this.marketMemory.recordMemory({
+              userId, symbol,
+              strategy: signalMeta?.signalSource ?? 'unknown',
+              direction, confidence: signalMeta?.confidence ?? 0,
+              conditions: {
+                niftyLevel: 22000, vixLevel: 15, regime: 'unknown',
+                dayOfWeek: new Date().getDay(), hourOfDay: new Date().getHours(), gapPct: 0,
+              },
+              fingerprint: '[]',
+              marketSnapshot: { riskBlocked: true, violations: sellRiskCheck.violations },
+            }).then(memId => this.marketMemory.resolveMemory(memId, 'LOSS', 0, 0, `Risk blocked: ${sellRiskCheck.violations.join('; ')}`));
+          } catch {}
           return { success: false, message: msg };
         }
 
@@ -1539,8 +1596,26 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           }
 
           if (rustSignals.length > 0) {
-            await this.handleRustSignals(rustSignals, bot, userId, botId);
+            await this.handleRustSignals(rustSignals, bot, userId, botId, regime ?? undefined);
             // Don't return — still run GPT for additional analysis
+          }
+
+          const registry = StrategyRegistry.getInstance();
+          const sdkStrategyNames = registry.list().map(s => s.name);
+          if (sdkStrategyNames.length > 0) {
+            const sdkSignals: ScanSignal[] = [];
+            for (const stratName of sdkStrategyNames.slice(0, 3)) {
+              for (const cd of candleData.slice(0, 5)) {
+                try {
+                  const sdkSig = await this.runSDKStrategy(stratName, cd.symbol, userId, 'NSE');
+                  if (sdkSig) sdkSignals.push(sdkSig);
+                } catch { /* non-fatal */ }
+              }
+            }
+            if (sdkSignals.length > 0) {
+              log.info({ botId, sdkSignalCount: sdkSignals.length }, 'SDK strategies generated signals');
+              await this.handleRustSignals(sdkSignals, bot, userId, botId, regime ?? undefined);
+            }
           }
         }
       }
@@ -1663,6 +1738,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     bot: any,
     userId: string,
     botId: string,
+    detectedRegime?: string,
   ): Promise<void> {
     const shouldAutoExecute = bot.role === 'EXECUTOR' || bot.role === 'SCANNER';
 
@@ -1684,8 +1760,165 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     for (const sig of prioritized.slice(0, 5)) {
       const gptApproved = await this.gptValidateSignal(sig, bot, userId);
 
-      const finalConfidence = gptApproved ? sig.confidence : sig.confidence * 0.9;
-      const execute = shouldAutoExecute && finalConfidence >= 0.35;
+      // --- Intelligent Trading Brain: ML scoring + memory gate ---
+      let fusionDecision: any = null;
+      try {
+        const candles = await this.marketData.getHistory(sig.symbol, '1d',
+          new Date(Date.now() - 250 * 86400000).toISOString().split('T')[0],
+          new Date().toISOString().split('T')[0], undefined, 'NSE');
+        const bars = candles.map((c: any) => ({
+          timestamp: new Date(c.timestamp), open: c.open, high: c.high,
+          low: c.low, close: c.close, volume: c.volume,
+        }));
+
+        const niftyQuote = await this.marketData.getQuote('NIFTY 50').catch(() => ({ ltp: 0, change: 0, changePercent: 0 }));
+        const vixQuote = await this.marketData.getQuote('INDIA VIX').catch(() => ({ ltp: 15, change: 0, changePercent: 0 }));
+
+        const preFeatures = this.featurePipeline.extractFeatures(sig.symbol, bars, {
+          niftyLtp: niftyQuote.ltp, niftyChange: niftyQuote.changePercent,
+          vixLevel: vixQuote.ltp, vixChange: vixQuote.changePercent,
+        }, {
+          winRate: 0.5, avgPnl: 0, sampleCount: 0, confidence: 0.3,
+        });
+
+        const fingerprint = this.featurePipeline.getFingerprint(preFeatures);
+
+        const memoryRecall = await this.marketMemory.recall(userId, {
+          niftyLevel: niftyQuote.ltp || 22000,
+          vixLevel: vixQuote.ltp || 15,
+          regime: detectedRegime ?? 'MEAN_REVERTING',
+          dayOfWeek: new Date().getDay(),
+          hourOfDay: new Date().getHours(),
+          gapPct: 0,
+        }, fingerprint, 20);
+
+        const features = this.featurePipeline.extractFeatures(sig.symbol, bars, {
+          niftyLtp: niftyQuote.ltp, niftyChange: niftyQuote.changePercent,
+          vixLevel: vixQuote.ltp, vixChange: vixQuote.changePercent,
+        }, {
+          winRate: memoryRecall.historicalWinRate,
+          avgPnl: memoryRecall.avgPnlPct,
+          sampleCount: memoryRecall.similarCases,
+          confidence: memoryRecall.similarCases >= 10 ? 0.8 : 0.4,
+        });
+        const flatFeatures = this.featurePipeline.toFlatArray(features);
+
+        let mlScoreResult: { winProbability: number; confidence: number; available: boolean; expectedReturn?: number } = { winProbability: 0.5, confidence: 0, available: false };
+        try {
+          if (await isMLServiceAvailable()) {
+            const namedFeatures: Record<string, number> = {};
+            const fv = features;
+            Object.entries(fv.priceAction).forEach(([k, v]) => { namedFeatures[`pa_${k}`] = v; });
+            Object.entries(fv.trend).forEach(([k, v]) => { namedFeatures[`tr_${k}`] = v; });
+            Object.entries(fv.momentum).forEach(([k, v]) => { namedFeatures[`mo_${k}`] = v; });
+            Object.entries(fv.volatility).forEach(([k, v]) => { namedFeatures[`vo_${k}`] = v; });
+            Object.entries(fv.volume).forEach(([k, v]) => { namedFeatures[`vl_${k}`] = v; });
+            Object.entries(fv.marketContext).forEach(([k, v]) => { namedFeatures[`mc_${k}`] = v; });
+            Object.entries(fv.time).forEach(([k, v]) => { namedFeatures[`tm_${k}`] = v; });
+            Object.entries(fv.memory).forEach(([k, v]) => { namedFeatures[`mm_${k}`] = v; });
+
+            const candleBars = bars.map((b: any) => ({
+              open: b.open, high: b.high, low: b.low, close: b.close,
+              volume: b.volume ?? 0, returns: 0, volatility: 0, volume_ratio: 1,
+            }));
+
+            const tftSequence = candleBars.slice(-30).map((b: any, i: number, arr: any[]) => ({
+              ...b,
+              day_of_week: new Date().getDay(),
+              hour_of_day: new Date().getHours(),
+              is_expiry_day: 0,
+              returns: i > 0 ? (b.close - arr[i - 1].close) / arr[i - 1].close : 0,
+              volume_ratio: 1,
+              rsi: 50, macd: 0, atr: 0, bb_position: 0.5,
+              obv: 0, vwap_dist: 0, spread_proxy: 0, adx: 25, momentum: 0, volatility: 0.015,
+            }));
+
+            const [xgbResult, lstmResult, tftResult, returnResult] = await Promise.allSettled([
+              mlScore({ features: [{ features: namedFeatures }] }),
+              mlScoreSequence(candleBars),
+              mlScoreTFT({ sector_id: 0, cap_category: 1, is_nifty50: 0, exchange_id: 0 }, tftSequence),
+              mlPredictReturns([namedFeatures]),
+            ]);
+
+            const xgbProb = xgbResult.status === 'fulfilled' ? xgbResult.value.scores[0] ?? 0.5 : 0.5;
+            const lstmProb = lstmResult.status === 'fulfilled' ? lstmResult.value.probability : 0.5;
+            const tftProb = tftResult.status === 'fulfilled' ? tftResult.value.probability : 0.5;
+            const expectedReturn = returnResult.status === 'fulfilled' && returnResult.value.available
+              ? returnResult.value.predictions[0] ?? 0 : undefined;
+
+            let ensembleProb = xgbProb;
+            let ensembleConfidence = 0.7;
+            try {
+              const ensembleResult = await mlEnsembleScore({
+                xgb_prob: xgbProb,
+                lgb_prob: xgbProb,
+                lstm_prob: lstmProb,
+                tft_prob: tftProb,
+                return_pred: expectedReturn ?? 0,
+                online_prob: 0.5,
+                regime_id: detectedRegime === 'TRENDING_UP' ? 0 : detectedRegime === 'TRENDING_DOWN' ? 1 : detectedRegime === 'VOLATILE' ? 3 : 2,
+                vix_level: 15,
+              });
+              if (ensembleResult.available) {
+                ensembleProb = ensembleResult.ensemble_probability;
+                ensembleConfidence = ensembleResult.confidence;
+              }
+            } catch { /* fallback to xgb */ }
+
+            mlScoreResult = {
+              winProbability: ensembleProb,
+              confidence: ensembleConfidence,
+              available: true,
+              expectedReturn,
+            };
+
+            log.info({
+              symbol: sig.symbol, xgbProb: xgbProb.toFixed(3),
+              lstmProb: lstmProb.toFixed(3), tftProb: tftProb.toFixed(3),
+              ensembleProb: ensembleProb.toFixed(3), expectedReturn,
+            }, 'Ensemble ML scoring completed');
+          }
+        } catch { /* ML service unavailable */ }
+
+        const strategyHealth = await this.getStrategyHealth(userId, sig.strategy ?? bot.assignedStrategy ?? 'default');
+
+        const lessons = await this.lessonsEngine.getRelevantLessons(
+          userId, sig.symbol, sig.strategy ?? 'default', detectedRegime ?? 'MEAN_REVERTING', 3);
+
+        fusionDecision = await this.decisionFusion.decide(
+          { symbol: sig.symbol, direction: sig.direction, confidence: sig.confidence, entry: sig.entry, stopLoss: sig.stop_loss, target: sig.target, indicators: sig.indicators ?? {}, votes: sig.votes ?? {}, strategy: sig.strategy },
+          mlScoreResult,
+          { ...memoryRecall, lessons },
+          { current: detectedRegime ?? 'MEAN_REVERTING', confidence: detectedRegime ? 0.7 : 0.5, source: detectedRegime ? 'rule_based' as const : 'rule_based' as const },
+          strategyHealth,
+          userId,
+        );
+
+        await this.marketMemory.recordMemory({
+          userId, symbol: sig.symbol,
+          strategy: sig.strategy ?? bot.assignedStrategy ?? 'default',
+          direction: sig.direction, confidence: sig.confidence,
+          conditions: {
+            niftyLevel: niftyQuote.ltp || 22000, vixLevel: vixQuote.ltp || 15,
+            regime: detectedRegime ?? 'MEAN_REVERTING', dayOfWeek: new Date().getDay(),
+            hourOfDay: new Date().getHours(), gapPct: 0,
+          },
+          fingerprint,
+          marketSnapshot: { indicators: sig.indicators, votes: sig.votes, mlScore: mlScoreResult.winProbability },
+        });
+
+        log.info({
+          symbol: sig.symbol, direction: sig.direction,
+          fusionScore: fusionDecision.finalScore, action: fusionDecision.action,
+          mlScore: mlScoreResult.winProbability, memoryWinRate: memoryRecall.historicalWinRate,
+          memoryCases: memoryRecall.similarCases,
+        }, 'Decision fusion result');
+      } catch (err) {
+        log.warn({ err, symbol: sig.symbol }, 'Decision fusion failed — falling back to raw signal');
+      }
+
+      const finalConfidence = fusionDecision?.finalScore ?? (gptApproved ? sig.confidence : sig.confidence * 0.9);
+      const execute = shouldAutoExecute && (fusionDecision ? fusionDecision.action === 'EXECUTE' : finalConfidence >= 0.35);
 
       const gateScores = this.deriveGateScores(finalConfidence, sig.indicators, sig.votes, { source: 'rust-engine', gptApproved });
 
@@ -1817,6 +2050,93 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
       }
     } catch (err) {
       console.log(`[BotEngine] Bot ${botId}: executePendingSignals error: ${(err as Error).message}`);
+    }
+  }
+
+  private async runSDKStrategy(
+    strategyName: string,
+    symbol: string,
+    userId: string,
+    exchange: string = 'NSE',
+  ): Promise<ScanSignal | null> {
+    try {
+      const registry = StrategyRegistry.getInstance();
+      const strategy = registry.get(strategyName);
+      if (!strategy) return null;
+
+      const candles = await this.marketData.getHistory(symbol, '1d',
+        new Date(Date.now() - 250 * 86400000).toISOString().split('T')[0],
+        new Date().toISOString().split('T')[0], undefined, exchange);
+
+      if (!candles || candles.length < 50) return null;
+
+      const bars: StrategyBar[] = candles.map((c: any) => ({
+        timestamp: new Date(c.timestamp), open: c.open, high: c.high,
+        low: c.low, close: c.close, volume: c.volume ?? 0,
+      }));
+
+      const portfolios = await this.prisma.portfolio.findFirst({
+        where: { userId },
+        select: { currentNav: true, initialCapital: true },
+      });
+
+      const positions = await this.prisma.position.findMany({
+        where: { portfolio: { userId }, status: 'OPEN' },
+        select: { symbol: true, side: true, qty: true, avgEntryPrice: true, unrealizedPnl: true },
+      });
+
+      const capital = Number(portfolios?.currentNav ?? 1000000);
+      const investedValue = positions.reduce((s, p) => s + Number(p.avgEntryPrice) * p.qty, 0);
+
+      strategy.onInit({
+        portfolio: { capital, investedValue, availableCash: capital - investedValue },
+        positions: positions.map(p => ({
+          symbol: p.symbol, side: p.side, qty: p.qty,
+          avgPrice: Number(p.avgEntryPrice), unrealizedPnl: Number(p.unrealizedPnl ?? 0),
+        })),
+        regime: 'MEAN_REVERTING',
+        timestamp: new Date(),
+        indicators: new Map(),
+      });
+
+      for (const bar of bars.slice(0, -1)) {
+        strategy.onBar(bar, {
+          portfolio: { capital, investedValue, availableCash: capital - investedValue },
+          positions: [],
+          regime: 'MEAN_REVERTING',
+          timestamp: bar.timestamp,
+          indicators: new Map(),
+        });
+      }
+
+      const lastBar = bars[bars.length - 1];
+      const signal = strategy.onBar(lastBar, {
+        portfolio: { capital, investedValue, availableCash: capital - investedValue },
+        positions: positions.map(p => ({
+          symbol: p.symbol, side: p.side, qty: p.qty,
+          avgPrice: Number(p.avgEntryPrice), unrealizedPnl: Number(p.unrealizedPnl ?? 0),
+        })),
+        regime: 'MEAN_REVERTING',
+        timestamp: lastBar.timestamp,
+        indicators: new Map(),
+      });
+
+      if (!signal) return null;
+
+      return {
+        symbol: signal.symbol,
+        direction: signal.direction,
+        confidence: signal.confidence,
+        entry: signal.entryPrice,
+        stop_loss: signal.stopLoss,
+        target: signal.target,
+        indicators: {},
+        votes: {},
+        strategy: strategyName,
+      };
+    } catch (err) {
+      log.warn({ err, strategyName, symbol }, 'SDK strategy execution failed');
+      return null;
     }
   }
 
@@ -2724,6 +3044,48 @@ Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted
       });
     } catch (err) {
       log.error({ err, symbol: signal.symbol }, 'Failed to execute pipeline signal');
+    }
+  }
+
+  private async getStrategyHealth(userId: string, strategyTag: string): Promise<{
+    isDecaying: boolean; consecutiveLosses: number; recentWinRate: number;
+    thompsonAlpha: number; thompsonBeta: number;
+  }> {
+    try {
+      const decay = await this.prisma.alphaDecay.findFirst({
+        where: { userId, strategyId: strategyTag },
+        orderBy: { date: 'desc' },
+      });
+
+      const redis = (await import('../lib/redis.js')).getRedis();
+      let thompsonState = { alpha: 1, beta: 1 };
+      if (redis) {
+        const raw = await redis.get(`cg:thompson:${userId}:${strategyTag}`);
+        if (raw) thompsonState = JSON.parse(raw);
+      }
+
+      const recentTrades = await this.prisma.trade.findMany({
+        where: { portfolio: { userId }, strategyTag, exitTime: { gte: new Date(Date.now() - 7 * 86400000) } },
+        select: { netPnl: true },
+        take: 20,
+        orderBy: { exitTime: 'desc' },
+      });
+
+      const wins = recentTrades.filter(t => Number(t.netPnl) > 0).length;
+      let consecutive = 0;
+      for (const t of recentTrades) {
+        if (Number(t.netPnl) <= 0) consecutive++; else break;
+      }
+
+      return {
+        isDecaying: decay?.isDecaying ?? false,
+        consecutiveLosses: consecutive,
+        recentWinRate: recentTrades.length > 0 ? wins / recentTrades.length : 0.5,
+        thompsonAlpha: thompsonState.alpha,
+        thompsonBeta: thompsonState.beta,
+      };
+    } catch {
+      return { isDecaying: false, consecutiveLosses: 0, recentWinRate: 0.5, thompsonAlpha: 1, thompsonBeta: 1 };
     }
   }
 }

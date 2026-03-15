@@ -44,6 +44,11 @@ import { DataPipelineService } from './services/data-pipeline.service.js';
 import { OrderManagementService } from './services/oms.service.js';
 import { registerAllWorkers } from './services/event-workers.js';
 import { register as metricsRegister, apiRequestDuration } from './lib/metrics.js';
+import { MetricsService } from './services/metrics.service.js';
+import { AuditTrailService } from './services/audit-trail.service.js';
+import { OMSRecoveryService } from './services/oms-recovery.service.js';
+import { TickStoreService } from './services/tick-store.service.js';
+import reportRoutes from './routes/reports.js';
 import { isEngineAvailable, ensureEngineAvailable, startDaemon, stopDaemon } from './lib/rust-engine.js';
 
 export interface BuildAppOptions {
@@ -68,6 +73,22 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     try { await getPrisma().$queryRaw`SELECT 1`; return true; } catch { return false; }
   });
   const dataPipeline = new DataPipelineService();
+  const metricsService = MetricsService.getInstance();
+  metricsService.startCollecting();
+  metricsService.setGaugeProvider(async () => {
+    const prisma = getPrisma();
+    const [posCount, portfolio] = await Promise.all([
+      prisma.position.count({ where: { status: 'OPEN' } }),
+      prisma.portfolio.aggregate({ _sum: { currentNav: true } }),
+    ]);
+    return {
+      openPositions: posCount,
+      nav: Number(portfolio._sum.currentNav ?? 0),
+      wsConnections: wsHub.getConnectedCount(),
+    };
+  });
+  const auditTrail = new AuditTrailService();
+  const omsRecovery = new OMSRecoveryService(auditTrail);
 
   app.decorate('botEngine', botEngine);
   app.decorate('learningEngine', learningEngine);
@@ -153,6 +174,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const latencyMs = reply.elapsedTime;
     if (latencyMs > 0) uptimeMonitor.recordLatency(latencyMs);
     if (reply.statusCode >= 500) uptimeMonitor.recordError();
+    const route = request.routeOptions?.url ?? request.url;
+    if (route !== '/metrics' && route !== '/health') {
+      metricsService.recordApiDuration(request.method, route, latencyMs);
+    }
   });
 
   // Prometheus metrics endpoint — protected by JWT auth
@@ -163,8 +188,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       reply.code(401).send({ error: 'Authentication required for metrics' });
     }
   }] }, async (_req, reply) => {
-    reply.header('Content-Type', metricsRegister.contentType);
-    return metricsRegister.metrics();
+    reply.header('Content-Type', metricsService.getContentType());
+    return metricsService.getMetrics();
   });
 
   // Request duration instrumentation
@@ -247,6 +272,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(riskRoutes, { prefix: '/api/risk' });
   await app.register(commandCenterRoutes, { prefix: '/api/command' });
   await app.register(engineRoutes, { prefix: '/api/engine' });
+  await app.register(reportRoutes, { prefix: '/api/reports' });
 
   await registerWebSocket(app);
   app.decorate('wsHub', wsHub);
@@ -383,6 +409,19 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
   });
 
+  app.addHook('onReady', async () => {
+    try {
+      const report = await omsRecovery.recover();
+      if (report.orphanedExpired > 0 || report.stuckRejected > 0) {
+        app.log.warn({ report }, `[OMS Recovery] Recovered: ${report.totalRecovered} orders, expired ${report.orphanedExpired} orphans, rejected ${report.stuckRejected} stuck`);
+      } else {
+        app.log.info(`[OMS Recovery] Clean startup — ${report.totalRecovered} active orders recovered`);
+      }
+    } catch (err) {
+      app.log.error({ err }, '[OMS Recovery] Failed');
+    }
+  });
+
   // Start SL monitor, price feed, intraday manager, and fill reconciliation at market open
   orchestrator.scheduleMarketDay('45 3 * * 1-5', async () => {
     console.log('[MarketOpen] Starting stop-loss monitor, price feed, intraday manager, and fill reconciliation');
@@ -402,6 +441,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.addHook('onClose', async () => {
+    try {
+      await omsRecovery.gracefulShutdown();
+      app.log.info('[shutdown] OMS graceful shutdown complete');
+    } catch { /* best effort */ }
+    metricsService.stopCollecting();
+    auditTrail.destroy();
     botEngine.stopAll();
     stopLossMonitor.stop();
     priceFeedService.stop();
