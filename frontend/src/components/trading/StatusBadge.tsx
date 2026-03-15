@@ -46,11 +46,39 @@ export function ExchangeBadge({ exchange }: { exchange: string }) {
   );
 }
 
+const SOURCE_MAP: Record<string, { label: string; style: string }> = {
+  RUST_ENGINE:  { label: 'Rust Engine',  style: 'bg-orange-50 text-orange-700 border-orange-200' },
+  AI_AGENT:     { label: 'AI Agent',     style: 'bg-indigo-50 text-indigo-700 border-indigo-200' },
+  AI_BOT:       { label: 'AI Bot',       style: 'bg-sky-50 text-sky-700 border-sky-200' },
+  'AI-BOT':     { label: 'AI Bot',       style: 'bg-sky-50 text-sky-700 border-sky-200' },
+  'AI-SIGNAL':  { label: 'AI Agent',     style: 'bg-indigo-50 text-indigo-700 border-indigo-200' },
+  MANUAL:       { label: 'Manual',       style: 'bg-slate-100 text-slate-600 border-slate-200' },
+};
+
 export function StrategyBadge({ tag }: { tag: string | null | undefined }) {
   if (!tag) return <span className="text-slate-300">—</span>;
+
+  const cleanTag = tag.replace('STRAT:', '').replace('BOT:', '');
+  const mapped = SOURCE_MAP[cleanTag];
+  if (mapped) {
+    return (
+      <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${mapped.style}`}>
+        {mapped.label}
+      </span>
+    );
+  }
+
+  if (cleanTag.startsWith('PIPELINE_')) {
+    return (
+      <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded border bg-amber-50 text-amber-700 border-amber-200">
+        Rust Engine
+      </span>
+    );
+  }
+
   return (
     <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-violet-50 text-violet-600 border border-violet-100">
-      {tag.replace('STRAT:', '').replace('BOT:', '')}
+      {cleanTag}
     </span>
   );
 }

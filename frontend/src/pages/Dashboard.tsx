@@ -17,6 +17,7 @@ import { useMarketDataStore } from '@/stores/market-data';
 import { tradingApi } from '@/services/api';
 import { formatINR } from '@/lib/utils';
 import { liveSocket } from '@/services/websocket';
+import { StrategyBadge } from '@/components/trading/StatusBadge';
 
 export default function Dashboard() {
   const { portfolios, summary, isLoading: portfolioLoading, fetchPortfolios } = usePortfolioStore();
@@ -354,7 +355,10 @@ export default function Dashboard() {
                 return (
                   <div key={trade.id ?? i} className="flex items-center justify-between text-xs border-b border-slate-100 pb-2">
                     <div>
-                      <p className="font-medium text-slate-800">{trade.symbol}</p>
+                      <div className="flex items-center gap-1.5">
+                        <p className="font-medium text-slate-800">{trade.symbol}</p>
+                        <StrategyBadge tag={trade.strategyTag ?? trade.strategy_tag} />
+                      </div>
                       <p className="text-slate-400">
                         {trade.side ?? trade.direction} · {trade.qty ?? trade.quantity} @ {formatINR(Number(trade.entryPrice ?? trade.price ?? 0))}
                       </p>

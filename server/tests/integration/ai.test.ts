@@ -4,6 +4,21 @@ import type { FastifyInstance } from 'fastify';
 let app: FastifyInstance;
 let mockPrisma: any;
 
+vi.mock('../../src/services/market-calendar.js', () => ({
+  MarketCalendar: vi.fn().mockImplementation(() => ({
+    isMarketOpen: vi.fn().mockReturnValue(true),
+    getMarketPhase: vi.fn().mockReturnValue('MARKET_OPEN'),
+    getPhaseConfig: vi.fn().mockReturnValue({ label: 'Market Open', scanInterval: 60000, features: [] }),
+    getHolidayName: vi.fn().mockReturnValue(null),
+    getNextMarketOpen: vi.fn().mockReturnValue(new Date()),
+    isHoliday: vi.fn().mockReturnValue(false),
+    isWeekend: vi.fn().mockReturnValue(false),
+    getStatus: vi.fn().mockReturnValue({ isOpen: true, phase: 'MARKET_OPEN' }),
+    nextOpen: vi.fn().mockReturnValue(new Date()),
+    nextClose: vi.fn().mockReturnValue(new Date()),
+  })),
+}));
+
 vi.mock('../../src/lib/openai.js', () => ({
   chatCompletion: vi.fn().mockResolvedValue('Mock AI response'),
   chatCompletionJSON: vi.fn().mockResolvedValue({
@@ -40,7 +55,7 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => { await app.close(); });
-beforeEach(() => { vi.resetAllMocks(); });
+beforeEach(() => { vi.clearAllMocks(); });
 
 function authHeaders(userId = 'test-user') {
   return { authorization: `Bearer ${app.jwt.sign({ sub: userId })}` };

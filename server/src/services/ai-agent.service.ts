@@ -244,7 +244,7 @@ Respond in JSON:
         qty,
         instrumentToken: signal.symbol,
         exchange: signal.exchange,
-        strategyTag: signal.strategyId || 'AI-SIGNAL',
+        strategyTag: signal.strategyId || 'AI_AGENT',
       });
     } else if (direction === 'SELL') {
       const longPosition = await this.prisma.position.findFirst({
@@ -294,7 +294,7 @@ Respond in JSON:
           qty,
           instrumentToken: signal.symbol,
           exchange: signal.exchange,
-          strategyTag: signal.strategyId || 'AI-SIGNAL',
+          strategyTag: signal.strategyId || 'AI_AGENT',
         }, true);
       }
     }

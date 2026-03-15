@@ -1,5 +1,5 @@
 import { X } from 'lucide-react';
-import { OrderStatusBadge, SideBadge } from './StatusBadge';
+import { OrderStatusBadge, SideBadge, StrategyBadge } from './StatusBadge';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -37,6 +37,7 @@ export default function OrderTable({ orders, onCancelOrder }: OrderTableProps) {
             <th className="text-right pb-2 font-medium">Qty</th>
             <th className="text-right pb-2 font-medium">Price</th>
             <th className="text-center pb-2 font-medium">Status</th>
+            <th className="text-left pb-2 font-medium hidden md:table-cell">Source</th>
             <th className="text-center pb-2 font-medium">Action</th>
           </tr>
         </thead>
@@ -50,6 +51,7 @@ export default function OrderTable({ orders, onCancelOrder }: OrderTableProps) {
               <td className="py-2.5 text-right font-mono text-slate-600">{order.filledQty ?? order.filled_qty}/{order.qty}</td>
               <td className="py-2.5 text-right font-mono text-slate-600">{order.price ? `₹${num(order.price).toFixed(2)}` : 'MKT'}</td>
               <td className="py-2.5 text-center"><OrderStatusBadge status={order.status} /></td>
+              <td className="py-2.5 text-left hidden md:table-cell"><StrategyBadge tag={order.strategyTag ?? order.strategy_tag} /></td>
               <td className="py-2.5 text-center">
                 {(order.status === 'PENDING' || order.status === 'SUBMITTED') && (
                   <button onClick={() => onCancelOrder(order.id)} className="text-red-500 hover:text-red-600" title="Cancel order">

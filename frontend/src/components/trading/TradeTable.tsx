@@ -1,4 +1,4 @@
-import { SideBadge } from './StatusBadge';
+import { SideBadge, StrategyBadge } from './StatusBadge';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -34,6 +34,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
             <th className="text-right pb-2 font-medium">Entry</th>
             <th className="text-right pb-2 font-medium">Exit</th>
             <th className="text-right pb-2 font-medium">Net P&L</th>
+            <th className="text-left pb-2 font-medium hidden md:table-cell">Source</th>
             <th className="text-right pb-2 font-medium hidden sm:table-cell">Duration</th>
             <th className="text-right pb-2 font-medium hidden sm:table-cell">Closed</th>
           </tr>
@@ -52,6 +53,9 @@ export default function TradeTable({ trades }: TradeTableProps) {
                 <td className="py-2.5 text-right font-mono text-slate-600">₹{num(trade.exitPrice ?? trade.exit_price).toFixed(2)}</td>
                 <td className={`py-2.5 text-right font-mono font-semibold ${netPnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                   {netPnl >= 0 ? '+' : ''}₹{netPnl.toFixed(2)}
+                </td>
+                <td className="py-2.5 text-left hidden md:table-cell">
+                  <StrategyBadge tag={trade.strategyTag ?? trade.strategy_tag} />
                 </td>
                 <td className="py-2.5 text-right text-slate-400 hidden sm:table-cell">{trade.holdDuration ?? trade.hold_duration ?? '—'}</td>
                 <td className="py-2.5 text-right text-slate-400 hidden sm:table-cell">{fmtTime(trade.exitTime ?? trade.exit_time)}</td>

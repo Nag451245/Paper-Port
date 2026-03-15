@@ -979,6 +979,15 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     }
   }
 
+  private resolveStrategyTag(signalSource?: string): string {
+    switch (signalSource) {
+      case 'RUST_ENGINE': return 'RUST_ENGINE';
+      case 'AI_AGENT':    return 'AI_AGENT';
+      case 'PENDING_SIGNAL': return 'AI_AGENT';
+      default:            return 'AI_BOT';
+    }
+  }
+
   private async executeTrade(
     userId: string,
     symbol: string,
@@ -1078,7 +1087,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
             totalQty: qty, numSlices: Math.min(5, qty),
             durationMinutes: 10, maxDeviationPct: 1.0,
             symbol, side: 'BUY', exchange,
-            portfolioId: portfolio.id, userId, strategyTag: 'AI-BOT',
+            portfolioId: portfolio.id, userId, strategyTag: this.resolveStrategyTag(signalMeta?.signalSource),
           });
 
           if (botId) await this.updateBotTradeStats(botId, 0);
@@ -1094,7 +1103,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           price: orderTypeDecision.orderType === 'LIMIT' && ltp > 0 ? Number((ltp * 1.001).toFixed(2)) : undefined,
           instrumentToken: symbol,
           exchange,
-          strategyTag: 'AI-BOT',
+          strategyTag: this.resolveStrategyTag(signalMeta?.signalSource),
         });
 
         if (botId) {
@@ -1209,7 +1218,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           qty,
           instrumentToken: symbol,
           exchange,
-          strategyTag: 'AI-BOT',
+          strategyTag: this.resolveStrategyTag(signalMeta?.signalSource),
         });
 
         if (botId) {
