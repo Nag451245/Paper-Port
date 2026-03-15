@@ -1,6 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AIAgentService, AIAgentError } from '../../src/services/ai-agent.service.js';
 
+vi.mock('../../src/services/market-calendar.js', () => ({
+  MarketCalendar: vi.fn().mockImplementation(() => ({
+    isMarketOpen: vi.fn().mockReturnValue(true),
+    getMarketPhase: vi.fn().mockReturnValue('MARKET_HOURS'),
+    getPhaseConfig: vi.fn().mockReturnValue({ label: 'Market Hours', botsActive: true }),
+  })),
+}));
+
 vi.mock('../../src/lib/openai.js', () => ({
   chatCompletion: vi.fn().mockResolvedValue('Mock response'),
   chatCompletionJSON: vi.fn().mockResolvedValue({

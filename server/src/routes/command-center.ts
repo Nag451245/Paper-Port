@@ -3,7 +3,7 @@ import { TargetTracker } from '../services/target-tracker.service.js';
 import { EODReviewService } from '../services/eod-review.service.js';
 import { RiskService } from '../services/risk.service.js';
 import { AIAgentService } from '../services/ai-agent.service.js';
-import { chatCompletionJSON } from '../lib/openai.js';
+import { chatCompletion, chatCompletionJSON } from '../lib/openai.js';
 import { getPrisma } from '../lib/prisma.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 
@@ -336,20 +336,92 @@ Examples:
         }
 
         default: {
-          if (!responseContent || responseContent === 'I understand your request. Let me help you with that.') {
-            const recentTrades = await prisma.trade.findMany({
-              where: { portfolio: { userId } },
+          const weekAgo = new Date();
+          weekAgo.setDate(weekAgo.getDate() - 7);
+
+          const [recentTrades, bots, signals, pnlRecords, chatHistory] = await Promise.all([
+            prisma.trade.findMany({
+              where: { portfolio: { userId }, exitTime: { gte: weekAgo } },
               orderBy: { exitTime: 'desc' },
-              take: 20,
-              select: { symbol: true, side: true, netPnl: true, exitTime: true, strategyTag: true },
+              take: 30,
+              select: { symbol: true, side: true, netPnl: true, exitTime: true, strategyTag: true, qty: true, entryPrice: true, exitPrice: true },
+            }),
+            prisma.tradingBot.findMany({
+              where: { userId },
+              select: { name: true, role: true, status: true, lastAction: true, totalPnl: true, winRate: true, totalTrades: true },
+            }),
+            prisma.aITradeSignal.findMany({
+              where: { userId, createdAt: { gte: weekAgo } },
+              orderBy: { createdAt: 'desc' },
+              take: 15,
+              select: { symbol: true, signalType: true, compositeScore: true, status: true, rationale: true, outcomeTag: true },
+            }),
+            prisma.dailyPnlRecord.findMany({
+              where: { userId, date: { gte: weekAgo } },
+              orderBy: { date: 'desc' },
+              select: { date: true, netPnl: true, tradeCount: true, winCount: true, lossCount: true },
+            }),
+            prisma.commandMessage.findMany({
+              where: { userId },
+              orderBy: { createdAt: 'desc' },
+              take: 6,
+              select: { role: true, content: true },
+            }),
+          ]);
+
+          const contextParts: string[] = [];
+
+          if (pnlRecords.length > 0) {
+            const dailySummary = pnlRecords.map(d => `${new Date(d.date).toISOString().split('T')[0]}: P&L ₹${Number(d.netPnl).toFixed(0)}, ${d.tradeCount} trades (${d.winCount}W/${d.lossCount}L)`).join('\n');
+            contextParts.push(`DAILY P&L (last ${pnlRecords.length} days):\n${dailySummary}`);
+          }
+
+          if (recentTrades.length > 0) {
+            const totalPnl = recentTrades.reduce((s, t) => s + Number(t.netPnl), 0);
+            const wins = recentTrades.filter(t => Number(t.netPnl) > 0).length;
+            const topWinners = [...recentTrades].sort((a, b) => Number(b.netPnl) - Number(a.netPnl)).slice(0, 3);
+            const topLosers = [...recentTrades].sort((a, b) => Number(a.netPnl) - Number(b.netPnl)).slice(0, 3);
+            contextParts.push(`RECENT TRADES (${recentTrades.length} in last 7 days):\nTotal P&L: ₹${totalPnl.toFixed(0)} | Win rate: ${((wins / recentTrades.length) * 100).toFixed(0)}%\nBest trades: ${topWinners.map(t => `${t.symbol} ${t.side} ₹${Number(t.netPnl).toFixed(0)}`).join(', ')}\nWorst trades: ${topLosers.map(t => `${t.symbol} ${t.side} ₹${Number(t.netPnl).toFixed(0)}`).join(', ')}`);
+          }
+
+          if (bots.length > 0) {
+            const botSummary = bots.map(b => `${b.name} (${b.role}): ${b.status} | P&L: ₹${Number(b.totalPnl).toFixed(0)} | WR: ${(Number(b.winRate) * 100).toFixed(0)}% | Trades: ${b.totalTrades} | Last: ${b.lastAction || 'idle'}`).join('\n');
+            contextParts.push(`BOT FLEET:\n${botSummary}`);
+          }
+
+          if (signals.length > 0) {
+            const signalSummary = signals.slice(0, 8).map(s => `${s.signalType} ${s.symbol} (${(Number(s.compositeScore) * 100).toFixed(0)}%) → ${s.status}${s.outcomeTag ? ' [' + s.outcomeTag + ']' : ''}`).join('\n');
+            contextParts.push(`RECENT SIGNALS:\n${signalSummary}`);
+          }
+
+          const conversationHistory = chatHistory.reverse().map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }));
+
+          try {
+            responseContent = await chatCompletion({
+              messages: [
+                {
+                  role: 'system',
+                  content: `You are an expert AI trading operations assistant for "Capital Guard", a personal algorithmic trading platform for Indian markets (NSE/BSE). You help the user understand their trading performance, bot behavior, and provide actionable insights.
+
+Respond naturally and conversationally. Be specific — reference actual data, numbers, symbols, and patterns. Give concrete, actionable recommendations when asked for improvements. Keep responses concise but insightful (2-4 paragraphs max).
+
+If asked about performance, analyze the data and highlight patterns, winning/losing strategies, and areas for improvement.
+If asked about bots, explain what they've been doing and suggest configuration changes.
+If asked what you can do, explain you can set targets, control bots, review signals, analyze performance, and more.
+
+Current date: ${new Date().toISOString().split('T')[0]}
+
+USER'S TRADING DATA:
+${contextParts.length > 0 ? contextParts.join('\n\n') : 'No trading data available yet — the user is new or has not placed any trades.'}`,
+                },
+                ...conversationHistory,
+                { role: 'user', content: message },
+              ],
+              maxTokens: 1024,
+              temperature: 0.7,
             });
-            if (recentTrades.length > 0) {
-              const totalPnl = recentTrades.reduce((s, t) => s + Number(t.netPnl), 0);
-              const wins = recentTrades.filter(t => Number(t.netPnl) > 0).length;
-              responseContent = `Here's a quick summary of your recent trading:\n\nLast ${recentTrades.length} trades: ${wins} wins, ${recentTrades.length - wins} losses\nTotal P&L: ${totalPnl >= 0 ? '+' : ''}₹${totalPnl.toFixed(0)}\nWin rate: ${((wins / recentTrades.length) * 100).toFixed(0)}%\n\nFor a detailed breakdown, say "show today's report" or "check progress". To review bot performance, try "how are the bots doing?"`;
-            } else {
-              responseContent = 'No recent trading activity found. Set a target to get started — try "Make 1% daily on 10 lakh".';
-            }
+          } catch {
+            responseContent = intent.response || 'I wasn\'t able to process that right now. Try asking about your targets, bot status, or recent trades.';
           }
           break;
         }

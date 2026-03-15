@@ -1709,6 +1709,12 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           ltp: sig.entry,
           signalSource: 'RUST_ENGINE',
         });
+        if (!result.success) {
+          await this.prisma.aITradeSignal.updateMany({
+            where: { userId, symbol: sig.symbol, status: 'EXECUTED', executedAt: { not: null } },
+            data: { status: 'PENDING', executedAt: null },
+          });
+        }
         await this.prisma.botMessage.create({
           data: {
             fromBotId: botId,
@@ -2210,6 +2216,12 @@ INSTRUCTIONS:
                 signalSource: 'AI_AGENT',
               });
             }
+            if (!result.success) {
+              await this.prisma.aITradeSignal.updateMany({
+                where: { userId, symbol: sig.symbol, status: 'EXECUTED', executedAt: { not: null } },
+                data: { status: 'PENDING', executedAt: null },
+              });
+            }
             await this.prisma.botMessage.create({
               data: {
                 fromBotId: botId,
@@ -2229,6 +2241,11 @@ INSTRUCTIONS:
   // ---- Agent cycle with Rust risk integration ----
   private async runAgentCycle(userId: string): Promise<void> {
     try {
+      if (!this.calendar.isMarketOpen()) {
+        console.log(`[BotEngine] Agent: skipping cycle — market is closed`);
+        return;
+      }
+
       const aiStatus = getOpenAIStatus();
       if (aiStatus.circuitOpen && !this.rustAvailable) {
         console.log(`[BotEngine] Agent: skipping cycle — AI circuit open and no Rust engine (cooldown: ${aiStatus.cooldownRemainingMs}ms)`);
@@ -2344,11 +2361,18 @@ INSTRUCTIONS:
             });
 
             if (autoExecute) {
-              await this.executeTrade(userId, sig.symbol, sig.direction, sig.symbol, undefined, {
+              const tradeResult = await this.executeTrade(userId, sig.symbol, sig.direction, sig.symbol, undefined, {
                 confidence: sig.confidence,
                 ltp: sig.entry,
                 signalSource: 'RUST_ENGINE',
               });
+              if (!tradeResult.success) {
+                await this.prisma.aITradeSignal.updateMany({
+                  where: { userId, symbol: sig.symbol, status: 'EXECUTED', executedAt: { not: null } },
+                  data: { status: 'PENDING', executedAt: null },
+                });
+                console.log(`[BotEngine] Agent: rolled back EXECUTED → PENDING for ${sig.symbol}: ${tradeResult.message}`);
+              }
             }
           }
           // Don't return — always continue to GPT for full market analysis
@@ -2445,11 +2469,18 @@ Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted
             });
 
             if (autoExecute) {
-              await this.executeTrade(userId, sig.symbol, sig.direction, sig.rationale, undefined, {
+              const gptTradeResult = await this.executeTrade(userId, sig.symbol, sig.direction, sig.rationale, undefined, {
                 confidence: sig.score,
                 ltp: sig.entry,
                 signalSource: 'AI_AGENT',
               });
+              if (!gptTradeResult.success) {
+                await this.prisma.aITradeSignal.updateMany({
+                  where: { userId, symbol: sig.symbol, status: 'EXECUTED', executedAt: { not: null } },
+                  data: { status: 'PENDING', executedAt: null },
+                });
+                console.log(`[BotEngine] Agent: rolled back EXECUTED → PENDING for ${sig.symbol}: ${gptTradeResult.message}`);
+              }
             }
           }
         }

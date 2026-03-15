@@ -9,6 +9,7 @@ import { engineRisk, isEngineAvailable } from '../lib/rust-engine.js';
 import { OptionsService, calculateMaxPain, calculateIVPercentile } from './options.service.js';
 import { ExitCoordinator } from './exit-coordinator.service.js';
 import { DecisionAuditService } from './decision-audit.service.js';
+import { MarketCalendar } from './market-calendar.js';
 
 export interface SignalAnalysis {
   signal: 'BUY' | 'SELL' | 'HOLD';
@@ -207,6 +208,11 @@ Respond in JSON:
   }
 
   async executeSignal(signalId: string, userId: string) {
+    const calendar = new MarketCalendar();
+    if (!calendar.isMarketOpen()) {
+      throw new AIAgentError('Market is closed. Trades can only be executed during market hours (9:15 AM – 3:30 PM IST, Mon–Fri).', 400);
+    }
+
     const signal = await this.getSignal(signalId, userId);
     if (signal.status !== 'PENDING') {
       throw new AIAgentError('Signal is not in pending status', 400);
