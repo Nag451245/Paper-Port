@@ -82,7 +82,7 @@ export default function TradingTerminal() {
     try {
       const [pRes, oRes, posRes, tRes] = await Promise.all([
         portfolioApi.list().catch((e) => { errors.push('Portfolio: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
-        tradingApi.listOrders().catch((e) => { errors.push('Orders: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
+        tradingApi.listOrders({ limit: 200 }).catch((e) => { errors.push('Orders: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
         tradingApi.positions().catch((e) => { errors.push('Positions: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
         tradingApi.listTrades({ limit: 200 }).catch((e) => { errors.push('Trades: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
       ]);
