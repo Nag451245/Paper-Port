@@ -1,6 +1,7 @@
 import { PrismaClient, type Prisma } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
 import { istDateStr, istMidnight } from '../lib/ist.js';
+import { calculateCosts } from '../lib/costs.js';
 
 export interface PortfolioSummary {
   totalNav: number;
@@ -377,14 +378,8 @@ export class PortfolioService {
       }
 
       const entrySide = pos.side === 'LONG' ? 'BUY' : 'SELL';
-      const turnover = entryPrice * pos.qty;
-      const brokerage = Math.min(turnover * 0.0003, 20);
-      const stt = entrySide === 'SELL' ? turnover * 0.001 : 0;
-      const exchCharges = turnover * 0.0000345;
-      const gst = (brokerage + exchCharges) * 0.18;
-      const sebi = turnover * 0.000001;
-      const stamp = entrySide === 'BUY' ? turnover * 0.00015 : 0;
-      openEntryCosts += brokerage + stt + exchCharges + gst + sebi + stamp;
+      const ec = calculateCosts(pos.qty, entryPrice, entrySide, pos.exchange ?? 'NSE');
+      openEntryCosts += ec.totalCost;
     }
 
     const correctCash = initialCapital + totalRealizedPnl - lockedCapital - openEntryCosts;

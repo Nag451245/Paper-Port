@@ -233,16 +233,9 @@ export default function PortfolioPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <BarChart3 className="w-4 h-4 text-indigo-500" />
-              <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Daily P&L</h2>
-            </div>
-            {dailyPnl.length > 0 && (
-              <span className={`text-xs font-mono font-semibold ${dailyPnl.reduce((s, d) => s + d.totalPnl, 0) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                Net: ₹{formatINR(dailyPnl.reduce((s, d) => s + d.totalPnl, 0))}
-              </span>
-            )}
+          <div className="flex items-center gap-2 mb-4">
+            <BarChart3 className="w-4 h-4 text-indigo-500" />
+            <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Daily P&L</h2>
           </div>
           <div className="h-[250px]">
             {dailyPnl.length > 0 ? (

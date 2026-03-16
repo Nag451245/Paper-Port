@@ -163,7 +163,7 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
       const { portfolioId } = request.params as { portfolioId: string };
       const { days } = request.query as { days?: string };
       const userId = getUserId(request);
-      const parsedDays = days ? Math.max(1, Math.min(365, Math.floor(Number(days)))) : 30;
+      const parsedDays = days ? Math.max(1, Math.min(365, Math.floor(Number(days)))) : 0;
       if (days && isNaN(Number(days))) {
         return reply.code(400).send({ error: 'Invalid days parameter' });
       }
