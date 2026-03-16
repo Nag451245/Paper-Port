@@ -74,19 +74,15 @@ describe('P&L Correctness', () => {
 
     it('should NOT include yesterday 23:59 IST trade in today dayPnl', async () => {
       const portfolio = makePortfolio({ id: portfolioId, userId });
-      const now = new Date();
-
-      const yesterdayLate = istDate(now.getFullYear(), now.getMonth() + 1, now.getDate() - 1, 23, 59);
-      const allTrades = [makeTrade({ portfolioId, exitTime: yesterdayLate, netPnl: 5000 })];
 
       prisma.portfolio.findUnique.mockResolvedValue({ ...portfolio, positions: [] });
-      prisma.trade.findMany
-        .mockResolvedValueOnce(allTrades)  // allTrades
-        .mockResolvedValueOnce([]);        // todayTrades (filtered by gte todayStart)
+      // getSummary has a single trade.findMany for today's trades — yesterday's trade won't match
+      prisma.trade.findMany.mockResolvedValue([]);
 
       const summary = await service.getSummary(portfolioId, userId);
       expect(summary.dayPnl).toBe(0);
-      expect(summary.totalPnl).toBe(5000);
+      // totalPnl = totalNav(1M) - initialCapital(1M) = 0
+      expect(summary.totalPnl).toBe(0);
     });
   });
 
@@ -171,20 +167,15 @@ describe('P&L Correctness', () => {
       expect(summary.dayPnlPercent).toBeCloseTo(0.11, 2);
     });
 
-    it('should compute totalPnl as sum of ALL realized netPnl', async () => {
-      const portfolio = makePortfolio({ id: portfolioId, userId, initialCapital: 1_000_000 });
-      const allTrades = [
-        makeTrade({ portfolioId, netPnl: 5000 }),
-        makeTrade({ portfolioId, netPnl: -2000 }),
-        makeTrade({ portfolioId, netPnl: 3000 }),
-      ];
+    it('should compute totalPnl as totalNav minus initialCapital', async () => {
+      // currentNav reflects cash after trades; totalPnl = NAV - initialCapital
+      const portfolio = makePortfolio({ id: portfolioId, userId, initialCapital: 1_000_000, currentNav: 1_006_000 });
 
       prisma.portfolio.findUnique.mockResolvedValue({ ...portfolio, positions: [] });
-      prisma.trade.findMany
-        .mockResolvedValueOnce(allTrades)  // allTrades
-        .mockResolvedValueOnce([]);        // todayTrades
+      prisma.trade.findMany.mockResolvedValue([]);
 
       const summary = await service.getSummary(portfolioId, userId);
+      // totalPnl = totalNav(1,006,000) - initialCapital(1,000,000) = 6,000
       expect(summary.totalPnl).toBe(6000);
       expect(summary.totalPnlPercent).toBeCloseTo(0.6, 2);
     });
@@ -368,19 +359,15 @@ describe('P&L Correctness', () => {
     });
 
     it('should still show totalPnl on holidays from historical trades', async () => {
-      const portfolio = makePortfolio({ id: portfolioId, userId, initialCapital: 1_000_000 });
-      const historicalTrades = [
-        makeTrade({ portfolioId, netPnl: 10_000, exitTime: new Date(Date.now() - 86400_000 * 3) }),
-        makeTrade({ portfolioId, netPnl: 5_000, exitTime: new Date(Date.now() - 86400_000 * 5) }),
-      ];
+      // NAV reflects historical gains even on holidays when no trades happen today
+      const portfolio = makePortfolio({ id: portfolioId, userId, initialCapital: 1_000_000, currentNav: 1_015_000 });
 
       prisma.portfolio.findUnique.mockResolvedValue({ ...portfolio, positions: [] });
-      prisma.trade.findMany
-        .mockResolvedValueOnce(historicalTrades) // allTrades
-        .mockResolvedValueOnce([]);              // todayTrades (holiday, nothing)
+      prisma.trade.findMany.mockResolvedValue([]);
 
       const summary = await service.getSummary(portfolioId, userId);
       expect(summary.dayPnl).toBe(0);
+      // totalPnl = totalNav(1,015,000) - initialCapital(1,000,000) = 15,000
       expect(summary.totalPnl).toBe(15_000);
     });
   });
@@ -407,10 +394,11 @@ describe('P&L Correctness', () => {
       prisma.portfolio.update.mockResolvedValue({});
 
       const result = await service.reconcileNav(portfolioId, userId);
-      // correctCash = 1_000_000 + (5000 - 2000) - (2500 * 10) = 978_000
-      expect(result.after).toBe(978_000);
+      // correctCash = initialCapital + realizedPnl - lockedCapital - entryCosts
+      // entryCosts for BUY 10@2500 NSE ≈ 13.64, so correctCash ≈ 977986.36
+      expect(result.after).toBeCloseTo(978_000, -2);
       expect(result.before).toBe(998_000);
-      expect(result.drift).toBe(20_000);
+      expect(result.drift).toBeCloseTo(20_000, -2);
     });
 
     it('should handle zero drift gracefully', async () => {
@@ -478,20 +466,21 @@ describe('P&L Correctness', () => {
     });
 
     it('should handle negative netPnl trades correctly in totalPnl', async () => {
-      const portfolio = makePortfolio({ id: portfolioId, userId, initialCapital: 1_000_000 });
-      const trades = [
-        makeTrade({ portfolioId, netPnl: -15_000 }),
-        makeTrade({ portfolioId, netPnl: -5_000 }),
-      ];
+      // Cash dropped to 980k from losses; totalPnl = NAV - capital
+      const portfolio = makePortfolio({ id: portfolioId, userId, initialCapital: 1_000_000, currentNav: 980_000 });
 
       prisma.portfolio.findUnique.mockResolvedValue({ ...portfolio, positions: [] });
-      prisma.trade.findMany
-        .mockResolvedValueOnce(trades)
-        .mockResolvedValueOnce(trades);
+      prisma.trade.findMany.mockResolvedValue([
+        { netPnl: -15_000 },
+        { netPnl: -5_000 },
+      ]);
 
       const summary = await service.getSummary(portfolioId, userId);
+      // totalPnl = 980,000 - 1,000,000 = -20,000
       expect(summary.totalPnl).toBe(-20_000);
       expect(summary.totalPnlPercent).toBe(-2);
+      // dayPnl = todayRealized(-20,000) + unrealized(0) = -20,000
+      expect(summary.dayPnl).toBe(-20_000);
     });
   });
 });

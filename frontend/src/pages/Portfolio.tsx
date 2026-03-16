@@ -319,7 +319,8 @@ export default function PortfolioPage() {
                 const avgPrice = safeNum(pos.avgEntryPrice ?? pos.avg_entry_price);
                 const qty = safeNum(pos.qty ?? pos.quantity);
                 const ltp = ltpMap[pos.symbol] || 0;
-                const pnlPct = avgPrice > 0 && ltp > 0 ? ((ltp - avgPrice) / avgPrice) * 100 : 0;
+                const rawPnlPct = avgPrice > 0 && ltp > 0 ? ((ltp - avgPrice) / avgPrice) * 100 : 0;
+                const pnlPct = pos.side === 'SHORT' ? -rawPnlPct : rawPnlPct;
                 const tag = pos.strategyTag ?? pos.strategy_tag ?? pos.strategy;
                 return (
                   <tr key={pos.id} className="border-b border-slate-100 hover:bg-slate-50/50">

@@ -112,7 +112,7 @@ describe('PortfolioService', () => {
   });
 
   describe('getSummary', () => {
-    it('should compute NAV from positions and realized P&L from trades only', async () => {
+    it('should compute totalPnl as totalNav minus initialCapital (includes unrealized)', async () => {
       mockPrisma.portfolio.findUnique.mockResolvedValue({
         id: 'p1',
         userId: 'user1',
@@ -132,14 +132,14 @@ describe('PortfolioService', () => {
       expect(summary.totalNav).toBe(1108000);
       expect(summary.investedValue).toBe(55000);
       expect(summary.unrealizedPnl).toBe(3000);
-      // P&L is purely from closed trades — no trades closed → zero
-      expect(summary.totalPnl).toBe(0);
-      expect(summary.totalPnlPercent).toBe(0);
-      expect(summary.dayPnl).toBe(0);
-      expect(summary.dayPnlPercent).toBe(0);
+      // totalPnl = totalNav - initialCapital = 1108000 - 1000000 = 108000
+      expect(summary.totalPnl).toBe(108000);
+      expect(summary.totalPnlPercent).toBeCloseTo(10.8, 1);
+      // dayPnl = todayRealizedPnl(0) + unrealizedPnl(3000) = 3000
+      expect(summary.dayPnl).toBe(3000);
     });
 
-    it('should include only closed trades in realized P&L', async () => {
+    it('should reflect actual NAV state in totalPnl regardless of trade history', async () => {
       mockPrisma.portfolio.findUnique.mockResolvedValue({
         id: 'p1',
         userId: 'user1',
@@ -147,7 +147,6 @@ describe('PortfolioService', () => {
         currentNav: 950000,
         positions: [],
       });
-      // Both findMany calls (all trades + today trades) get the same mock
       mockPrisma.trade.findMany.mockResolvedValue([
         { netPnl: 5000 },
         { netPnl: -2000 },
@@ -156,10 +155,9 @@ describe('PortfolioService', () => {
 
       const summary = await service.getSummary('p1', 'user1');
 
-      // totalPnl = sum of all closed trades: 5000 + (-2000) + 8000 = 11000
-      expect(summary.totalPnl).toBe(11000);
-      expect(summary.totalPnlPercent).toBeCloseTo(1.1, 1);
-      // dayPnl = same trades (mock returns same for both queries)
+      // totalPnl = totalNav(950000) - initialCapital(1000000) = -50000
+      expect(summary.totalPnl).toBe(-50000);
+      // dayPnl = todayRealizedPnl(11000) + unrealizedPnl(0) = 11000
       expect(summary.dayPnl).toBe(11000);
       expect(summary.unrealizedPnl).toBe(0);
     });

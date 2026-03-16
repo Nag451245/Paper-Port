@@ -128,14 +128,16 @@ export class PortfolioService {
     }
 
     const totalNav = availableCash + investedValue + unrealizedPnl;
-    const totalRealizedPnl = availableCash + investedValue - initialCapital;
+    const totalPnl = totalNav - initialCapital;
+    const dayPnl = todayRealizedPnl + unrealizedPnl;
+    const dayPnlBase = totalNav > 0 ? totalNav : initialCapital;
 
     return {
       totalNav,
-      dayPnl: todayRealizedPnl,
-      dayPnlPercent: initialCapital > 0 ? (todayRealizedPnl / initialCapital) * 100 : 0,
-      totalPnl: Number(totalRealizedPnl.toFixed(2)),
-      totalPnlPercent: initialCapital > 0 ? (totalRealizedPnl / initialCapital) * 100 : 0,
+      dayPnl: Number(dayPnl.toFixed(2)),
+      dayPnlPercent: dayPnlBase > 0 ? (dayPnl / dayPnlBase) * 100 : 0,
+      totalPnl: Number(totalPnl.toFixed(2)),
+      totalPnlPercent: initialCapital > 0 ? (totalPnl / initialCapital) * 100 : 0,
       unrealizedPnl,
       investedValue,
       currentValue: totalNav,

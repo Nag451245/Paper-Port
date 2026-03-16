@@ -4,6 +4,7 @@ import { PortfolioService, PortfolioError } from '../services/portfolio.service.
 import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
 import { MetricsService } from '../services/metrics.service.js';
+import { MarketDataService } from '../services/market-data.service.js';
 
 const createSchema = z.object({
   name: z.string().min(1),
@@ -50,19 +51,53 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
         }
       }
     }
-    const totalNav = totalCash + totalInvestedValue;
-    const totalRealizedPnl = totalCash + totalInvestedValue - totalCapital;
+    const marketData = new MarketDataService();
+    let totalUnrealizedPnl = 0;
+
+    const allPositions = portfolios.flatMap(p => p.positions);
+    const uniqueSymbols = [...new Set(allPositions.map(pos => pos.symbol))];
+    const ltpMap = new Map<string, number>();
+    const priceFeed = (app as any).priceFeedService;
+    const priceCache = priceFeed?.getAllLastPrices?.() ?? {};
+
+    for (const sym of uniqueSymbols) {
+      if (priceCache[sym] && priceCache[sym] > 0) {
+        ltpMap.set(sym, priceCache[sym]);
+      } else {
+        try {
+          const quote = await Promise.race([
+            marketData.getQuote(sym, 'NSE'),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5_000)),
+          ]) as any;
+          if (quote.ltp > 0) ltpMap.set(sym, Number(quote.ltp));
+        } catch { /* skip */ }
+      }
+    }
+
+    for (const pos of allPositions) {
+      const entryPrice = Number(pos.avgEntryPrice);
+      const ltp = ltpMap.get(pos.symbol) ?? 0;
+      if (ltp > 0) {
+        totalUnrealizedPnl += pos.side === 'SHORT'
+          ? (entryPrice - ltp) * pos.qty
+          : (ltp - entryPrice) * pos.qty;
+      }
+    }
+
+    const totalNav = totalCash + totalInvestedValue + totalUnrealizedPnl;
+    const totalPnl = totalNav - totalCapital;
 
     return reply.send({
       portfolioCount: portfolios.length,
       totalCapital: Number(totalCapital.toFixed(2)),
       totalNav: Number(totalNav.toFixed(2)),
-      totalPnl: Number(totalRealizedPnl.toFixed(2)),
-      totalPnlPct: totalCapital > 0 ? Number(((totalRealizedPnl / totalCapital) * 100).toFixed(2)) : 0,
+      totalPnl: Number(totalPnl.toFixed(2)),
+      totalPnlPct: totalCapital > 0 ? Number(((totalPnl / totalCapital) * 100).toFixed(2)) : 0,
       totalOpenPositions,
       totalTrades,
       portfolios: portfolios.map(p => {
         let pInvested = 0;
+        let pUnrealizedPnl = 0;
         for (const pos of p.positions) {
           const ep = Number(pos.avgEntryPrice);
           if (pos.side === 'LONG') {
@@ -71,17 +106,24 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
             const rate = pos.exchange === 'MCX' ? 0.10 : pos.exchange === 'CDS' ? 0.05 : 0.25;
             pInvested += ep * pos.qty * rate;
           }
+          const ltp = ltpMap.get(pos.symbol) ?? 0;
+          if (ltp > 0) {
+            pUnrealizedPnl += pos.side === 'SHORT'
+              ? (ep - ltp) * pos.qty
+              : (ltp - ep) * pos.qty;
+          }
         }
         const pCash = Number(p.currentNav);
         const pCapital = Number(p.initialCapital);
-        const pRealizedPnl = pCash + pInvested - pCapital;
+        const pNav = pCash + pInvested + pUnrealizedPnl;
+        const pTotalPnl = pNav - pCapital;
         return {
           id: p.id,
           name: p.name,
           isDefault: p.isDefault,
           capital: pCapital,
-          nav: Number((pCash + pInvested).toFixed(2)),
-          pnl: Number(pRealizedPnl.toFixed(2)),
+          nav: Number(pNav.toFixed(2)),
+          pnl: Number(pTotalPnl.toFixed(2)),
           openPositions: p.positions.length,
           trades: p._count.trades,
         };

@@ -737,7 +737,6 @@ export class BotEngine {
   private async runMarketScan(userId: string): Promise<void> {
     if (this.scanInProgress) return;
 
-    // STRICT: No scanning outside market hours
     if (!this.calendar.isMarketOpen()) return;
 
     this.scanInProgress = true;
@@ -1983,6 +1982,14 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
       const finalConfidence = fusionDecision?.finalScore ?? (gptApproved ? sig.confidence : sig.confidence * 0.9);
       const execute = shouldAutoExecute && (fusionDecision ? fusionDecision.action === 'EXECUTE' : finalConfidence >= 0.35);
 
+      if (!execute) {
+        const reasons: string[] = [];
+        if (!shouldAutoExecute) reasons.push(`bot role '${bot.role}' cannot auto-execute (needs EXECUTOR/SCANNER)`);
+        if (fusionDecision && fusionDecision.action !== 'EXECUTE') reasons.push(`DecisionFusion action=${fusionDecision.action}`);
+        if (!fusionDecision && finalConfidence < 0.35) reasons.push(`confidence ${(finalConfidence * 100).toFixed(0)}% < 35% threshold`);
+        log.info({ symbol: sig.symbol, direction: sig.direction, reasons }, 'Rust signal NOT auto-executed');
+      }
+
       const gateScores = this.deriveGateScores(finalConfidence, sig.indicators, sig.votes, { source: 'rust-engine', gptApproved });
 
       const signal = await this.prisma.aITradeSignal.create({
@@ -2678,9 +2685,18 @@ INSTRUCTIONS:
         },
       });
 
-      const watchSymbols = positions.length > 0
-        ? [...new Set(positions.map(p => p.symbol))]
-        : ['NIFTY 50', 'RELIANCE', 'TCS', 'HDFCBANK', 'GOLD', 'USDINR'];
+      const AGENT_UNIVERSE = [
+        'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN',
+        'BHARTIARTL', 'KOTAKBANK', 'ITC', 'LT', 'AXISBANK', 'BAJFINANCE',
+        'WIPRO', 'HCLTECH', 'MARUTI', 'TATAMOTORS', 'SUNPHARMA', 'TITAN',
+      ];
+      const positionSymbols = [...new Set(positions.map(p => p.symbol))];
+      let moverSymbols: string[] = [];
+      try {
+        const { gainers, losers } = await this.marketData.getTopMovers(10);
+        moverSymbols = [...gainers, ...losers].map(m => m.symbol).filter(Boolean);
+      } catch { /* non-fatal */ }
+      const watchSymbols = [...new Set([...positionSymbols, ...moverSymbols, ...AGENT_UNIVERSE])];
 
       // Use IST (UTC+5:30) for today boundary to avoid timezone-related over-counting
       const nowIST = new Date(Date.now() + 5.5 * 3600_000);

@@ -606,11 +606,16 @@ impl AppState {
                     } else {
                         (existing.entry_price - fill_price) * close_qty as f64
                     };
+                    let value = fill_price * close_qty.unsigned_abs() as f64;
+                    let is_sell_txn = existing.side.eq_ignore_ascii_case("buy");
                     drop(existing);
                     self.positions.remove(&key);
-                    self.add_realized_pnl(pnl);
-                    let value = fill_price * close_qty.unsigned_abs() as f64;
-                    self.adjust_cash(value);
+                    let cost = value * self.config.costs.slippage_bps / 10_000.0
+                        + self.config.costs.commission_per_trade
+                        + if is_sell_txn { value * self.config.costs.stt_pct / 100.0 } else { 0.0 };
+                    let net_pnl = pnl - cost;
+                    self.add_realized_pnl(net_pnl);
+                    self.adjust_cash(value - cost);
                 } else {
                     let partial_pnl = if existing.side.eq_ignore_ascii_case("buy") {
                         (fill_price - existing.entry_price) * close_qty as f64
@@ -618,8 +623,13 @@ impl AppState {
                         (existing.entry_price - fill_price) * close_qty as f64
                     };
                     let partial_value = fill_price * close_qty.unsigned_abs() as f64;
-                    self.add_realized_pnl(partial_pnl);
-                    self.adjust_cash(partial_value);
+                    let is_sell_txn = existing.side.eq_ignore_ascii_case("buy");
+                    let cost = partial_value * self.config.costs.slippage_bps / 10_000.0
+                        + self.config.costs.commission_per_trade
+                        + if is_sell_txn { partial_value * self.config.costs.stt_pct / 100.0 } else { 0.0 };
+                    let net_partial_pnl = partial_pnl - cost;
+                    self.add_realized_pnl(net_partial_pnl);
+                    self.adjust_cash(partial_value - cost);
                     existing.qty = remaining;
                     existing.update_price(fill_price);
                 }
