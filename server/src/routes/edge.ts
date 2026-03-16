@@ -3,6 +3,7 @@ import { getPrisma } from '../lib/prisma.js';
 import { StrategyComposer } from '../services/strategy-composer.js';
 import { SentimentEngine } from '../services/sentiment-engine.js';
 import { engineAdvancedSignals, engineIVSurface, engineWalkForward } from '../lib/rust-engine.js';
+import { istDateStr } from '../lib/ist.js';
 import type { ServerOrchestrator } from '../services/server-orchestrator.js';
 
 export async function edgeRoutes(app: FastifyInstance) {
@@ -133,7 +134,7 @@ export async function edgeRoutes(app: FastifyInstance) {
     const dailyMap = new Map<string, { pnl: number; count: number }>();
 
     for (const t of trades) {
-      const date = t.exitTime ? new Date(t.exitTime).toISOString().split('T')[0] : 'unknown';
+      const date = t.exitTime ? istDateStr(new Date(t.exitTime)) : 'unknown';
       const existing = dailyMap.get(date) ?? { pnl: 0, count: 0 };
       existing.pnl += Number(t.netPnl);
       existing.count += 1;

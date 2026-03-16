@@ -1,4 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
+import { istDateStr } from '../lib/ist.js';
 
 interface TradeStats {
   totalTrades: number;
@@ -186,7 +187,7 @@ export class AnalyticsService {
     return trades.map(t => {
       cumPnl += Number(t.netPnl);
       return {
-        date: t.exitTime.toISOString().split('T')[0],
+        date: istDateStr(t.exitTime),
         pnl: Number(t.netPnl),
         cumPnl,
       };
@@ -206,7 +207,7 @@ export class AnalyticsService {
 
     const headers = 'Date,Symbol,Side,Entry,Exit,Qty,Gross P&L,Costs,Net P&L,Strategy,Duration';
     const rows = trades.map(t =>
-      `${t.exitTime.toISOString().split('T')[0]},${t.symbol},${t.side},${t.entryPrice},${t.exitPrice},${t.qty},${t.grossPnl},${t.totalCosts},${t.netPnl},${t.strategyTag || 'Manual'},${t.holdDuration || ''}`
+      `${istDateStr(t.exitTime)},${t.symbol},${t.side},${t.entryPrice},${t.exitPrice},${t.qty},${t.grossPnl},${t.totalCosts},${t.netPnl},${t.strategyTag || 'Manual'},${t.holdDuration || ''}`
     );
 
     return [headers, ...rows].join('\n');

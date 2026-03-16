@@ -4,6 +4,7 @@ import { TargetTracker } from './target-tracker.service.js';
 import { LearningStoreService } from './learning-store.service.js';
 import { MarketDataService } from './market-data.service.js';
 import { TelegramService } from './telegram.service.js';
+import { istDateStr } from '../lib/ist.js';
 
 interface TradeReview {
   tradeId: string;
@@ -310,7 +311,7 @@ ${falsePositives.map(fp => `  ${fp.direction} ${fp.symbol} (${(fp.confidence * 1
           },
           {
             role: 'user',
-            content: `Recent daily P&L:\n${recentRecords.map(r => `  ${(r.date as Date).toISOString().split('T')[0]}: ₹${Number(r.netPnl).toFixed(0)} | ${r.winCount}W/${r.lossCount}L | ${r.status}`).join('\n')}`,
+            content: `Recent daily P&L:\n${recentRecords.map(r => `  ${istDateStr(r.date as Date)}: ₹${Number(r.netPnl).toFixed(0)} | ${r.winCount}W/${r.lossCount}L | ${r.status}`).join('\n')}`,
           },
         ],
         maxTokens: 500,

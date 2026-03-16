@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { MarketDataService } from '../services/market-data.service.js';
 import { GlobalMarketService } from '../services/global-market.service.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
+import { istDateStr, istDaysAgo } from '../lib/ist.js';
 
 const symbolParam = z.string().min(1).max(30).regex(/^[A-Z0-9&_-]+$/i, 'Invalid symbol');
 const intervalParam = z.string().regex(/^(1d|1day|day|daily|1h|1hour|hour|5m|5min|5minute|15m|15min|15minute|30m|30min|30minute)$/i).default('1day');
@@ -25,15 +26,13 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
     const query = request.query as { interval?: string; from_date?: string; to_date?: string; exchange?: string };
     const userId = getUserId(request);
 
-    const now = new Date();
-    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
     const interval = intervalParam.safeParse(query.interval ?? '1day');
 
     const bars = await service.getHistory(
       sym.data,
       interval.success ? interval.data : '1day',
-      query.from_date ?? thirtyDaysAgo.toISOString().split('T')[0],
-      query.to_date ?? now.toISOString().split('T')[0],
+      query.from_date ?? istDaysAgo(30),
+      query.to_date ?? istDateStr(),
       userId,
       query.exchange ?? 'NSE',
     );

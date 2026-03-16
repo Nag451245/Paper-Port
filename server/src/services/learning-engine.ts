@@ -13,6 +13,7 @@ import { emit } from '../lib/event-bus.js';
 import { getPrisma } from '../lib/prisma.js';
 import { MarketMemoryService } from './market-memory.service.js';
 import { FeaturePipelineService } from './feature-pipeline.service.js';
+import { istDateStr, istDaysAgo } from '../lib/ist.js';
 import { LessonsEngineService } from './lessons-engine.service.js';
 import { DecisionFusionService } from './decision-fusion.service.js';
 
@@ -467,7 +468,7 @@ Top losers: ${JSON.stringify(topLosers)}`,
 
         let candles: Array<{ timestamp: string; open: number; high: number; low: number; close: number; volume: number }> = [];
         try {
-          const history = await this.marketData.getHistory('NIFTY 50', '1day', thirtyDaysAgo.toISOString().split('T')[0], date.toISOString().split('T')[0], userId, 'NSE');
+          const history = await this.marketData.getHistory('NIFTY 50', '1day', istDateStr(thirtyDaysAgo), istDateStr(date), userId, 'NSE');
           candles = (history as any[]).map((h: any) => ({
             timestamp: h.date || h.timestamp || new Date().toISOString(),
             open: Number(h.open),
@@ -550,7 +551,7 @@ Top losers: ${JSON.stringify(topLosers)}`,
     }
 
     const fpData = {
-      date: date.toISOString().split('T')[0],
+      date: istDateStr(date),
       total: falsePositives.length,
       bySymbol: Object.fromEntries(bySymbol),
       avgConfidence: falsePositives.reduce((s, fp) => s + fp.compositeScore, 0) / falsePositives.length,
@@ -595,7 +596,7 @@ Top losers: ${JSON.stringify(topLosers)}`,
 
     // Persist to RegimeHistory table for transition analysis
     try {
-      const dateOnly = new Date(date.toISOString().split('T')[0]);
+      const dateOnly = new Date(istDateStr(date) + 'T00:00:00+05:30');
       const prev = await this.prisma.regimeHistory.findFirst({
         orderBy: { date: 'desc' },
         where: { date: { lt: dateOnly } },
@@ -662,7 +663,7 @@ Top losers: ${JSON.stringify(topLosers)}`,
       .map(r => ({
         from: r.transitionFrom!,
         to: r.regime,
-        date: r.date.toISOString().split('T')[0],
+        date: istDateStr(r.date),
         duration: r.durationDays,
       }));
 
@@ -700,7 +701,7 @@ Top losers: ${JSON.stringify(topLosers)}`,
 
       try {
         await this.learningStore.writeStrategyEvolution(ledger.strategyId, {
-          date: date.toISOString().split('T')[0],
+          date: istDateStr(date),
           userId,
           winRate: ledger.winRate,
           pnl: Number(ledger.netPnl),
@@ -725,7 +726,7 @@ Top losers: ${JSON.stringify(topLosers)}`,
   ): Promise<void> {
     for (const ledger of ledgers) {
       try {
-        const dateOnly = new Date(date.toISOString().split('T')[0]);
+        const dateOnly = new Date(istDateStr(date) + 'T00:00:00+05:30');
 
         // Compute rolling Sharpe from recent trade history
         const windows = [30, 60, 90];
@@ -842,8 +843,8 @@ Top losers: ${JSON.stringify(topLosers)}`,
         let rawFeatures: number[] = [];
         if (isEngineAvailable()) {
           try {
-            const fromDate = new Date(d.createdAt.getTime() - 60 * 86400000).toISOString().split('T')[0];
-            const toDate = d.createdAt.toISOString().split('T')[0];
+            const fromDate = istDateStr(new Date(d.createdAt.getTime() - 60 * 86400000));
+            const toDate = istDateStr(d.createdAt);
             const candles = await this.marketData.getHistory(
               d.symbol, '1d', fromDate, toDate, undefined, 'NSE',
             );
@@ -937,7 +938,7 @@ Top losers: ${JSON.stringify(topLosers)}`,
 
           // Dedup against existing decision audit entries (by symbol + date)
           const existingKeys = new Set(
-            decisions.map(d => `${d.symbol}:${d.createdAt.toISOString().split('T')[0]}`),
+            decisions.map(d => `${d.symbol}:${istDateStr(d.createdAt)}`),
           );
 
           let mergedCount = 0;
@@ -1496,8 +1497,8 @@ Top losers: ${JSON.stringify(topLosers)}`,
 
     try {
       const candles = await this.marketData.getHistory('NIFTY 50', '5m',
-        new Date(now - 2 * 86400000).toISOString().split('T')[0],
-        new Date().toISOString().split('T')[0], undefined, 'NSE',
+        istDaysAgo(5),
+        istDateStr(), undefined, 'NSE',
       );
       if (!candles || candles.length < 30) return;
 

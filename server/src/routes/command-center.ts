@@ -6,6 +6,7 @@ import { AIAgentService } from '../services/ai-agent.service.js';
 import { chatCompletion, chatCompletionJSON } from '../lib/openai.js';
 import { getPrisma } from '../lib/prisma.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
+import { istDateStr } from '../lib/ist.js';
 
 interface ChatIntent {
   intent: string;
@@ -409,7 +410,7 @@ If asked about performance, analyze the data and highlight patterns, winning/los
 If asked about bots, explain what they've been doing and suggest configuration changes.
 If asked what you can do, explain you can set targets, control bots, review signals, analyze performance, and more.
 
-Current date: ${new Date().toISOString().split('T')[0]}
+Current date: ${istDateStr()}
 
 USER'S TRADING DATA:
 ${contextParts.length > 0 ? contextParts.join('\n\n') : 'No trading data available yet — the user is new or has not placed any trades.'}`,

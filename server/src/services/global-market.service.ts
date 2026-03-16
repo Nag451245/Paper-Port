@@ -1,6 +1,7 @@
 import { MarketDataService } from './market-data.service.js';
 import { chatCompletionJSON } from '../lib/openai.js';
 import { getPrisma } from '../lib/prisma.js';
+import { istDateStr } from '../lib/ist.js';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const FETCH_TIMEOUT = 12_000;
@@ -424,7 +425,7 @@ Respond in JSON with this schema:
   }
 
   private async storeIntelligence(intel: MarketIntelligence): Promise<void> {
-    const date = new Date().toISOString().split('T')[0];
+    const date = istDateStr();
 
     try {
       const prisma = getPrisma();

@@ -6,6 +6,7 @@ import { createRequire } from 'module';
 import { env } from '../config.js';
 import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
+import { istDateStr, istDaysAgo } from '../lib/ist.js';
 
 const log = createChildLogger('MarketData');
 
@@ -569,8 +570,8 @@ export class MarketDataService {
 
     // Fallback 3: Breeze historical (last bar close)
     try {
-      const today = new Date().toISOString().split('T')[0];
-      const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+      const today = istDateStr();
+      const weekAgo = istDaysAgo(7);
       const bars = await this.fetchFromBreeze(symbol, '1day', weekAgo, today);
       if (bars.length > 0) {
         const latest = bars[bars.length - 1];
@@ -1184,7 +1185,7 @@ export class MarketDataService {
     }
 
     const empty = {
-      date: new Date().toISOString().split('T')[0],
+      date: istDateStr(),
       fiiBuy: 0, fiiSell: 0, fiiNet: 0,
       diiBuy: 0, diiSell: 0, diiNet: 0,
     };

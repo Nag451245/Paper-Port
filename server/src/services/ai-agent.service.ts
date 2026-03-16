@@ -8,6 +8,7 @@ import { OrderManagementService } from './oms.service.js';
 import { engineRisk, isEngineAvailable } from '../lib/rust-engine.js';
 import { OptionsService, calculateMaxPain, calculateIVPercentile } from './options.service.js';
 import { ExitCoordinator } from './exit-coordinator.service.js';
+import { istDateStr } from '../lib/ist.js';
 import { DecisionAuditService } from './decision-audit.service.js';
 import { MarketCalendar } from './market-calendar.js';
 
@@ -427,7 +428,7 @@ Respond in JSON format:
           : [`Market is currently ${briefing.stance ?? 'neutral'}. Check back during trading hours for detailed analysis.`];
       }
       if (!briefing.stance) briefing.stance = 'neutral';
-      if (!briefing.date) briefing.date = new Date().toISOString().split('T')[0];
+      if (!briefing.date) briefing.date = istDateStr();
 
       this.cachedBriefing = { data: briefing, fetchedAt: Date.now() };
       return briefing;
@@ -507,7 +508,7 @@ Respond in JSON format:
       : ['Market is closed. Briefing will be available before market opens.', 'After-hours analysis is running in the background.'];
 
     return {
-      date: new Date().toISOString().split('T')[0],
+      date: istDateStr(),
       stance: 'neutral',
       keyPoints,
       globalCues: [],
@@ -535,7 +536,7 @@ Respond in JSON format:
 
     if (trades.length === 0) {
       return {
-        date: new Date().toISOString().split('T')[0],
+        date: istDateStr(),
         summary: 'No trades executed today',
         pnlSummary: { realizedPnl: 0, totalPnl: 0, tradeCount: 0 },
         topWinners: [],
@@ -551,7 +552,7 @@ Respond in JSON format:
     const losers = pnls.filter((p: any) => p.pnl < 0).sort((a: any, b: any) => a.pnl - b.pnl);
 
     return {
-      date: new Date().toISOString().split('T')[0],
+      date: istDateStr(),
       summary: `${trades.length} trades executed. Total P&L: ₹${totalPnl.toFixed(2)}`,
       pnlSummary: { realizedPnl: totalPnl, totalPnl, tradeCount: trades.length },
       topWinners: winners.slice(0, 3),

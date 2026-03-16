@@ -13,6 +13,7 @@ import { RiskService } from './risk.service.js';
 import { TWAPExecutor, selectOrderType } from './twap-executor.service.js';
 import { ExitCoordinator } from './exit-coordinator.service.js';
 import { emit } from '../lib/event-bus.js';
+import { istDateStr, istDaysAgo } from '../lib/ist.js';
 import { wsHub } from '../lib/websocket.js';
 import { createChildLogger } from '../lib/logger.js';
 import { env } from '../config.js';
@@ -1474,13 +1475,11 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     symbols: string[],
     userId: string,
   ): Promise<Array<{ symbol: string; candles: Array<{ open: number; close: number; high: number; low: number; volume: number }> }>> {
-    const now = new Date();
-    const toDate = now.toISOString().split('T')[0];
-    const fiveDaysAgo = new Date(now.getTime() - 5 * 86_400_000);
-    const fromDate = fiveDaysAgo.toISOString().split('T')[0];
+    const toDate = istDateStr();
+    const fromDate = istDaysAgo(5);
 
     const results: Array<{ symbol: string; candles: Array<{ open: number; close: number; high: number; low: number; volume: number }> }> = [];
-    const MIN_BARS = 10;
+    const MIN_BARS = 20;
 
     for (const sym of symbols.slice(0, MAX_CANDLE_SYMBOLS)) {
       try {

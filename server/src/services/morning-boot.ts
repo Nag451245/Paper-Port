@@ -3,6 +3,7 @@ import { chatCompletionJSON } from '../lib/openai.js';
 import { MarketDataService } from './market-data.service.js';
 import { isEngineAvailable, engineFeatureStore } from '../lib/rust-engine.js';
 import { createChildLogger } from '../lib/logger.js';
+import { istDateStr, istDaysAgo } from '../lib/ist.js';
 
 const log = createChildLogger('MorningBoot');
 
@@ -342,8 +343,8 @@ Currently active bots: ${bots.map(b => `${b.name} (${b.assignedStrategy || 'none
       let precomputed = 0;
       for (const { symbol } of universe.slice(0, 10)) {
         try {
-          const fromDate = new Date(Date.now() - 90 * 86400000).toISOString().split('T')[0];
-          const toDate = new Date().toISOString().split('T')[0];
+          const fromDate = istDaysAgo(90);
+          const toDate = istDateStr();
           const candles = await this.marketData.getHistory(symbol, '1d', fromDate, toDate, undefined, 'NSE');
           if (!candles || candles.length < 50) continue;
 
