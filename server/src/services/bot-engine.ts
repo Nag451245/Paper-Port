@@ -1065,6 +1065,13 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
       } catch { /* audit best-effort */ }
 
       if (direction === 'BUY') {
+        const existingLong = await this.prisma.position.findFirst({
+          where: { portfolioId: portfolio.id, symbol, side: 'LONG', status: 'OPEN' },
+        });
+        if (existingLong) {
+          return { success: false, message: `Already holding LONG position in ${symbol} (qty: ${existingLong.qty})` };
+        }
+
         let ltp = 0;
         try {
           const quote = await this.marketData.getQuote(symbol, exchange);
@@ -1240,6 +1247,13 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         }
 
         // No LONG position -- open a SHORT via placeOrder
+        const existingShort = await this.prisma.position.findFirst({
+          where: { portfolioId: portfolio.id, symbol, side: 'SHORT', status: 'OPEN' },
+        });
+        if (existingShort) {
+          return { success: false, message: `Already holding SHORT position in ${symbol} (qty: ${existingShort.qty})` };
+        }
+
         let ltp = 0;
         try {
           const quote = await this.marketData.getQuote(symbol, exchange);
@@ -1634,8 +1648,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         }
       }
 
-      // --- Step 1b: Pyramid into winning positions ---
-      await this.pyramidWinners(bot, userId, botId);
+      // Pyramiding disabled — was causing bots to pile up on existing positions
 
       // --- Step 2: GPT/Gemini analysis (always runs for market commentary + AI signals) ---
       console.log(`[BotEngine] Bot ${botId}: running GPT/Gemini analysis cycle`);
@@ -1756,8 +1769,29 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
   ): Promise<void> {
     const shouldAutoExecute = bot.role === 'EXECUTOR' || bot.role === 'SCANNER';
 
+    const openPositions = await this.prisma.position.findMany({
+      where: { portfolio: { userId }, status: 'OPEN' },
+      select: { symbol: true, side: true },
+    });
+    const heldSymbols = new Map<string, string>();
+    for (const p of openPositions) {
+      heldSymbols.set(p.symbol, p.side);
+    }
+
+    const filtered = rustSignals.filter(sig => {
+      const held = heldSymbols.get(sig.symbol);
+      if (!held) return true;
+      if (sig.direction === 'BUY' && held === 'LONG') return false;
+      if (sig.direction === 'SELL' && held === 'SHORT') return false;
+      return true;
+    });
+
+    if (filtered.length < rustSignals.length) {
+      console.log(`[BotEngine] Filtered out ${rustSignals.length - filtered.length} signals for already-held symbols`);
+    }
+
     // Thompson sampling: prioritize signals from strategies with better posteriors
-    let prioritized = rustSignals;
+    let prioritized = filtered;
     if (rustSignals.length > 1) {
       const strategyIds = [...new Set(rustSignals.map(s => s.strategy ?? bot.assignedStrategy ?? 'default'))];
       const selectedStrategy = this.thompsonSelectStrategy(strategyIds);
