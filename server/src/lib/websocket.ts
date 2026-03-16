@@ -212,7 +212,9 @@ class WebSocketHub {
 export const wsHub = new WebSocketHub();
 
 export async function registerWebSocket(app: FastifyInstance): Promise<void> {
-  await app.register(websocket);
+  await app.register(websocket, { options: { maxPayload: 1048576 } });
+
+  app.server.setMaxListeners(50);
 
   app.get('/ws', { websocket: true }, (socket, req) => {
     let userId: string | null = null;
