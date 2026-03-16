@@ -34,19 +34,6 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
 
     const portfolioIds = portfolios.map(p => p.id);
 
-    const allTrades = await prisma.trade.findMany({
-      where: { portfolioId: { in: portfolioIds } },
-      select: { portfolioId: true, netPnl: true },
-    });
-
-    const pnlByPortfolio = new Map<string, number>();
-    let totalRealizedPnl = 0;
-    for (const t of allTrades) {
-      const pnl = Number(t.netPnl);
-      totalRealizedPnl += pnl;
-      pnlByPortfolio.set(t.portfolioId, (pnlByPortfolio.get(t.portfolioId) ?? 0) + pnl);
-    }
-
     let totalCapital = 0, totalCash = 0, totalInvestedValue = 0, totalOpenPositions = 0, totalTrades = 0;
     for (const p of portfolios) {
       totalCapital += Number(p.initialCapital);
@@ -64,6 +51,7 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
       }
     }
     const totalNav = totalCash + totalInvestedValue;
+    const totalRealizedPnl = totalCash + totalInvestedValue - totalCapital;
 
     return reply.send({
       portfolioCount: portfolios.length,
@@ -74,7 +62,6 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
       totalOpenPositions,
       totalTrades,
       portfolios: portfolios.map(p => {
-        const pRealizedPnl = pnlByPortfolio.get(p.id) ?? 0;
         let pInvested = 0;
         for (const pos of p.positions) {
           const ep = Number(pos.avgEntryPrice);
@@ -85,12 +72,15 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
             pInvested += ep * pos.qty * rate;
           }
         }
+        const pCash = Number(p.currentNav);
+        const pCapital = Number(p.initialCapital);
+        const pRealizedPnl = pCash + pInvested - pCapital;
         return {
           id: p.id,
           name: p.name,
           isDefault: p.isDefault,
-          capital: Number(p.initialCapital),
-          nav: Number((Number(p.currentNav) + pInvested).toFixed(2)),
+          capital: pCapital,
+          nav: Number((pCash + pInvested).toFixed(2)),
           pnl: Number(pRealizedPnl.toFixed(2)),
           openPositions: p.positions.length,
           trades: p._count.trades,

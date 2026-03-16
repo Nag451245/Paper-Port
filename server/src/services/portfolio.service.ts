@@ -1,5 +1,6 @@
 import { PrismaClient, type Prisma } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
+import { istDateStr, istMidnight } from '../lib/ist.js';
 
 export interface PortfolioSummary {
   totalNav: number;
@@ -63,18 +64,13 @@ export class PortfolioService {
     const availableCash = Number(portfolio.currentNav);
     const openPositions = (portfolio as any).positions ?? [];
 
-    const todayStart = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-    todayStart.setHours(0, 0, 0, 0);
+    const todayStart = istMidnight();
 
     const uncachedPositions = priceCache
       ? openPositions.filter((pos: any) => !(pos.symbol in priceCache) || priceCache[pos.symbol] <= 0)
       : openPositions;
 
-    const [allTrades, todayTrades, ltpResults] = await Promise.all([
-      this.prisma.trade.findMany({
-        where: { portfolioId },
-        select: { netPnl: true },
-      }),
+    const [todayTrades, ltpResults] = await Promise.all([
       this.prisma.trade.findMany({
         where: { portfolioId, exitTime: { gte: todayStart } },
         select: { netPnl: true },
@@ -94,7 +90,6 @@ export class PortfolioService {
       ),
     ]);
 
-    const totalRealizedPnl = allTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
     const todayRealizedPnl = todayTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
 
     const ltpMap = new Map<string, number>();
@@ -132,12 +127,13 @@ export class PortfolioService {
     }
 
     const totalNav = availableCash + investedValue + unrealizedPnl;
+    const totalRealizedPnl = availableCash + investedValue - initialCapital;
 
     return {
       totalNav,
       dayPnl: todayRealizedPnl,
       dayPnlPercent: initialCapital > 0 ? (todayRealizedPnl / initialCapital) * 100 : 0,
-      totalPnl: totalRealizedPnl,
+      totalPnl: Number(totalRealizedPnl.toFixed(2)),
       totalPnlPercent: initialCapital > 0 ? (totalRealizedPnl / initialCapital) * 100 : 0,
       unrealizedPnl,
       investedValue,
@@ -161,13 +157,13 @@ export class PortfolioService {
 
     let runningNav = initialCapital;
     const curve: { date: string; value: number }[] = [
-      { date: portfolio!.createdAt.toISOString().split('T')[0], value: initialCapital },
+      { date: istDateStr(portfolio!.createdAt), value: initialCapital },
     ];
 
     const dateMap: Record<string, number> = {};
     for (const trade of trades) {
       runningNav += Number(trade.netPnl);
-      const day = trade.exitTime.toISOString().split('T')[0];
+      const day = istDateStr(trade.exitTime);
       dateMap[day] = runningNav;
     }
 
@@ -178,7 +174,7 @@ export class PortfolioService {
     // Append today's live NAV including open positions
     try {
       const summary = await this.getSummary(portfolioId, userId);
-      const today = new Date().toISOString().split('T')[0];
+      const today = istDateStr();
       const lastDate = curve[curve.length - 1]?.date;
       if (today !== lastDate) {
         curve.push({ date: today, value: summary.totalNav });
@@ -301,27 +297,31 @@ export class PortfolioService {
     };
   }
 
-  async getPnlHistory(portfolioId: string, userId: string, days = 30) {
+  async getPnlHistory(portfolioId: string, userId: string, days = 0) {
     await this.getById(portfolioId, userId);
 
-    const since = new Date();
-    since.setDate(since.getDate() - days);
+    const where: any = { portfolioId };
+    if (days > 0) {
+      const since = new Date();
+      since.setDate(since.getDate() - days);
+      where.exitTime = { gte: since };
+    }
 
     const trades = await this.prisma.trade.findMany({
-      where: { portfolioId, exitTime: { gte: since } },
+      where,
       orderBy: { exitTime: 'asc' },
       select: { exitTime: true, netPnl: true },
     });
 
     const dayMap: Record<string, number> = {};
     for (const t of trades) {
-      const day = t.exitTime.toISOString().split('T')[0];
+      const day = istDateStr(t.exitTime);
       dayMap[day] = (dayMap[day] || 0) + Number(t.netPnl);
     }
 
     return Object.entries(dayMap)
       .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, totalPnl]) => ({ date, totalPnl }));
+      .map(([date, totalPnl]) => ({ date, totalPnl: Number(totalPnl.toFixed(2)) }));
   }
 
   async updateCapital(portfolioId: string, userId: string, virtualCapital: number) {
@@ -355,38 +355,39 @@ export class PortfolioService {
     const initialCapital = Number(portfolio.initialCapital);
     const beforeNav = Number(portfolio.currentNav);
 
-    // Sum of all realized P&L from closed trades
     const allTrades = await this.prisma.trade.findMany({
       where: { portfolioId },
-      select: { netPnl: true, totalCosts: true },
+      select: { netPnl: true },
     });
     const totalRealizedPnl = allTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
 
-    // Sum of all transaction costs on orders (covers BUY costs on still-open positions)
-    const allOrders = await this.prisma.order.findMany({
-      where: { portfolioId, status: 'FILLED' },
-      select: { side: true, qty: true, avgFillPrice: true, totalCost: true },
-    });
-
-    // Cost locked in open positions
     const openPositions = await this.prisma.position.findMany({
       where: { portfolioId, status: 'OPEN' },
     });
 
     let lockedCapital = 0;
+    let openEntryCosts = 0;
     for (const pos of openPositions) {
       const entryPrice = Number(pos.avgEntryPrice);
       if (pos.side === 'LONG') {
         lockedCapital += entryPrice * pos.qty;
       } else {
-        // SHORT: only margin is blocked, no premium added to cash
         const rate = pos.exchange === 'MCX' ? 0.10 : pos.exchange === 'CDS' ? 0.05 : 0.25;
         lockedCapital += entryPrice * pos.qty * rate;
       }
+
+      const entrySide = pos.side === 'LONG' ? 'BUY' : 'SELL';
+      const turnover = entryPrice * pos.qty;
+      const brokerage = Math.min(turnover * 0.0003, 20);
+      const stt = entrySide === 'SELL' ? turnover * 0.001 : 0;
+      const exchCharges = turnover * 0.0000345;
+      const gst = (brokerage + exchCharges) * 0.18;
+      const sebi = turnover * 0.000001;
+      const stamp = entrySide === 'BUY' ? turnover * 0.00015 : 0;
+      openEntryCosts += brokerage + stt + exchCharges + gst + sebi + stamp;
     }
 
-    // correctCash = initial capital + realized P&L - capital locked in open positions
-    const correctCash = initialCapital + totalRealizedPnl - lockedCapital;
+    const correctCash = initialCapital + totalRealizedPnl - lockedCapital - openEntryCosts;
 
     await this.prisma.portfolio.update({
       where: { id: portfolioId },

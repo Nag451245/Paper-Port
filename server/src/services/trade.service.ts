@@ -795,9 +795,12 @@ export class TradeService {
       const entryPrice = Number(existingShort.avgEntryPrice);
       const coverQty = Math.min(input.qty, existingShort.qty);
       const coverRatio = coverQty / input.qty;
-      const coverCost = costs.totalCost * coverRatio;
+      const exitCost = costs.totalCost * coverRatio;
+      const entryCost = calculateCosts(coverQty, entryPrice, 'SELL', input.exchange ?? 'NSE').totalCost;
       const grossPnl = (entryPrice - fillPrice) * coverQty;
-      const netPnl = grossPnl - coverCost;
+      const roundTripCosts = exitCost + entryCost;
+      const exitOnlyPnl = grossPnl - exitCost;
+      const netPnl = grossPnl - roundTripCosts;
 
       await prisma.trade.create({
         data: {
@@ -810,7 +813,7 @@ export class TradeService {
           exitPrice: fillPrice,
           qty: coverQty,
           grossPnl,
-          totalCosts: coverCost,
+          totalCosts: roundTripCosts,
           netPnl,
           entryTime: existingShort.openedAt,
           exitTime: new Date(),
@@ -836,7 +839,7 @@ export class TradeService {
       const portfolio = await prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
       if (portfolio) {
         const marginReleased = this.shortMarginRequired(entryPrice, coverQty, input.exchange ?? 'NSE');
-        const cashChange = marginReleased + netPnl;
+        const cashChange = marginReleased + exitOnlyPnl;
         await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), cashChange, prisma);
       }
 
@@ -919,9 +922,11 @@ export class TradeService {
       const entryPrice = Number(existingLong.avgEntryPrice);
       const closeQty = Math.min(input.qty, existingLong.qty);
       const closeRatio = closeQty / input.qty;
-      const closeCost = costs.totalCost * closeRatio;
+      const exitCost = costs.totalCost * closeRatio;
+      const entryCost = calculateCosts(closeQty, entryPrice, 'BUY', input.exchange ?? 'NSE').totalCost;
       const grossPnl = (fillPrice - entryPrice) * closeQty;
-      const netPnl = grossPnl - closeCost;
+      const roundTripCosts = exitCost + entryCost;
+      const netPnl = grossPnl - roundTripCosts;
 
       await prisma.trade.create({
         data: {
@@ -934,7 +939,7 @@ export class TradeService {
           exitPrice: fillPrice,
           qty: closeQty,
           grossPnl,
-          totalCosts: closeCost,
+          totalCosts: roundTripCosts,
           netPnl,
           entryTime: existingLong.openedAt,
           exitTime: new Date(),
@@ -959,7 +964,7 @@ export class TradeService {
 
       const portfolio = await prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
       if (portfolio) {
-        const saleProceeds = fillPrice * closeQty - costs.totalCost;
+        const saleProceeds = fillPrice * closeQty - exitCost;
         await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), saleProceeds, prisma);
       }
 
@@ -1248,11 +1253,15 @@ export class TradeService {
 
     const entryPrice = Number(position.avgEntryPrice);
     const exitSide = position.side === 'LONG' ? 'SELL' : 'BUY';
+    const entrySide = position.side === 'LONG' ? 'BUY' : 'SELL';
     const grossPnl = position.side === 'LONG'
       ? (exitPrice - entryPrice) * position.qty
       : (entryPrice - exitPrice) * position.qty;
-    const costs = calculateCosts(position.qty, exitPrice, exitSide);
-    const netPnl = grossPnl - costs.totalCost;
+    const exitCosts = calculateCosts(position.qty, exitPrice, exitSide, position.exchange);
+    const entryCosts = calculateCosts(position.qty, entryPrice, entrySide, position.exchange);
+    const roundTripCosts = exitCosts.totalCost + entryCosts.totalCost;
+    const exitOnlyPnl = grossPnl - exitCosts.totalCost;
+    const netPnl = grossPnl - roundTripCosts;
 
     // Create an exit Order record so the close flows through OMS
     const exitOrder = await this.prisma.order.create({
@@ -1268,7 +1277,7 @@ export class TradeService {
         status: 'PENDING',
         filledQty: 0,
         avgFillPrice: null,
-        ...costs,
+        ...exitCosts,
       },
     });
 
@@ -1294,7 +1303,7 @@ export class TradeService {
         exitPrice,
         qty: position.qty,
         grossPnl,
-        totalCosts: costs.totalCost,
+        totalCosts: roundTripCosts,
         netPnl,
         entryTime: position.openedAt,
         exitTime: new Date(),
@@ -1314,10 +1323,10 @@ export class TradeService {
     if (portfolio) {
       let cashChange: number;
       if (position.side === 'LONG') {
-        cashChange = exitPrice * position.qty - costs.totalCost;
+        cashChange = exitPrice * position.qty - exitCosts.totalCost;
       } else {
         const marginReleased = this.shortMarginRequired(entryPrice, position.qty, position.exchange);
-        cashChange = marginReleased + netPnl;
+        cashChange = marginReleased + exitOnlyPnl;
       }
 
       const newNav = Number(portfolio.currentNav) + cashChange;
