@@ -63,7 +63,7 @@ export class PortfolioService {
     const availableCash = Number(portfolio.currentNav);
     const openPositions = (portfolio as any).positions ?? [];
 
-    const todayStart = new Date();
+    const todayStart = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
     todayStart.setHours(0, 0, 0, 0);
 
     const uncachedPositions = priceCache

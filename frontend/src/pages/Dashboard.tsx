@@ -27,7 +27,7 @@ export default function Dashboard() {
 
   const loadTodayTrades = useCallback(() => {
     const today = new Date().toISOString().slice(0, 10);
-    tradingApi.listTrades({ from_date: today, to_date: today, limit: 20 })
+    tradingApi.listTrades({ from_date: today, to_date: today, limit: 200 })
       .then(({ data }) => {
         const trades = Array.isArray(data) ? data : (data as any)?.trades ?? (data as any)?.items ?? [];
         setTodayTrades(trades);

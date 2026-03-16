@@ -84,7 +84,7 @@ export default function TradingTerminal() {
         portfolioApi.list().catch((e) => { errors.push('Portfolio: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
         tradingApi.listOrders().catch((e) => { errors.push('Orders: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
         tradingApi.positions().catch((e) => { errors.push('Positions: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
-        tradingApi.listTrades().catch((e) => { errors.push('Trades: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
+        tradingApi.listTrades({ limit: 200 }).catch((e) => { errors.push('Trades: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
       ]);
 
       const pList = Array.isArray(pRes.data) ? pRes.data : [];

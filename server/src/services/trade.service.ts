@@ -792,8 +792,10 @@ export class TradeService {
     if (existingShort) {
       const entryPrice = Number(existingShort.avgEntryPrice);
       const coverQty = Math.min(input.qty, existingShort.qty);
+      const coverRatio = coverQty / input.qty;
+      const coverCost = costs.totalCost * coverRatio;
       const grossPnl = (entryPrice - fillPrice) * coverQty;
-      const netPnl = grossPnl - costs.totalCost;
+      const netPnl = grossPnl - coverCost;
 
       await prisma.trade.create({
         data: {
@@ -806,7 +808,7 @@ export class TradeService {
           exitPrice: fillPrice,
           qty: coverQty,
           grossPnl,
-          totalCosts: costs.totalCost,
+          totalCosts: coverCost,
           netPnl,
           entryTime: existingShort.openedAt,
           exitTime: new Date(),
@@ -840,7 +842,9 @@ export class TradeService {
 
       const excessQty = input.qty - coverQty;
       if (excessQty > 0) {
-        await this.openLongPosition(orderId, input, fillPrice, costs, excessQty, prisma);
+        const excessRatio = excessQty / input.qty;
+        const excessCosts = { ...costs, totalCost: costs.totalCost * excessRatio };
+        await this.openLongPosition(orderId, input, fillPrice, excessCosts, excessQty, prisma);
       }
       return;
     }
@@ -910,8 +914,10 @@ export class TradeService {
     if (existingLong) {
       const entryPrice = Number(existingLong.avgEntryPrice);
       const closeQty = Math.min(input.qty, existingLong.qty);
+      const closeRatio = closeQty / input.qty;
+      const closeCost = costs.totalCost * closeRatio;
       const grossPnl = (fillPrice - entryPrice) * closeQty;
-      const netPnl = grossPnl - costs.totalCost;
+      const netPnl = grossPnl - closeCost;
 
       await prisma.trade.create({
         data: {
@@ -924,7 +930,7 @@ export class TradeService {
           exitPrice: fillPrice,
           qty: closeQty,
           grossPnl,
-          totalCosts: costs.totalCost,
+          totalCosts: closeCost,
           netPnl,
           entryTime: existingLong.openedAt,
           exitTime: new Date(),
@@ -957,7 +963,9 @@ export class TradeService {
 
       const excessQty = input.qty - closeQty;
       if (excessQty > 0) {
-        await this.openShortPosition(orderId, input, fillPrice, costs, excessQty, prisma);
+        const excessRatio = excessQty / input.qty;
+        const excessCosts = { ...costs, totalCost: costs.totalCost * excessRatio };
+        await this.openShortPosition(orderId, input, fillPrice, excessCosts, excessQty, prisma);
       }
       return;
     }
