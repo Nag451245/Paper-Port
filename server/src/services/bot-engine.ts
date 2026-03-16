@@ -552,6 +552,11 @@ export class BotEngine {
       if (oldest) this.stopBot(oldest);
     }
 
+    await this.prisma.tradingBot.update({
+      where: { id: botId },
+      data: { status: 'RUNNING', lastAction: 'Bot started', lastActionAt: new Date() },
+    }).catch(() => {});
+
     const botIndex = this.runningBots.size;
     const staggerMs = botIndex * 30_000 + 10_000;
 
@@ -1446,25 +1451,30 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
   }
 
   private async updateBotTradeStats(botId: string, pnl: number): Promise<void> {
+    if (pnl === 0) return;
+
     try {
       const bot = await this.prisma.tradingBot.findUnique({ where: { id: botId } });
       if (!bot) return;
 
-      const newTotal = (bot.totalTrades || 0) + 1;
+      const closedTrades = (bot.totalTrades || 0) + 1;
       const oldPnl = Number(bot.totalPnl || 0);
       const newPnl = oldPnl + pnl;
 
-      const wins = pnl > 0 ? 1 : 0;
-      const oldWinCount = Math.round(Number(bot.winRate || 0) / 100 * (bot.totalTrades || 0));
-      const newWinRate = newTotal > 0 ? ((oldWinCount + wins) / newTotal) * 100 : 0;
+      const oldClosedCount = bot.totalTrades || 0;
+      const oldWinCount = oldClosedCount > 0
+        ? Math.round(Number(bot.winRate || 0) / 100 * oldClosedCount)
+        : 0;
+      const newWinCount = oldWinCount + (pnl > 0 ? 1 : 0);
+      const newWinRate = closedTrades > 0 ? (newWinCount / closedTrades) * 100 : 0;
 
       await this.prisma.tradingBot.update({
         where: { id: botId },
         data: {
-          totalTrades: newTotal,
+          totalTrades: closedTrades,
           totalPnl: newPnl,
           winRate: newWinRate,
-          usedCapital: { increment: Math.abs(pnl) > 0 ? Math.abs(pnl) : 0 },
+          usedCapital: { increment: Math.abs(pnl) },
         },
       });
     } catch { /* best effort */ }
@@ -2680,7 +2690,8 @@ INSTRUCTIONS:
 
             if (riskData && riskData.max_drawdown_percent > 10) continue;
 
-            const autoExecute = config.mode === 'AUTONOMOUS' && sig.confidence >= 0.45;
+            const autoExecThreshold = config.mode === 'AUTONOMOUS' ? 0.45 : config.mode === 'SIGNAL' ? 0.55 : 0.65;
+            const autoExecute = sig.confidence >= autoExecThreshold;
 
             const agentRustGates = this.deriveGateScores(sig.confidence, sig.indicators, sig.votes, { source: 'rust-engine' });
             await this.prisma.aITradeSignal.create({
@@ -2785,7 +2796,8 @@ Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted
       if (result.signals) {
         for (const sig of result.signals) {
           if (sig.score >= (config.minSignalScore || 0.6) && (sig.direction === 'BUY' || sig.direction === 'SELL')) {
-            const autoExecute = config.mode === 'AUTONOMOUS' && sig.score >= 0.65;
+            const gptExecThreshold = config.mode === 'AUTONOMOUS' ? 0.55 : config.mode === 'SIGNAL' ? 0.65 : 0.75;
+            const autoExecute = sig.score >= gptExecThreshold;
 
             // Use GPT-provided gate scores if they have G1-G9 keys, otherwise derive them
             const hasGates = sig.gateScores && Object.keys(sig.gateScores).some(k => k.startsWith('g1'));

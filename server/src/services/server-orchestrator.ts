@@ -53,6 +53,17 @@ export class ServerOrchestrator {
       console.log(`[Orchestrator] Today is a holiday: ${holiday}`);
     }
 
+    if (this.currentPhase === 'MARKET_HOURS' || this.currentPhase === 'PRE_MARKET') {
+      const config = this.calendar.getPhaseConfig(this.currentPhase);
+      this.botEngine.setTickInterval(config.botTickMs || 60_000);
+      this.botEngine.setMarketScanInterval(config.scanIntervalMs || 5 * 60_000);
+      setTimeout(() => {
+        this.autoStartBots().catch(err => {
+          console.error('[Orchestrator] Auto-start on boot failed:', (err as Error).message);
+        });
+      }, 15_000);
+    }
+
     this.heartbeatTask = cron.schedule('* * * * *', () => {
       this.heartbeat().catch(err => {
         console.error('[Orchestrator] Heartbeat error:', (err as Error).message);
@@ -136,10 +147,19 @@ export class ServerOrchestrator {
   private async autoStartBots(): Promise<void> {
     try {
       const bots = await this.prisma.tradingBot.findMany({
-        where: { status: 'RUNNING', isActive: true },
-        select: { id: true, userId: true, name: true },
+        where: { isActive: true, status: { in: ['RUNNING', 'IDLE'] } },
+        select: { id: true, userId: true, name: true, status: true },
         take: 5,
       });
+
+      for (const bot of bots) {
+        if (bot.status !== 'RUNNING') {
+          await this.prisma.tradingBot.update({
+            where: { id: bot.id },
+            data: { status: 'RUNNING', lastAction: 'Auto-started at market open', lastActionAt: new Date() },
+          });
+        }
+      }
 
       for (let i = 0; i < bots.length; i++) {
         const bot = bots[i];
