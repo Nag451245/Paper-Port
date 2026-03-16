@@ -52,7 +52,24 @@ async function gracefulShutdown(signal: string, app: ReturnType<typeof buildApp>
   }
 }
 
+async function waitForPort(port: number, maxAttempts = 5): Promise<void> {
+  const net = await import('net');
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const inUse = await new Promise<boolean>((resolve) => {
+      const srv = net.createServer();
+      srv.once('error', () => resolve(true));
+      srv.once('listening', () => { srv.close(); resolve(false); });
+      srv.listen(port, '0.0.0.0');
+    });
+    if (!inUse) return;
+    console.log(`[Startup] Port ${port} in use — waiting ${attempt}s before retry (${attempt}/${maxAttempts})`);
+    await new Promise(r => setTimeout(r, attempt * 1000));
+  }
+}
+
 async function main(): Promise<void> {
+  await waitForPort(env.PORT);
+
   const app = await buildApp({ logger: false });
 
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM', app));

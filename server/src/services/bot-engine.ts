@@ -1469,22 +1469,23 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     } catch { /* best effort */ }
   }
 
-  // ---- Fetch 50 candles (5-min interval) for a list of symbols ----
+  // ---- Fetch candles (5-min interval) for a list of symbols ----
   private async fetchCandles(
     symbols: string[],
     userId: string,
   ): Promise<Array<{ symbol: string; candles: Array<{ open: number; close: number; high: number; low: number; volume: number }> }>> {
     const now = new Date();
     const toDate = now.toISOString().split('T')[0];
-    const twoDaysAgo = new Date(now.getTime() - 2 * 86_400_000);
-    const fromDate = twoDaysAgo.toISOString().split('T')[0];
+    const fiveDaysAgo = new Date(now.getTime() - 5 * 86_400_000);
+    const fromDate = fiveDaysAgo.toISOString().split('T')[0];
 
     const results: Array<{ symbol: string; candles: Array<{ open: number; close: number; high: number; low: number; volume: number }> }> = [];
+    const MIN_BARS = 10;
 
     for (const sym of symbols.slice(0, MAX_CANDLE_SYMBOLS)) {
       try {
         const bars = await this.marketData.getHistory(sym, '5m', fromDate, toDate, userId);
-        if (bars.length >= 26) {
+        if (bars.length >= MIN_BARS) {
           const last50 = bars.slice(-50);
           results.push({
             symbol: sym,
@@ -1497,7 +1498,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
             })),
           });
         } else {
-          console.log(`[BotEngine] fetchCandles: ${sym} returned only ${bars.length} bars (need 26+)`);
+          console.log(`[BotEngine] fetchCandles: ${sym} returned only ${bars.length} bars (need ${MIN_BARS}+)`);
         }
       } catch (err) {
         console.log(`[BotEngine] fetchCandles: ${sym} failed — ${(err as Error).message}`);
