@@ -1,5 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { createChildLogger } from '../lib/logger.js';
+import { istMidnight } from '../lib/ist.js';
 
 const log = createChildLogger('PerformanceMetrics');
 
@@ -132,8 +133,7 @@ export class PerformanceMetricsService {
     let timeToFirstTradeMin: number | null = null;
     if (trades.length > 0 && trades[0].entryTime) {
       const entryTime = new Date(trades[0].entryTime);
-      const marketOpen = new Date(entryTime);
-      marketOpen.setHours(3, 45, 0, 0); // 09:15 IST = 03:45 UTC
+      const marketOpen = new Date(istMidnight(entryTime).getTime() + (9 * 60 + 15) * 60_000);
       const diffMs = entryTime.getTime() - marketOpen.getTime();
       if (diffMs > 0) {
         timeToFirstTradeMin = Math.round(diffMs / 60_000);
