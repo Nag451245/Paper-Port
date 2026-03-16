@@ -47,6 +47,8 @@ export interface PlaceOrderInput {
   expiry?: string;
   strike?: number;
   optionType?: 'CE' | 'PE';
+  stopLoss?: number;
+  target?: number;
 }
 
 interface CostBreakdown {
@@ -887,6 +889,8 @@ export class TradeService {
           avgEntryPrice: fillPrice,
           side: 'LONG',
           strategyTag: input.strategyTag,
+          stopLoss: input.stopLoss ?? null,
+          target: input.target ?? null,
         },
       });
       await prisma.order.update({ where: { id: orderId }, data: { positionId: position.id } });
@@ -1022,6 +1026,8 @@ export class TradeService {
           avgEntryPrice: fillPrice,
           side: 'SHORT',
           strategyTag: input.strategyTag,
+          stopLoss: input.stopLoss ?? null,
+          target: input.target ?? null,
         },
       });
       await prisma.order.update({ where: { id: orderId }, data: { positionId: position.id } });

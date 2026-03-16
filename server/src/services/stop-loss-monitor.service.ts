@@ -175,24 +175,51 @@ export class StopLossMonitor {
         existing.config.qty = pos.qty;
         existing.config.entryPrice = entryPrice;
       } else {
-        const defaultStopPct = 0.03;
-        const stopLossPrice = pos.side === 'LONG'
-          ? entryPrice * (1 - defaultStopPct)
-          : entryPrice * (1 + defaultStopPct);
-
-        this.addPosition({
-          symbol: pos.symbol,
-          positionId: pos.id,
-          portfolioId: pos.portfolioId,
-          userId: pos.portfolio.userId,
-          side: pos.side as 'LONG' | 'SHORT',
-          qty: pos.qty,
-          entryPrice,
-          stopLossPrice: Number(stopLossPrice.toFixed(2)),
-          trailingStopPct: 2,
-        });
+        this.addPosition(this.buildConfig(pos));
       }
     }
+  }
+
+  private buildConfig(pos: {
+    id: string; symbol: string; portfolioId: string; side: string;
+    qty: number; avgEntryPrice: unknown; stopLoss: unknown; target: unknown;
+    portfolio: { userId: string };
+  }): StopLossConfig {
+    const entryPrice = Number(pos.avgEntryPrice);
+    const dbStopLoss = pos.stopLoss ? Number(pos.stopLoss) : 0;
+    const dbTarget = pos.target ? Number(pos.target) : 0;
+
+    const DEFAULT_STOP_PCT = 0.03;
+    const DEFAULT_TP_MULTIPLIER = 2;
+
+    const stopLossPrice = dbStopLoss > 0
+      ? dbStopLoss
+      : pos.side === 'LONG'
+        ? entryPrice * (1 - DEFAULT_STOP_PCT)
+        : entryPrice * (1 + DEFAULT_STOP_PCT);
+
+    let takeProfitPrice: number | undefined;
+    if (dbTarget > 0) {
+      takeProfitPrice = dbTarget;
+    } else {
+      const riskAmt = Math.abs(entryPrice - stopLossPrice);
+      takeProfitPrice = pos.side === 'LONG'
+        ? entryPrice + riskAmt * DEFAULT_TP_MULTIPLIER
+        : entryPrice - riskAmt * DEFAULT_TP_MULTIPLIER;
+    }
+
+    return {
+      symbol: pos.symbol,
+      positionId: pos.id,
+      portfolioId: pos.portfolioId,
+      userId: pos.portfolio.userId,
+      side: pos.side as 'LONG' | 'SHORT',
+      qty: pos.qty,
+      entryPrice,
+      stopLossPrice: Number(stopLossPrice.toFixed(2)),
+      trailingStopPct: 2,
+      takeProfitPrice: Number(takeProfitPrice.toFixed(2)),
+    };
   }
 
   private async loadOpenPositions(): Promise<void> {
@@ -202,23 +229,7 @@ export class StopLossMonitor {
     });
 
     for (const pos of positions) {
-      const entryPrice = Number(pos.avgEntryPrice);
-      const defaultStopPct = 0.03;
-      const stopLossPrice = pos.side === 'LONG'
-        ? entryPrice * (1 - defaultStopPct)
-        : entryPrice * (1 + defaultStopPct);
-
-      this.addPosition({
-        symbol: pos.symbol,
-        positionId: pos.id,
-        portfolioId: pos.portfolioId,
-        userId: pos.portfolio.userId,
-        side: pos.side as 'LONG' | 'SHORT',
-        qty: pos.qty,
-        entryPrice,
-        stopLossPrice: Number(stopLossPrice.toFixed(2)),
-        trailingStopPct: 2,
-      });
+      this.addPosition(this.buildConfig(pos));
     }
 
     log.info({ count: positions.length }, 'Loaded open positions');

@@ -1007,7 +1007,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     direction: 'BUY' | 'SELL',
     rationale: string,
     botId?: string,
-    signalMeta?: { confidence?: number; indicators?: string; ltp?: number; signalSource?: string },
+    signalMeta?: { confidence?: number; indicators?: string; ltp?: number; signalSource?: string; stopLoss?: number; target?: number },
   ): Promise<{ success: boolean; message: string }> {
     try {
       if (this._killSwitchActive) {
@@ -1148,6 +1148,8 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           instrumentToken: symbol,
           exchange,
           strategyTag: this.resolveStrategyTag(signalMeta?.signalSource),
+          stopLoss: signalMeta?.stopLoss,
+          target: signalMeta?.target,
         });
 
         if (botId) {
@@ -1276,6 +1278,8 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           instrumentToken: symbol,
           exchange,
           strategyTag: this.resolveStrategyTag(signalMeta?.signalSource),
+          stopLoss: signalMeta?.stopLoss,
+          target: signalMeta?.target,
         });
 
         if (botId) {
@@ -1950,6 +1954,8 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           indicators: JSON.stringify(sig.indicators),
           ltp: sig.entry,
           signalSource: 'RUST_ENGINE',
+          stopLoss: sig.stop_loss,
+          target: sig.target,
         });
         if (!result.success) {
           await this.prisma.aITradeSignal.updateMany({
@@ -2543,6 +2549,8 @@ INSTRUCTIONS:
                 confidence: sig.confidence,
                 ltp: sig.entry,
                 signalSource: 'AI_AGENT',
+                stopLoss: sig.stopLoss,
+                target: sig.target,
               });
             }
             if (!result.success) {
@@ -2694,6 +2702,8 @@ INSTRUCTIONS:
                 confidence: sig.confidence,
                 ltp: sig.entry,
                 signalSource: 'RUST_ENGINE',
+                stopLoss: sig.stop_loss,
+                target: sig.target,
               });
               if (!tradeResult.success) {
                 await this.prisma.aITradeSignal.updateMany({
@@ -2802,6 +2812,8 @@ Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted
                 confidence: sig.score,
                 ltp: sig.entry,
                 signalSource: 'AI_AGENT',
+                stopLoss: sig.stopLoss,
+                target: sig.target,
               });
               if (!gptTradeResult.success) {
                 await this.prisma.aITradeSignal.updateMany({
