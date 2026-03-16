@@ -58,7 +58,7 @@ struct TimeframeAlignment {
 }
 
 fn analyze_trend(candles: &[Candle]) -> (String, f64) {
-    if candles.len() < 26 {
+    if candles.len() < 15 {
         return ("neutral".to_string(), 0.0);
     }
 

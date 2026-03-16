@@ -236,7 +236,7 @@ pub fn compute(data: Value) -> Result<Value, String> {
     let mut out_signals = Vec::new();
 
     for sym_data in &input.symbols {
-        if sym_data.candles.len() < 26 {
+        if sym_data.candles.len() < 15 {
             continue;
         }
 

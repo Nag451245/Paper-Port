@@ -1494,20 +1494,35 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     } catch { /* best effort */ }
   }
 
-  // ---- Fetch candles (5-min interval) for a list of symbols ----
+  // ---- Fetch candles for a list of symbols ----
   private async fetchCandles(
     symbols: string[],
     userId: string,
   ): Promise<Array<{ symbol: string; candles: Array<{ open: number; close: number; high: number; low: number; volume: number }> }>> {
     const toDate = istDateStr();
-    const fromDate = istDaysAgo(5);
+    const fromDate = istDaysAgo(10);
+    const MIN_BARS = 15;
 
     const results: Array<{ symbol: string; candles: Array<{ open: number; close: number; high: number; low: number; volume: number }> }> = [];
-    const MIN_BARS = 20;
 
     for (const sym of symbols.slice(0, MAX_CANDLE_SYMBOLS)) {
       try {
-        const bars = await this.marketData.getHistory(sym, '5m', fromDate, toDate, userId);
+        let bars = await this.marketData.getHistory(sym, '5m', fromDate, toDate, userId);
+
+        if (bars.length < MIN_BARS) {
+          bars = await this.marketData.getHistory(sym, '15m', fromDate, toDate, userId);
+          if (bars.length >= MIN_BARS) {
+            console.log(`[BotEngine] fetchCandles: ${sym} used 15m fallback (${bars.length} bars)`);
+          }
+        }
+
+        if (bars.length < MIN_BARS) {
+          bars = await this.marketData.getHistory(sym, '1d', istDaysAgo(60), toDate, userId);
+          if (bars.length >= MIN_BARS) {
+            console.log(`[BotEngine] fetchCandles: ${sym} used daily fallback (${bars.length} bars)`);
+          }
+        }
+
         if (bars.length >= MIN_BARS) {
           const last50 = bars.slice(-50);
           results.push({
@@ -1521,7 +1536,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
             })),
           });
         } else {
-          console.log(`[BotEngine] fetchCandles: ${sym} returned only ${bars.length} bars (need ${MIN_BARS}+)`);
+          console.log(`[BotEngine] fetchCandles: ${sym} returned only ${bars.length} bars across all intervals (need ${MIN_BARS}+)`);
         }
       } catch (err) {
         console.log(`[BotEngine] fetchCandles: ${sym} failed — ${(err as Error).message}`);

@@ -239,7 +239,7 @@ pub fn tier2_deep_scan(
                     return None;
                 }
             };
-            if candles.len() < 26 { return None; }
+            if candles.len() < 15 { return None; }
             Some(serde_json::json!({
                 "symbol": t1.symbol,
                 "candles": candles,
