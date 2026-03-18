@@ -1,5 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { engineScan, engineOptionsSignals, engineOptionsData, isEngineAvailable } from '../lib/rust-engine.js';
+import { processCommandCenterChat } from '../routes/command-center.js';
 
 const TELEGRAM_API = 'https://api.telegram.org/bot';
 const POLL_INTERVAL = 10_000;
@@ -79,6 +80,10 @@ export class TelegramService {
           await this.handleQuoteCommand(chatId, text.slice(7).trim().toUpperCase());
         } else if (/^[A-Z&-]{2,20}$/.test(text.toUpperCase()) && !text.startsWith('/')) {
           await this.handleScanCommand(chatId, text.toUpperCase());
+        } else if (text.startsWith('/ask ')) {
+          await this.handleCommandCenterChat(chatId, text.slice(5).trim());
+        } else if (text.length > 2 && !text.startsWith('/')) {
+          await this.handleCommandCenterChat(chatId, text);
         }
       }
     } catch {
@@ -109,8 +114,10 @@ export class TelegramService {
       `  <i>e.g. /options NIFTY</i>\n\n` +
       `<b>/quote SYMBOL</b> — Quick price quote\n` +
       `  <i>e.g. /quote TCS</i>\n\n` +
+      `<b>/ask QUESTION</b> — Ask the AI anything\n` +
+      `  <i>e.g. /ask How are bots doing?</i>\n\n` +
       `<b>/status</b> — Check connection status\n\n` +
-      `💡 You can also just type a symbol name (e.g. <b>INFY</b>) for a quick scan.`);
+      `💡 Type a symbol (e.g. <b>INFY</b>) for a quick scan, or type any question to chat with the AI.`);
   }
 
   private async handleScanCommand(chatId: string, symbol: string): Promise<void> {
@@ -316,6 +323,37 @@ export class TelegramService {
       }));
     } catch {
       return [];
+    }
+  }
+
+  private async handleCommandCenterChat(chatId: string, text: string): Promise<void> {
+    if (this.isOnCooldown(chatId)) {
+      await this.sendMessage(chatId, '⏳ Please wait a moment between requests.');
+      return;
+    }
+    const user = await this.prisma.user.findFirst({
+      where: { telegramChatId: chatId },
+      select: { id: true },
+    });
+    if (!user) {
+      await this.sendMessage(chatId,
+        '⚠️ Not connected to any account.\nPaste your Chat ID in Settings to connect first.');
+      return;
+    }
+
+    await this.sendMessage(chatId, '🤖 Thinking...');
+
+    try {
+      const result = await processCommandCenterChat(user.id, text);
+      const response = result.content || 'No response generated.';
+      const maxLen = 4000;
+      if (response.length > maxLen) {
+        await this.sendMessage(chatId, response.slice(0, maxLen) + '\n\n<i>...truncated</i>');
+      } else {
+        await this.sendMessage(chatId, response);
+      }
+    } catch (err) {
+      await this.sendMessage(chatId, `❌ Error: ${(err as Error).message}`);
     }
   }
 

@@ -114,15 +114,18 @@ const SUGGESTIONS = [
   'What\'s the status?',
   'How are the bots doing?',
   'Show pending signals',
+  'Scan RELIANCE',
+  'Options NIFTY',
+  'Rust engine status',
   'Start scanning',
   'Make 2% daily on 10 lakh',
-  'Show today\'s report',
 ];
 
 export default function CommandCenter() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [scanSymbol, setScanSymbol] = useState('');
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -469,23 +472,65 @@ export default function CommandCenter() {
           </div>
         )}
 
-        {/* Quick Actions */}
+        {/* Quick Scan */}
         <div className="bg-slate-900 rounded-xl border border-slate-700/50 p-4">
-          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Quick Actions</h3>
+          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Quick Scan</h3>
+          <div className="flex gap-2 mb-3">
+            <input
+              type="text"
+              value={scanSymbol}
+              onChange={e => setScanSymbol(e.target.value.toUpperCase())}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && scanSymbol.trim()) {
+                  setInput(`Scan ${scanSymbol.trim()}`);
+                  setScanSymbol('');
+                }
+              }}
+              placeholder="RELIANCE, NIFTY..."
+              className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-teal-500"
+            />
+            <button
+              onClick={() => { if (scanSymbol.trim()) { setInput(`Scan ${scanSymbol.trim()}`); setScanSymbol(''); } }}
+              className="px-3 py-1.5 text-[10px] font-medium rounded-lg bg-teal-600 text-white hover:bg-teal-500 transition-colors"
+            >
+              Scan
+            </button>
+          </div>
+          <div className="grid grid-cols-3 gap-1.5">
+            {['RELIANCE', 'NIFTY', 'BANKNIFTY', 'TCS', 'INFY', 'HDFCBANK'].map(sym => (
+              <button
+                key={sym}
+                onClick={() => setInput(`Scan ${sym}`)}
+                className="px-2 py-1 text-[10px] font-medium rounded bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white border border-slate-700/50 transition-colors"
+              >
+                {sym}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Rust Engine Actions */}
+        <div className="bg-slate-900 rounded-xl border border-slate-700/50 p-4">
+          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Engine & Controls</h3>
           <div className="grid grid-cols-2 gap-2">
             {[
-              { label: 'Start Scanner', cmd: 'Start scanning' },
-              { label: 'Stop Scanner', cmd: 'Stop the scanner' },
-              { label: 'Start Agent', cmd: 'Start the AI agent' },
-              { label: 'Stop Agent', cmd: 'Stop the agent' },
-              { label: 'Check Progress', cmd: 'How are we doing?' },
-              { label: 'Pause Trading', cmd: 'Stop all trading' },
+              { label: 'Engine Status', cmd: 'Rust engine status', icon: '🦀' },
+              { label: 'Options NIFTY', cmd: 'Options NIFTY', icon: '📊' },
+              { label: 'Options BANKNIFTY', cmd: 'Options BANKNIFTY', icon: '📊' },
+              { label: 'Start Scanner', cmd: 'Start scanning', icon: '📡' },
+              { label: 'Stop Scanner', cmd: 'Stop the scanner', icon: '🛑' },
+              { label: 'Start Agent', cmd: 'Start the AI agent', icon: '🤖' },
+              { label: 'Stop Agent', cmd: 'Stop the agent', icon: '⏹️' },
+              { label: 'Check Progress', cmd: 'How are we doing?', icon: '📈' },
+              { label: 'Pending Signals', cmd: 'Show pending signals', icon: '⚡' },
+              { label: 'Pause Trading', cmd: 'Stop all trading', icon: '⏸️' },
             ].map(a => (
               <button
                 key={a.cmd}
-                onClick={() => { setInput(a.cmd); }}
-                className="px-2 py-1.5 text-[10px] font-medium rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50 transition-colors"
+                onClick={() => setInput(a.cmd)}
+                className="flex items-center gap-1.5 px-2 py-1.5 text-[10px] font-medium rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50 transition-colors"
               >
+                <span>{a.icon}</span>
                 {a.label}
               </button>
             ))}
