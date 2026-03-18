@@ -25,6 +25,20 @@ interface ChatResult {
 }
 
 let _botEngineRef: any = null;
+let _cachedServices: { targetTracker: TargetTracker; eodReview: EODReviewService; riskService: RiskService; aiAgentService: AIAgentService } | null = null;
+
+function getServices() {
+  if (!_cachedServices) {
+    const prisma = getPrisma();
+    _cachedServices = {
+      targetTracker: new TargetTracker(prisma),
+      eodReview: new EODReviewService(prisma),
+      riskService: new RiskService(prisma),
+      aiAgentService: new AIAgentService(prisma),
+    };
+  }
+  return _cachedServices;
+}
 
 export function setBotEngineRef(engine: any) {
   _botEngineRef = engine;
@@ -35,10 +49,7 @@ export function setBotEngineRef(engine: any) {
  */
 export async function processCommandCenterChat(userId: string, message: string): Promise<ChatResult> {
   const prisma = getPrisma();
-  const targetTracker = new TargetTracker(prisma);
-  const eodReview = new EODReviewService(prisma);
-  const riskService = new RiskService(prisma);
-  const aiAgentService = new AIAgentService(prisma);
+  const { targetTracker, eodReview, riskService, aiAgentService } = getServices();
 
   try {
     await prisma.commandMessage.create({ data: { userId, role: 'user', content: message } });
@@ -544,10 +555,7 @@ async function fetchBridgeCandles(symbol: string): Promise<Array<{ open: number;
 }
 
 export default async function commandCenterRoutes(app: FastifyInstance) {
-  const prisma = getPrisma();
-  const targetTracker = new TargetTracker(prisma);
-  const eodReview = new EODReviewService(prisma);
-  const riskService = new RiskService(prisma);
+  const { targetTracker, eodReview, riskService } = getServices();
 
   if ((app as any).botEngine) setBotEngineRef((app as any).botEngine);
 
@@ -570,14 +578,15 @@ export default async function commandCenterRoutes(app: FastifyInstance) {
 
   app.get('/dashboard', async (request) => {
     const userId = getUserId(request);
+    const db = getPrisma();
     const [progress, risk, bots, recentPnl] = await Promise.all([
       targetTracker.updateProgress(userId),
       riskService.getDailyRiskSummary(userId),
-      prisma.tradingBot.findMany({ where: { userId, status: 'RUNNING' }, select: { id: true, name: true, role: true, lastAction: true, lastActionAt: true, totalPnl: true, winRate: true } }),
+      db.tradingBot.findMany({ where: { userId, status: 'RUNNING' }, select: { id: true, name: true, role: true, lastAction: true, lastActionAt: true, totalPnl: true, winRate: true } }),
       targetTracker.getRecentPnlRecords(userId, 7),
     ]);
     const todayStart = new Date(); todayStart.setUTCHours(0, 0, 0, 0);
-    const todaySignals = await prisma.aITradeSignal.findMany({
+    const todaySignals = await db.aITradeSignal.findMany({
       where: { userId, createdAt: { gte: todayStart } },
       orderBy: { createdAt: 'desc' }, take: 20,
       select: { id: true, symbol: true, signalType: true, compositeScore: true, status: true, rationale: true, createdAt: true },
@@ -598,12 +607,14 @@ export default async function commandCenterRoutes(app: FastifyInstance) {
 
   app.get('/messages', async (request) => {
     const userId = getUserId(request);
-    return prisma.commandMessage.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, take: Number((request.query as any).limit) || 50 });
+    const db = getPrisma();
+    return db.commandMessage.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, take: Number((request.query as any).limit) || 50 });
   });
 
   app.get('/activity', async (request) => {
     const userId = getUserId(request);
-    const messages = await prisma.botMessage.findMany({
+    const db = getPrisma();
+    const messages = await db.botMessage.findMany({
       where: { userId }, orderBy: { createdAt: 'desc' }, take: Number((request.query as any).limit) || 50,
       include: { fromBot: { select: { id: true, name: true, role: true } } },
     });

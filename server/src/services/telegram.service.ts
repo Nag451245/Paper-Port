@@ -24,6 +24,9 @@ const KNOWN_SYMBOLS = new Set([
 ]);
 
 export class TelegramService {
+  private static pollingInstance: TelegramService | null = null;
+  private static pollingStarted = false;
+
   private botToken: string | null;
   private lastUpdateId = 0;
   private polling = false;
@@ -35,7 +38,11 @@ export class TelegramService {
 
   constructor(private prisma: PrismaClient) {
     this.botToken = process.env.TELEGRAM_BOT_TOKEN ?? null;
-    if (this.botToken) this.startPolling();
+    if (this.botToken && !TelegramService.pollingStarted) {
+      TelegramService.pollingStarted = true;
+      TelegramService.pollingInstance = this;
+      this.startPolling();
+    }
   }
 
   get isConfigured(): boolean {
@@ -44,6 +51,10 @@ export class TelegramService {
 
   stopPolling(): void {
     this.stopRequested = true;
+    if (TelegramService.pollingInstance === this) {
+      TelegramService.pollingStarted = false;
+      TelegramService.pollingInstance = null;
+    }
   }
 
   private startPolling(): void {

@@ -16,6 +16,10 @@ struct BacktestConfig {
     /// How many candle bars correspond to one trading day. Default: 1 (daily bars).
     /// For 5-min bars on a 6.25h trading day, use 75.
     bars_per_day: Option<f64>,
+    /// Max volume participation per bar (e.g. 0.05 = 5%). Orders exceeding this are rejected.
+    volume_participation_limit: Option<f64>,
+    /// Enable volume-adjusted slippage based on order size vs liquidity.
+    dynamic_slippage: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -47,6 +51,8 @@ struct BacktestResult {
     cost_drag_pct: f64,
     risk_rejections: usize,
     drawdown_circuit_breaks: usize,
+    volume_rejected_trades: usize,
+    avg_slippage_bps: f64,
     equity_curve: Vec<EquityPoint>,
     trade_log: Vec<TradeEntry>,
 }
@@ -69,6 +75,19 @@ struct TradeEntry {
     costs: f64,
     entry_time: String,
     exit_time: String,
+}
+
+fn daily_avg_value(candles: &[Candle], i: usize, bars_per_day: f64) -> f64 {
+    let n = bars_per_day as usize;
+    let start = i.saturating_sub(n);
+    let count = (i - start + 1).max(1);
+    let sum: f64 = candles[start..=i].iter().map(|c| c.volume * c.close).sum();
+    sum / count as f64
+}
+
+fn slippage_adjusted_with_bps(price: f64, is_buy: bool, slippage_bps: f64) -> f64 {
+    let slip = price * slippage_bps / 10_000.0;
+    if is_buy { price + slip } else { price - slip }
 }
 
 fn build_engine_config(params: &Option<Value>) -> EngineConfig {
@@ -122,6 +141,7 @@ pub fn run(data: Value) -> Result<Value, String> {
             avg_win: 0.0, avg_loss: 0.0,
             total_costs: 0.0, cost_drag_pct: 0.0,
             risk_rejections: 0, drawdown_circuit_breaks: 0,
+            volume_rejected_trades: 0, avg_slippage_bps: 0.0,
             equity_curve: vec![], trade_log: vec![],
         }).map_err(|e| e.to_string())?);
     }
@@ -148,6 +168,13 @@ pub fn run(data: Value) -> Result<Value, String> {
     let mut total_costs = 0.0_f64;
     let mut risk_rejections = 0usize;
     let mut circuit_breaks = 0usize;
+    let mut volume_rejected_trades = 0usize;
+    let mut slippage_bps_sum = 0.0_f64;
+    let mut slippage_trade_count = 0usize;
+
+    let volume_limit = config.volume_participation_limit.unwrap_or(0.05); // for dynamic slippage formula
+    let dynamic_slippage = config.dynamic_slippage.unwrap_or(false);
+    let bars_per_day = config.bars_per_day.unwrap_or(1.0).max(1.0);
 
     for (i, candle) in config.candles.iter().enumerate() {
         // Recalculate NAV = cash + open position market value
@@ -265,7 +292,26 @@ pub fn run(data: Value) -> Result<Value, String> {
                             continue;
                         }
                         if qty > 0 {
-                            let entry_price = costs.slippage_adjusted_price(signal.price, true);
+                            let order_value = qty as f64 * signal.price;
+                            if let Some(limit) = config.volume_participation_limit {
+                                let max_allowed = limit * candle.volume * candle.close;
+                                if order_value > max_allowed {
+                                    volume_rejected_trades += 1;
+                                    continue;
+                                }
+                            }
+                            let entry_price = if dynamic_slippage {
+                                let daily_avg = daily_avg_value(&config.candles, i, bars_per_day);
+                                let available = (daily_avg * volume_limit).max(1e-10);
+                                let effective_bps = costs.slippage_bps * (1.0 + order_value / available);
+                                slippage_bps_sum += effective_bps;
+                                slippage_trade_count += 1;
+                                slippage_adjusted_with_bps(signal.price, true, effective_bps)
+                            } else {
+                                slippage_bps_sum += costs.slippage_bps;
+                                slippage_trade_count += 1;
+                                costs.slippage_adjusted_price(signal.price, true)
+                            };
                             let position_value = entry_price * qty as f64;
                             let entry_cost = costs.total_cost(position_value, false);
                             cash -= position_value + entry_cost;
@@ -299,7 +345,26 @@ pub fn run(data: Value) -> Result<Value, String> {
                             continue;
                         }
                         if qty > 0 {
-                            let entry_price = costs.slippage_adjusted_price(signal.price, false);
+                            let order_value = qty as f64 * signal.price;
+                            if let Some(limit) = config.volume_participation_limit {
+                                let max_allowed = limit * candle.volume * candle.close;
+                                if order_value > max_allowed {
+                                    volume_rejected_trades += 1;
+                                    continue;
+                                }
+                            }
+                            let entry_price = if dynamic_slippage {
+                                let daily_avg = daily_avg_value(&config.candles, i, bars_per_day);
+                                let available = (daily_avg * volume_limit).max(1e-10);
+                                let effective_bps = costs.slippage_bps * (1.0 + order_value / available);
+                                slippage_bps_sum += effective_bps;
+                                slippage_trade_count += 1;
+                                slippage_adjusted_with_bps(signal.price, false, effective_bps)
+                            } else {
+                                slippage_bps_sum += costs.slippage_bps;
+                                slippage_trade_count += 1;
+                                costs.slippage_adjusted_price(signal.price, false)
+                            };
                             let position_value = entry_price * qty as f64;
                             let entry_cost = costs.total_cost(position_value, false);
                             cash -= entry_cost;
@@ -366,7 +431,6 @@ pub fn run(data: Value) -> Result<Value, String> {
     let avg_loss = if losses.is_empty() { 0.0 } else { total_losses / losses.len() as f64 };
 
     // Compute Sharpe/Sortino from per-bar equity returns (not per-trade returns)
-    let bars_per_day = config.bars_per_day.unwrap_or(1.0).max(1.0);
     let bar_returns: Vec<f64> = equity_curve.windows(2)
         .map(|w| if w[0].nav > 0.0 { w[1].nav / w[0].nav - 1.0 } else { 0.0 })
         .collect();
@@ -396,6 +460,12 @@ pub fn run(data: Value) -> Result<Value, String> {
         total_costs / config.initial_capital * 100.0
     } else { 0.0 };
 
+    let avg_slippage_bps = if slippage_trade_count > 0 {
+        slippage_bps_sum / slippage_trade_count as f64
+    } else {
+        0.0
+    };
+
     let result = BacktestResult {
         cagr: round2(cagr),
         max_drawdown: round2(max_dd * 100.0),
@@ -410,6 +480,8 @@ pub fn run(data: Value) -> Result<Value, String> {
         cost_drag_pct: round2(cost_drag),
         risk_rejections,
         drawdown_circuit_breaks: circuit_breaks,
+        volume_rejected_trades,
+        avg_slippage_bps: round2(avg_slippage_bps),
         equity_curve,
         trade_log: trades,
     };
@@ -863,6 +935,41 @@ mod tests {
         let r = run_backtest("supertrend", candles, 100000.0);
         assert_eq!(r.equity_curve.len(), 80, "SuperTrend backtest should complete");
         assert!(r.sharpe_ratio.is_finite());
+    }
+
+    #[test]
+    fn test_volume_participation_rejection() {
+        // Trending candles to ensure EMA crossover signals are generated,
+        // but with very low volume so order exceeds participation limit.
+        let mut candles: Vec<serde_json::Value> = Vec::new();
+        for i in 0..40 {
+            let close = 100.0 - i as f64 * 0.3;
+            candles.push(json!({
+                "timestamp": format!("2025-01-{:02}T09:15:00", (i % 28) + 1),
+                "open": close + 0.2, "high": close + 0.5, "low": close - 0.5,
+                "close": close, "volume": 50.0,
+            }));
+        }
+        for i in 0..60 {
+            let close = 88.0 + i as f64 * 1.5;
+            candles.push(json!({
+                "timestamp": format!("2025-02-{:02}T09:15:00", (i % 28) + 1),
+                "open": close - 0.5, "high": close + 1.0, "low": close - 1.0,
+                "close": close, "volume": 50.0,
+            }));
+        }
+        let result = run(json!({
+            "strategy": "ema_crossover",
+            "symbol": "TEST",
+            "initial_capital": 1000000.0,
+            "candles": candles,
+            "volume_participation_limit": 0.01,
+        })).unwrap();
+        let r: BacktestResult = serde_json::from_value(result).unwrap();
+        // With volume=50 and limit=1%, max_allowed = 0.01 * 50 * price ≈ 50.
+        // Order value = (1M * 0.3 / price) * price ≈ 300000 >> 50 → all trades rejected
+        assert!(r.volume_rejected_trades > 0,
+            "expected volume rejections, got {} (total_trades={})", r.volume_rejected_trades, r.total_trades);
     }
 
     #[test]

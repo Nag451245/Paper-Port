@@ -41,6 +41,11 @@ pub mod strategy_performance;
 pub mod smart_executor;
 pub mod tick_aggregator;
 mod strategy_discovery;
+mod execution_analytics;
+mod signal_ranker;
+mod paper_live_bridge;
+mod orderbook_analyzer;
+pub mod correlation_guard;
 
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -611,11 +616,16 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
         "optimize_portfolio" => portfolio_opt::compute(req.data),
         "options_strategy" => options_strategy::compute(req.data),
         "correlation" => correlation::compute(req.data),
+        "correlation_guard" => correlation_guard::compute(req.data),
         "feature_store" => feature_store::compute(req.data),
         "multi_timeframe_scan" => multi_timeframe::compute(req.data),
         "ml_score" => ml_scorer::compute(req.data),
         "strategy_performance" => strategy_performance::compute(req.data),
         "smart_executor" => smart_executor::compute(req.data),
+        "execution_analytics" => execution_analytics::compute(req.data),
+        "signal_ranker" => signal_ranker::compute(req.data),
+        "orderbook_analyze" => orderbook_analyzer::compute(req.data),
+        "paper_live_bridge" => paper_live_bridge::compute(req.data),
 
         "ml_scan" => {
             let ml_weights = req.data.get("ml_weights").cloned();

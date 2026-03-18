@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Central configuration for the entire engine.
@@ -51,6 +52,10 @@ pub struct EngineConfig {
     pub futures: FuturesConfig,
     #[serde(default)]
     pub universe: UniverseConfig,
+    #[serde(default)]
+    pub regime_strategy: RegimeStrategyConfig,
+    #[serde(default)]
+    pub survivorship: SurvivorshipConfig,
     #[serde(default = "default_initial_capital")]
     pub initial_capital: f64,
 }
@@ -501,6 +506,8 @@ impl Default for EngineConfig {
             breeze_rate_limit: BreezeRateLimitConfig::default(),
             futures: FuturesConfig::default(),
             universe: UniverseConfig::default(),
+            regime_strategy: RegimeStrategyConfig::default(),
+            survivorship: SurvivorshipConfig::default(),
             initial_capital: 1_000_000.0,
         }
     }
@@ -518,6 +525,53 @@ impl Default for UniverseConfig {
     fn default() -> Self {
         Self {
             file_path: "data/nse_universe.json".into(),
+        }
+    }
+}
+
+// ─── Regime-Conditional Strategy Activation ────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RegimeStrategyConfig {
+    pub enabled: bool,
+    pub strategy_regime_map: HashMap<String, Vec<String>>,
+}
+
+impl Default for RegimeStrategyConfig {
+    fn default() -> Self {
+        let mut strategy_regime_map = HashMap::new();
+        strategy_regime_map.insert("ema_crossover".into(), vec!["trending".into(), "breakout".into()]);
+        strategy_regime_map.insert("momentum".into(), vec!["trending".into()]);
+        strategy_regime_map.insert("mean_reversion".into(), vec!["mean_reverting".into(), "range".into()]);
+        strategy_regime_map.insert("rsi_reversal".into(), vec!["mean_reverting".into(), "range".into(), "volatile".into()]);
+        strategy_regime_map.insert("supertrend".into(), vec!["trending".into(), "breakout".into()]);
+        strategy_regime_map.insert("vwap_reversion".into(), vec!["mean_reverting".into(), "range".into()]);
+        strategy_regime_map.insert("volatility_breakout".into(), vec!["volatile".into(), "breakout".into()]);
+        strategy_regime_map.insert("opening_range_breakout".into(), vec!["trending".into(), "breakout".into(), "volatile".into()]);
+        Self {
+            enabled: false,
+            strategy_regime_map,
+        }
+    }
+}
+
+// ─── Survivorship Bias Handling ────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SurvivorshipConfig {
+    pub enabled: bool,
+    pub historical_universe_dir: String,
+    pub use_point_in_time_universe: bool,
+}
+
+impl Default for SurvivorshipConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            historical_universe_dir: "data/historical_universe".into(),
+            use_point_in_time_universe: false,
         }
     }
 }

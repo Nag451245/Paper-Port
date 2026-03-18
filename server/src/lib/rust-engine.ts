@@ -1257,6 +1257,76 @@ export async function engineDiscoveryApply(): Promise<Record<string, unknown> | 
   } catch { return null; }
 }
 
+// ─── Order Book Analysis ─────────────────────────────────────────────
+
+export async function engineOrderbookAnalyze(data: unknown): Promise<Record<string, unknown> | null> {
+  try {
+    const { env } = await import('../config.js');
+    const url = `${env.RUST_ENGINE_URL}/api/orderbook/analyze`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 15_000);
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data), signal: ac.signal });
+    clearTimeout(timer);
+    return await res.json() as Record<string, unknown>;
+  } catch { return null; }
+}
+
+// ─── Correlation Guard ───────────────────────────────────────────────
+
+export async function engineCorrelationGuard(data: unknown): Promise<Record<string, unknown> | null> {
+  try {
+    const { env } = await import('../config.js');
+    const url = `${env.RUST_ENGINE_URL}/api/correlation_guard/check`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 15_000);
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data), signal: ac.signal });
+    clearTimeout(timer);
+    return await res.json() as Record<string, unknown>;
+  } catch { return null; }
+}
+
+// ─── Execution Analytics ─────────────────────────────────────────────
+
+export async function engineExecutionAnalytics(data: unknown): Promise<Record<string, unknown> | null> {
+  try {
+    const { env } = await import('../config.js');
+    const url = `${env.RUST_ENGINE_URL}/api/execution_analytics`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 15_000);
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data), signal: ac.signal });
+    clearTimeout(timer);
+    return await res.json() as Record<string, unknown>;
+  } catch { return null; }
+}
+
+// ─── Signal Ranker ───────────────────────────────────────────────────
+
+export async function engineSignalRanker(data: unknown): Promise<Record<string, unknown> | null> {
+  try {
+    const { env } = await import('../config.js');
+    const url = `${env.RUST_ENGINE_URL}/api/signal_ranker`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 15_000);
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data), signal: ac.signal });
+    clearTimeout(timer);
+    return await res.json() as Record<string, unknown>;
+  } catch { return null; }
+}
+
+// ─── Paper-Live Bridge ───────────────────────────────────────────────
+
+export async function enginePaperLiveBridge(data: unknown): Promise<Record<string, unknown> | null> {
+  try {
+    const { env } = await import('../config.js');
+    const url = `${env.RUST_ENGINE_URL}/api/paper_live_bridge`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 15_000);
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data), signal: ac.signal });
+    clearTimeout(timer);
+    return await res.json() as Record<string, unknown>;
+  } catch { return null; }
+}
+
 export function _getCircuitBreakerState() {
   return { crashCount, lastCrashTime, circuitOpenSince, MAX_CRASHES, CRASH_WINDOW_MS, CIRCUIT_COOLDOWN_MS };
 }

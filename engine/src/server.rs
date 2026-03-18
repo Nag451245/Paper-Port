@@ -210,6 +210,12 @@ pub async fn run(state: SharedState) {
         .route("/api/discovery/results", get(discovery_results))
         .route("/api/discovery/apply", post(discovery_apply))
 
+        .route("/api/orderbook/analyze", post(cmd_orderbook_analyze))
+        .route("/api/correlation_guard/check", post(cmd_correlation_guard))
+        .route("/api/execution_analytics", post(cmd_execution_analytics))
+        .route("/api/signal_ranker", post(cmd_signal_ranker))
+        .route("/api/paper_live_bridge", post(cmd_paper_live_bridge))
+
         .route("/ws", get(ws_handler))
 
         .layer(middleware::from_fn_with_state(state.clone(), auth_layer))
@@ -536,6 +542,11 @@ cmd_handler!(cmd_options_strategy, "options_strategy");
 cmd_handler!(cmd_correlation, "correlation");
 cmd_handler!(cmd_feature_store, "feature_store");
 cmd_handler!(cmd_multi_timeframe, "multi_timeframe_scan");
+cmd_handler!(cmd_orderbook_analyze, "orderbook_analyze");
+cmd_handler!(cmd_correlation_guard, "correlation_guard");
+cmd_handler!(cmd_execution_analytics, "execution_analytics");
+cmd_handler!(cmd_signal_ranker, "signal_ranker");
+cmd_handler!(cmd_paper_live_bridge, "paper_live_bridge");
 
 // ─── Portfolio endpoints ──────────────────────────────────────────────
 

@@ -27,6 +27,7 @@ const LearningIntelligence = lazy(() => import('@/pages/LearningIntelligence'));
 const EdgeLab = lazy(() => import('@/pages/EdgeLab'));
 const CommandCenter = lazy(() => import('@/pages/CommandCenter'));
 const RiskDashboard = lazy(() => import('@/pages/RiskDashboard'));
+const PortfolioHeatMap = lazy(() => import('@/pages/PortfolioHeatMap'));
 const Onboarding = lazy(() => import('@/pages/Onboarding'));
 
 const queryClient = new QueryClient({
@@ -132,6 +133,7 @@ export default function App() {
             <Route path="/edge-lab" element={<Suspense fallback={<PageLoader />}><EdgeLab /></Suspense>} />
             <Route path="/command-center" element={<Suspense fallback={<PageLoader />}><CommandCenter /></Suspense>} />
             <Route path="/risk-dashboard" element={<Suspense fallback={<PageLoader />}><RiskDashboard /></Suspense>} />
+            <Route path="/heatmap" element={<Suspense fallback={<PageLoader />}><PortfolioHeatMap /></Suspense>} />
           </Route>
 
           <Route path="*" element={<Navigate to="/dashboard" replace />} />

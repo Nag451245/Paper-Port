@@ -18,6 +18,7 @@ import {
   Rocket,
   Target,
   ShieldAlert,
+  Flame,
 } from 'lucide-react';
 
 const navItems = [
@@ -29,6 +30,7 @@ const navItems = [
   { to: '/bots', icon: Users, label: 'Bot Team', color: 'from-amber-500 to-orange-500' },
   { to: '/intelligence', icon: Brain, label: 'Market Intel', color: 'from-pink-500 to-rose-500' },
   { to: '/portfolio', icon: Briefcase, label: 'Portfolio', color: 'from-indigo-500 to-purple-500' },
+  { to: '/heatmap', icon: Flame, label: 'Heat Map', color: 'from-amber-500 to-orange-500' },
   { to: '/strategy-builder', icon: Layers, label: 'Strategy Builder', color: 'from-violet-500 to-purple-500' },
   { to: '/option-chain', icon: Grid3X3, label: 'Option Chain', color: 'from-sky-500 to-blue-500' },
   { to: '/fno-analytics', icon: BarChart3, label: 'F&O Analytics', color: 'from-teal-500 to-cyan-500' },

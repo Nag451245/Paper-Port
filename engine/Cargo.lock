@@ -164,6 +164,7 @@ dependencies = [
  "futures-util",
  "hyper",
  "hyper-util",
+ "once_cell",
  "rayon",
  "rustls",
  "rustls-pemfile",
