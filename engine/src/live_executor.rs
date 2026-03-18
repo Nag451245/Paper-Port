@@ -9,6 +9,7 @@ use crate::broker::{OrderRequest, OrderSide, OrderType, ProductType};
 use crate::alerts::{AlertSeverity, AlertType};
 use crate::position_sizing::{SizingMethod, SizingContext, MarketRegime, compute_quantity};
 use crate::exec_algo::{ExecAlgoType, plan_twap, plan_vwap, plan_iceberg, execute_plan_sync, TwapConfig, VwapConfig, IcebergConfig};
+use crate::strategy_performance::GLOBAL_TRACKER;
 
 const MAX_ROLLING_CANDLES: usize = 300;
 
@@ -230,11 +231,19 @@ pub fn spawn(state: Arc<AppState>) {
                         Side::Sell => "sell",
                     };
 
-                    if signal.confidence < min_confidence {
+                    if GLOBAL_TRACKER.is_strategy_retired(&strat_name) {
+                        tracing::debug!(strategy = %strat_name, symbol = %tick.symbol, "Skipping retired strategy in live executor");
                         continue;
                     }
 
-                    // Advanced position sizing
+                    let calibrated_confidence = GLOBAL_TRACKER.get_regime_weighted_confidence(
+                        signal.confidence, &strat_name, "neutral",
+                    );
+
+                    if calibrated_confidence < min_confidence {
+                        continue;
+                    }
+
                     let sizing_method = SizingMethod::from_str_loose(&sizing_mode);
                     let sizing_ctx = SizingContext {
                         nav,
@@ -246,7 +255,7 @@ pub fn spawn(state: Arc<AppState>) {
                         target_volatility: 0.15,
                         portfolio_volatility: 0.12,
                         regime: MarketRegime::Normal,
-                        signal_confidence: signal.confidence,
+                        signal_confidence: calibrated_confidence,
                         max_position_pct,
                         default_qty,
                     };
@@ -257,7 +266,7 @@ pub fn spawn(state: Arc<AppState>) {
                         strategy: strat_name.clone(),
                         side: side_str.to_string(),
                         price: signal.price,
-                        confidence: signal.confidence,
+                        confidence: calibrated_confidence,
                         reason: signal.reason.clone(),
                         timestamp: chrono::Utc::now().to_rfc3339(),
                         ttl_seconds: candle_interval * 2,
@@ -268,8 +277,8 @@ pub fn spawn(state: Arc<AppState>) {
 
                     state.cache_signal(cached);
                     state.log_audit("LIVE_SIGNAL", Some(&tick.symbol),
-                        &format!("strategy={} side={} conf={:.2} price={:.2} qty={}",
-                            strat_name, side_str, signal.confidence, signal.price, qty));
+                        &format!("strategy={} side={} conf={:.2} cal_conf={:.2} price={:.2} qty={}",
+                            strat_name, side_str, signal.confidence, calibrated_confidence, signal.price, qty));
 
                     if auto_execute {
                         let position_count = state.positions.len();
@@ -294,7 +303,45 @@ pub fn spawn(state: Arc<AppState>) {
                         };
 
                         let ref_price = state.live_prices.get_ltp(&tick.symbol);
-                        let algo = ExecAlgoType::from_str_loose(&exec_algo_str);
+
+                        let smart_plan = crate::smart_executor::compute(serde_json::json!({
+                            "command": "plan",
+                            "symbol": tick.symbol,
+                            "side": side_str,
+                            "quantity": qty,
+                            "price": signal.price,
+                            "signal_confidence": calibrated_confidence,
+                        }));
+
+                        let algo = match &smart_plan {
+                            Ok(plan) => {
+                                let recommended = plan.get("recommended_algo")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&exec_algo_str);
+                                ExecAlgoType::from_str_loose(recommended)
+                            }
+                            Err(_) => ExecAlgoType::from_str_loose(&exec_algo_str),
+                        };
+
+                        let smart_slices = smart_plan.as_ref().ok()
+                            .and_then(|p| p.get("num_slices"))
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as u32)
+                            .unwrap_or(exec_slices);
+                        let smart_interval = smart_plan.as_ref().ok()
+                            .and_then(|p| p.get("slice_interval_secs"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(exec_duration);
+
+                        if let Ok(ref plan_data) = smart_plan {
+                            let slippage = plan_data.get("estimated_slippage_bps").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let impact = plan_data.get("estimated_market_impact_bps").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            tracing::info!(
+                                symbol = %tick.symbol, algo = ?algo, slices = smart_slices,
+                                slippage_bps = slippage, impact_bps = impact,
+                                "Smart execution plan applied"
+                            );
+                        }
 
                         let exec_state = state.clone();
                         let exec_symbol = tick.symbol.clone();
@@ -308,7 +355,7 @@ pub fn spawn(state: Arc<AppState>) {
                         match algo {
                             ExecAlgoType::TWAP => {
                                 let plan = plan_twap(&exec_symbol, order_side, qty, &TwapConfig {
-                                    duration_secs: exec_duration, num_slices: exec_slices, randomize_pct: 15.0,
+                                    duration_secs: smart_interval, num_slices: smart_slices, randomize_pct: 15.0,
                                 });
                                 tokio::task::spawn_blocking(move || {
                                     let result = execute_plan_sync(&plan, &exec_state.oms, &exec_exchange, product,
@@ -325,7 +372,7 @@ pub fn spawn(state: Arc<AppState>) {
                             }
                             ExecAlgoType::VWAP => {
                                 let plan = plan_vwap(&exec_symbol, order_side, qty, &VwapConfig {
-                                    duration_secs: exec_duration, num_slices: exec_slices,
+                                    duration_secs: smart_interval, num_slices: smart_slices,
                                     volume_profile: Vec::new(), max_participation_rate: 0.25,
                                 });
                                 tokio::task::spawn_blocking(move || {

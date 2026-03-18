@@ -9,6 +9,7 @@ use crate::universe::Universe;
 use crate::rate_limiter::RateLimiter;
 use crate::news_sentiment::NewsSentimentStore;
 use crate::futures_scanner;
+use crate::strategy_performance::GLOBAL_TRACKER;
 
 // ─── Enriched Signal ─────────────────────────────────────────────────
 
@@ -306,15 +307,26 @@ pub fn run_sector_scan(
                     volume_ratio,
                 };
 
+                if GLOBAL_TRACKER.is_strategy_retired(strategy) {
+                    tracing::debug!(strategy = strategy, symbol = %stock.symbol, "Skipping retired strategy");
+                    continue;
+                }
+
+                let calibrated_confidence = GLOBAL_TRACKER.get_regime_weighted_confidence(
+                    confidence, strategy, "neutral",
+                );
+
+                let mut enriched = enriched;
+                enriched.confidence = calibrated_confidence;
+
                 ledger.upsert_signal(&key, enriched);
 
-                // Also cache in AppState for the execution pipeline
                 let cached = CachedSignal {
                     symbol: stock.symbol.clone(),
                     strategy: strategy.to_string(),
                     side: direction.to_string(),
                     price: entry,
-                    confidence,
+                    confidence: calibrated_confidence,
                     reason: format!("continuous:{}:{}", sector, strategy),
                     timestamp: now_str.clone(),
                     ttl_seconds: 1800,

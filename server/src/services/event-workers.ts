@@ -23,6 +23,7 @@ import { emit } from '../lib/event-bus.js';
 import type { LearningEngine } from './learning-engine.js';
 import type { BotEngine } from './bot-engine.js';
 import { TelegramService } from './telegram.service.js';
+import { engineRecordOutcome } from '../lib/rust-engine.js';
 
 const log = createChildLogger('EventWorkers');
 
@@ -88,6 +89,23 @@ export function registerAllWorkers(
         if (botEngine && event.strategyTag) {
           botEngine.bayesianUpdate(event.strategyTag, event.pnl >= 0);
         }
+
+        // Feed outcome to Rust Strategy Performance Engine for calibration & decay detection
+        try {
+          const entryPrice = (event as any).entryPrice ?? event.exitPrice;
+          const pnlPct = entryPrice > 0 ? ((event.exitPrice - entryPrice) / entryPrice) * 100 : 0;
+          engineRecordOutcome({
+            symbol: event.symbol,
+            strategy: event.strategyTag ?? 'unknown',
+            direction: event.pnl >= 0 ? 'BUY' : 'SELL',
+            predicted_confidence: (event as any).confidence ?? 0.5,
+            entry_price: entryPrice,
+            exit_price: event.exitPrice,
+            pnl_pct: pnlPct,
+            won: event.pnl >= 0,
+            regime: 'neutral',
+          }).catch(err => log.debug({ err }, 'Performance engine outcome recording failed'));
+        } catch { /* performance recording is best-effort */ }
         break;
       }
 

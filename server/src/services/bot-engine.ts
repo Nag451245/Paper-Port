@@ -1057,7 +1057,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     direction: 'BUY' | 'SELL',
     rationale: string,
     botId?: string,
-    signalMeta?: { confidence?: number; indicators?: string; ltp?: number; signalSource?: string; stopLoss?: number; target?: number },
+    signalMeta?: { confidence?: number; indicators?: string; ltp?: number; signalSource?: string; stopLoss?: number; target?: number; execAlgo?: string; execSlices?: number },
   ): Promise<{ success: boolean; message: string }> {
     try {
       if (this._killSwitchActive) {
@@ -1171,21 +1171,28 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           log.warn({ warnings: riskCheck.warnings }, 'Risk warnings');
         }
 
-        const orderTypeDecision = selectOrderType({
-          qty: optimizedQty,
-          ltp: ltp > 0 ? ltp : nav * kellyAllocation,
-          avgDailyVolume: 500_000,
-          confidence: signalMeta?.confidence ?? 0.5,
-          spreadPct: 0.05,
-        });
-        log.info({ symbol, orderType: orderTypeDecision.orderType, reason: orderTypeDecision.reason }, 'Order type selected');
+        const smartAlgo = signalMeta?.execAlgo?.toUpperCase();
+        const smartSlices = signalMeta?.execSlices;
+
+        const orderTypeDecision = smartAlgo && ['TWAP', 'VWAP', 'ICEBERG'].includes(smartAlgo)
+          ? { orderType: smartAlgo, reason: `Smart executor recommended ${smartAlgo}` }
+          : selectOrderType({
+              qty: optimizedQty,
+              ltp: ltp > 0 ? ltp : nav * kellyAllocation,
+              avgDailyVolume: 500_000,
+              confidence: signalMeta?.confidence ?? 0.5,
+              spreadPct: 0.05,
+            });
+        log.info({ symbol, orderType: orderTypeDecision.orderType, reason: orderTypeDecision.reason, smartExecutor: !!smartAlgo }, 'Order type selected');
+
+        const effectiveSlices = smartSlices ?? Math.min(5, optimizedQty);
 
         if ((orderTypeDecision.orderType === 'TWAP' || orderTypeDecision.orderType === 'VWAP') && optimizedQty > 10) {
           const execFn = orderTypeDecision.orderType === 'VWAP'
             ? this.twapExecutor.executeVWAP.bind(this.twapExecutor)
             : this.twapExecutor.executeTWAP.bind(this.twapExecutor);
           const twapResult = await execFn({
-            totalQty: optimizedQty, numSlices: Math.min(5, optimizedQty),
+            totalQty: optimizedQty, numSlices: effectiveSlices,
             durationMinutes: 10, maxDeviationPct: 1.0,
             symbol, side: 'BUY', exchange,
             portfolioId: portfolio.id, userId, strategyTag: this.resolveStrategyTag(signalMeta?.signalSource),

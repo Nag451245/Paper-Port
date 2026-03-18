@@ -807,7 +807,14 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
             };
 
             let qualifying: Vec<_> = all_signals.into_iter()
-                .filter(|s| s.confidence >= input.min_confidence)
+                .filter(|s| {
+                    if strategy_performance::GLOBAL_TRACKER.is_strategy_retired(&s.strategy) {
+                        return false;
+                    }
+                    let cal = strategy_performance::GLOBAL_TRACKER
+                        .calibrate_confidence(s.confidence, &s.strategy);
+                    cal >= input.min_confidence
+                })
                 .collect();
 
             let product = match input.product.to_lowercase().as_str() {
@@ -822,6 +829,17 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
                     _ => OrderSide::Buy,
                 };
                 let qty = sig.suggested_qty.unwrap_or(input.default_qty);
+
+                let exec_plan = smart_executor::compute(serde_json::json!({
+                    "command": "plan",
+                    "symbol": sig.symbol,
+                    "side": sig.side,
+                    "quantity": qty,
+                    "price": sig.price,
+                    "signal_confidence": sig.confidence,
+                }));
+                let plan_info = exec_plan.as_ref().ok();
+
                 let order_req = OrderRequest {
                     symbol: sig.symbol.clone(),
                     exchange: input.exchange.clone(),
@@ -835,6 +853,14 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
                     ..Default::default()
                 };
                 let ref_price = state.live_prices.get_ltp(&sig.symbol);
+
+                if let Some(pi) = plan_info {
+                    let algo = pi.get("recommended_algo").and_then(|v| v.as_str()).unwrap_or("direct");
+                    let slippage = pi.get("estimated_slippage_bps").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    state.log_audit("SMART_EXEC_PLAN", Some(&sig.symbol),
+                        &format!("algo={} slippage={:.1}bps qty={}", algo, slippage, qty));
+                }
+
                 match state.oms.submit_order(order_req, Some(sig.strategy.clone()), ref_price) {
                     Ok(order) => {
                         if order.status == OrderStatus::Filled && order.filled_qty > 0 {
