@@ -1,17 +1,37 @@
 import type { PrismaClient } from '@prisma/client';
-import { engineScan, engineOptionsSignals, engineOptionsData, isEngineAvailable } from '../lib/rust-engine.js';
+import { engineScan, engineOptionsSignals, engineOptionsData, isEngineAvailable, enginePerformanceSummary, engineActiveStrategies } from '../lib/rust-engine.js';
 import { processCommandCenterChat } from '../routes/command-center.js';
 
 const TELEGRAM_API = 'https://api.telegram.org/bot';
-const POLL_INTERVAL = 10_000;
+const MIN_POLL_DELAY_MS = 3_000;
+const MAX_POLL_DELAY_MS = 15_000;
 const BRIDGE_URL = process.env.BREEZE_BRIDGE_URL || 'http://127.0.0.1:8001';
 const SCAN_COOLDOWN_MS = 15_000;
+const CHAT_COOLDOWN_MS = 5_000;
+const PROCESSED_CACHE_SIZE = 500;
+
+const KNOWN_SYMBOLS = new Set([
+  'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN', 'BHARTIARTL',
+  'HINDUNILVR', 'ITC', 'KOTAKBANK', 'LT', 'HCLTECH', 'AXISBANK', 'ASIANPAINT',
+  'MARUTI', 'SUNPHARMA', 'TITAN', 'BAJFINANCE', 'WIPRO', 'ULTRACEMCO',
+  'NESTLEIND', 'TATAMOTORS', 'TATASTEEL', 'POWERGRID', 'NTPC', 'ONGC',
+  'COALINDIA', 'ADANIENT', 'ADANIPORTS', 'TECHM', 'INDUSINDBK', 'DRREDDY',
+  'CIPLA', 'BAJAJFINSV', 'HEROMOTOCO', 'DIVISLAB', 'EICHERMOT', 'GRASIM',
+  'APOLLOHOSP', 'BPCL', 'JSWSTEEL', 'HINDALCO', 'BAJAJ-AUTO', 'TATACONSUM',
+  'M&M', 'BRITANNIA', 'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY',
+  'HDFCLIFE', 'SBILIFE', 'PNB', 'BANKBARODA', 'VEDL', 'TRENT', 'ZOMATO',
+  'IRCTC', 'HAL', 'BEL', 'BHEL', 'GAIL', 'IOC', 'RECLTD', 'PFC',
+]);
 
 export class TelegramService {
   private botToken: string | null;
   private lastUpdateId = 0;
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private polling = false;
+  private stopRequested = false;
+  private processedUpdateIds = new Set<number>();
   private userCooldowns = new Map<string, number>();
+  private chatCooldowns = new Map<string, number>();
+  private processingMessages = new Set<string>();
 
   constructor(private prisma: PrismaClient) {
     this.botToken = process.env.TELEGRAM_BOT_TOKEN ?? null;
@@ -23,124 +43,257 @@ export class TelegramService {
   }
 
   stopPolling(): void {
-    if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
+    this.stopRequested = true;
   }
 
   private startPolling(): void {
-    this.pollTimer = setInterval(() => this.pollUpdates(), POLL_INTERVAL);
-    this.pollUpdates();
+    if (this.polling) return;
+    this.polling = true;
+    this.stopRequested = false;
+    this.pollLoop();
   }
 
-  private isOnCooldown(chatId: string): boolean {
+  private async pollLoop(): Promise<void> {
+    while (!this.stopRequested && this.botToken) {
+      const start = Date.now();
+      try {
+        await this.pollUpdates();
+      } catch (err) {
+        console.error('[Telegram] Poll error:', (err as Error).message);
+      }
+      const elapsed = Date.now() - start;
+      const delay = Math.max(MIN_POLL_DELAY_MS, MAX_POLL_DELAY_MS - elapsed);
+      await new Promise(r => setTimeout(r, delay));
+    }
+    this.polling = false;
+  }
+
+  private isOnScanCooldown(chatId: string): boolean {
     const last = this.userCooldowns.get(chatId) ?? 0;
     if (Date.now() - last < SCAN_COOLDOWN_MS) return true;
     this.userCooldowns.set(chatId, Date.now());
     return false;
   }
 
+  private isOnChatCooldown(chatId: string): boolean {
+    const last = this.chatCooldowns.get(chatId) ?? 0;
+    if (Date.now() - last < CHAT_COOLDOWN_MS) return true;
+    this.chatCooldowns.set(chatId, Date.now());
+    return false;
+  }
+
+  private markProcessed(updateId: number): boolean {
+    if (this.processedUpdateIds.has(updateId)) return false;
+    this.processedUpdateIds.add(updateId);
+    if (this.processedUpdateIds.size > PROCESSED_CACHE_SIZE) {
+      const oldest = this.processedUpdateIds.values().next().value;
+      if (oldest !== undefined) this.processedUpdateIds.delete(oldest);
+    }
+    return true;
+  }
+
   private async pollUpdates(): Promise<void> {
     if (!this.botToken) return;
-    try {
-      const res = await fetch(
-        `${TELEGRAM_API}${this.botToken}/getUpdates?offset=${this.lastUpdateId + 1}&timeout=0&allowed_updates=["message"]`,
-      );
-      const data = await res.json() as {
-        ok: boolean;
-        result?: Array<{
-          update_id: number;
-          message?: { chat: { id: number; first_name?: string }; text?: string };
-        }>;
-      };
-      if (!data.ok || !data.result) return;
 
-      for (const update of data.result) {
+    const res = await fetch(
+      `${TELEGRAM_API}${this.botToken}/getUpdates?offset=${this.lastUpdateId + 1}&timeout=5&allowed_updates=["message"]`,
+      { signal: AbortSignal.timeout(30_000) },
+    );
+    const data = await res.json() as {
+      ok: boolean;
+      result?: Array<{
+        update_id: number;
+        message?: {
+          message_id: number;
+          chat: { id: number; first_name?: string };
+          text?: string;
+          date: number;
+        };
+      }>;
+    };
+    if (!data.ok || !data.result || data.result.length === 0) return;
+
+    for (const update of data.result) {
+      if (update.update_id > this.lastUpdateId) {
         this.lastUpdateId = update.update_id;
-        const msg = update.message;
-        if (!msg?.text) continue;
-
-        const chatId = String(msg.chat.id);
-        const name = msg.chat.first_name ?? 'there';
-        const text = msg.text.trim();
-
-        if (text === '/start') {
-          await this.sendMessage(chatId,
-            `👋 Hello ${name}!\n\n` +
-            `Your <b>Chat ID</b> is:\n<code>${chatId}</code>\n\n` +
-            `📋 Copy this number, go to <b>PaperPort Settings → Telegram</b>, paste it, and click <b>Connect</b>.`,
-          );
-        } else if (text === '/status') {
-          await this.handleStatus(chatId);
-        } else if (text === '/help') {
-          await this.handleHelp(chatId);
-        } else if (text.startsWith('/scan ')) {
-          await this.handleScanCommand(chatId, text.slice(6).trim().toUpperCase());
-        } else if (text.startsWith('/options ')) {
-          await this.handleOptionsCommand(chatId, text.slice(9).trim().toUpperCase());
-        } else if (text.startsWith('/quote ')) {
-          await this.handleQuoteCommand(chatId, text.slice(7).trim().toUpperCase());
-        } else if (/^[A-Z&-]{2,20}$/.test(text.toUpperCase()) && !text.startsWith('/')) {
-          await this.handleScanCommand(chatId, text.toUpperCase());
-        } else if (text.startsWith('/ask ')) {
-          await this.handleCommandCenterChat(chatId, text.slice(5).trim());
-        } else if (text.length > 2 && !text.startsWith('/')) {
-          await this.handleCommandCenterChat(chatId, text);
-        }
       }
-    } catch {
-      // silent — poll will retry
+
+      if (!this.markProcessed(update.update_id)) continue;
+
+      const msg = update.message;
+      if (!msg?.text) continue;
+
+      const messageAge = Date.now() / 1000 - msg.date;
+      if (messageAge > 120) continue;
+
+      const chatId = String(msg.chat.id);
+      const text = msg.text.trim();
+      const dedupKey = `${chatId}:${msg.message_id}`;
+
+      if (this.processingMessages.has(dedupKey)) continue;
+      this.processingMessages.add(dedupKey);
+
+      try {
+        await this.routeMessage(chatId, text, msg.chat.first_name ?? 'there');
+      } catch (err) {
+        console.error(`[Telegram] Handler error for ${dedupKey}:`, (err as Error).message);
+      } finally {
+        setTimeout(() => this.processingMessages.delete(dedupKey), 60_000);
+      }
     }
   }
 
-  private async handleStatus(chatId: string): Promise<void> {
+  private async routeMessage(chatId: string, text: string, name: string): Promise<void> {
+    if (text === '/start') {
+      await this.sendMessage(chatId,
+        `Hello ${name}!\n\n` +
+        `Your <b>Chat ID</b> is:\n<code>${chatId}</code>\n\n` +
+        `Copy this number, go to <b>PaperPort Settings → Telegram</b>, paste it, and click <b>Connect</b>.\n\n` +
+        `Type <b>/help</b> to see available commands.`);
+      return;
+    }
+
+    if (text === '/help') {
+      await this.handleHelp(chatId);
+      return;
+    }
+
+    if (text === '/status') {
+      await this.handleSmartStatus(chatId);
+      return;
+    }
+
+    if (text.startsWith('/scan ')) {
+      const symbol = text.slice(6).trim().toUpperCase();
+      if (symbol.length >= 2) {
+        await this.handleScanCommand(chatId, symbol);
+        return;
+      }
+    }
+
+    if (text.startsWith('/options ')) {
+      const symbol = text.slice(9).trim().toUpperCase();
+      if (symbol.length >= 2) {
+        await this.handleOptionsCommand(chatId, symbol);
+        return;
+      }
+    }
+
+    if (text.startsWith('/quote ')) {
+      const symbol = text.slice(7).trim().toUpperCase();
+      if (symbol.length >= 2) {
+        await this.handleQuoteCommand(chatId, symbol);
+        return;
+      }
+    }
+
+    const upperText = text.toUpperCase().trim();
+    if (KNOWN_SYMBOLS.has(upperText) && !text.startsWith('/')) {
+      await this.handleScanCommand(chatId, upperText);
+      return;
+    }
+
+    if (text.length > 1 && !text.startsWith('/')) {
+      await this.handleCommandCenterChat(chatId, text);
+      return;
+    }
+  }
+
+  private async handleSmartStatus(chatId: string): Promise<void> {
     const user = await this.prisma.user.findFirst({
       where: { telegramChatId: chatId },
-      select: { fullName: true, notifyTelegram: true },
+      select: { id: true, fullName: true, notifyTelegram: true },
     });
-    if (user) {
+
+    if (!user) {
       await this.sendMessage(chatId,
-        `✅ Connected as <b>${user.fullName}</b>\nNotifications: ${user.notifyTelegram ? 'ON' : 'OFF'}`);
-    } else {
-      await this.sendMessage(chatId,
-        `⚠️ Not connected to any PaperPort account.\nPaste your Chat ID (<code>${chatId}</code>) in Settings to connect.`);
+        `Not connected to any PaperPort account.\nPaste your Chat ID (<code>${chatId}</code>) in Settings to connect.`);
+      return;
     }
+
+    const [portfolio, bots, recentSignals, engineOnline, perfSummary] = await Promise.all([
+      this.prisma.portfolio.findFirst({
+        where: { userId: user.id },
+        select: { currentNav: true, initialCapital: true },
+      }),
+      this.prisma.tradingBot.findMany({
+        where: { userId: user.id },
+        select: { name: true, status: true, totalPnl: true, winRate: true, totalTrades: true },
+      }),
+      this.prisma.aITradeSignal.count({
+        where: { userId: user.id, createdAt: { gte: new Date(Date.now() - 24 * 60 * 60_000) } },
+      }),
+      Promise.resolve(isEngineAvailable()),
+      enginePerformanceSummary().catch(() => null),
+    ]);
+
+    const lines: string[] = [`<b>Capital Guard Status</b>\n`];
+    lines.push(`Account: <b>${user.fullName}</b>`);
+    lines.push(`Notifications: ${user.notifyTelegram ? 'ON' : 'OFF'}\n`);
+
+    if (portfolio) {
+      const nav = Number(portfolio.currentNav);
+      const initial = Number(portfolio.initialCapital);
+      const pnl = nav - initial;
+      const pnlPct = initial > 0 ? (pnl / initial * 100) : 0;
+      lines.push(`NAV: <b>₹${nav.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</b>`);
+      lines.push(`P&L: ${pnl >= 0 ? '+' : ''}₹${pnl.toFixed(0)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)\n`);
+    }
+
+    if (bots.length > 0) {
+      const activeBots = bots.filter(b => b.status === 'ACTIVE');
+      lines.push(`Bots: ${activeBots.length}/${bots.length} active`);
+      const totalBotPnl = bots.reduce((sum, b) => sum + Number(b.totalPnl ?? 0), 0);
+      if (totalBotPnl !== 0) lines.push(`Bot P&L: ${totalBotPnl >= 0 ? '+' : ''}₹${totalBotPnl.toFixed(0)}`);
+    }
+
+    lines.push(`Signals (24h): ${recentSignals}`);
+    lines.push(`Rust Engine: ${engineOnline ? '<b>ONLINE</b>' : '<b>OFFLINE</b>'}`);
+
+    if (perfSummary) {
+      const outcomes = (perfSummary as Record<string, unknown>).total_outcomes ?? 0;
+      const health = (perfSummary as Record<string, unknown>).avg_health_score ?? 'N/A';
+      lines.push(`Performance: ${outcomes} outcomes tracked, avg health: ${health}`);
+    }
+
+    await this.sendMessage(chatId, lines.join('\n'));
   }
 
   private async handleHelp(chatId: string): Promise<void> {
     await this.sendMessage(chatId,
-      `<b>📖 PaperPort Bot Commands</b>\n\n` +
-      `<b>/scan SYMBOL</b> — Full technical analysis\n` +
-      `  <i>e.g. /scan RELIANCE</i>\n\n` +
-      `<b>/options SYMBOL</b> — Options chain analysis\n` +
-      `  <i>e.g. /options NIFTY</i>\n\n` +
-      `<b>/quote SYMBOL</b> — Quick price quote\n` +
-      `  <i>e.g. /quote TCS</i>\n\n` +
-      `<b>/ask QUESTION</b> — Ask the AI anything\n` +
-      `  <i>e.g. /ask How are bots doing?</i>\n\n` +
-      `<b>/status</b> — Check connection status\n\n` +
-      `💡 Type a symbol (e.g. <b>INFY</b>) for a quick scan, or type any question to chat with the AI.`);
+      `<b>Capital Guard Bot</b>\n\n` +
+      `<b>Commands:</b>\n` +
+      `/scan SYMBOL — Technical analysis\n` +
+      `/options SYMBOL — Options chain\n` +
+      `/quote SYMBOL — Quick price\n` +
+      `/status — Portfolio & engine status\n` +
+      `/help — This message\n\n` +
+      `<b>Smart features:</b>\n` +
+      `Type a stock symbol (e.g. <b>RELIANCE</b>) for instant scan.\n` +
+      `Ask anything in plain English — the AI understands context and queries live data.`);
   }
 
   private async handleScanCommand(chatId: string, symbol: string): Promise<void> {
     if (!symbol || symbol.length < 2) {
-      await this.sendMessage(chatId, '⚠️ Please provide a valid symbol.\n<i>Example: /scan RELIANCE</i>');
+      await this.sendMessage(chatId, 'Please provide a valid symbol.\n<i>Example: /scan RELIANCE</i>');
       return;
     }
-    if (this.isOnCooldown(chatId)) {
-      await this.sendMessage(chatId, '⏳ Please wait 15 seconds between scan requests.');
+    if (this.isOnScanCooldown(chatId)) {
+      await this.sendMessage(chatId, 'Please wait 15 seconds between scan requests.');
       return;
     }
 
-    await this.sendMessage(chatId, `🔍 Analyzing <b>${symbol}</b>...`);
+    await this.sendMessage(chatId, `Analyzing <b>${symbol}</b>...`);
 
     try {
       const candles = await this.fetchCandles(symbol);
       if (!candles || candles.length < 15) {
-        await this.sendMessage(chatId, `⚠️ Not enough data for <b>${symbol}</b>. Check if the symbol is valid.`);
+        await this.sendMessage(chatId, `Not enough data for <b>${symbol}</b>. Check if the symbol is valid.`);
         return;
       }
 
       if (!isEngineAvailable()) {
-        await this.sendMessage(chatId, '⚠️ Rust engine is offline. Try again later.');
+        await this.sendMessage(chatId, 'Rust engine is offline. Try again later.');
         return;
       }
 
@@ -153,7 +306,7 @@ export class TelegramService {
       if (!result.signals || result.signals.length === 0) {
         const lastPrice = candles[candles.length - 1]?.close ?? 0;
         await this.sendMessage(chatId,
-          `<b>📊 ${symbol} Analysis</b>\n\n` +
+          `<b>${symbol} Analysis</b>\n\n` +
           `LTP: ₹${lastPrice.toFixed(2)}\n` +
           `Direction: <b>NEUTRAL</b>\n\n` +
           `No strong signals detected. Market is range-bound or lacks momentum.`);
@@ -175,7 +328,7 @@ export class TelegramService {
       if (indicators.supertrend) indLines.push(`Supertrend: ${indicators.supertrend.toFixed(1)}`);
 
       await this.sendMessage(chatId,
-        `<b>🦀 Rust Engine Analysis: ${symbol}</b>\n\n` +
+        `<b>Rust Engine: ${symbol}</b>\n\n` +
         `${emoji} Direction: <b>${sig.direction}</b>\n` +
         `Confidence: <b>${(sig.confidence * 100).toFixed(0)}%</b>\n\n` +
         `Entry: ₹${sig.entry.toFixed(2)}\n` +
@@ -185,21 +338,21 @@ export class TelegramService {
         (sig.strategy ? `Strategy: ${sig.strategy}` : ''));
 
     } catch (err) {
-      await this.sendMessage(chatId, `❌ Scan failed for <b>${symbol}</b>: ${(err as Error).message}`);
+      await this.sendMessage(chatId, `Scan failed for <b>${symbol}</b>: ${(err as Error).message}`);
     }
   }
 
   private async handleOptionsCommand(chatId: string, symbol: string): Promise<void> {
     if (!symbol || symbol.length < 2) {
-      await this.sendMessage(chatId, '⚠️ Please provide a valid symbol.\n<i>Example: /options NIFTY</i>');
+      await this.sendMessage(chatId, 'Please provide a valid symbol.\n<i>Example: /options NIFTY</i>');
       return;
     }
-    if (this.isOnCooldown(chatId)) {
-      await this.sendMessage(chatId, '⏳ Please wait 15 seconds between requests.');
+    if (this.isOnScanCooldown(chatId)) {
+      await this.sendMessage(chatId, 'Please wait 15 seconds between requests.');
       return;
     }
 
-    await this.sendMessage(chatId, `📊 Fetching options data for <b>${symbol}</b>...`);
+    await this.sendMessage(chatId, `Fetching options data for <b>${symbol}</b>...`);
 
     try {
       const [optData, allSignals] = await Promise.all([
@@ -211,13 +364,12 @@ export class TelegramService {
 
       if (!optData && symbolSignals.length === 0) {
         await this.sendMessage(chatId,
-          `⚠️ No options data available for <b>${symbol}</b>.\n\n` +
-          `Options data is available for major F&O symbols (NIFTY, BANKNIFTY, RELIANCE, etc.). ` +
-          `Make sure the Rust engine options feed is running.`);
+          `No options data available for <b>${symbol}</b>.\n\n` +
+          `Options data is available for major F&O symbols (NIFTY, BANKNIFTY, RELIANCE, etc.).`);
         return;
       }
 
-      const lines: string[] = [`<b>📊 Options Analysis: ${symbol}</b>\n`];
+      const lines: string[] = [`<b>Options Analysis: ${symbol}</b>\n`];
 
       if (optData) {
         const pcr = optData.pcr as number | undefined;
@@ -251,17 +403,17 @@ export class TelegramService {
       await this.sendMessage(chatId, lines.join('\n'));
 
     } catch (err) {
-      await this.sendMessage(chatId, `❌ Options analysis failed for <b>${symbol}</b>: ${(err as Error).message}`);
+      await this.sendMessage(chatId, `Options analysis failed for <b>${symbol}</b>: ${(err as Error).message}`);
     }
   }
 
   private async handleQuoteCommand(chatId: string, symbol: string): Promise<void> {
     if (!symbol || symbol.length < 2) {
-      await this.sendMessage(chatId, '⚠️ Please provide a valid symbol.\n<i>Example: /quote TCS</i>');
+      await this.sendMessage(chatId, 'Please provide a valid symbol.\n<i>Example: /quote TCS</i>');
       return;
     }
-    if (this.isOnCooldown(chatId)) {
-      await this.sendMessage(chatId, '⏳ Please wait 15 seconds between requests.');
+    if (this.isOnScanCooldown(chatId)) {
+      await this.sendMessage(chatId, 'Please wait 15 seconds between requests.');
       return;
     }
 
@@ -277,7 +429,7 @@ export class TelegramService {
       };
 
       if (quote.error || !quote.ltp) {
-        await this.sendMessage(chatId, `⚠️ No quote data for <b>${symbol}</b>. Check if the symbol is valid.`);
+        await this.sendMessage(chatId, `No quote data for <b>${symbol}</b>. Check if the symbol is valid.`);
         return;
       }
 
@@ -295,7 +447,39 @@ export class TelegramService {
         `Volume: ${vol}`);
 
     } catch (err) {
-      await this.sendMessage(chatId, `❌ Quote failed for <b>${symbol}</b>: ${(err as Error).message}`);
+      await this.sendMessage(chatId, `Quote failed for <b>${symbol}</b>: ${(err as Error).message}`);
+    }
+  }
+
+  private async handleCommandCenterChat(chatId: string, text: string): Promise<void> {
+    if (this.isOnChatCooldown(chatId)) {
+      return;
+    }
+
+    const user = await this.prisma.user.findFirst({
+      where: { telegramChatId: chatId },
+      select: { id: true },
+    });
+    if (!user) {
+      await this.sendMessage(chatId,
+        'Not connected to any account.\nPaste your Chat ID in Settings to connect first.');
+      return;
+    }
+
+    await this.sendMessage(chatId, 'Thinking...');
+
+    try {
+      const result = await processCommandCenterChat(user.id, text);
+      const response = result.content || 'No response generated.';
+      const maxLen = 4000;
+      if (response.length > maxLen) {
+        await this.sendMessage(chatId, response.slice(0, maxLen) + '\n\n<i>...truncated</i>');
+      } else {
+        await this.sendMessage(chatId, response);
+      }
+    } catch (err) {
+      console.error('[Telegram] Command center error:', (err as Error).message);
+      await this.sendMessage(chatId, `Something went wrong. Please try again.`);
     }
   }
 
@@ -305,10 +489,7 @@ export class TelegramService {
       const toDate = new Date().toISOString().split('T')[0];
       const url = `${BRIDGE_URL}/historical/${encodeURIComponent(symbol)}?interval=5minute&from=${fromDate}&to=${toDate}`;
 
-      const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), 20_000);
-      const res = await fetch(url, { signal: ac.signal });
-      clearTimeout(timer);
+      const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
       const data = await res.json() as { bars?: Array<Record<string, unknown>>; error?: string };
 
       if (data.error || !data.bars) return [];
@@ -326,36 +507,7 @@ export class TelegramService {
     }
   }
 
-  private async handleCommandCenterChat(chatId: string, text: string): Promise<void> {
-    if (this.isOnCooldown(chatId)) {
-      await this.sendMessage(chatId, '⏳ Please wait a moment between requests.');
-      return;
-    }
-    const user = await this.prisma.user.findFirst({
-      where: { telegramChatId: chatId },
-      select: { id: true },
-    });
-    if (!user) {
-      await this.sendMessage(chatId,
-        '⚠️ Not connected to any account.\nPaste your Chat ID in Settings to connect first.');
-      return;
-    }
-
-    await this.sendMessage(chatId, '🤖 Thinking...');
-
-    try {
-      const result = await processCommandCenterChat(user.id, text);
-      const response = result.content || 'No response generated.';
-      const maxLen = 4000;
-      if (response.length > maxLen) {
-        await this.sendMessage(chatId, response.slice(0, maxLen) + '\n\n<i>...truncated</i>');
-      } else {
-        await this.sendMessage(chatId, response);
-      }
-    } catch (err) {
-      await this.sendMessage(chatId, `❌ Error: ${(err as Error).message}`);
-    }
-  }
+  // ─── Public API (unchanged signatures) ──────────────────────────────
 
   async sendMessage(chatId: string, text: string, parseMode: 'HTML' | 'Markdown' = 'HTML'): Promise<boolean> {
     if (!this.botToken || !chatId) return false;
@@ -383,7 +535,7 @@ export class TelegramService {
   async notifyUser(userId: string, title: string, message: string): Promise<boolean> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { telegramChatId: true, notifyTelegram: true, fullName: true },
+      select: { telegramChatId: true, notifyTelegram: true },
     });
 
     if (!user?.notifyTelegram || !user.telegramChatId) return false;
@@ -418,12 +570,12 @@ export class TelegramService {
     source?: string,
   ): Promise<boolean> {
     const sourceTag = source?.includes('rust') || source?.includes('engine')
-      ? '🦀 Rust Engine' : '🤖 AI Bot';
+      ? 'Rust Engine' : 'AI Bot';
     const entryLine = entry > 0 ? `\nEntry: ₹${entry.toFixed(2)}` : '';
     const targetLine = target > 0 ? ` | Target: ₹${target.toFixed(2)}` : '';
     const slLine = stopLoss > 0 ? ` | SL: ₹${stopLoss.toFixed(2)}` : '';
 
-    return this.notifyUser(userId, `📊 ${sourceTag} Signal`,
+    return this.notifyUser(userId, `${sourceTag} Signal`,
       `<b>${direction} ${symbol}</b>${entryLine}${targetLine}${slLine}\nConfidence: <b>${(confidence * 100).toFixed(0)}%</b>`);
   }
 
@@ -443,7 +595,7 @@ export class TelegramService {
 
     const emoji = direction === 'BUY' ? '🟢' : '🔴';
     const text =
-      `<b>🦀 Rust Engine Signal</b>\n\n` +
+      `<b>Rust Engine Signal</b>\n\n` +
       `${emoji} <b>${direction} ${symbol}</b>\n` +
       `Strategy: ${strategy}\n` +
       `Confidence: <b>${(confidence * 100).toFixed(0)}%</b> | ML Score: ${(mlScore * 100).toFixed(0)}%\n` +
@@ -457,7 +609,7 @@ export class TelegramService {
   }
 
   async notifyRiskAlert(userId: string, alertType: string, message: string): Promise<boolean> {
-    return this.notifyUser(userId, `⚠️ Risk Alert: ${alertType}`, message);
+    return this.notifyUser(userId, `Risk Alert: ${alertType}`, message);
   }
 
   async notifyDailyReport(userId: string, report: {
@@ -478,7 +630,7 @@ export class TelegramService {
 
     try {
       const sent = await this.sendMessage(chatId,
-        '✅ <b>PaperPort Connected!</b>\n\nYou will now receive trade alerts, signals, and daily reports here.');
+        '<b>PaperPort Connected!</b>\n\nYou will now receive trade alerts, signals, and daily reports here.');
       return { success: sent };
     } catch {
       return { success: false };
