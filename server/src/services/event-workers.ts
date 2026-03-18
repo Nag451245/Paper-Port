@@ -170,10 +170,14 @@ export function registerAllWorkers(
       case 'SIGNAL_GENERATED':
         if ('userId' in event) {
           wsHub.broadcastToUser(event.userId, { type: 'signal_generated', data: event });
-          telegram.notifySignal(
-            event.userId, event.symbol, event.direction ?? 'LONG',
-            event.confidence ?? 0, event.entry ?? 0, event.target ?? 0, event.stopLoss ?? 0,
-          ).catch(err => log.warn({ err }, 'Telegram signal notification failed'));
+          const confidence = event.confidence ?? 0;
+          if (confidence >= 0.5) {
+            telegram.notifySignal(
+              event.userId, event.symbol, event.direction ?? 'LONG',
+              confidence, event.entry ?? 0, event.target ?? 0, event.stopLoss ?? 0,
+              event.source,
+            ).catch(err => log.warn({ err }, 'Telegram signal notification failed'));
+          }
         }
         break;
 
@@ -193,6 +197,13 @@ export function registerAllWorkers(
           strategy: event.strategy,
           mlScore: event.mlScore,
         }, 'Pipeline signal received — routing to bot engine');
+
+        if (event.confidence >= 0.5) {
+          telegram.notifyPipelineSignal(
+            event.symbol, event.direction, event.confidence,
+            event.strategy, event.mlScore, event.source,
+          ).catch(err => log.warn({ err }, 'Telegram pipeline signal notification failed'));
+        }
 
         if (botEngine) {
           try {

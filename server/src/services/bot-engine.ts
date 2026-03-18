@@ -2825,6 +2825,13 @@ INSTRUCTIONS:
               },
             });
 
+            emit('signals', {
+              type: 'SIGNAL_GENERATED', userId,
+              symbol: sig.symbol, direction: sig.direction, confidence: sig.confidence,
+              entry: sig.entry, stopLoss: sig.stop_loss, target: sig.target,
+              source: sig.strategy ?? 'rust-engine-agent',
+            }).catch(err => log.error({ err, userId }, 'Failed to emit agent SIGNAL_GENERATED event'));
+
             if (autoExecute) {
               const tradeResult = await this.executeTrade(userId, sig.symbol, sig.direction, sig.symbol, undefined, {
                 confidence: sig.confidence,

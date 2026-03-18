@@ -134,9 +134,45 @@ export class TelegramService {
     entry: number,
     target: number,
     stopLoss: number,
+    source?: string,
   ): Promise<boolean> {
-    return this.notifyUser(userId, '📊 AI Signal',
-      `<b>${direction} ${symbol}</b>\nEntry: ₹${entry} | Target: ₹${target} | SL: ₹${stopLoss}\nConfidence: ${(confidence * 100).toFixed(0)}%`);
+    const sourceTag = source?.includes('rust') || source?.includes('engine')
+      ? '🦀 Rust Engine' : '🤖 AI Bot';
+    const entryLine = entry > 0 ? `\nEntry: ₹${entry.toFixed(2)}` : '';
+    const targetLine = target > 0 ? ` | Target: ₹${target.toFixed(2)}` : '';
+    const slLine = stopLoss > 0 ? ` | SL: ₹${stopLoss.toFixed(2)}` : '';
+
+    return this.notifyUser(userId, `📊 ${sourceTag} Signal`,
+      `<b>${direction} ${symbol}</b>${entryLine}${targetLine}${slLine}\nConfidence: <b>${(confidence * 100).toFixed(0)}%</b>`);
+  }
+
+  async notifyPipelineSignal(
+    symbol: string,
+    direction: string,
+    confidence: number,
+    strategy: string,
+    mlScore: number,
+    source: string,
+  ): Promise<void> {
+    const users = await this.prisma.user.findMany({
+      where: { notifyTelegram: true, telegramChatId: { not: null } },
+      select: { telegramChatId: true },
+    });
+    if (users.length === 0) return;
+
+    const emoji = direction === 'BUY' ? '🟢' : '🔴';
+    const text =
+      `<b>🦀 Rust Engine Signal</b>\n\n` +
+      `${emoji} <b>${direction} ${symbol}</b>\n` +
+      `Strategy: ${strategy}\n` +
+      `Confidence: <b>${(confidence * 100).toFixed(0)}%</b> | ML Score: ${(mlScore * 100).toFixed(0)}%\n` +
+      `Source: ${source}`;
+
+    for (const u of users) {
+      if (u.telegramChatId) {
+        this.sendMessage(u.telegramChatId, text).catch(() => {});
+      }
+    }
   }
 
   async notifyRiskAlert(userId: string, alertType: string, message: string): Promise<boolean> {
