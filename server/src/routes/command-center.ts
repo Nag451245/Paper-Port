@@ -7,7 +7,7 @@ import { chatCompletion, chatCompletionJSON } from '../lib/openai.js';
 import { getPrisma } from '../lib/prisma.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 import { istDateStr } from '../lib/ist.js';
-import { engineScan, engineScanActiveSymbols, engineScanStatus, engineOptionsSignals, engineOptionsData, isEngineAvailable, enginePerformanceSummary, engineExecutionPlan, engineActiveStrategies } from '../lib/rust-engine.js';
+import { engineScan, engineScanActiveSymbols, engineScanStatus, engineOptionsSignals, engineOptionsData, isEngineAvailable, enginePerformanceSummary, engineExecutionPlan, engineActiveStrategies, engineDiscoveryResults, engineDiscoveryRun } from '../lib/rust-engine.js';
 
 const GEMINI_MODEL = 'gemini-2.5-pro';
 const BRIDGE_URL = process.env.BREEZE_BRIDGE_URL || 'http://127.0.0.1:8001';
@@ -54,7 +54,7 @@ export async function processCommandCenterChat(userId: string, message: string):
 Be concise. Return ONLY valid JSON, no explanation.
 
 {
-  "intent": "set_target"|"check_progress"|"stop_trading"|"resume_trading"|"show_report"|"change_instruments"|"status"|"bot_status"|"bot_instruct"|"explain_decision"|"list_signals"|"execute_signal"|"reject_signal"|"start_scanner"|"stop_scanner"|"start_agent"|"stop_agent"|"scan_symbol"|"options_analysis"|"rust_status"|"general_chat",
+  "intent": "set_target"|"check_progress"|"stop_trading"|"resume_trading"|"show_report"|"change_instruments"|"status"|"bot_status"|"bot_instruct"|"explain_decision"|"list_signals"|"execute_signal"|"reject_signal"|"start_scanner"|"stop_scanner"|"start_agent"|"stop_agent"|"scan_symbol"|"options_analysis"|"rust_status"|"discovery_status"|"run_discovery"|"general_chat",
   "params": { ... },
   "response": "short natural response"
 }
@@ -63,6 +63,8 @@ Key intents:
 - "Scan RELIANCE" / "Analyze TCS" -> scan_symbol with {symbol}
 - "Options for NIFTY" / "NIFTY options" -> options_analysis with {symbol}
 - "Rust engine status" / "What is engine doing?" -> rust_status
+- "Discovery status" / "What strategies were discovered?" -> discovery_status
+- "Run strategy discovery" / "Discover new strategies" -> run_discovery
 - "Make 2% on 10L" -> set_target
 - "How are bots doing?" -> bot_status
 - "Show pending signals" -> list_signals
@@ -380,6 +382,43 @@ Key intents:
           }
           responseContent = lines.join('\n');
         } catch { responseContent = `Rust engine: ${isEngineAvailable() ? 'ONLINE' : 'OFFLINE'}. Unable to fetch detailed status.`; }
+        break;
+      }
+
+      case 'discovery_status': {
+        try {
+          const results = await engineDiscoveryResults();
+          if (!results || (results as any).error) {
+            responseContent = 'No strategy discovery results available yet. Discovery runs automatically on Saturdays at 11:00 IST.';
+          } else {
+            const r = results as any;
+            const lines = ['Strategy Discovery Results:'];
+            lines.push(`• Timestamp: ${r.timestamp ?? 'N/A'}`);
+            lines.push(`• Total strategies evaluated: ${r.results?.length ?? 0}`);
+            lines.push(`• Promoted: ${r.promoted?.length ? r.promoted.join(', ') : 'None'}`);
+            lines.push(`• Retired: ${r.retired?.length ? r.retired.join(', ') : 'None'}`);
+            if (r.results?.length) {
+              lines.push('\nDetails:');
+              for (const s of r.results) {
+                lines.push(`  ${s.strategy}: ${s.action} (OOS Sharpe: ${s.out_sample_sharpe}, Consistency: ${s.consistency})`);
+              }
+            }
+            responseContent = lines.join('\n');
+          }
+        } catch { responseContent = 'Unable to fetch discovery results.'; }
+        break;
+      }
+
+      case 'run_discovery': {
+        try {
+          responseContent = 'Starting strategy discovery pipeline... This may take a few minutes.';
+          engineDiscoveryRun().then(result => {
+            if (result) {
+              const r = result as any;
+              console.log(`Discovery complete: ${r.promoted?.length ?? 0} promoted, ${r.retired?.length ?? 0} retired`);
+            }
+          }).catch(() => {});
+        } catch { responseContent = 'Failed to trigger strategy discovery.'; }
         break;
       }
 

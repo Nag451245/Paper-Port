@@ -87,6 +87,22 @@ ws_url = "wss://breezeapi.icicidirect.com"
 [market_data]
 enabled = true
 reconnect_delay_secs = 3
+feed_mode = "auto"             # "bridge", "websocket", or "auto"
+tick_aggregation_secs = 5      # Micro-candle aggregation interval
+tick_symbols = [
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
+    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
+    "HINDUNILVR", "SBIN", "BHARTIARTL", "KOTAKBANK", "ITC",
+    "LT", "AXISBANK", "BAJFINANCE", "TATAMOTORS", "MARUTI",
+    "SUNPHARMA", "TITAN", "NTPC", "WIPRO", "ASIANPAINT",
+    "HCLTECH", "ULTRACEMCO", "POWERGRID", "NESTLEIND",
+    "TATASTEEL", "JSWSTEEL", "ADANIENT", "ADANIPORTS",
+    "BAJAJFINSV", "GRASIM", "TECHM", "DRREDDY", "CIPLA",
+    "BRITANNIA", "HINDALCO", "M&M", "EICHERMOT", "DIVISLAB",
+    "COALINDIA", "TATACONSUM", "HEROMOTOCO", "SBILIFE",
+    "HDFCLIFE", "INDUSINDBK", "APOLLOHOSP", "BAJAJ-AUTO",
+    "ONGC", "BPCL",
+]
 symbols = [
     # Indices
     "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",

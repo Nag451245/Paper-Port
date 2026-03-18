@@ -1194,6 +1194,69 @@ export async function engineOptimalSize(params: {
   } catch { return null; }
 }
 
+// ─── Training Data Export ────────────────────────────────────────────
+
+export async function engineTrainingData(): Promise<{
+  outcomes: Array<Record<string, unknown>>;
+  training_log: Array<Record<string, unknown>>;
+  total_outcomes: number;
+  total_log_entries: number;
+} | null> {
+  try {
+    return await engineHttpGet('/api/performance/training_data', 30_000) as any;
+  } catch { return null; }
+}
+
+// ─── Tick Data ──────────────────────────────────────────────────────
+
+export async function engineTickData(symbol: string): Promise<Record<string, unknown> | null> {
+  try {
+    return await engineHttpGet(`/api/market_data/ticks/${encodeURIComponent(symbol)}`, 10_000) as Record<string, unknown>;
+  } catch { return null; }
+}
+
+// ─── Strategy Discovery ─────────────────────────────────────────────
+
+export async function engineDiscoveryRun(candles_by_symbol?: Record<string, unknown[]>): Promise<Record<string, unknown> | null> {
+  try {
+    const { env } = await import('../config.js');
+    const url = `${env.RUST_ENGINE_URL}/api/discovery/run`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 120_000);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ candles_by_symbol: candles_by_symbol ?? {} }),
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    return await res.json() as Record<string, unknown>;
+  } catch { return null; }
+}
+
+export async function engineDiscoveryResults(): Promise<Record<string, unknown> | null> {
+  try {
+    return await engineHttpGet('/api/discovery/results', 15_000) as Record<string, unknown>;
+  } catch { return null; }
+}
+
+export async function engineDiscoveryApply(): Promise<Record<string, unknown> | null> {
+  try {
+    const { env } = await import('../config.js');
+    const url = `${env.RUST_ENGINE_URL}/api/discovery/apply`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 30_000);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    return await res.json() as Record<string, unknown>;
+  } catch { return null; }
+}
+
 export function _getCircuitBreakerState() {
   return { crashCount, lastCrashTime, circuitOpenSince, MAX_CRASHES, CRASH_WINDOW_MS, CIRCUIT_COOLDOWN_MS };
 }

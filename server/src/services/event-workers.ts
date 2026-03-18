@@ -24,6 +24,7 @@ import type { LearningEngine } from './learning-engine.js';
 import type { BotEngine } from './bot-engine.js';
 import { TelegramService } from './telegram.service.js';
 import { engineRecordOutcome } from '../lib/rust-engine.js';
+import { mlOnlineUpdate, isMLServiceAvailable } from '../lib/ml-service-client.js';
 
 const log = createChildLogger('EventWorkers');
 
@@ -106,6 +107,21 @@ export function registerAllWorkers(
             regime: 'neutral',
           }).catch(err => log.debug({ err }, 'Performance engine outcome recording failed'));
         } catch { /* performance recording is best-effort */ }
+
+        // Online ML model update — feed outcome to Python ML service for incremental learning
+        try {
+          if (await isMLServiceAvailable()) {
+            const outcomeValue = event.pnl >= 0 ? 1.0 : 0.0;
+            const features: Record<string, number> = {
+              composite_score: (event as any).confidence ?? 0.5,
+              pnl: event.pnl ?? 0,
+              exit_price: event.exitPrice ?? 0,
+            };
+            mlOnlineUpdate(features, outcomeValue, `pos_close_${event.symbol}_${Date.now()}`).catch(err =>
+              log.debug({ err }, 'Online ML update on position close failed'),
+            );
+          }
+        } catch { /* online learning is best-effort */ }
         break;
       }
 

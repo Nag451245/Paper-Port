@@ -1882,6 +1882,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
 
       // --- Intelligent Trading Brain: ML scoring + memory gate ---
       let fusionDecision: any = null;
+      let mlScoreResultOuter: { winProbability: number; confidence: number; available: boolean; expectedReturn?: number } = { winProbability: 0.5, confidence: 0, available: false };
       try {
         const candles = await this.marketData.getHistory(sig.symbol, '1d',
           new Date(Date.now() - 250 * 86400000).toISOString().split('T')[0],
@@ -2033,11 +2034,25 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
           mlScore: mlScoreResult.winProbability, memoryWinRate: memoryRecall.historicalWinRate,
           memoryCases: memoryRecall.similarCases,
         }, 'Decision fusion result');
+        mlScoreResultOuter = mlScoreResult;
       } catch (err) {
         log.warn({ err, symbol: sig.symbol }, 'Decision fusion failed — falling back to raw signal');
       }
 
       let finalConfidence = fusionDecision?.finalScore ?? (gptApproved ? sig.confidence : sig.confidence * 0.9);
+
+      // Prefer Python ML service (XGBoost) over Rust logistic regression for scoring.
+      // Blend: 50% XGBoost + 30% Rust ensemble + 20% composite vote
+      if (mlScoreResultOuter.available && mlScoreResultOuter.winProbability > 0) {
+        const xgbScore = mlScoreResultOuter.winProbability;
+        const rustEnsemble = fusionDecision?.finalScore ?? sig.confidence;
+        const compositeVote = sig.confidence;
+        finalConfidence = 0.5 * xgbScore + 0.3 * rustEnsemble + 0.2 * compositeVote;
+        log.debug({
+          symbol: sig.symbol, xgbScore, rustEnsemble, compositeVote,
+          blended: finalConfidence,
+        }, 'XGBoost-preferred ML blending applied');
+      }
 
       try {
         const calibration = await engineCalibrateConfidence(finalConfidence, sig.strategy ?? 'composite', 'neutral');

@@ -454,6 +454,12 @@ pub struct MarketDataConfig {
     pub symbols: Vec<String>,
     /// Reconnect delay in seconds on disconnect
     pub reconnect_delay_secs: u64,
+    /// Top F&O symbols for tick-level aggregation
+    pub tick_symbols: Vec<String>,
+    /// Tick aggregation interval in seconds (default 5)
+    pub tick_aggregation_secs: u64,
+    /// Feed mode: "bridge", "websocket", or "auto"
+    pub feed_mode: String,
 }
 
 impl Default for MarketDataConfig {
@@ -462,6 +468,9 @@ impl Default for MarketDataConfig {
             enabled: false,
             symbols: Vec::new(),
             reconnect_delay_secs: 5,
+            tick_symbols: Vec::new(),
+            tick_aggregation_secs: 5,
+            feed_mode: "auto".into(),
         }
     }
 }

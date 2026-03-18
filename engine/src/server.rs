@@ -198,10 +198,17 @@ pub async fn run(state: SharedState) {
         .route("/api/performance/calibrate", post(perf_calibrate))
         .route("/api/performance/record", post(perf_record_outcome))
         .route("/api/performance/strategies", get(perf_active_strategies))
+        .route("/api/performance/training_data", get(perf_training_data))
 
         .route("/api/execution/plan", post(exec_plan))
         .route("/api/execution/quality", post(exec_quality))
         .route("/api/execution/optimal_size", post(exec_optimal_size))
+
+        .route("/api/market_data/ticks/{symbol}", get(tick_data_handler))
+
+        .route("/api/discovery/run", post(discovery_run))
+        .route("/api/discovery/results", get(discovery_results))
+        .route("/api/discovery/apply", post(discovery_apply))
 
         .route("/ws", get(ws_handler))
 
@@ -1058,6 +1065,85 @@ async fn exec_optimal_size(Json(body): Json<serde_json::Value>) -> impl IntoResp
     data["command"] = json!("optimal_size");
     match crate::smart_executor::compute(data) {
         Ok(v) => Json(v),
+        Err(e) => Json(json!({"error": e})),
+    }
+}
+
+// ─── Performance Training Data ────────────────────────────────────────
+
+async fn perf_training_data() -> impl IntoResponse {
+    let outcomes = crate::strategy_performance::GLOBAL_TRACKER.get_all_outcomes();
+
+    let mut training_log: Vec<serde_json::Value> = Vec::new();
+    let log_path = std::path::Path::new("data/ml_training_log.json");
+    if log_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(log_path) {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&contents) {
+                training_log = parsed;
+            }
+        }
+    }
+
+    Json(json!({
+        "outcomes": outcomes,
+        "training_log": training_log,
+        "total_outcomes": outcomes.len(),
+        "total_log_entries": training_log.len(),
+    }))
+}
+
+// ─── Tick Data ────────────────────────────────────────────────────────
+
+async fn tick_data_handler(Path(symbol): Path<String>) -> impl IntoResponse {
+    let input = json!({
+        "command": "features",
+        "candles": [],
+    });
+    match crate::tick_aggregator::TickAggregator::compute(input) {
+        Ok(features) => Json(json!({
+            "symbol": symbol,
+            "features": features,
+            "source": "tick_aggregator",
+        })),
+        Err(_) => Json(json!({
+            "symbol": symbol,
+            "features": crate::tick_aggregator::MicroFeatures::default(),
+            "source": "default",
+        })),
+    }
+}
+
+// ─── Strategy Discovery ──────────────────────────────────────────────
+
+async fn discovery_run(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let mut data = body;
+    data["command"] = json!("run");
+    match crate::strategy_discovery::compute(data) {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({"error": e})),
+    }
+}
+
+async fn discovery_results() -> impl IntoResponse {
+    match crate::strategy_discovery::compute(json!({"command": "results"})) {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({"error": e})),
+    }
+}
+
+async fn discovery_apply(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let mut data = body;
+    data["command"] = json!("run");
+    match crate::strategy_discovery::compute(data) {
+        Ok(report) => {
+            let promoted = report.get("promoted").cloned().unwrap_or(json!([]));
+            let retired = report.get("retired").cloned().unwrap_or(json!([]));
+            Json(json!({
+                "applied": true,
+                "promoted": promoted,
+                "retired": retired,
+            }))
+        }
         Err(e) => Json(json!({"error": e})),
     }
 }

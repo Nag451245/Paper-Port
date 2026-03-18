@@ -39,6 +39,8 @@ pub mod futures_scanner;
 pub mod continuous_scanner;
 pub mod strategy_performance;
 pub mod smart_executor;
+pub mod tick_aggregator;
+mod strategy_discovery;
 
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -253,6 +255,19 @@ async fn main() {
                 }
             }
 
+            // Start tick aggregator for micro-candle features
+            if !config.market_data.tick_symbols.is_empty() {
+                let tick_interval = config.market_data.tick_aggregation_secs.max(1);
+                let _tick_agg = tick_aggregator::TickAggregator::new(
+                    &state.live_prices, tick_interval,
+                );
+                info!(
+                    tick_symbols = config.market_data.tick_symbols.len(),
+                    interval_secs = tick_interval,
+                    "Tick aggregator started"
+                );
+            }
+
             live_executor::spawn(state.clone());
 
             // Try to refresh the universe from Breeze bridge at startup
@@ -365,6 +380,15 @@ async fn main() {
                         options_data::start_options_feed(options_store, signal_state, &bridge_url, &oc_symbols, &opts_config).await;
                     });
                 }
+            }
+
+            // Tick aggregator for micro-candle features (daemon mode)
+            if !config.market_data.tick_symbols.is_empty() {
+                let tick_interval = config.market_data.tick_aggregation_secs.max(1);
+                let _tick_agg = tick_aggregator::TickAggregator::new(
+                    &state.live_prices, tick_interval,
+                );
+                info!(tick_symbols = config.market_data.tick_symbols.len(), "[daemon] Tick aggregator started");
             }
 
             // Live executor (processes ticks → strategies → auto-executes orders)
@@ -580,6 +604,7 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
 
         "optimize" => optimize::compute(req.data),
         "walk_forward" => walk_forward::compute(req.data),
+        "strategy_discovery" => strategy_discovery::compute(req.data),
         "advanced_signals" => advanced_signals::compute(req.data),
         "iv_surface" => iv_surface::compute(req.data),
         "monte_carlo" => monte_carlo::compute(req.data),

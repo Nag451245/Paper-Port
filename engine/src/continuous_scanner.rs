@@ -517,6 +517,20 @@ pub fn spawn(
                     }).await.ok();
                     last_weekly = ist_date.clone();
                 }
+
+                // Strategy discovery pipeline at 11:00 IST on Saturday
+                if ist_day == "Saturday" && ist_time.as_str() >= "11:00" && ist_time.as_str() < "11:05" {
+                    let discovery_key = format!("{}-discovery", ist_date);
+                    if last_weekly != discovery_key {
+                        info!("Running strategy discovery pipeline");
+                        let st = state.clone();
+                        let uv = universe.clone();
+                        let rl = limiter.clone();
+                        tokio::task::spawn_blocking(move || {
+                            run_strategy_discovery(&st, &uv, &rl);
+                        }).await.ok();
+                    }
+                }
                 continue; 
             }
 
@@ -608,6 +622,78 @@ pub fn spawn(
             }
         }
     });
+}
+
+// ─── Strategy Discovery Pipeline ─────────────────────────────────────
+
+fn run_strategy_discovery(
+    state: &Arc<AppState>,
+    universe: &Universe,
+    limiter: &RateLimiter,
+) {
+    let bridge_url = &state.config.broker.icici.bridge_url;
+    if bridge_url.is_empty() {
+        warn!("Cannot run strategy discovery: bridge URL not configured");
+        return;
+    }
+
+    let liquid_symbols = universe.fno_stocks();
+    let symbols_to_test: Vec<String> = liquid_symbols.iter().take(20).map(|s| s.symbol.clone()).collect();
+
+    if symbols_to_test.is_empty() {
+        warn!("No symbols available for strategy discovery");
+        return;
+    }
+
+    let from = chrono::Utc::now() - chrono::Duration::days(120);
+    let to = chrono::Utc::now();
+    let from_str = from.format("%Y-%m-%d").to_string();
+    let to_str = to.format("%Y-%m-%d").to_string();
+
+    let mut candles_by_symbol = std::collections::HashMap::new();
+
+    for symbol in &symbols_to_test {
+        if !limiter.try_acquire() { continue; }
+        match crate::broker_icici::bridge_get_historical(bridge_url, symbol, "1day", &from_str, &to_str) {
+            Ok(val) => {
+                let candles = if let Some(arr) = val.get("data").and_then(|d| d.as_array()) {
+                    arr.clone()
+                } else if let Some(arr) = val.as_array() {
+                    arr.clone()
+                } else {
+                    continue;
+                };
+                if candles.len() >= 30 {
+                    candles_by_symbol.insert(symbol.clone(), candles);
+                }
+            }
+            Err(e) => {
+                warn!(symbol = %symbol, error = %e, "Failed to fetch candles for discovery");
+            }
+        }
+    }
+
+    if candles_by_symbol.is_empty() {
+        warn!("No candle data fetched for strategy discovery");
+        return;
+    }
+
+    info!(symbols = candles_by_symbol.len(), "Running strategy discovery pipeline");
+    let report = crate::strategy_discovery::run_discovery(&candles_by_symbol);
+
+    info!(
+        promoted = report.promoted.len(),
+        retired = report.retired.len(),
+        total = report.results.len(),
+        "Strategy discovery complete"
+    );
+
+    if let Err(e) = crate::strategy_discovery::compute(serde_json::json!({
+        "command": "run",
+        "candles_by_symbol": candles_by_symbol,
+    })) {
+        warn!(error = %e, "Failed to persist discovery results");
+    }
 }
 
 // ─── Status Report ───────────────────────────────────────────────────

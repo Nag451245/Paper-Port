@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 import type { PrismaClient } from '@prisma/client';
 import { chatCompletionJSON, chatCompletion } from '../lib/openai.js';
 import { MarketDataService } from './market-data.service.js';
-import { engineOptimize, engineFeatureStore, engineMLScore, isEngineAvailable, type OptimizeInput } from '../lib/rust-engine.js';
+import { engineOptimize, engineFeatureStore, engineMLScore, isEngineAvailable, engineTrainingData, type OptimizeInput } from '../lib/rust-engine.js';
 import { isMLServiceAvailable, mlTrain, mlDetectRegime, mlAllocate, mlOnlineUpdate, mlEnsembleScore } from '../lib/ml-service-client.js';
 import { LearningStoreService } from './learning-store.service.js';
 import { getRedis } from '../lib/redis.js';
@@ -49,7 +49,190 @@ export class LearningEngine {
   private fusionService = new DecisionFusionService();
   private intradayWinTracker: { wins: number; total: number } = { wins: 0, total: 0 };
 
-  constructor(private prisma: PrismaClient) {}
+  private weeklyRetrainTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(private prisma: PrismaClient) {
+    this.scheduleWeeklyRetrain();
+  }
+
+  /**
+   * Runs every minute, checking if it's Saturday 11:00 IST. When it is,
+   * pulls outcome data from the Rust Performance Engine and retrains
+   * both XGBoost and LightGBM models on the merged training data.
+   */
+  private scheduleWeeklyRetrain(): void {
+    let lastRetrainDate = '';
+
+    this.weeklyRetrainTimer = setInterval(async () => {
+      const nowUtc = new Date();
+      const ist = new Date(nowUtc.getTime() + (5.5 * 3600_000));
+      const istDay = ist.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'Asia/Kolkata' });
+      const istTime = ist.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' });
+      const istDate = ist.toISOString().split('T')[0];
+
+      if (istDay !== 'Saturday') return;
+      if (istTime < '11:00' || istTime >= '11:05') return;
+      if (lastRetrainDate === istDate) return;
+      lastRetrainDate = istDate;
+
+      log.info('Weekly ML retrain triggered (Saturday 11:00 IST)');
+      await this.runWeeklyMLRetrain();
+    }, 60_000);
+  }
+
+  async runWeeklyMLRetrain(): Promise<void> {
+    try {
+      if (!await isMLServiceAvailable()) {
+        log.warn('Python ML service unavailable — skipping weekly retrain');
+        return;
+      }
+
+      const perfData = await engineTrainingData();
+      const outcomes = perfData?.outcomes ?? [];
+      const rustLog = perfData?.training_log ?? [];
+
+      log.info({ outcomes: outcomes.length, rustLog: rustLog.length }, 'Fetched training data from Performance Engine');
+
+      const since = new Date();
+      since.setDate(since.getDate() - 120);
+
+      const decisions = await this.prisma.decisionAudit.findMany({
+        where: {
+          createdAt: { gte: since },
+          outcome: { in: ['WIN', 'LOSS', 'BREAKEVEN'] },
+          decisionType: 'ENTRY_SIGNAL',
+        },
+        select: {
+          symbol: true, confidence: true, direction: true, outcome: true,
+          marketDataSnapshot: true, entryPrice: true, exitPrice: true, pnl: true, createdAt: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 1000,
+      });
+
+      const trainingData: Array<{ features: Record<string, number | number[]>; outcome: number }> = [];
+
+      for (const d of decisions) {
+        const snapshot = typeof d.marketDataSnapshot === 'string'
+          ? JSON.parse(d.marketDataSnapshot) : (d.marketDataSnapshot ?? {});
+        trainingData.push({
+          features: {
+            ema_vote: snapshot.ema_vote ?? d.confidence * 0.5,
+            rsi_vote: snapshot.rsi_vote ?? 0,
+            macd_vote: snapshot.macd_vote ?? 0,
+            supertrend_vote: snapshot.supertrend_vote ?? 0,
+            bollinger_vote: snapshot.bollinger_vote ?? 0,
+            vwap_vote: snapshot.vwap_vote ?? 0,
+            momentum_vote: snapshot.momentum_vote ?? 0,
+            volume_vote: snapshot.volume_vote ?? 0,
+            composite_score: d.confidence,
+            regime: 1.0,
+            hour_of_day: d.createdAt.getHours(),
+            day_of_week: d.createdAt.getDay(),
+            raw_features: [],
+          },
+          outcome: d.outcome === 'WIN' ? 1.0 : d.outcome === 'BREAKEVEN' ? 0.5 : 0.0,
+        });
+      }
+
+      for (const o of outcomes as Array<Record<string, unknown>>) {
+        trainingData.push({
+          features: {
+            ema_vote: 0, rsi_vote: 0, macd_vote: 0, supertrend_vote: 0,
+            bollinger_vote: 0, vwap_vote: 0, momentum_vote: 0, volume_vote: 0,
+            composite_score: Number(o.predicted_confidence ?? 0.5),
+            regime: 1.0, hour_of_day: 10, day_of_week: 3, raw_features: [],
+          },
+          outcome: o.won ? 1.0 : 0.0,
+        });
+      }
+
+      for (const entry of rustLog as Array<Record<string, unknown>>) {
+        const outcomeVal = entry.outcome === 'WIN' ? 1.0 : entry.outcome === 'FLAT' ? 0.5 : 0.0;
+        trainingData.push({
+          features: {
+            ema_vote: 0, rsi_vote: 0, macd_vote: 0, supertrend_vote: 0,
+            bollinger_vote: 0, vwap_vote: 0, momentum_vote: 0, volume_vote: 0,
+            composite_score: Number(entry.confidence ?? entry.ml_score ?? 0.5),
+            regime: 1.0, hour_of_day: 10, day_of_week: 3, raw_features: [],
+          },
+          outcome: outcomeVal,
+        });
+      }
+
+      if (trainingData.length < 30) {
+        log.info({ samples: trainingData.length }, 'Not enough training data for weekly retrain (need 30)');
+        return;
+      }
+
+      const maxRawLen = Math.max(...trainingData.map(d => (d.features.raw_features as number[]).length), 0);
+      if (maxRawLen > 0) {
+        for (const d of trainingData) {
+          const raw = d.features.raw_features as number[];
+          while (raw.length < maxRawLen) raw.push(0);
+        }
+      }
+
+      const xgbResult = await mlTrain({
+        training_data: trainingData,
+        model_type: 'xgboost',
+        walk_forward_days: 60,
+        purge_gap_days: 5,
+      });
+
+      log.info({
+        model: 'xgboost', accuracy: xgbResult.accuracy,
+        auc: xgbResult.auc_roc, samples: xgbResult.training_samples,
+      }, 'Weekly XGBoost retrain complete');
+
+      const lgbResult = await mlTrain({
+        training_data: trainingData,
+        model_type: 'lightgbm',
+        walk_forward_days: 60,
+        purge_gap_days: 5,
+      });
+
+      log.info({
+        model: 'lightgbm', accuracy: lgbResult.accuracy,
+        auc: lgbResult.auc_roc, samples: lgbResult.training_samples,
+      }, 'Weekly LightGBM retrain complete');
+
+      const bestAcc = Math.max(xgbResult.accuracy, lgbResult.accuracy);
+      const bestModel = xgbResult.accuracy >= lgbResult.accuracy ? 'xgboost' : 'lightgbm';
+
+      await this.prisma.strategyParam.create({
+        data: {
+          userId: 'system',
+          strategyId: 'weekly_retrain_metrics',
+          params: JSON.stringify({
+            xgboost: { accuracy: xgbResult.accuracy, auc: xgbResult.auc_roc },
+            lightgbm: { accuracy: lgbResult.accuracy, auc: lgbResult.auc_roc },
+            best_model: bestModel,
+            samples: trainingData.length,
+            outcome_samples: outcomes.length,
+            decision_samples: decisions.length,
+            retrained_at: new Date().toISOString(),
+          }),
+          isActive: true,
+          version: 1,
+          source: 'weekly_auto_retrain',
+        },
+      });
+
+      emit('system', {
+        type: 'LEARNING_UPDATE',
+        userId: 'system',
+        symbol: 'ML_RETRAIN',
+        outcome: `${bestModel}_acc_${bestAcc.toFixed(3)}`,
+        intradayWinRate: bestAcc,
+        totalIntradayTrades: trainingData.length,
+      } as any).catch(() => {});
+
+      log.info({ bestModel, bestAcc, totalSamples: trainingData.length }, 'Weekly ML retrain completed successfully');
+    } catch (err) {
+      log.error({ err }, 'Weekly ML retrain failed');
+    }
+  }
 
   async runNightlyLearning(): Promise<{ usersProcessed: number; insights: number }> {
     if (this.running) return { usersProcessed: 0, insights: 0 };
