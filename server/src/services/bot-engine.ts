@@ -3,7 +3,7 @@ import { chatCompletionJSON, getOpenAIStatus } from '../lib/openai.js';
 import { MarketDataService, type MarketMover } from './market-data.service.js';
 import { TradeService } from './trade.service.js';
 import { OrderManagementService } from './oms.service.js';
-import { engineScan, engineRisk, engineSignals, isEngineAvailable, engineScanActiveSymbols, type ScanSignal } from '../lib/rust-engine.js';
+import { engineScan, engineRisk, engineSignals, isEngineAvailable, engineScanActiveSymbols, engineOptionsSignals, type ScanSignal, type OptionsSignalResult } from '../lib/rust-engine.js';
 import { calculateMaxPain, calculateIVPercentile, calculateGreeks } from './options.service.js';
 import { TargetTracker, type TargetProgress } from './target-tracker.service.js';
 import { GlobalMarketService } from './global-market.service.js';
@@ -2118,10 +2118,28 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
       }
     }
 
+    let optionsSignalCount = 0;
+    try {
+      const optionsSignals = await engineOptionsSignals();
+      const qualifying = optionsSignals.filter(s => s.confidence >= 0.5);
+      for (const optSig of qualifying) {
+        optionsSignalCount++;
+        emit('signals', {
+          type: 'SIGNAL_GENERATED', userId, botId,
+          symbol: optSig.symbol, direction: optSig.side.toUpperCase(),
+          confidence: optSig.confidence, entry: 0, stopLoss: 0, target: 0,
+          source: `rust-options-${optSig.strategy}`,
+        }).catch(err => log.error({ err }, 'Failed to emit options SIGNAL_GENERATED'));
+      }
+      if (qualifying.length > 0) {
+        log.info({ count: qualifying.length }, 'Options signals emitted from Rust engine');
+      }
+    } catch { /* options signals are best-effort */ }
+
     await this.prisma.tradingBot.update({
       where: { id: botId },
       data: {
-        lastAction: `Rust: ${rustSignals.length} signal(s) — ${rustSignals.map(s => `${s.direction} ${s.symbol}`).join(', ')}`,
+        lastAction: `Rust: ${rustSignals.length} equity + ${optionsSignalCount} options signal(s)`,
         lastActionAt: new Date(),
       },
     });

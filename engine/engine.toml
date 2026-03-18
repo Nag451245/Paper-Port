@@ -59,8 +59,15 @@ volume_weight = 0.20
 span_margin_index_pct = 15.0
 span_margin_stock_pct = 20.0
 default_expiry_days = 30.0
-feed_enabled = false           # Set to true to start options chain polling
-feed_symbols = []              # Empty = use market_data.symbols
+feed_enabled = true            # Options chain polling active
+feed_symbols = [
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
+    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
+    "SBIN", "BHARTIARTL", "KOTAKBANK", "ITC", "LT",
+    "AXISBANK", "BAJFINANCE", "TATAMOTORS", "MARUTI",
+    "SUNPHARMA", "TITAN", "HINDUNILVR", "WIPRO",
+    "HCLTECH", "TATASTEEL", "M&M", "ADANIENT",
+]
 poll_delay_ms = 600            # Delay between individual symbol polls (~100 calls/min)
 poll_cycle_pause_secs = 60     # Pause between full scan cycles
 pcr_high_threshold = 1.5       # PCR above this = contrarian bullish

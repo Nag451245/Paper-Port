@@ -963,6 +963,31 @@ export async function engineScanStatus(): Promise<unknown> {
   return engineHttpGet('/api/scan/status', 15_000);
 }
 
+export interface OptionsSignalResult {
+  symbol: string;
+  strategy: string;
+  side: string;
+  confidence: number;
+  reason: string;
+}
+
+export async function engineOptionsSignals(): Promise<OptionsSignalResult[]> {
+  try {
+    const res = await engineHttpGet('/api/options/signals', 15_000) as OptionsSignalResult[];
+    return Array.isArray(res) ? res : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function engineOptionsData(symbol: string): Promise<Record<string, unknown> | null> {
+  try {
+    return await engineHttpGet(`/api/options/data/${encodeURIComponent(symbol)}`, 15_000) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 export async function engineUniverseRefresh(): Promise<unknown> {
   const { env } = await import('../config.js');
   const baseUrl = env.RUST_ENGINE_URL;
