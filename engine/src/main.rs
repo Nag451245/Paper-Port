@@ -37,6 +37,8 @@ pub mod rate_limiter;
 pub mod news_sentiment;
 pub mod futures_scanner;
 pub mod continuous_scanner;
+pub mod strategy_performance;
+pub mod smart_executor;
 
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -587,6 +589,8 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
         "feature_store" => feature_store::compute(req.data),
         "multi_timeframe_scan" => multi_timeframe::compute(req.data),
         "ml_score" => ml_scorer::compute(req.data),
+        "strategy_performance" => strategy_performance::compute(req.data),
+        "smart_executor" => smart_executor::compute(req.data),
 
         "ml_scan" => {
             let ml_weights = req.data.get("ml_weights").cloned();

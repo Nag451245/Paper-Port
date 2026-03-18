@@ -3,7 +3,7 @@ import { chatCompletionJSON, getOpenAIStatus } from '../lib/openai.js';
 import { MarketDataService, type MarketMover } from './market-data.service.js';
 import { TradeService } from './trade.service.js';
 import { OrderManagementService } from './oms.service.js';
-import { engineScan, engineRisk, engineSignals, isEngineAvailable, engineScanActiveSymbols, engineOptionsSignals, type ScanSignal, type OptionsSignalResult } from '../lib/rust-engine.js';
+import { engineScan, engineRisk, engineSignals, isEngineAvailable, engineScanActiveSymbols, engineOptionsSignals, engineRecordOutcome, engineCalibrateConfidence, engineExecutionPlan, enginePerformanceSummary, type ScanSignal, type OptionsSignalResult, type ExecutionPlan } from '../lib/rust-engine.js';
 import { calculateMaxPain, calculateIVPercentile, calculateGreeks } from './options.service.js';
 import { TargetTracker, type TargetProgress } from './target-tracker.service.js';
 import { GlobalMarketService } from './global-market.service.js';
@@ -2030,7 +2030,16 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         log.warn({ err, symbol: sig.symbol }, 'Decision fusion failed — falling back to raw signal');
       }
 
-      const finalConfidence = fusionDecision?.finalScore ?? (gptApproved ? sig.confidence : sig.confidence * 0.9);
+      let finalConfidence = fusionDecision?.finalScore ?? (gptApproved ? sig.confidence : sig.confidence * 0.9);
+
+      try {
+        const calibration = await engineCalibrateConfidence(finalConfidence, sig.strategy ?? 'composite', 'neutral');
+        if (calibration) {
+          log.debug({ raw: finalConfidence, calibrated: calibration.regime_adjusted, strategy: sig.strategy }, 'Confidence calibrated via performance engine');
+          finalConfidence = calibration.regime_adjusted;
+        }
+      } catch { /* calibration is best-effort */ }
+
       const execute = shouldAutoExecute && (fusionDecision ? fusionDecision.action === 'EXECUTE' : finalConfidence >= 0.35);
 
       if (!execute) {
@@ -2066,13 +2075,30 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
       }).catch(err => log.error({ err, userId }, 'Failed to emit SIGNAL_GENERATED event'));
 
       if (execute) {
+        let execPlan: ExecutionPlan | null = null;
+        try {
+          execPlan = await engineExecutionPlan({
+            symbol: sig.symbol, side: sig.direction.toLowerCase(),
+            quantity: 1, price: sig.entry, signal_confidence: finalConfidence,
+          });
+          if (execPlan) {
+            log.info({
+              symbol: sig.symbol, algo: execPlan.recommended_algo,
+              slippage_bps: execPlan.estimated_slippage_bps,
+              impact_bps: execPlan.estimated_market_impact_bps,
+              warnings: execPlan.risk_warnings.length,
+            }, 'Smart execution plan generated');
+          }
+        } catch { /* execution planning is best-effort */ }
+
         const result = await this.executeTrade(userId, sig.symbol, sig.direction, sig.symbol, botId, {
-          confidence: sig.confidence,
+          confidence: finalConfidence,
           indicators: JSON.stringify(sig.indicators),
           ltp: sig.entry,
           signalSource: 'RUST_ENGINE',
           stopLoss: sig.stop_loss,
           target: sig.target,
+          ...(execPlan ? { execAlgo: execPlan.recommended_algo, execSlices: execPlan.num_slices } : {}),
         });
         if (!result.success) {
           await this.prisma.aITradeSignal.updateMany({

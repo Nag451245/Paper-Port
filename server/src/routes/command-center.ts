@@ -7,7 +7,7 @@ import { chatCompletion, chatCompletionJSON } from '../lib/openai.js';
 import { getPrisma } from '../lib/prisma.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 import { istDateStr } from '../lib/ist.js';
-import { engineScan, engineScanActiveSymbols, engineScanStatus, engineOptionsSignals, engineOptionsData, isEngineAvailable } from '../lib/rust-engine.js';
+import { engineScan, engineScanActiveSymbols, engineScanStatus, engineOptionsSignals, engineOptionsData, isEngineAvailable, enginePerformanceSummary, engineExecutionPlan, engineActiveStrategies } from '../lib/rust-engine.js';
 
 const GEMINI_MODEL = 'gemini-2.5-pro';
 const BRIDGE_URL = process.env.BREEZE_BRIDGE_URL || 'http://127.0.0.1:8001';
@@ -355,10 +355,12 @@ Key intents:
 
       case 'rust_status': {
         try {
-          const [scanStatus, active, optSignals] = await Promise.all([
+          const [scanStatus, active, optSignals, perfSummary, strategies] = await Promise.all([
             engineScanStatus().catch(() => null) as Promise<any>,
             engineScanActiveSymbols().catch(() => ({ count: 0, symbols: [] })),
             engineOptionsSignals().catch(() => []),
+            enginePerformanceSummary().catch(() => null),
+            engineActiveStrategies().catch(() => null),
           ]);
           const lines = ['Rust Engine Status:'];
           lines.push(`• Engine: ${isEngineAvailable() ? 'ONLINE' : 'OFFLINE'}`);
@@ -366,6 +368,16 @@ Key intents:
           if (active.symbols.length > 0) lines.push(`• Top movers: ${active.symbols.slice(0, 10).join(', ')}`);
           if (optSignals.length > 0) lines.push(`• Options signals: ${optSignals.length} (${optSignals.filter(s => s.confidence >= 0.5).length} high-confidence)`);
           if (scanStatus?.sectors_scanned) lines.push(`• Sectors scanned: ${scanStatus.sectors_scanned}`);
+          if (perfSummary) {
+            lines.push(`\nPerformance Engine:`);
+            lines.push(`• Outcomes tracked: ${(perfSummary as any).total_outcomes ?? 0}`);
+            lines.push(`• Avg health: ${(perfSummary as any).avg_health_score ?? 'N/A'}`);
+            lines.push(`• Calibration error: ${(perfSummary as any).avg_calibration_error ?? 'N/A'}`);
+          }
+          if (strategies) {
+            lines.push(`• Active strategies: ${(strategies as any).active?.length ?? 0}`);
+            lines.push(`• Retired strategies: ${(strategies as any).retired?.length ?? 0}`);
+          }
           responseContent = lines.join('\n');
         } catch { responseContent = `Rust engine: ${isEngineAvailable() ? 'ONLINE' : 'OFFLINE'}. Unable to fetch detailed status.`; }
         break;

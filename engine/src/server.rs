@@ -191,6 +191,18 @@ pub async fn run(state: SharedState) {
         .route("/api/scan/active_symbols", get(scan_active_symbols))
         .route("/api/scan/status", get(scan_status))
         .route("/api/universe/refresh", post(universe_refresh))
+
+        .route("/api/performance/summary", get(perf_summary))
+        .route("/api/performance/health", get(perf_health))
+        .route("/api/performance/health/{strategy}", get(perf_health_strategy))
+        .route("/api/performance/calibrate", post(perf_calibrate))
+        .route("/api/performance/record", post(perf_record_outcome))
+        .route("/api/performance/strategies", get(perf_active_strategies))
+
+        .route("/api/execution/plan", post(exec_plan))
+        .route("/api/execution/quality", post(exec_quality))
+        .route("/api/execution/optimal_size", post(exec_optimal_size))
+
         .route("/ws", get(ws_handler))
 
         .layer(middleware::from_fn_with_state(state.clone(), auth_layer))
@@ -970,6 +982,83 @@ async fn universe_refresh(
         Ok(Ok(count)) => Json(json!({"status": "ok", "count": count})),
         Ok(Err(e)) => Json(json!({"status": "error", "error": e})),
         Err(e) => Json(json!({"status": "error", "error": format!("{}", e)})),
+    }
+}
+
+// ─── Strategy Performance Engine ──────────────────────────────────────
+
+async fn perf_summary() -> impl IntoResponse {
+    match crate::strategy_performance::compute(json!({"command": "summary"})) {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({"error": e})),
+    }
+}
+
+async fn perf_health() -> impl IntoResponse {
+    match crate::strategy_performance::compute(json!({"command": "health"})) {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({"error": e})),
+    }
+}
+
+async fn perf_health_strategy(Path(strategy): Path<String>) -> impl IntoResponse {
+    match crate::strategy_performance::compute(json!({"command": "health", "strategy": strategy})) {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({"error": e})),
+    }
+}
+
+async fn perf_calibrate(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let mut data = body;
+    data["command"] = json!("calibrate");
+    match crate::strategy_performance::compute(data) {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({"error": e})),
+    }
+}
+
+async fn perf_record_outcome(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let mut data = body;
+    data["command"] = json!("record_outcome");
+    match crate::strategy_performance::compute(data) {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({"error": e})),
+    }
+}
+
+async fn perf_active_strategies() -> impl IntoResponse {
+    match crate::strategy_performance::compute(json!({"command": "active_strategies"})) {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({"error": e})),
+    }
+}
+
+// ─── Smart Execution Engine ──────────────────────────────────────────
+
+async fn exec_plan(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let mut data = body;
+    data["command"] = json!("plan");
+    match crate::smart_executor::compute(data) {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({"error": e})),
+    }
+}
+
+async fn exec_quality(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let mut data = body;
+    data["command"] = json!("quality");
+    match crate::smart_executor::compute(data) {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({"error": e})),
+    }
+}
+
+async fn exec_optimal_size(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let mut data = body;
+    data["command"] = json!("optimal_size");
+    match crate::smart_executor::compute(data) {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({"error": e})),
     }
 }
 

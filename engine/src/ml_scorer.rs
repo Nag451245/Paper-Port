@@ -308,8 +308,214 @@ pub fn compute(data: Value) -> Result<Value, String> {
             })).map_err(|e| e.to_string())
         }
 
+        "predict_ensemble" => {
+            let features = input.features.ok_or("features required")?;
+            let weights = input.weights.ok_or("weights required for base model")?;
+
+            if features.is_empty() {
+                return Ok(serde_json::json!({ "scores": [], "method": "ensemble" }));
+            }
+
+            let scores: Vec<f64> = features.iter().map(|f| {
+                let x = feature_vec(f);
+
+                let logreg = if weights.w.len() == x.len() {
+                    predict_one(&x, &weights.w, weights.bias)
+                } else { 0.5 };
+
+                let stumps = predict_stumps(&x);
+
+                let momentum_boost = momentum_signal(f);
+
+                let blended = logreg * 0.4 + stumps * 0.35 + momentum_boost * 0.25;
+                (blended * 1000.0).round() / 1000.0
+            }).collect();
+
+            Ok(serde_json::json!({
+                "scores": scores,
+                "method": "ensemble_v2",
+                "components": ["logistic_regression", "gradient_stumps", "momentum_boost"],
+            }))
+        }
+
+        "train_ensemble" => {
+            let training_data = input.training_data.ok_or("training_data required")?;
+            if training_data.len() < 10 {
+                return Err("Need at least 10 training samples".to_string());
+            }
+
+            let lr = input.learning_rate.unwrap_or(0.01);
+            let epochs = input.epochs.unwrap_or(500).min(5000);
+            let (w, bias, accuracy, avg_loss) = train_logistic(&training_data, lr, epochs);
+
+            let stump_rules = train_stumps(&training_data);
+
+            let base_names = vec![
+                "ema_vote", "rsi_vote", "macd_vote", "supertrend_vote",
+                "bollinger_vote", "vwap_vote", "momentum_vote", "volume_vote",
+                "composite_score", "regime", "hour_of_day", "day_of_week",
+                "sector_score", "cap_category", "news_sentiment",
+                "options_pcr", "options_iv_rank", "futures_basis",
+                "scan_confirmation_count",
+            ];
+            let n_raw = if !training_data.is_empty() { training_data[0].features.raw_features.len() } else { 0 };
+            let mut feature_names: Vec<String> = base_names.into_iter().map(String::from).collect();
+            for i in 0..n_raw { feature_names.push(format!("raw_{}", i)); }
+
+            Ok(serde_json::json!({
+                "weights": {
+                    "w": w.iter().map(|v| (v * 10000.0).round() / 10000.0).collect::<Vec<f64>>(),
+                    "bias": (bias * 10000.0).round() / 10000.0,
+                    "feature_names": feature_names,
+                    "training_samples": training_data.len(),
+                    "training_accuracy": (accuracy * 1000.0).round() / 1000.0,
+                },
+                "stump_rules": stump_rules,
+                "training_loss": (avg_loss * 10000.0).round() / 10000.0,
+                "training_accuracy": (accuracy * 1000.0).round() / 1000.0,
+                "method": "ensemble_v2",
+            }))
+        }
+
         _ => Err(format!("Unknown ML scorer command: {}", input.command)),
     }
+}
+
+fn predict_stumps(features: &[f64]) -> f64 {
+    let rules = default_stump_rules();
+    let mut score = 0.5_f64;
+    let mut weight_sum = 0.0_f64;
+
+    for rule in &rules {
+        if rule.feature_idx >= features.len() { continue; }
+        let val = features[rule.feature_idx];
+        let vote = if val > rule.threshold { rule.positive_weight } else { rule.negative_weight };
+        score += vote * rule.importance;
+        weight_sum += rule.importance;
+    }
+
+    if weight_sum > 0.0 {
+        score = 0.5 + (score - 0.5) / weight_sum;
+    }
+    score.clamp(0.0, 1.0)
+}
+
+fn momentum_signal(f: &FeatureRow) -> f64 {
+    let mom_strong = f.momentum_vote > 0.7;
+    let vol_confirm = f.volume_vote > 0.6;
+    let ema_aligned = f.ema_vote > 0.5;
+    let trend_confirm = f.supertrend_vote > 0.5;
+
+    let confirmations = [mom_strong, vol_confirm, ema_aligned, trend_confirm]
+        .iter().filter(|&&b| b).count();
+
+    match confirmations {
+        4 => 0.85,
+        3 => 0.70,
+        2 => 0.55,
+        1 => 0.40,
+        _ => 0.25,
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StumpRule {
+    feature_idx: usize,
+    feature_name: String,
+    threshold: f64,
+    positive_weight: f64,
+    negative_weight: f64,
+    importance: f64,
+}
+
+fn default_stump_rules() -> Vec<StumpRule> {
+    vec![
+        StumpRule { feature_idx: 8, feature_name: "composite_score".into(), threshold: 0.6, positive_weight: 0.15, negative_weight: -0.1, importance: 1.0 },
+        StumpRule { feature_idx: 6, feature_name: "momentum_vote".into(), threshold: 0.5, positive_weight: 0.12, negative_weight: -0.08, importance: 0.9 },
+        StumpRule { feature_idx: 7, feature_name: "volume_vote".into(), threshold: 0.5, positive_weight: 0.10, negative_weight: -0.05, importance: 0.8 },
+        StumpRule { feature_idx: 0, feature_name: "ema_vote".into(), threshold: 0.5, positive_weight: 0.08, negative_weight: -0.06, importance: 0.7 },
+        StumpRule { feature_idx: 3, feature_name: "supertrend_vote".into(), threshold: 0.5, positive_weight: 0.08, negative_weight: -0.06, importance: 0.7 },
+        StumpRule { feature_idx: 1, feature_name: "rsi_vote".into(), threshold: 0.4, positive_weight: 0.06, negative_weight: -0.04, importance: 0.5 },
+        StumpRule { feature_idx: 2, feature_name: "macd_vote".into(), threshold: 0.5, positive_weight: 0.07, negative_weight: -0.05, importance: 0.6 },
+        StumpRule { feature_idx: 9, feature_name: "regime".into(), threshold: 1.5, positive_weight: 0.05, negative_weight: -0.03, importance: 0.4 },
+        StumpRule { feature_idx: 14, feature_name: "news_sentiment".into(), threshold: 0.3, positive_weight: 0.04, negative_weight: -0.02, importance: 0.3 },
+        StumpRule { feature_idx: 15, feature_name: "options_pcr".into(), threshold: 1.0, positive_weight: 0.05, negative_weight: -0.03, importance: 0.4 },
+        StumpRule { feature_idx: 18, feature_name: "scan_confirmation".into(), threshold: 3.0, positive_weight: 0.08, negative_weight: -0.02, importance: 0.6 },
+    ]
+}
+
+fn train_stumps(data: &[TrainingRow]) -> Vec<StumpRule> {
+    let features_count = 19;
+    let mut rules = Vec::new();
+
+    for idx in 0..features_count {
+        let mut values: Vec<(f64, f64)> = data.iter().map(|row| {
+            let fv = feature_vec(&row.features);
+            let val = if idx < fv.len() { fv[idx] } else { 0.0 };
+            (val, row.outcome)
+        }).collect();
+        values.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut best_threshold = 0.5;
+        let mut best_gini = f64::MAX;
+
+        let step = (values.len() / 20).max(1);
+        for i in (0..values.len()).step_by(step) {
+            let threshold = values[i].0;
+            let (left_w, left_t, right_w, right_t) = values.iter().fold((0.0, 0.0, 0.0, 0.0), |acc, &(v, o)| {
+                if v <= threshold {
+                    (acc.0 + o, acc.1 + 1.0, acc.2, acc.3)
+                } else {
+                    (acc.0, acc.1, acc.2 + o, acc.3 + 1.0)
+                }
+            });
+
+            let left_p = if left_t > 0.0 { left_w / left_t } else { 0.5 };
+            let right_p = if right_t > 0.0 { right_w / right_t } else { 0.5 };
+            let left_gini = left_p * (1.0 - left_p);
+            let right_gini = right_p * (1.0 - right_p);
+            let weighted = (left_t * left_gini + right_t * right_gini) / (left_t + right_t).max(1.0);
+
+            if weighted < best_gini {
+                best_gini = weighted;
+                best_threshold = threshold;
+            }
+        }
+
+        let (above_wins, above_total, below_wins, below_total) = values.iter()
+            .fold((0.0f64, 0.0f64, 0.0f64, 0.0f64), |acc, &(v, o)| {
+                if v > best_threshold {
+                    (acc.0 + o, acc.1 + 1.0, acc.2, acc.3)
+                } else {
+                    (acc.0, acc.1, acc.2 + o, acc.3 + 1.0)
+                }
+            });
+
+        let pos_wr = if above_total > 0.0 { above_wins / above_total } else { 0.5 };
+        let neg_wr = if below_total > 0.0 { below_wins / below_total } else { 0.5 };
+        let importance = (pos_wr - neg_wr).abs();
+
+        let name = match idx {
+            0 => "ema_vote", 1 => "rsi_vote", 2 => "macd_vote", 3 => "supertrend_vote",
+            4 => "bollinger_vote", 5 => "vwap_vote", 6 => "momentum_vote", 7 => "volume_vote",
+            8 => "composite_score", 9 => "regime", 10 => "hour_of_day", 11 => "day_of_week",
+            12 => "sector_score", 13 => "cap_category", 14 => "news_sentiment",
+            15 => "options_pcr", 16 => "options_iv_rank", 17 => "futures_basis",
+            18 => "scan_confirmation", _ => "unknown",
+        };
+
+        rules.push(StumpRule {
+            feature_idx: idx,
+            feature_name: name.to_string(),
+            threshold: (best_threshold * 1000.0).round() / 1000.0,
+            positive_weight: ((pos_wr - 0.5) * 0.3 * 1000.0).round() / 1000.0,
+            negative_weight: ((neg_wr - 0.5) * 0.3 * 1000.0).round() / 1000.0,
+            importance: (importance * 1000.0).round() / 1000.0,
+        });
+    }
+
+    rules.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+    rules
 }
 
 #[cfg(test)]

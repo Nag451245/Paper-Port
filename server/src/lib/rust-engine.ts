@@ -1018,6 +1018,182 @@ export async function isKillSwitchActive(): Promise<boolean> {
   }
 }
 
+// ─── Strategy Performance Engine ────────────────────────────────────
+
+export interface StrategyHealth {
+  strategy_id: string;
+  total_signals: number;
+  recent_signals: number;
+  win_rate_all: number;
+  win_rate_recent: number;
+  avg_pnl_pct: number;
+  sharpe: number;
+  consistency_score: number;
+  health_score: number;
+  is_retired: boolean;
+  retirement_reason: string | null;
+  regime_performance: Record<string, { wins: number; losses: number; win_rate: number; avg_pnl: number }>;
+}
+
+export async function enginePerformanceSummary(): Promise<Record<string, unknown> | null> {
+  try {
+    return await engineHttpGet('/api/performance/summary', 15_000) as Record<string, unknown>;
+  } catch { return null; }
+}
+
+export async function engineStrategyHealth(strategy?: string): Promise<StrategyHealth[] | StrategyHealth | null> {
+  try {
+    const path = strategy ? `/api/performance/health/${encodeURIComponent(strategy)}` : '/api/performance/health';
+    return await engineHttpGet(path, 15_000) as StrategyHealth[] | StrategyHealth;
+  } catch { return null; }
+}
+
+export async function engineCalibrateConfidence(confidence: number, strategy: string, regime = 'neutral'): Promise<{ raw: number; calibrated: number; regime_adjusted: number } | null> {
+  try {
+    const { env } = await import('../config.js');
+    const url = `${env.RUST_ENGINE_URL}/api/performance/calibrate`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 10_000);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confidence, strategy, regime }),
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    return await res.json() as { raw: number; calibrated: number; regime_adjusted: number };
+  } catch { return null; }
+}
+
+export async function engineRecordOutcome(outcome: {
+  symbol: string; strategy: string; direction: string;
+  predicted_confidence: number; entry_price: number; exit_price: number;
+  pnl_pct: number; won: boolean; regime: string;
+}): Promise<boolean> {
+  try {
+    const { env } = await import('../config.js');
+    const url = `${env.RUST_ENGINE_URL}/api/performance/record`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 10_000);
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ outcome: { ...outcome, timestamp: new Date().toISOString() } }),
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    return true;
+  } catch { return false; }
+}
+
+export async function engineActiveStrategies(): Promise<{ active: string[]; retired: Array<[string, string]> } | null> {
+  try {
+    return await engineHttpGet('/api/performance/strategies', 10_000) as { active: string[]; retired: Array<[string, string]> };
+  } catch { return null; }
+}
+
+// ─── Smart Execution Engine ─────────────────────────────────────────
+
+export interface ExecutionPlan {
+  symbol: string;
+  side: string;
+  total_qty: number;
+  recommended_algo: string;
+  num_slices: number;
+  slice_interval_secs: number;
+  urgency: number;
+  estimated_slippage_bps: number;
+  estimated_market_impact_bps: number;
+  estimated_total_cost_bps: number;
+  optimal_execution_window: {
+    avoid_open_minutes: number;
+    avoid_close_minutes: number;
+    preferred_start_ist: string;
+    preferred_end_ist: string;
+    reason: string;
+  };
+  risk_warnings: string[];
+  confidence: number;
+}
+
+export interface ExecutionQuality {
+  symbol: string;
+  side: string;
+  qty: number;
+  avg_fill_price: number;
+  vwap: number;
+  arrival_price: number;
+  implementation_shortfall_bps: number;
+  vwap_slippage_bps: number;
+  market_impact_bps: number;
+  timing_cost_bps: number;
+  total_cost_bps: number;
+  grade: string;
+}
+
+export async function engineExecutionPlan(params: {
+  symbol: string; side: string; quantity: number; price: number;
+  avg_daily_volume?: number; daily_volatility?: number;
+  urgency?: string; signal_confidence?: number;
+}): Promise<ExecutionPlan | null> {
+  try {
+    const { env } = await import('../config.js');
+    const url = `${env.RUST_ENGINE_URL}/api/execution/plan`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 10_000);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    return await res.json() as ExecutionPlan;
+  } catch { return null; }
+}
+
+export async function engineExecutionQuality(params: {
+  symbol: string; side: string; qty: number;
+  avg_fill_price: number; arrival_price: number;
+  vwap?: number; avg_daily_volume?: number;
+}): Promise<ExecutionQuality | null> {
+  try {
+    const { env } = await import('../config.js');
+    const url = `${env.RUST_ENGINE_URL}/api/execution/quality`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 10_000);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    return await res.json() as ExecutionQuality;
+  } catch { return null; }
+}
+
+export async function engineOptimalSize(params: {
+  price: number; capital: number; risk_pct?: number;
+  stop_loss_pct?: number; avg_daily_volume?: number;
+  daily_volatility?: number; confidence?: number;
+}): Promise<Record<string, unknown> | null> {
+  try {
+    const { env } = await import('../config.js');
+    const url = `${env.RUST_ENGINE_URL}/api/execution/optimal_size`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 10_000);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    return await res.json() as Record<string, unknown>;
+  } catch { return null; }
+}
+
 export function _getCircuitBreakerState() {
   return { crashCount, lastCrashTime, circuitOpenSince, MAX_CRASHES, CRASH_WINDOW_MS, CIRCUIT_COOLDOWN_MS };
 }
