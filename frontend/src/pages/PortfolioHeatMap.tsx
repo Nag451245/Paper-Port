@@ -66,14 +66,14 @@ const MOCK_PNL_WATERFALL = [
   { symbol: 'SBIN', pnl: 720, cumulative: 3970 },
 ];
 
-const MOCK_CORRELATION = [
+const MOCK_CORRELATION: string[][] = [
   ['', 'RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK', 'SBIN'],
-  ['RELIANCE', 1, 0.45, 0.62, 0.38, 0.71, 0.58],
-  ['TCS', 0.45, 1, 0.52, 0.78, 0.41, 0.35],
-  ['HDFCBANK', 0.62, 0.52, 1, 0.48, 0.85, 0.72],
-  ['INFY', 0.38, 0.78, 0.48, 1, 0.42, 0.31],
-  ['ICICIBANK', 0.71, 0.41, 0.85, 0.42, 1, 0.68],
-  ['SBIN', 0.58, 0.35, 0.72, 0.31, 0.68, 1],
+  ['RELIANCE', '1', '0.45', '0.62', '0.38', '0.71', '0.58'],
+  ['TCS', '0.45', '1', '0.52', '0.78', '0.41', '0.35'],
+  ['HDFCBANK', '0.62', '0.52', '1', '0.48', '0.85', '0.72'],
+  ['INFY', '0.38', '0.78', '0.48', '1', '0.42', '0.31'],
+  ['ICICIBANK', '0.71', '0.41', '0.85', '0.42', '1', '0.68'],
+  ['SBIN', '0.58', '0.35', '0.72', '0.31', '0.68', '1'],
 ];
 
 interface HeatMapResponse {
@@ -231,7 +231,7 @@ export default function PortfolioHeatMap() {
                   <YAxis tick={{ fill: '#9ca3af', fontSize: 10 }} tickFormatter={(v) => v.toFixed(2)} />
                   <Tooltip
                     contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151', borderRadius: 8 }}
-                    formatter={(value: number) => [value.toFixed(2), 'Beta']}
+                    formatter={(value: any) => [Number(value).toFixed(2), 'Beta']}
                   />
                   <Bar dataKey="beta" radius={[3, 3, 0, 0]}>
                     {betaData.byPosition.map((_, i) => (
@@ -313,7 +313,7 @@ export default function PortfolioHeatMap() {
                   <YAxis tick={{ fill: '#9ca3af', fontSize: 10 }} tickFormatter={(v) => `₹${(v / 1000).toFixed(0)}K`} />
                   <Tooltip
                     contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151', borderRadius: 8 }}
-                    formatter={(value: number) => [formatINRCompact(value), 'P&L']}
+                    formatter={(value: any) => [formatINRCompact(Number(value)), 'P&L']}
                   />
                   <Bar dataKey="pnl" radius={[3, 3, 0, 0]}>
                     {pnlWaterfall.map((entry, i) => (
