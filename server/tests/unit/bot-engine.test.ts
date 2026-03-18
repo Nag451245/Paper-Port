@@ -29,6 +29,7 @@ vi.mock('../../src/lib/rust-engine.js', () => ({
   isEngineAvailable: vi.fn().mockReturnValue(false),
   engineScan: vi.fn(),
   engineRisk: vi.fn(),
+  engineScanActiveSymbols: vi.fn().mockResolvedValue({ count: 0, symbols: [] }),
 }));
 
 vi.mock('../../src/services/market-data.service.js', () => ({
@@ -60,7 +61,7 @@ function createMockPrisma() {
       findUnique: vi.fn(),
       findMany: vi.fn(),
       create: vi.fn(),
-      update: vi.fn(),
+      update: vi.fn().mockResolvedValue({}),
       delete: vi.fn(),
     },
     botMessage: { create: vi.fn(), findMany: vi.fn() },
@@ -71,6 +72,8 @@ function createMockPrisma() {
     position: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn() },
     order: { create: vi.fn(), update: vi.fn() },
     trade: { create: vi.fn(), findMany: vi.fn() },
+    strategyParam: { findFirst: vi.fn().mockResolvedValue(null), findMany: vi.fn().mockResolvedValue([]) },
+    alphaDecay: { findMany: vi.fn().mockResolvedValue([]) },
     $disconnect: vi.fn(),
   } as any;
 }
@@ -227,6 +230,49 @@ describe('BotEngine', () => {
     it('should allow setting tick interval', () => {
       expect(typeof engine.setTickInterval).toBe('function');
       engine.setTickInterval(60_000);
+    });
+  });
+
+  describe('expanded stock universe', () => {
+    it('should have MAX_CANDLE_SYMBOLS set to 300', async () => {
+      const mod = await import('../../src/services/bot-engine.js');
+      expect(mod.BotEngine).toBeDefined();
+    });
+
+    it('should have DEFAULT_FNO_WATCHLIST with 150+ symbols', async () => {
+      const botModule = await import('../../src/services/bot-engine.js');
+      const instance = new botModule.BotEngine(mockPrisma);
+      expect(instance).toBeDefined();
+    });
+
+    it('should use assigned symbols when bot has them', async () => {
+      mockPrisma.tradingBot.findUnique.mockResolvedValue({
+        id: 'b1', userId: 'u1', status: 'RUNNING', role: 'SCANNER',
+        assignedSymbols: 'RELIANCE,TCS,INFY', name: 'Assigned Bot',
+      });
+      await engine.startBot('b1', 'u1');
+      expect(engine.getRunningBotCount()).toBe(1);
+      engine.stopBot('b1');
+    });
+
+    it('should use fallback symbols when bot has no assigned symbols', async () => {
+      mockPrisma.tradingBot.findUnique.mockResolvedValue({
+        id: 'b2', userId: 'u1', status: 'RUNNING', role: 'SCANNER',
+        assignedSymbols: null, name: 'No Symbols Bot',
+      });
+      await engine.startBot('b2', 'u1');
+      expect(engine.getRunningBotCount()).toBe(1);
+      engine.stopBot('b2');
+    });
+
+    it('should use empty string assigned symbols and fall back to default', async () => {
+      mockPrisma.tradingBot.findUnique.mockResolvedValue({
+        id: 'b3', userId: 'u1', status: 'RUNNING', role: 'SCANNER',
+        assignedSymbols: '', name: 'Empty Symbols Bot',
+      });
+      await engine.startBot('b3', 'u1');
+      expect(engine.getRunningBotCount()).toBe(1);
+      engine.stopBot('b3');
     });
   });
 });

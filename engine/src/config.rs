@@ -525,8 +525,8 @@ pub struct BreezeRateLimitConfig {
 impl Default for BreezeRateLimitConfig {
     fn default() -> Self {
         Self {
-            max_requests_per_sec: 2.5,
-            burst_capacity: 5,
+            max_requests_per_sec: 8.0,
+            burst_capacity: 25,
         }
     }
 }
@@ -551,10 +551,10 @@ impl Default for ContinuousScanConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            sector_rotation_interval_secs: 600,
-            futures_scan_interval_secs: 1800,
-            news_fetch_interval_secs: 900,
-            signal_ttl_secs: 7200,
+            sector_rotation_interval_secs: 300,
+            futures_scan_interval_secs: 900,
+            news_fetch_interval_secs: 600,
+            signal_ttl_secs: 14400,
         }
     }
 }
@@ -663,10 +663,10 @@ impl Default for PremarketConfig {
             scan_interval: "1day".into(),
             aggressiveness: "medium".into(),
             min_signal_confidence: 0.50,
-            max_signals: 20,
-            concurrency: 15,
+            max_signals: 50,
+            concurrency: 30,
             position_sizing_mode: "nav_pct".into(),
-            max_auto_orders: 10,
+            max_auto_orders: 25,
             execution_exchange: "NSE".into(),
             execution_product: "intraday".into(),
         }
@@ -784,7 +784,7 @@ impl Default for LiveExecutorConfig {
             strategies: vec!["ema_crossover".into()],
             min_confidence: 0.55,
             auto_execute: true,
-            max_positions: 10,
+            max_positions: 25,
             default_qty: 1,
             exchange: "NSE".into(),
             product: "intraday".into(),

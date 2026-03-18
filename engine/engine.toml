@@ -117,14 +117,22 @@ symbols = [
     "BSE", "CDSL", "NBCC", "NHPC", "LUPIN", "ABB",
     "BIOCON", "COLPAL", "CONCOR", "PIIND", "HUDCO",
     "VOLTAS", "HINDZINC", "LICI",
+    # Additional high-activity F&O stocks
+    "IRFC", "IRCTC", "IDEA", "INDUSTOWER", "MRF",
+    "NAUKRI", "PAYTM", "SOLARINDS", "SUPREMEIND", "ZYDUSLIFE",
+    "IPCALAB", "LAURUSLABS", "METROPOLIS", "MPHASIS", "NAVINFLUOR",
+    "COFORGE", "DEEPAKNTR", "ESCORTS", "HAVELLS", "MARICO",
+    "ATUL", "BALKRISIND", "CANFINHOME", "CUB", "GRANULES",
+    "GNFC", "INDIACEM", "IGL", "MGL", "PVRINOX",
+    "RAMCOCEM", "SYNGENE", "TATACHEM", "UBL", "ALKEM",
 ]
 
 [continuous_scan]
 enabled = true
-sector_rotation_interval_secs = 600   # Every 10 minutes
-futures_scan_interval_secs = 1800     # Every 30 minutes
-news_fetch_interval_secs = 900       # Every 15 minutes
-signal_ttl_secs = 7200               # 2 hours
+sector_rotation_interval_secs = 300   # Every 5 minutes
+futures_scan_interval_secs = 900      # Every 15 minutes
+news_fetch_interval_secs = 600        # Every 10 minutes
+signal_ttl_secs = 14400               # 4 hours
 
 [persistence]
 enabled = true

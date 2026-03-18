@@ -1169,18 +1169,53 @@ def _classify_cap(symbol):
     return "mid"
 
 
+def _fetch_nse_equity_list():
+    """Fetch the full NSE equity list (~3000+ stocks) from NSE's public CSV endpoint.
+    Falls back gracefully if the endpoint is unavailable."""
+    symbols = set()
+    urls = [
+        "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
+        "https://www1.nseindia.com/content/equities/EQUITY_L.csv",
+    ]
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "text/csv",
+            })
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                reader = csv.DictReader(io.StringIO(raw))
+                for row in reader:
+                    sym = row.get("SYMBOL", row.get("Symbol", "")).strip().upper()
+                    if sym and len(sym) >= 2:
+                        symbols.add(sym)
+            if symbols:
+                print(f"[Breeze Bridge] Fetched {len(symbols)} NSE equities from {url}")
+                return symbols
+        except Exception as e:
+            print(f"[Breeze Bridge] NSE equity list fetch failed ({url}): {e}")
+    return symbols
+
+
 def get_nse_stock_list():
-    """Build a dynamic stock universe from the Breeze SDK stock script data + NSE lot sizes.
-    Returns all NSE equity stocks that the SDK knows about, enriched with sector/cap/FnO data.
-    Does NOT require API calls — uses locally cached SDK data."""
+    """Build a comprehensive stock universe from multiple sources:
+    1. NSE public equity list (~3000+ stocks)
+    2. Breeze SDK stock script data
+    3. F&O lot sizes
+    4. Hardcoded known stocks
+    Returns all NSE equity stocks enriched with sector/cap/FnO data."""
     lot_sizes = get_lot_sizes()
     fno_symbols = set(lot_sizes.keys())
 
-    # Extract NSE equity stocks from the Breeze SDK script dictionaries
     nse_stocks = set()
 
+    # Source 1: Full NSE equity list (3000+ stocks)
+    nse_equities = _fetch_nse_equity_list()
+    nse_stocks.update(nse_equities)
+
+    # Source 2: Breeze SDK script dictionaries
     if breeze_instance and breeze_instance.stock_script_dict_list:
-        # Dict index 0 = NSE equity, 1 = BSE equity, 4 = NFO, etc.
         for dict_idx in [0, 1]:
             try:
                 stock_dict = breeze_instance.stock_script_dict_list[dict_idx]
@@ -1191,17 +1226,20 @@ def get_nse_stock_list():
             except (IndexError, AttributeError):
                 pass
 
-    # Also add all FnO symbols (from lot sizes)
+    # Source 3: All FnO symbols
     nse_stocks.update(fno_symbols)
 
-    # Also add all hardcoded breeze codes (known tradeable stocks)
+    # Source 4: All hardcoded breeze codes
     nse_stocks.update(k.upper() for k in _HARDCODED_BREEZE_CODES.keys())
 
-    # Build the result list
+    # Filter out indices and very short tickers
+    skip_prefixes = ("NIFTY", "BANKNIFTY", "CNXBAN", "NIFFIN", "NIFSEL", "NIFNEX", "SENSEX")
     stocks = []
     for sym in sorted(nse_stocks):
-        if len(sym) < 2 or sym.startswith("NIFTY") or sym.startswith("BANK"):
-            continue  # Skip indices
+        if len(sym) < 2:
+            continue
+        if any(sym.startswith(p) for p in skip_prefixes):
+            continue
         is_fno = sym in fno_symbols
         lot = lot_sizes.get(sym)
         sector = _SECTOR_MAP.get(sym, "Other")

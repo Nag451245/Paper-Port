@@ -953,6 +953,30 @@ export async function engineMarketDataPrices(): Promise<unknown> {
   return engineHttpGet('/api/market_data/prices', 10_000);
 }
 
+export async function engineScanActiveSymbols(): Promise<{ count: number; symbols: string[] }> {
+  const res = await engineHttpGet('/api/scan/active_symbols', 10_000);
+  const data = res as { count?: number; symbols?: string[] };
+  return { count: data?.count ?? 0, symbols: data?.symbols ?? [] };
+}
+
+export async function engineScanStatus(): Promise<unknown> {
+  return engineHttpGet('/api/scan/status', 15_000);
+}
+
+export async function engineUniverseRefresh(): Promise<unknown> {
+  const { env } = await import('../config.js');
+  const baseUrl = env.RUST_ENGINE_URL;
+  const url = `${baseUrl}/api/universe/refresh`;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 60_000);
+  try {
+    const resp = await fetch(url, { method: 'POST', signal: ac.signal });
+    return await resp.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Non-blocking check: returns true if the Rust engine kill switch is active.
  * Returns false if the engine is unreachable (fail-open to avoid breaking existing flow).

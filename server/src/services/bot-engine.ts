@@ -3,7 +3,7 @@ import { chatCompletionJSON, getOpenAIStatus } from '../lib/openai.js';
 import { MarketDataService, type MarketMover } from './market-data.service.js';
 import { TradeService } from './trade.service.js';
 import { OrderManagementService } from './oms.service.js';
-import { engineScan, engineRisk, engineSignals, isEngineAvailable, type ScanSignal } from '../lib/rust-engine.js';
+import { engineScan, engineRisk, engineSignals, isEngineAvailable, engineScanActiveSymbols, type ScanSignal } from '../lib/rust-engine.js';
 import { calculateMaxPain, calculateIVPercentile, calculateGreeks } from './options.service.js';
 import { TargetTracker, type TargetProgress } from './target-tracker.service.js';
 import { GlobalMarketService } from './global-market.service.js';
@@ -32,7 +32,56 @@ const DEFAULT_TICK_INTERVAL = 30_000;         // 30 seconds — Rust scan is fas
 const DEFAULT_SIGNAL_INTERVAL = 2 * 60_000;   // 2 minutes
 const DEFAULT_MARKET_SCAN_INTERVAL = 3 * 60_000; // 3 minutes
 const MAX_CONCURRENT_BOTS = 10;
-const MAX_CANDLE_SYMBOLS = 30;
+const MAX_CANDLE_SYMBOLS = 300;
+
+const DEFAULT_FNO_WATCHLIST = [
+  // Indices
+  'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY',
+  // Full F&O universe
+  'AARTIIND', 'ABB', 'ABBOTINDIA', 'ABCAPITAL', 'ABFRL',
+  'ACC', 'ADANIENT', 'ADANIGREEN', 'ADANIPORTS', 'ALKEM',
+  'AMBUJACEM', 'APOLLOHOSP', 'APOLLOTYRE', 'ASHOKLEY', 'ASIANPAINT',
+  'ASTRAL', 'ATUL', 'AUROPHARMA', 'AXISBANK', 'BAJAJ-AUTO',
+  'BAJAJFINSV', 'BAJFINANCE', 'BALKRISIND', 'BALRAMCHIN', 'BANDHANBNK',
+  'BANKBARODA', 'BATAINDIA', 'BEL', 'BERGEPAINT', 'BHARATFORG',
+  'BHARTIARTL', 'BHEL', 'BIOCON', 'BOSCHLTD', 'BPCL',
+  'BRITANNIA', 'BSOFT', 'CANBK', 'CANFINHOME', 'CHAMBLFERT',
+  'CHOLAFIN', 'CIPLA', 'COALINDIA', 'COFORGE', 'COLPAL',
+  'CONCOR', 'COROMANDEL', 'CROMPTON', 'CUB', 'CUMMINSIND',
+  'DABUR', 'DALBHARAT', 'DEEPAKNTR', 'DIVISLAB',
+  'DIXON', 'DLF', 'DRREDDY', 'EICHERMOT', 'ESCORTS',
+  'EXIDEIND', 'FEDERALBNK', 'GAIL', 'GLENMARK', 'GMRAIRPORT',
+  'GNFC', 'GODREJCP', 'GODREJPROP', 'GRANULES', 'GRASIM',
+  'GUJGASLTD', 'HAL', 'HAVELLS', 'HCLTECH',
+  'HDFCAMC', 'HDFCBANK', 'HDFCLIFE', 'HEROMOTOCO', 'HINDALCO',
+  'HINDCOPPER', 'HINDPETRO', 'HINDUNILVR',
+  'ICICIBANK', 'ICICIGI', 'ICICIPRULI', 'IDEA',
+  'IDFCFIRSTB', 'IEX', 'IGL', 'INDHOTEL', 'INDIACEM',
+  'INDIAMART', 'INDIGO', 'INDUSINDBK', 'INDUSTOWER', 'INFY',
+  'IOC', 'IPCALAB', 'IRCTC', 'ITC',
+  'JINDALSTEL', 'JKCEMENT', 'JSWSTEEL', 'JUBLFOOD', 'KOTAKBANK',
+  'LALPATHLAB', 'LAURUSLABS', 'LICHSGFIN', 'LT', 'LTIM',
+  'LTTS', 'LUPIN', 'M&M', 'M&MFIN', 'MANAPPURAM',
+  'MARICO', 'MARUTI', 'MCX', 'METROPOLIS',
+  'MFSL', 'MGL', 'MOTHERSON', 'MPHASIS', 'MRF',
+  'MUTHOOTFIN', 'NATIONALUM', 'NAUKRI', 'NAVINFLUOR', 'NESTLEIND',
+  'NMDC', 'NTPC', 'OBEROIRLTY', 'OFSS', 'ONGC',
+  'PAGEIND', 'PEL', 'PERSISTENT', 'PETRONET', 'PFC',
+  'PIDILITIND', 'PIIND', 'PNB', 'POLYCAB', 'POWERGRID',
+  'PVRINOX', 'RAMCOCEM', 'RBLBANK', 'RECLTD', 'RELIANCE',
+  'SAIL', 'SBICARD', 'SBILIFE', 'SBIN', 'SHREECEM',
+  'SHRIRAMFIN', 'SIEMENS', 'SRF', 'SUNPHARMA', 'SUNTV',
+  'SYNGENE', 'TATACHEM', 'TATACOMM', 'TATACONSUM', 'TATAMOTORS',
+  'TATAPOWER', 'TATASTEEL', 'TCS', 'TECHM', 'TITAN',
+  'TORNTPHARM', 'TRENT', 'TVSMOTOR', 'UBL', 'ULTRACEMCO',
+  'UPL', 'VEDL', 'VOLTAS', 'WIPRO', 'ZEEL', 'ZYDUSLIFE',
+  // Additional high-activity stocks
+  'JIOFIN', 'JSWENERGY', 'KALYANKJIL', 'KPITTECH', 'TATAELXSI',
+  'TATATECH', 'TORNTPOWER', 'YESBANK', 'ETERNAL', 'BDL', 'FORTIS',
+  'KAYNES', 'BSE', 'CDSL', 'NBCC', 'NHPC', 'HUDCO', 'LICI',
+  'HINDZINC', 'ZOMATO', 'DELHIVERY', 'MAXHEALTH', 'SONACOMS',
+  'IRFC', 'PAYTM',
+].join(',');
 
 interface RunningBot {
   botId: string;
@@ -743,16 +792,12 @@ export class BotEngine {
 
     const start = Date.now();
     try {
-      let { gainers, losers } = await this.marketData.getTopMovers(15);
+      let { gainers, losers } = await this.marketData.getTopMovers(50);
 
       if (gainers.length === 0 && losers.length === 0) {
-        const FALLBACK_NIFTY50 = [
-          'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN', 'BHARTIARTL',
-          'KOTAKBANK', 'ITC', 'LT', 'AXISBANK', 'BAJFINANCE', 'WIPRO', 'HCLTECH',
-          'MARUTI', 'TATAMOTORS', 'SUNPHARMA', 'TITAN',
-        ];
-        log.warn('Scraper returned no movers — using NIFTY 50 fallback watchlist');
-        gainers = FALLBACK_NIFTY50.map(symbol => ({
+        const fallbackSymbols = DEFAULT_FNO_WATCHLIST.split(',').slice(0, 50);
+        log.warn('Scraper returned no movers — using F&O fallback watchlist');
+        gainers = fallbackSymbols.map(symbol => ({
           symbol, name: symbol, ltp: 0, change: 0, changePercent: 0, volume: 0,
           open: 0, high: 0, low: 0, previousClose: 0,
         }));
@@ -1493,7 +1538,7 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     } catch { /* best effort */ }
   }
 
-  // ---- Fetch candles for a list of symbols ----
+  // ---- Fetch candles for a list of symbols (batch-parallel) ----
   private async fetchCandles(
     symbols: string[],
     userId: string,
@@ -1501,44 +1546,41 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     const toDate = istDateStr();
     const fromDate = istDaysAgo(10);
     const MIN_BARS = 15;
+    const BATCH_SIZE = 20;
 
+    const symbolsToFetch = symbols.slice(0, MAX_CANDLE_SYMBOLS);
     const results: Array<{ symbol: string; candles: Array<{ open: number; close: number; high: number; low: number; volume: number }> }> = [];
 
-    for (const sym of symbols.slice(0, MAX_CANDLE_SYMBOLS)) {
-      try {
-        let bars = await this.marketData.getHistory(sym, '5m', fromDate, toDate, userId);
+    for (let i = 0; i < symbolsToFetch.length; i += BATCH_SIZE) {
+      const batch = symbolsToFetch.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.allSettled(
+        batch.map(async (sym) => {
+          let bars = await this.marketData.getHistory(sym, '5m', fromDate, toDate, userId);
 
-        if (bars.length < MIN_BARS) {
-          bars = await this.marketData.getHistory(sym, '15m', fromDate, toDate, userId);
-          if (bars.length >= MIN_BARS) {
-            console.log(`[BotEngine] fetchCandles: ${sym} used 15m fallback (${bars.length} bars)`);
+          if (bars.length < MIN_BARS) {
+            bars = await this.marketData.getHistory(sym, '15m', fromDate, toDate, userId);
           }
-        }
 
-        if (bars.length < MIN_BARS) {
-          bars = await this.marketData.getHistory(sym, '1d', istDaysAgo(60), toDate, userId);
-          if (bars.length >= MIN_BARS) {
-            console.log(`[BotEngine] fetchCandles: ${sym} used daily fallback (${bars.length} bars)`);
+          if (bars.length < MIN_BARS) {
+            bars = await this.marketData.getHistory(sym, '1d', istDaysAgo(60), toDate, userId);
           }
-        }
 
-        if (bars.length >= MIN_BARS) {
-          const last50 = bars.slice(-50);
-          results.push({
-            symbol: sym,
-            candles: last50.map(b => ({
-              open: b.open,
-              close: b.close,
-              high: b.high,
-              low: b.low,
-              volume: b.volume,
-            })),
-          });
-        } else {
-          console.log(`[BotEngine] fetchCandles: ${sym} returned only ${bars.length} bars across all intervals (need ${MIN_BARS}+)`);
+          if (bars.length >= MIN_BARS) {
+            return {
+              symbol: sym,
+              candles: bars.slice(-50).map(b => ({
+                open: b.open, close: b.close, high: b.high, low: b.low, volume: b.volume,
+              })),
+            };
+          }
+          return null;
+        }),
+      );
+
+      for (const result of batchResults) {
+        if (result.status === 'fulfilled' && result.value) {
+          results.push(result.value);
         }
-      } catch (err) {
-        console.log(`[BotEngine] fetchCandles: ${sym} failed — ${(err as Error).message}`);
       }
     }
 
@@ -1569,8 +1611,17 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         return;
       }
 
-      const symbols = (bot.assignedSymbols || 'RELIANCE,TCS,INFY,HDFCBANK,ITC,SBIN,BHARTIARTL,ICICIBANK,KOTAKBANK,AXISBANK,LT,BAJFINANCE,TATAMOTORS,SUNPHARMA,TITAN,WIPRO,HCLTECH,MARUTI,NTPC,POWERGRID,ADANIENT,JSWSTEEL,TATASTEEL,HINDALCO,ONGC,NIFTY,BANKNIFTY')
+      const baseSymbols = (bot.assignedSymbols || DEFAULT_FNO_WATCHLIST)
         .split(',').map(s => s.trim()).filter(Boolean);
+
+      // Merge with Rust engine's dynamically discovered active movers
+      let engineActiveSymbols: string[] = [];
+      try {
+        const active = await engineScanActiveSymbols();
+        engineActiveSymbols = active.symbols || [];
+      } catch { /* non-fatal */ }
+
+      const symbols = [...new Set([...baseSymbols, ...engineActiveSymbols])];
 
       // Target-aware: check if trading is allowed
       let targetProgress: TargetProgress | null = null;
@@ -2693,10 +2744,11 @@ INSTRUCTIONS:
       const positionSymbols = [...new Set(positions.map(p => p.symbol))];
       let moverSymbols: string[] = [];
       try {
-        const { gainers, losers } = await this.marketData.getTopMovers(10);
+        const { gainers, losers } = await this.marketData.getTopMovers(50);
         moverSymbols = [...gainers, ...losers].map(m => m.symbol).filter(Boolean);
       } catch { /* non-fatal */ }
-      const watchSymbols = [...new Set([...positionSymbols, ...moverSymbols, ...AGENT_UNIVERSE])];
+      const defaultSymbols = DEFAULT_FNO_WATCHLIST.split(',');
+      const watchSymbols = [...new Set([...positionSymbols, ...moverSymbols, ...AGENT_UNIVERSE, ...defaultSymbols])];
 
       // Use IST (UTC+5:30) for today boundary to avoid timezone-related over-counting
       const nowIST = new Date(Date.now() + 5.5 * 3600_000);

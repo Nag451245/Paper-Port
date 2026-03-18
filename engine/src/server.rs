@@ -188,6 +188,9 @@ pub async fn run(state: SharedState) {
 
         .route("/api/strategies", get(list_strategies))
         .route("/api/signals/cache/{symbol}", get(cached_signals))
+        .route("/api/scan/active_symbols", get(scan_active_symbols))
+        .route("/api/scan/status", get(scan_status))
+        .route("/api/universe/refresh", post(universe_refresh))
         .route("/ws", get(ws_handler))
 
         .layer(middleware::from_fn_with_state(state.clone(), auth_layer))
@@ -924,6 +927,50 @@ async fn cached_signals(
 ) -> impl IntoResponse {
     let signals = state.get_cached_signals(&symbol);
     Json(signals)
+}
+
+// ─── Scan status & active symbols ─────────────────────────────────────
+
+async fn scan_active_symbols(
+    State(state): State<SharedState>,
+) -> impl IntoResponse {
+    let symbols: Vec<String> = state.signal_cache.iter()
+        .map(|e| e.value().symbol.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    Json(json!({
+        "count": symbols.len(),
+        "symbols": symbols,
+    }))
+}
+
+async fn scan_status(
+    State(state): State<SharedState>,
+) -> impl IntoResponse {
+    let ledger = &state.scan_ledger;
+    let status = crate::continuous_scanner::get_status(ledger, 50);
+    Json(json!({
+        "total_signals": status.total_signals,
+        "sector_count": status.sector_count,
+        "top_signals": status.top_signals,
+        "sector_scores": status.sector_scores,
+    }))
+}
+
+async fn universe_refresh(
+    State(state): State<SharedState>,
+) -> impl IntoResponse {
+    let bridge_url = state.config.broker.icici.bridge_url.clone();
+    let universe = state.universe.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        universe.refresh_from_bridge(&bridge_url)
+    }).await;
+    match result {
+        Ok(Ok(count)) => Json(json!({"status": "ok", "count": count})),
+        Ok(Err(e)) => Json(json!({"status": "error", "error": e})),
+        Err(e) => Json(json!({"status": "error", "error": format!("{}", e)})),
+    }
 }
 
 // ─── WebSocket ────────────────────────────────────────────────────────

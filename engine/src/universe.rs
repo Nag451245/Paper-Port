@@ -169,7 +169,7 @@ impl Universe {
             .filter_map(|v| serde_json::from_value(v.clone()).ok())
             .collect();
 
-        if new_stocks.len() < 10 {
+        if new_stocks.len() < 50 {
             return Err(format!("Bridge returned too few stocks ({}), keeping existing", new_stocks.len()));
         }
 

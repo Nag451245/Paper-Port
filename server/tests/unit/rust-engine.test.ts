@@ -73,4 +73,19 @@ describe('Rust Engine Bridge', () => {
     const module = await import('../../src/lib/rust-engine.js');
     expect(module.engineGreeks).toBeDefined();
   });
+
+  it('engineScanActiveSymbols should be exported', async () => {
+    const module = await import('../../src/lib/rust-engine.js');
+    expect(typeof module.engineScanActiveSymbols).toBe('function');
+  });
+
+  it('engineScanStatus should be exported', async () => {
+    const module = await import('../../src/lib/rust-engine.js');
+    expect(typeof module.engineScanStatus).toBe('function');
+  });
+
+  it('engineUniverseRefresh should be exported', async () => {
+    const module = await import('../../src/lib/rust-engine.js');
+    expect(typeof module.engineUniverseRefresh).toBe('function');
+  });
 });

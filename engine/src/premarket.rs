@@ -126,7 +126,7 @@ pub fn tier1_filter(
     use rayon::prelude::*;
 
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(concurrency.clamp(1, 50))
+        .num_threads(concurrency.clamp(1, 80))
         .build()
         .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
@@ -212,7 +212,7 @@ pub fn tier2_deep_scan(
     use rayon::prelude::*;
 
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(concurrency.clamp(1, 50))
+        .num_threads(concurrency.clamp(1, 80))
         .build()
         .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
