@@ -49,6 +49,7 @@ import { AuditTrailService } from './services/audit-trail.service.js';
 import { OMSRecoveryService } from './services/oms-recovery.service.js';
 import { TickStoreService } from './services/tick-store.service.js';
 import reportRoutes from './routes/reports.js';
+import guardianRoutes from './routes/guardian.js';
 import { isEngineAvailable, ensureEngineAvailable, startDaemon, stopDaemon } from './lib/rust-engine.js';
 
 export interface BuildAppOptions {
@@ -273,6 +274,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(commandCenterRoutes, { prefix: '/api/command' });
   await app.register(engineRoutes, { prefix: '/api/engine' });
   await app.register(reportRoutes, { prefix: '/api/reports' });
+  await app.register(guardianRoutes, { prefix: '/api/guardian' });
 
   await registerWebSocket(app);
   app.decorate('wsHub', wsHub);
@@ -504,6 +506,98 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   onEvent('PHASE_CHANGE', (e: AppEvent) => {
     if ('from' in e && 'to' in e) {
       wsHub.broadcastRegime({ regime: (e as any).to, confidence: 1.0, timestamp: (e as any).timestamp });
+    }
+  });
+
+  // ── Guardian AI Personality — Event Wiring ─────────────────────────
+  const { GuardianService } = await import('./services/guardian.service.js');
+  const guardianService = new GuardianService(getPrisma());
+
+  onEvent('POSITION_CLOSED', (e: AppEvent) => {
+    if ('userId' in e && 'symbol' in e) {
+      guardianService.onEvent((e as any).userId, {
+        type: 'trade_executed',
+        data: { symbol: (e as any).symbol, side: 'CLOSE', pnl: (e as any).pnl },
+      }).catch(() => {});
+    }
+  });
+  onEvent('SIGNAL_GENERATED', (e: AppEvent) => {
+    if ('userId' in e && 'confidence' in e) {
+      guardianService.onEvent((e as any).userId, {
+        type: 'signal_generated',
+        data: { symbol: (e as any).symbol, confidence: (e as any).confidence },
+      }).catch(() => {});
+    }
+  });
+  onEvent('RISK_VIOLATION', (e: AppEvent) => {
+    if ('userId' in e) {
+      guardianService.onEvent((e as any).userId, {
+        type: 'risk_violation',
+        data: { violations: (e as any).violations, severity: (e as any).severity },
+      }).catch(() => {});
+    }
+  });
+  onEvent('PHASE_CHANGE', (e: AppEvent) => {
+    if ('to' in e) {
+      const prisma = getPrisma();
+      prisma.user.findMany({ where: { isActive: true }, select: { id: true } })
+        .then(users => {
+          for (const u of users) {
+            guardianService.onEvent(u.id, {
+              type: 'regime_change',
+              data: { regime: (e as any).to, details: `Phase changed from ${(e as any).from} to ${(e as any).to}` },
+            }).catch(() => {});
+          }
+        }).catch(() => {});
+    }
+  });
+
+  // Guardian proactive thought generation — every 3 min during market hours
+  orchestrator.scheduleMarketDay('*/3 3-10 * * 1-5', async () => {
+    try {
+      const prisma = getPrisma();
+      const users = await prisma.user.findMany({ where: { isActive: true }, select: { id: true } });
+      for (const u of users) {
+        const state = await guardianService.getOrCreateState(u.id);
+        const lastThoughtAge = state.lastThoughtAt
+          ? Date.now() - new Date(state.lastThoughtAt).getTime()
+          : Infinity;
+        if (lastThoughtAge > 3 * 60 * 1000) {
+          await guardianService.getAwareness(u.id);
+          await guardianService.generateThought(u.id);
+        }
+      }
+    } catch (err) {
+      app.log.warn({ err }, '[Guardian] Proactive thought generation failed');
+    }
+  });
+
+  // Guardian morning boot greeting — 9:00 IST = 3:30 UTC
+  orchestrator.scheduleMarketDay('30 3 * * 1-5', async () => {
+    try {
+      const prisma = getPrisma();
+      const users = await prisma.user.findMany({ where: { isActive: true }, select: { id: true } });
+      for (const u of users) {
+        await guardianService.onEvent(u.id, { type: 'morning_boot', data: {} });
+      }
+    } catch (err) {
+      app.log.warn({ err }, '[Guardian] Morning boot greeting failed');
+    }
+  });
+
+  // Guardian mood update based on VIX — every 10 min during market hours
+  orchestrator.scheduleMarketDay('*/10 3-10 * * 1-5', async () => {
+    try {
+      const prisma = getPrisma();
+      const users = await prisma.user.findMany({ where: { isActive: true }, select: { id: true } });
+      for (const u of users) {
+        const awareness = await guardianService.getAwareness(u.id);
+        const vixMatch = awareness.match(/VIX[:\s]+([\d.]+)/i);
+        const vix = vixMatch ? parseFloat(vixMatch[1]) : undefined;
+        await guardianService.updateMood(u.id, { vix, isMarketOpen: true });
+      }
+    } catch (err) {
+      app.log.warn({ err }, '[Guardian] Mood update failed');
     }
   });
 

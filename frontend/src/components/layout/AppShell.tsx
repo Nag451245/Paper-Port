@@ -1,7 +1,21 @@
 import { useState } from 'react';
-import { Outlet } from 'react-router-dom';
+import { Outlet, useLocation } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import TopBar from './TopBar';
+import GuardianAvatar from '@/components/guardian/GuardianAvatar';
+import GuardianChatPanel from '@/components/guardian/GuardianChatPanel';
+import ThoughtBubble from '@/components/guardian/ThoughtBubble';
+import { useGuardianStore } from '@/stores/guardian';
+
+function GuardianPageTracker() {
+  const location = useLocation();
+  const setPageContext = useGuardianStore((s) => s.setPageContext);
+  const page = location.pathname.replace('/', '') || 'dashboard';
+  if (useGuardianStore.getState().pageContext !== page) {
+    setPageContext(page);
+  }
+  return null;
+}
 
 export default function AppShell() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -22,6 +36,11 @@ export default function AppShell() {
           <Outlet />
         </div>
       </main>
+
+      <GuardianPageTracker />
+      <GuardianAvatar />
+      <GuardianChatPanel />
+      <ThoughtBubble />
     </div>
   );
 }

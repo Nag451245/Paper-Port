@@ -51,6 +51,8 @@ model User {
   dailyPnlRecords  DailyPnlRecord[]
   eodReports       EODReport[]
   commandMessages  CommandMessage[]
+  guardianState    GuardianState?
+  guardianMemories GuardianMemory[]
 
   @@map("users")
 }
@@ -817,6 +819,45 @@ model ContractNote {
   @@index([userId, tradeDate])
   @@index([orderId])
   @@map("contract_notes")
+}
+
+// ─── Guardian AI Personality ────────────────────────────────────────
+
+model GuardianState {
+  id              String    @id @default(uuid())
+  userId          String    @unique @map("user_id")
+  mood            String    @default("COMPOSED")
+  moodIntensity   Float     @default(0.5) @map("mood_intensity")
+  awareness       Json      @default("{}")
+  currentFocus    String?   @map("current_focus")
+  marketStance    String?   @map("market_stance")
+  personalityData Json      @default("{}") @map("personality_data")
+  lastThought     String?   @map("last_thought")
+  lastThoughtAt   DateTime? @map("last_thought_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("guardian_state")
+}
+
+model GuardianMemory {
+  id         String    @id @default(uuid())
+  userId     String    @map("user_id")
+  memoryType String    @map("memory_type")
+  subject    String
+  content    String
+  sentiment  Float     @default(0)
+  importance Float     @default(0.5)
+  expiresAt  DateTime? @map("expires_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, memoryType])
+  @@index([userId, subject])
+  @@index([userId, createdAt])
+  @@map("guardian_memories")
 }
 
 // ─── Intelligent Trading Brain ──────────────────────────────────────

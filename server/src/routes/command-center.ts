@@ -3,6 +3,7 @@ import { TargetTracker } from '../services/target-tracker.service.js';
 import { EODReviewService } from '../services/eod-review.service.js';
 import { RiskService } from '../services/risk.service.js';
 import { AIAgentService } from '../services/ai-agent.service.js';
+import { GuardianService } from '../services/guardian.service.js';
 import { chatCompletion, chatCompletionJSON } from '../lib/openai.js';
 import { getPrisma } from '../lib/prisma.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
@@ -25,7 +26,7 @@ interface ChatResult {
 }
 
 let _botEngineRef: any = null;
-let _cachedServices: { targetTracker: TargetTracker; eodReview: EODReviewService; riskService: RiskService; aiAgentService: AIAgentService } | null = null;
+let _cachedServices: { targetTracker: TargetTracker; eodReview: EODReviewService; riskService: RiskService; aiAgentService: AIAgentService; guardianService: GuardianService } | null = null;
 
 function getServices() {
   if (!_cachedServices) {
@@ -35,6 +36,7 @@ function getServices() {
       eodReview: new EODReviewService(prisma),
       riskService: new RiskService(prisma),
       aiAgentService: new AIAgentService(prisma),
+      guardianService: new GuardianService(prisma),
     };
   }
   return _cachedServices;
@@ -434,89 +436,10 @@ Key intents:
       }
 
       default: {
-        const weekAgo = new Date();
-        weekAgo.setDate(weekAgo.getDate() - 7);
-
-        const [recentTrades, bots, signals, pnlRecords, chatHistory] = await Promise.all([
-          prisma.trade.findMany({
-            where: { portfolio: { userId }, exitTime: { gte: weekAgo } },
-            orderBy: { exitTime: 'desc' }, take: 20,
-            select: { symbol: true, side: true, netPnl: true, strategyTag: true },
-          }),
-          prisma.tradingBot.findMany({
-            where: { userId },
-            select: { name: true, role: true, status: true, lastAction: true, totalPnl: true, winRate: true, totalTrades: true },
-          }),
-          prisma.aITradeSignal.findMany({
-            where: { userId, createdAt: { gte: weekAgo } },
-            orderBy: { createdAt: 'desc' }, take: 10,
-            select: { symbol: true, signalType: true, compositeScore: true, status: true, outcomeTag: true },
-          }),
-          prisma.dailyPnlRecord.findMany({
-            where: { userId, date: { gte: weekAgo } },
-            orderBy: { date: 'desc' },
-            select: { date: true, netPnl: true, tradeCount: true, winCount: true, lossCount: true },
-          }),
-          prisma.commandMessage.findMany({
-            where: { userId }, orderBy: { createdAt: 'desc' }, take: 6,
-            select: { role: true, content: true },
-          }),
-        ]);
-
-        const ctx: string[] = [];
-        if (pnlRecords.length > 0) {
-          ctx.push(`DAILY P&L:\n${pnlRecords.map(d => `${new Date(d.date).toISOString().split('T')[0]}: ₹${Number(d.netPnl).toFixed(0)} (${d.winCount}W/${d.lossCount}L)`).join('\n')}`);
-        }
-        if (recentTrades.length > 0) {
-          const total = recentTrades.reduce((s, t) => s + Number(t.netPnl), 0);
-          const wins = recentTrades.filter(t => Number(t.netPnl) > 0).length;
-          ctx.push(`TRADES (${recentTrades.length} in 7d): P&L ₹${total.toFixed(0)} | WR ${((wins / recentTrades.length) * 100).toFixed(0)}%`);
-        }
-        if (bots.length > 0) {
-          ctx.push(`BOTS:\n${bots.map(b => `${b.name} (${b.role}): ${b.status} | ₹${Number(b.totalPnl).toFixed(0)} | WR ${(Number(b.winRate) * 100).toFixed(0)}% | ${b.lastAction || 'idle'}`).join('\n')}`);
-        }
-        if (signals.length > 0) {
-          ctx.push(`SIGNALS:\n${signals.slice(0, 6).map(s => `${s.signalType} ${s.symbol} ${(Number(s.compositeScore) * 100).toFixed(0)}% → ${s.status}`).join('\n')}`);
-        }
-
-        let rustCtx = '';
+        const { guardianService } = getServices();
         try {
-          const [active, optSigs] = await Promise.all([
-            engineScanActiveSymbols().catch(() => ({ count: 0, symbols: [] })),
-            engineOptionsSignals().catch(() => []),
-          ]);
-          if (active.count > 0) rustCtx += `\nRUST ENGINE: ${active.count} active symbols. Top: ${active.symbols.slice(0, 8).join(', ')}`;
-          const highConf = optSigs.filter(s => s.confidence >= 0.5);
-          if (highConf.length > 0) rustCtx += `\nOPTIONS SIGNALS: ${highConf.map(s => `${s.side.toUpperCase()} ${s.symbol} (${s.strategy}, ${(s.confidence * 100).toFixed(0)}%)`).join('; ')}`;
-        } catch { /* */ }
-
-        const history = chatHistory.reverse().map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }));
-
-        try {
-          responseContent = await chatCompletion({
-            messages: [
-              {
-                role: 'system',
-                content: `You are Capital Guard's AI trading assistant for Indian markets (NSE/BSE/MCX).
-
-RULES:
-- Be CONCISE. Use bullet points. Max 3-4 short paragraphs.
-- Reference actual data, numbers, symbols. No generic advice.
-- If asked about bots/engine, use the provided data.
-- You can tell users to "Scan RELIANCE" or "Options NIFTY" for live analysis.
-
-Date: ${istDateStr()}
-
-DATA:
-${ctx.length > 0 ? ctx.join('\n\n') : 'No trading data yet — new user.'}${rustCtx}`,
-              },
-              ...history,
-              { role: 'user', content: message },
-            ],
-            model: GEMINI_MODEL,
-            maxTokens: 768,
-            temperature: 0.5,
-          });
+          const result = await guardianService.chat(userId, message, 'command-center');
+          responseContent = result.content;
         } catch {
           responseContent = intent.response || 'Unable to process right now. Try "status", "bot status", or "scan SYMBOL".';
         }
