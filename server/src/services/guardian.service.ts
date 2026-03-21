@@ -66,7 +66,10 @@ interface SystemEvent {
     | 'target_hit'
     | 'regime_change'
     | 'eod_review'
-    | 'morning_boot';
+    | 'morning_boot'
+    | 'reconciliation_result'
+    | 'exposure_breach'
+    | 'drift_detected';
   data: Record<string, unknown>;
 }
 
@@ -190,10 +193,13 @@ REGIME PLAYBOOKS:
 
 YOU ARE WIRED INTO THESE SYSTEMS:
 - Bot Fleet: Scanner (finds setups), Analyst (provides depth), Executor (places trades), Risk Manager (blocks bad trades), Strategist (adapts to regime), Monitor (tracks live positions)
-- Rust Engine: 40+ technical indicators, multi-strategy scan, walk-forward optimization, strategy discovery, Monte Carlo simulation
-- Learning Engine: Nightly strategy review, regime detection via ML, parameter tuning, false positive tracking, alpha decay monitoring
+- Rust Engine: 40+ technical indicators, multi-strategy scan, walk-forward optimization, strategy discovery, Monte Carlo simulation, real-time position sizing with live market metrics
+- Learning Engine: Nightly strategy review, regime detection via ML, parameter tuning, false positive tracking, alpha decay monitoring, PSI-based concept drift detection (halts online learning when market regime shifts significantly)
 - 9-Gate Signal Scoring: g1_trend, g2_momentum, g3_volatility, g4_volume, g5_options_flow, g6_global_macro, g7_fii_dii, g8_sentiment, g9_risk. Score > 0.7 = high quality signal.
-- Risk System: Daily loss limits, position sizing (5% NAV max), sector concentration, drawdown circuit breaker, intraday square-off
+- Risk System: Daily loss limits, position sizing (5% NAV max), sector concentration, drawdown circuit breaker, intraday square-off, portfolio-level gross/net exposure limits, order rate limiting (10/sec, 100/min)
+- Execution Safety: Broker circuit breaker with exponential backoff retry, trailing stop-loss on tick loop, automated EOD OMS reconciliation (15:40 IST), PaperBroker with realistic cash deduction
+- Sentiment Engine: 50-stock symbol-to-company-name mapping, weighted keyword scoring (upgrade/downgrade ±0.4), normalized by article volume
+- Infrastructure: WebSocket backpressure with per-client queuing, expanded tick buffer (32K), optional OpenTelemetry distributed tracing
 
 When users ask about system capabilities, explain how these work. You know the architecture intimately.
 
@@ -806,9 +812,42 @@ Generate a single brief observation, insight, or alert (1-2 sentences max). Rule
           break;
         }
 
+        case 'reconciliation_result': {
+          const mismatches = Number(event.data.mismatchCount ?? 0);
+          const matched = Number(event.data.matched ?? 0);
+          if (mismatches > 0) {
+            await this.updateMood(userId, { anomalyDetected: true });
+            await this.memory.storeMemory(userId, 'trade_lesson', 'reconciliation',
+              `EOD reconciliation found ${mismatches} position mismatches (${matched} matched). Investigate immediately.`,
+              { importance: 0.9 },
+            );
+            await this.generateThought(userId);
+          }
+          break;
+        }
+
+        case 'exposure_breach': {
+          const exposureType = String(event.data.exposureType ?? 'gross');
+          const pct = Number(event.data.pct ?? 0);
+          await this.updateMood(userId, { drawdownPct: 2 });
+          await this.memory.storeMemory(userId, 'trade_lesson', 'risk_management',
+            `${exposureType} exposure limit breached at ${pct.toFixed(1)}%. Order rejected by risk system.`,
+            { importance: 0.7 },
+          );
+          break;
+        }
+
+        case 'drift_detected': {
+          const psiScore = Number(event.data.psiScore ?? 0);
+          await this.memory.evolveView(userId, 'ml_models',
+            `ML concept drift detected (PSI=${psiScore.toFixed(3)}). Online learning paused until regime stabilizes.`,
+          );
+          break;
+        }
+
         default: {
           const _exhaustive: never = event.type;
-          console.warn('[Chitti] Unknown event type:', _exhaustive);
+          console.warn('[Chitti] Unhandled event type:', _exhaustive);
         }
       }
     } catch (err) {

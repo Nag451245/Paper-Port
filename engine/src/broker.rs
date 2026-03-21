@@ -187,6 +187,7 @@ pub struct PaperBroker {
     orders: std::sync::Mutex<Vec<(String, OrderRequest, OrderResponse)>>,
     fills: std::sync::Mutex<Vec<BrokerPosition>>,
     cash: std::sync::atomic::AtomicU64,
+    initial_cash: f64,
     next_id: std::sync::atomic::AtomicU64,
 }
 
@@ -196,6 +197,7 @@ impl PaperBroker {
             orders: std::sync::Mutex::new(Vec::new()),
             fills: std::sync::Mutex::new(Vec::new()),
             cash: std::sync::atomic::AtomicU64::new(initial_cash.to_bits()),
+            initial_cash,
             next_id: std::sync::atomic::AtomicU64::new(1),
         }
     }
@@ -234,18 +236,42 @@ impl BrokerAdapter for PaperBroker {
             _ => fill_price * req.quantity.unsigned_abs() as f64,
         };
 
-        if req.side == OrderSide::Buy && required_capital > self.get_cash() {
-            return Ok(OrderResponse {
-                broker_order_id: order_id.clone(),
-                status: OrderStatus::Rejected,
-                filled_qty: 0,
-                avg_price: 0.0,
-                message: Some(format!(
-                    "Insufficient funds: need {:.2}, have {:.2} ({})",
-                    required_capital, self.get_cash(), req.asset_class
-                )),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-            });
+        if req.side == OrderSide::Buy {
+            loop {
+                let old_bits = self.cash.load(std::sync::atomic::Ordering::Acquire);
+                let old_cash = f64::from_bits(old_bits);
+                if required_capital > old_cash {
+                    return Ok(OrderResponse {
+                        broker_order_id: order_id.clone(),
+                        status: OrderStatus::Rejected,
+                        filled_qty: 0,
+                        avg_price: 0.0,
+                        message: Some(format!(
+                            "Insufficient funds: need {:.2}, have {:.2} ({})",
+                            required_capital, old_cash, req.asset_class
+                        )),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    });
+                }
+                let new_cash = old_cash - required_capital;
+                if self.cash.compare_exchange_weak(
+                    old_bits, new_cash.to_bits(),
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Relaxed,
+                ).is_ok() { break; }
+            }
+        } else {
+            let credit = fill_price * req.quantity.unsigned_abs() as f64;
+            loop {
+                let old_bits = self.cash.load(std::sync::atomic::Ordering::Acquire);
+                let old_cash = f64::from_bits(old_bits);
+                let new_cash = old_cash + credit;
+                if self.cash.compare_exchange_weak(
+                    old_bits, new_cash.to_bits(),
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Relaxed,
+                ).is_ok() { break; }
+            }
         }
 
         let resp = OrderResponse {
@@ -318,10 +344,11 @@ impl BrokerAdapter for PaperBroker {
 
     fn margins(&self) -> Result<MarginInfo, String> {
         let cash = self.get_cash();
+        let used = (self.initial_cash - cash).max(0.0);
         Ok(MarginInfo {
             available_cash: cash,
-            used_margin: 0.0,
-            total_collateral: cash,
+            used_margin: used,
+            total_collateral: cash + used,
             available_margin: cash,
         })
     }
@@ -357,6 +384,53 @@ mod tests {
         let resp = broker.place_order(&req).unwrap();
         assert_eq!(resp.status, OrderStatus::Filled);
         assert_eq!(resp.filled_qty, 10);
+        let cash = broker.get_cash();
+        assert!(
+            (cash - (1_000_000.0 - 25_000.0)).abs() < 0.01,
+            "Cash should be deducted by 10*2500=25000, got {}",
+            cash
+        );
+    }
+
+    #[test]
+    fn test_paper_broker_sell_credits_cash() {
+        let broker = PaperBroker::new(1_000_000.0);
+        let req = OrderRequest {
+            symbol: "RELIANCE".into(),
+            exchange: "NSE".into(),
+            side: OrderSide::Sell,
+            order_type: OrderType::Limit,
+            quantity: 10,
+            price: Some(2500.0),
+            product: ProductType::Delivery,
+            ..Default::default()
+        };
+        let resp = broker.place_order(&req).unwrap();
+        assert_eq!(resp.status, OrderStatus::Filled);
+        let cash = broker.get_cash();
+        assert!(
+            (cash - (1_000_000.0 + 25_000.0)).abs() < 0.01,
+            "Cash should be credited by 10*2500=25000, got {}",
+            cash
+        );
+    }
+
+    #[test]
+    fn test_paper_broker_insufficient_funds() {
+        let broker = PaperBroker::new(10_000.0);
+        let req = OrderRequest {
+            symbol: "RELIANCE".into(),
+            exchange: "NSE".into(),
+            side: OrderSide::Buy,
+            order_type: OrderType::Limit,
+            quantity: 100,
+            price: Some(2500.0),
+            product: ProductType::Delivery,
+            ..Default::default()
+        };
+        let resp = broker.place_order(&req).unwrap();
+        assert_eq!(resp.status, OrderStatus::Rejected);
+        assert_eq!(broker.get_cash(), 10_000.0);
     }
 
     #[test]

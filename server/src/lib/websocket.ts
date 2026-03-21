@@ -10,6 +10,8 @@ interface WsClient {
   subscribedSymbols: Set<string>;
   channels: Set<string>;
   isAlive: boolean;
+  pendingMessages: string[];
+  maxPendingMessages: number;
 }
 
 class WebSocketHub {
@@ -24,6 +26,8 @@ class WebSocketHub {
       subscribedSymbols: new Set(),
       channels: new Set(['signals', 'notifications', 'bot_messages']),
       isAlive: true,
+      pendingMessages: [],
+      maxPendingMessages: 100,
     };
     this.clients.set(socket, client);
 
@@ -56,7 +60,10 @@ class WebSocketHub {
           continue;
         }
         client.isAlive = false;
-        try { ws.ping(); } catch { this.unregister(ws); }
+        try { ws.ping(); } catch { this.unregister(ws); continue; }
+        if (client.pendingMessages.length > 0) {
+          this.drainPending(ws, client);
+        }
       }
 
       if (this.clients.size === 0 && this.heartbeatTimer) {
@@ -109,20 +116,43 @@ class WebSocketHub {
     try { socket.close(); } catch { /* already closed */ }
   }
 
+  private safeSend(ws: WebSocket, client: WsClient, payload: string): void {
+    if (ws.readyState !== 1) return;
+    if (ws.bufferedAmount > 65536) {
+      if (client.pendingMessages.length >= client.maxPendingMessages) {
+        client.pendingMessages.shift();
+      }
+      client.pendingMessages.push(payload);
+      return;
+    }
+    ws.send(payload);
+  }
+
+  private drainPending(ws: WebSocket, client: WsClient): void {
+    let sent = 0;
+    while (client.pendingMessages.length > 0 && sent < 10) {
+      if (ws.readyState !== 1 || ws.bufferedAmount > 65536) break;
+      const msg = client.pendingMessages.shift()!;
+      ws.send(msg);
+      sent++;
+    }
+  }
+
   broadcastPriceUpdate(symbol: string, data: { ltp: number; change: number; changePercent: number; volume: number; timestamp: string }): void {
     const subs = this.symbolSubscriptions.get(symbol);
     if (!subs || subs.size === 0) return;
     const payload = JSON.stringify({ type: 'price', symbol, ...data });
     for (const ws of subs) {
-      if (ws.readyState === 1) ws.send(payload);
+      const client = this.clients.get(ws);
+      if (client) this.safeSend(ws, client, payload);
     }
   }
 
   broadcastToUser(userId: string, event: { type: string; [key: string]: unknown }): void {
     const payload = JSON.stringify(event);
-    for (const [, client] of this.clients) {
-      if (client.userId === userId && client.socket.readyState === 1) {
-        client.socket.send(payload);
+    for (const [ws, client] of this.clients) {
+      if (client.userId === userId) {
+        this.safeSend(ws, client, payload);
       }
     }
   }
@@ -163,24 +193,25 @@ class WebSocketHub {
     if (!subs || subs.size === 0) return;
     const payload = JSON.stringify({ type: 'engine_signal', symbol, ...data });
     for (const ws of subs) {
-      if (ws.readyState === 1) ws.send(payload);
+      const client = this.clients.get(ws);
+      if (client) this.safeSend(ws, client, payload);
     }
   }
 
   broadcastRegime(data: { regime: string; confidence: number; timestamp: string }): void {
     const payload = JSON.stringify({ type: 'regime_update', ...data });
-    for (const [, client] of this.clients) {
-      if (client.channels.has('signals') && client.socket.readyState === 1) {
-        client.socket.send(payload);
+    for (const [ws, client] of this.clients) {
+      if (client.channels.has('signals')) {
+        this.safeSend(ws, client, payload);
       }
     }
   }
 
   broadcastAnomaly(data: { symbol: string; anomaly_type: string; score: number; details: string; timestamp: string }): void {
     const payload = JSON.stringify({ type: 'anomaly', ...data });
-    for (const [, client] of this.clients) {
-      if (client.channels.has('signals') && client.socket.readyState === 1) {
-        client.socket.send(payload);
+    for (const [ws, client] of this.clients) {
+      if (client.channels.has('signals')) {
+        this.safeSend(ws, client, payload);
       }
     }
   }

@@ -243,15 +243,13 @@ pub fn compute(data: Value) -> Result<Value, String> {
                 return Err("At least one strategy required".to_string());
             }
 
-            // Thompson sampling: sample from Beta(wins+1, losses+1) for each strategy
-            // Using deterministic approximation: mean of Beta distribution
             let mut raw_scores: Vec<(String, f64)> = stats.iter().map(|s| {
                 let alpha = s.wins as f64 + 1.0;
-                let beta = s.losses as f64 + 1.0;
-                let mean = alpha / (alpha + beta);
+                let beta_param = s.losses as f64 + 1.0;
+                let sample = sample_beta(alpha, beta_param);
                 let decay_penalty = if s.is_decaying { 0.5 } else { 1.0 };
                 let sharpe_bonus = (s.sharpe.max(0.0) * 0.1).min(0.3);
-                let score = (mean + sharpe_bonus) * decay_penalty;
+                let score = (sample + sharpe_bonus) * decay_penalty;
                 (s.strategy_id.clone(), score)
             }).collect();
 
@@ -444,6 +442,74 @@ fn default_stump_rules() -> Vec<StumpRule> {
     ]
 }
 
+/// Thread-local xorshift64* PRNG seeded from system time + thread id
+fn xorshift_rand() -> f64 {
+    use std::cell::Cell;
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new({
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let tid = std::thread::current().id();
+            let tid_hash = format!("{:?}", tid).bytes().fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64));
+            t ^ tid_hash ^ 0x5DEECE66D
+        });
+    }
+    STATE.with(|s| {
+        let mut x = s.get();
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        s.set(x);
+        let v = x.wrapping_mul(0x2545F4914F6CDD1D);
+        (v >> 11) as f64 / (1u64 << 53) as f64
+    })
+}
+
+/// Marsaglia-Tsang method for Gamma(alpha, 1) where alpha >= 1
+fn sample_gamma_ge1(alpha: f64) -> f64 {
+    let d = alpha - 1.0 / 3.0;
+    let c = 1.0 / (9.0 * d).sqrt();
+    loop {
+        let (x, v) = loop {
+            let u1 = xorshift_rand();
+            let _u2 = xorshift_rand();
+            let raw = (2.0 * u1 - 1.0).max(-0.9999).min(0.9999);
+            let x = raw.signum() * (-2.0 * (1.0 - raw.abs()).ln()).sqrt();
+            let v = 1.0 + c * x;
+            if v > 0.0 { break (x, v); }
+        };
+        let v = v * v * v;
+        let u = xorshift_rand();
+        if u < 1.0 - 0.0331 * x * x * x * x {
+            return d * v;
+        }
+        if u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
+            return d * v;
+        }
+    }
+}
+
+/// Sample from Gamma(alpha, 1) for any alpha > 0
+fn sample_gamma(alpha: f64) -> f64 {
+    if alpha >= 1.0 {
+        sample_gamma_ge1(alpha)
+    } else {
+        let g = sample_gamma_ge1(alpha + 1.0);
+        g * xorshift_rand().powf(1.0 / alpha)
+    }
+}
+
+/// Sample from Beta(alpha, beta) using the Gamma-ratio method
+fn sample_beta(alpha: f64, beta: f64) -> f64 {
+    let x = sample_gamma(alpha);
+    let y = sample_gamma(beta);
+    let sum = x + y;
+    if sum <= 0.0 { return alpha / (alpha + beta); }
+    (x / sum).clamp(0.0, 1.0)
+}
+
 fn train_stumps(data: &[TrainingRow]) -> Vec<StumpRule> {
     let features_count = 19;
     let mut rules = Vec::new();
@@ -631,6 +697,53 @@ mod tests {
         let result = compute(input).unwrap();
         let scores = result.get("scores").unwrap().as_array().unwrap();
         assert_eq!(scores.len(), 0, "empty features should produce empty scores");
+    }
+
+    #[test]
+    fn test_sample_beta_in_range() {
+        for _ in 0..1000 {
+            let s = super::sample_beta(2.0, 5.0);
+            assert!(s >= 0.0 && s <= 1.0, "Beta sample out of range: {}", s);
+        }
+    }
+
+    #[test]
+    fn test_sample_beta_mean_converges() {
+        let n = 10_000;
+        let alpha = 10.0;
+        let beta = 5.0;
+        let expected_mean = alpha / (alpha + beta);
+        let sum: f64 = (0..n).map(|_| super::sample_beta(alpha, beta)).sum();
+        let empirical_mean = sum / n as f64;
+        assert!(
+            (empirical_mean - expected_mean).abs() < 0.05,
+            "Beta({},{}) mean should be ~{:.3}, got {:.3}",
+            alpha, beta, expected_mean, empirical_mean
+        );
+    }
+
+    #[test]
+    fn test_thompson_sampling_is_stochastic() {
+        let stats = vec![
+            json!({"strategy_id": "a", "wins": 10, "losses": 5, "sharpe": 1.0, "is_decaying": false}),
+            json!({"strategy_id": "b", "wins": 5, "losses": 10, "sharpe": 0.2, "is_decaying": false}),
+            json!({"strategy_id": "c", "wins": 8, "losses": 8, "sharpe": 0.5, "is_decaying": false}),
+            json!({"strategy_id": "d", "wins": 3, "losses": 12, "sharpe": -0.3, "is_decaying": false}),
+        ];
+        let mut results = Vec::new();
+        for _ in 0..20 {
+            let input = json!({
+                "command": "allocate",
+                "strategy_stats": stats.clone(),
+                "total_capital": 1000000.0,
+            });
+            let result = compute(input).unwrap();
+            let allocs = result.get("allocations").unwrap().as_array().unwrap();
+            let pct_a = allocs[0].get("allocation_pct").unwrap().as_f64().unwrap();
+            results.push(pct_a);
+        }
+        let all_same = results.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01);
+        assert!(!all_same, "Thompson sampling should produce varying allocations, got {:?}", results);
     }
 
     #[test]

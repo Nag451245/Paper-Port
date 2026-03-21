@@ -14,8 +14,10 @@ import os
 import json
 import logging
 import time
+import asyncio
 from typing import Dict, Optional
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
@@ -36,12 +38,37 @@ from online_learner import online_learner
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("MLService")
 
+# Optional OpenTelemetry tracing
+try:
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+    otel_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    if otel_endpoint:
+        resource = Resource.create({"service.name": "capital-guard-ml"})
+        provider = TracerProvider(resource=resource)
+        exporter = OTLPSpanExporter(endpoint=f"{otel_endpoint}/v1/traces")
+        provider.add_span_processor(BatchSpanProcessor(exporter))
+        trace.set_tracer_provider(provider)
+        log.info(f"OpenTelemetry tracing enabled, exporting to {otel_endpoint}")
+        _OTEL_AVAILABLE = True
+    else:
+        _OTEL_AVAILABLE = False
+except ImportError:
+    _OTEL_AVAILABLE = False
+
 store = ModelStore()
 regime_detector = RegimeDetector()
 signal_scorer = SignalScorer(store)
 strategy_allocator = StrategyAllocator()
 
 startup_time = time.time()
+
+training_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ml-train")
 
 
 @asynccontextmanager
@@ -54,6 +81,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Capital Guard ML Service", version="1.0.0", lifespan=lifespan)
+
+if _OTEL_AVAILABLE:
+    FastAPIInstrumentor.instrument_app(app)
 
 
 # ── Request / Response Models ──
@@ -210,11 +240,15 @@ async def score_signals(req: ScoreRequest):
 async def train_model(req: TrainRequest):
     """Retrain signal scoring model with walk-forward validation."""
     try:
-        results = signal_scorer.train(
-            req.training_data,
-            req.model_type,
-            req.walk_forward_days,
-            req.purge_gap_days,
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(
+            training_pool,
+            lambda: signal_scorer.train(
+                req.training_data,
+                req.model_type,
+                req.walk_forward_days,
+                req.purge_gap_days,
+            ),
         )
         return results
     except Exception as e:
@@ -226,8 +260,12 @@ async def train_model(req: TrainRequest):
 async def detect_regime(req: RegimeRequest):
     """Detect current market regime using Hidden Markov Model."""
     try:
-        result = regime_detector.detect(
-            req.returns, req.volatility, req.correlations, req.n_states
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            training_pool,
+            lambda: regime_detector.detect(
+                req.returns, req.volatility, req.correlations, req.n_states
+            ),
         )
         return result
     except Exception as e:
@@ -293,10 +331,14 @@ async def predict_returns(req: PredictReturnsRequest):
 @app.post("/train-returns")
 async def train_returns(req: TrainReturnModelRequest):
     """Train return prediction model with walk-forward validation and purge gap."""
-    result = return_predictor.train(
-        req.training_data,
-        walk_forward_days=req.walk_forward_days,
-        purge_gap_days=req.purge_gap_days,
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        training_pool,
+        lambda: return_predictor.train(
+            req.training_data,
+            walk_forward_days=req.walk_forward_days,
+            purge_gap_days=req.purge_gap_days,
+        ),
     )
     return result
 
@@ -315,7 +357,8 @@ async def rl_experience(req: RLExperienceRequest):
 
 @app.post("/rl-train")
 async def rl_train():
-    result = rl_agent.train()
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(training_pool, rl_agent.train)
     return result
 
 
@@ -335,7 +378,11 @@ async def score_sequence(req: SequenceScoreRequest):
 
 @app.post("/train-sequence")
 async def train_sequence(req: SequenceTrainRequest):
-    result = lstm_model.train(req.training_data, req.seq_len)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        training_pool,
+        lambda: lstm_model.train(req.training_data, req.seq_len),
+    )
     return result
 
 
@@ -347,7 +394,11 @@ async def score_tft(req: TFTScoreRequest):
 
 @app.post("/train-tft")
 async def train_tft(req: TFTTrainRequest):
-    result = tft_model.train(req.training_data, req.seq_len)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        training_pool,
+        lambda: tft_model.train(req.training_data, req.seq_len),
+    )
     return result
 
 
@@ -362,7 +413,11 @@ async def ensemble_score(req: EnsembleScoreRequest):
 
 @app.post("/ensemble-train")
 async def ensemble_train(req: EnsembleTrainRequest):
-    result = ensemble_learner.train(req.training_data)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        training_pool,
+        lambda: ensemble_learner.train(req.training_data),
+    )
     return result
 
 

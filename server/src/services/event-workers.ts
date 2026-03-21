@@ -93,13 +93,13 @@ export function registerAllWorkers(
 
         // Feed outcome to Rust Strategy Performance Engine for calibration & decay detection
         try {
-          const entryPrice = (event as any).entryPrice ?? event.exitPrice;
+          const entryPrice = event.entryPrice ?? event.exitPrice;
           const pnlPct = entryPrice > 0 ? ((event.exitPrice - entryPrice) / entryPrice) * 100 : 0;
           engineRecordOutcome({
             symbol: event.symbol,
             strategy: event.strategyTag ?? 'unknown',
             direction: event.pnl >= 0 ? 'BUY' : 'SELL',
-            predicted_confidence: (event as any).confidence ?? 0.5,
+            predicted_confidence: event.confidence ?? 0.5,
             entry_price: entryPrice,
             exit_price: event.exitPrice,
             pnl_pct: pnlPct,
@@ -113,7 +113,7 @@ export function registerAllWorkers(
           if (await isMLServiceAvailable()) {
             const outcomeValue = event.pnl >= 0 ? 1.0 : 0.0;
             const features: Record<string, number> = {
-              composite_score: (event as any).confidence ?? 0.5,
+              composite_score: event.confidence ?? 0.5,
               pnl: event.pnl ?? 0,
               exit_price: event.exitPrice ?? 0,
             };
@@ -192,6 +192,25 @@ export function registerAllWorkers(
         break;
 
       case 'RISK_CHECK_PASSED':
+        break;
+
+      case 'RECONCILIATION_MISMATCH':
+        log.error({ mismatches: event.mismatches, timestamp: event.timestamp },
+          `EOD Reconciliation: ${Array.isArray(event.mismatches) ? event.mismatches.length : 0} position mismatches detected`);
+        try {
+          await prisma.riskEvent.create({
+            data: {
+              userId: 'system',
+              ruleType: 'RECONCILIATION_MISMATCH',
+              severity: 'critical',
+              details: JSON.stringify(event),
+            },
+          });
+        } catch { /* best-effort */ }
+        telegram.notifyRiskAlert(
+          'system', 'RECONCILIATION MISMATCH',
+          `${Array.isArray(event.mismatches) ? event.mismatches.length : 0} position mismatches between engine and broker at ${event.timestamp}`,
+        ).catch(err => log.warn({ err }, 'Telegram reconciliation notification failed'));
         break;
     }
   }, { concurrency: 5 });
@@ -292,16 +311,16 @@ export function registerAllWorkers(
         log.info({ userId: event.userId }, 'Kill switch deactivated');
         break;
 
-      default: {
-        // Handle ML_WEIGHTS_UPDATED and other custom system events
-        const evAny = event as any;
-        if (evAny.type === 'ML_WEIGHTS_UPDATED' && botEngine) {
-          log.info({ userId: evAny.userId, version: evAny.version }, 'Reloading ML weights in BotEngine');
-          botEngine.loadMLWeightsFromDB(evAny.userId).catch(err =>
+      case 'ML_WEIGHTS_UPDATED':
+        if (botEngine) {
+          log.info({ userId: event.userId, version: event.version }, 'Reloading ML weights in BotEngine');
+          botEngine.loadMLWeightsFromDB(event.userId).catch(err =>
             log.warn({ err }, 'Failed to reload ML weights in BotEngine'));
         }
         break;
-      }
+
+      case 'LEARNING_UPDATE':
+        break;
     }
   }, { concurrency: 3 });
 

@@ -25,7 +25,7 @@ pub struct LivePriceStore {
 
 impl LivePriceStore {
     pub fn new() -> (Arc<Self>, broadcast::Receiver<Tick>) {
-        let (tx, rx) = broadcast::channel(4096);
+        let (tx, rx) = broadcast::channel(32768);
         let store = Arc::new(Self {
             prices: DashMap::new(),
             tx,
@@ -166,8 +166,8 @@ fn poll_bridge_quote(bridge_url: &str, symbol: &str) -> Result<Tick, String> {
         return Err(err.to_string());
     }
 
-    let ltp = data.get("ltp")
-        .and_then(|v| v.as_f64())
+    let ltp = parse_f64_field(&data, "ltp")
+        .or_else(|| parse_f64_field(&data, "last"))
         .unwrap_or(0.0);
 
     if ltp <= 0.0 {
@@ -179,21 +179,30 @@ fn poll_bridge_quote(bridge_url: &str, symbol: &str) -> Result<Tick, String> {
         .unwrap_or("")
         .to_string();
 
-    let change = data.get("change")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
+    let open = parse_f64_field(&data, "open")
+        .filter(|&v| v > 0.0)
+        .unwrap_or(ltp);
+    let high = parse_f64_field(&data, "high")
+        .filter(|&v| v > 0.0)
+        .unwrap_or(ltp);
+    let low = parse_f64_field(&data, "low")
+        .filter(|&v| v > 0.0)
+        .unwrap_or(ltp);
+    let close = parse_f64_field(&data, "close")
+        .filter(|&v| v > 0.0)
+        .unwrap_or(ltp);
 
     let volume = data.get("volume")
-        .and_then(|v| v.as_u64())
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
         .unwrap_or(0);
 
     Ok(Tick {
         symbol: symbol.to_string(),
         ltp,
-        open: ltp - change,
-        high: ltp,
-        low: ltp,
-        close: ltp,
+        open,
+        high,
+        low,
+        close,
         volume,
         timestamp,
     })
@@ -399,5 +408,36 @@ mod tests {
             if "".is_empty() { FeedMode::BridgePolling } else { FeedMode::WebSocket },
             FeedMode::BridgePolling
         );
+    }
+
+    #[test]
+    fn test_poll_bridge_quote_uses_real_ohlc() {
+        let data = serde_json::json!({
+            "symbol": "RELIANCE",
+            "ltp": 2500.0,
+            "open": 2480.0,
+            "high": 2520.0,
+            "low": 2470.0,
+            "close": 2500.0,
+            "volume": 100000,
+            "timestamp": "2026-01-01T10:00:00"
+        });
+        let tick = parse_breeze_tick(&data).unwrap();
+        assert_eq!(tick.open, 2480.0, "open should come from API, not LTP - change");
+        assert_eq!(tick.high, 2520.0, "high should come from API, not LTP");
+        assert_eq!(tick.low, 2470.0, "low should come from API, not LTP");
+    }
+
+    #[test]
+    fn test_poll_bridge_quote_ltp_fallback_for_missing_ohlc() {
+        let data = serde_json::json!({
+            "symbol": "HDFC",
+            "ltp": 1600.0,
+            "volume": 50000
+        });
+        let tick = parse_breeze_tick(&data).unwrap();
+        assert_eq!(tick.open, 1600.0, "missing open should fall back to LTP");
+        assert_eq!(tick.high, 1600.0, "missing high should fall back to LTP");
+        assert_eq!(tick.low, 1600.0, "missing low should fall back to LTP");
     }
 }

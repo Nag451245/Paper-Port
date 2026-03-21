@@ -1,4 +1,6 @@
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use crate::broker::{
     BrokerAdapter, OrderRequest, OrderSide, OrderType,
@@ -62,13 +64,19 @@ pub struct OMS {
     orders: Mutex<Vec<Order>>,
     broker: Arc<dyn BrokerAdapter>,
     fat_finger: FatFingerLimits,
-    next_id: std::sync::atomic::AtomicU64,
-    pub total_orders: std::sync::atomic::AtomicU64,
-    pub total_fills: std::sync::atomic::AtomicU64,
-    pub total_rejections: std::sync::atomic::AtomicU64,
+    next_id: AtomicU64,
+    pub total_orders: AtomicU64,
+    pub total_fills: AtomicU64,
+    pub total_rejections: AtomicU64,
     pub retry_enabled: bool,
     pub max_retries: u32,
     pub initial_backoff_ms: u64,
+    orders_this_second: AtomicU64,
+    second_timestamp: AtomicU64,
+    orders_this_minute: AtomicU64,
+    minute_timestamp: AtomicU64,
+    pub max_orders_per_second: u64,
+    pub max_orders_per_minute: u64,
 }
 
 impl OMS {
@@ -77,13 +85,19 @@ impl OMS {
             orders: Mutex::new(Vec::new()),
             broker,
             fat_finger,
-            next_id: std::sync::atomic::AtomicU64::new(1),
-            total_orders: std::sync::atomic::AtomicU64::new(0),
-            total_fills: std::sync::atomic::AtomicU64::new(0),
-            total_rejections: std::sync::atomic::AtomicU64::new(0),
+            next_id: AtomicU64::new(1),
+            total_orders: AtomicU64::new(0),
+            total_fills: AtomicU64::new(0),
+            total_rejections: AtomicU64::new(0),
             retry_enabled: false,
             max_retries: 3,
             initial_backoff_ms: 200,
+            orders_this_second: AtomicU64::new(0),
+            second_timestamp: AtomicU64::new(0),
+            orders_this_minute: AtomicU64::new(0),
+            minute_timestamp: AtomicU64::new(0),
+            max_orders_per_second: 10,
+            max_orders_per_minute: 100,
         }
     }
 
@@ -94,9 +108,56 @@ impl OMS {
         self
     }
 
+    pub fn with_rate_limits(mut self, per_second: u64, per_minute: u64) -> Self {
+        self.max_orders_per_second = per_second;
+        self.max_orders_per_minute = per_minute;
+        self
+    }
+
     fn next_id(&self) -> String {
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         format!("OMS-{:08}", id)
+    }
+
+    fn check_rate_limit(&self) -> Result<(), String> {
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let now_min = now_secs / 60;
+
+        let prev_sec = self.second_timestamp.load(Ordering::Relaxed);
+        if now_secs != prev_sec {
+            if self.second_timestamp.compare_exchange(prev_sec, now_secs, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                self.orders_this_second.store(0, Ordering::Relaxed);
+            }
+        }
+        let sec_count = self.orders_this_second.fetch_add(1, Ordering::Relaxed) + 1;
+        if sec_count > self.max_orders_per_second {
+            self.orders_this_second.fetch_sub(1, Ordering::Relaxed);
+            return Err(format!(
+                "Order rate limit exceeded: {} orders/sec (limit {})",
+                sec_count - 1, self.max_orders_per_second
+            ));
+        }
+
+        let prev_min = self.minute_timestamp.load(Ordering::Relaxed);
+        if now_min != prev_min {
+            if self.minute_timestamp.compare_exchange(prev_min, now_min, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                self.orders_this_minute.store(0, Ordering::Relaxed);
+            }
+        }
+        let min_count = self.orders_this_minute.fetch_add(1, Ordering::Relaxed) + 1;
+        if min_count > self.max_orders_per_minute {
+            self.orders_this_minute.fetch_sub(1, Ordering::Relaxed);
+            self.orders_this_second.fetch_sub(1, Ordering::Relaxed);
+            return Err(format!(
+                "Order rate limit exceeded: {} orders/min (limit {})",
+                min_count - 1, self.max_orders_per_minute
+            ));
+        }
+
+        Ok(())
     }
 
     /// Pre-trade validation: fat-finger protection
@@ -150,6 +211,7 @@ impl OMS {
         strategy_id: Option<String>,
         reference_price: Option<f64>,
     ) -> Result<Order, String> {
+        self.check_rate_limit()?;
         self.validate_order(&req, reference_price)?;
 
         let internal_id = self.next_id();
@@ -197,11 +259,11 @@ impl OMS {
                     order.updated_at = resp.timestamp;
                     if resp.status == OrderStatus::Filled || resp.status == OrderStatus::PartialFill {
                         order.synced_fill_qty = resp.filled_qty;
-                        self.total_fills.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.total_fills.fetch_add(1, Ordering::Relaxed);
                     }
                     if resp.status == OrderStatus::Rejected {
                         order.rejection_reason = resp.message;
-                        self.total_rejections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.total_rejections.fetch_add(1, Ordering::Relaxed);
                     }
                     last_err.clear();
                     break;
@@ -212,13 +274,13 @@ impl OMS {
                         order.status = OrderStatus::Rejected;
                         order.rejection_reason = Some(format!("Failed after {} attempt(s): {}", max_attempts, last_err));
                         order.updated_at = chrono::Utc::now().to_rfc3339();
-                        self.total_rejections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.total_rejections.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
         }
 
-        self.total_orders.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.total_orders.fetch_add(1, Ordering::Relaxed);
 
         if let Ok(mut orders) = self.orders.lock() {
             orders.push(order.clone());
@@ -678,5 +740,37 @@ mod tests {
         let result = oms.validate_order(&req, Some(2500.0));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("deviates"));
+    }
+
+    #[test]
+    fn test_rate_limit_per_second() {
+        let broker = Arc::new(PaperBroker::new(100_000_000.0));
+        let oms = OMS::new(broker, FatFingerLimits::default())
+            .with_rate_limits(10, 100);
+
+        let mut ok_count = 0u32;
+        let mut rejected_count = 0u32;
+
+        for _ in 0..15 {
+            let req = OrderRequest {
+                symbol: "RELIANCE".into(),
+                exchange: "NSE".into(),
+                side: OrderSide::Buy,
+                order_type: OrderType::Limit,
+                quantity: 1,
+                price: Some(2500.0),
+                product: ProductType::Delivery,
+                tag: None,
+                ..Default::default()
+            };
+            match oms.submit_order(req, None, None) {
+                Ok(_) => ok_count += 1,
+                Err(e) if e.contains("rate limit") => rejected_count += 1,
+                Err(e) => panic!("Unexpected error: {}", e),
+            }
+        }
+
+        assert_eq!(ok_count, 10, "Should allow exactly 10 orders per second");
+        assert_eq!(rejected_count, 5, "Should reject 5 orders exceeding the limit");
     }
 }

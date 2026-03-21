@@ -1,6 +1,9 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::collections::HashMap;
 use tracing::{info, warn, error};
+
+static TOTAL_LAGGED_TICKS: AtomicU64 = AtomicU64::new(0);
 
 use crate::state::{AppState, CachedSignal};
 use crate::strategy::{Indicators, Side, create_strategy};
@@ -39,6 +42,7 @@ pub fn spawn(state: Arc<AppState>) {
     let iceberg_visible = config.live_executor.iceberg_visible_qty;
     let tick_exec_enabled = config.live_executor.tick_execution_enabled;
     let _tick_threshold_pct = config.live_executor.tick_threshold_pct;
+    let trail_pct: f64 = config.live_executor.trail_pct.unwrap_or(0.0);
 
     info!(
         strategies = ?strategies_names,
@@ -58,12 +62,15 @@ pub fn spawn(state: Arc<AppState>) {
         let mut current_candles: HashMap<String, PartialCandle> = HashMap::new();
         let mut partial_5m: HashMap<String, PartialCandle> = HashMap::new();
         let mut partial_15m: HashMap<String, PartialCandle> = HashMap::new();
+        let mut trailing_highs: HashMap<String, f64> = HashMap::new();
+        let mut trailing_lows: HashMap<String, f64> = HashMap::new();
 
         loop {
             let tick = match rx.recv().await {
                 Ok(t) => t,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(lagged = n, "Live executor lagged, skipping ticks");
+                    let total = TOTAL_LAGGED_TICKS.fetch_add(n, std::sync::atomic::Ordering::Relaxed) + n;
+                    warn!(lagged = n, total_lagged = total, "Live executor lagged, skipping ticks");
                     continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -142,8 +149,72 @@ pub fn spawn(state: Arc<AppState>) {
                                             &format!("TP hit at {:.2}, closed {} qty", tick.ltp, order.filled_qty));
                                     }
                                 }
+                                exited = true;
                             }
                         }
+                    }
+
+                    // Trailing stop-loss: track peak price and exit if retracement exceeds trail_pct
+                    if !exited && trail_pct > 0.0 {
+                        if is_long {
+                            let high = trailing_highs.entry(sym.clone()).or_insert(tick.ltp);
+                            if tick.ltp > *high { *high = tick.ltp; }
+                            let trailing_sl = *high * (1.0 - trail_pct);
+                            if tick.ltp <= trailing_sl {
+                                let order_req = OrderRequest {
+                                    symbol: sym.clone(),
+                                    exchange: exchange.clone(),
+                                    side: OrderSide::Sell,
+                                    order_type: OrderType::Market,
+                                    quantity: qty,
+                                    price: Some(tick.ltp),
+                                    product: ProductType::Intraday,
+                                    tag: Some("tick_trailing_sl".into()),
+                                    ..Default::default()
+                                };
+                                if let Ok(order) = state.oms.submit_order(order_req, None, Some(tick.ltp)) {
+                                    if order.filled_qty > 0 {
+                                        state.sync_oms_fill(&order.symbol, "sell", order.filled_qty,
+                                            order.avg_fill_price, None, None);
+                                        state.log_audit("TICK_TRAILING_SL", Some(&sym),
+                                            &format!("Trailing SL hit at {:.2} (high {:.2}, trail {}%), closed {} qty",
+                                                tick.ltp, *high, trail_pct * 100.0, order.filled_qty));
+                                    }
+                                }
+                                trailing_highs.remove(&sym);
+                            }
+                        } else {
+                            let low = trailing_lows.entry(sym.clone()).or_insert(tick.ltp);
+                            if tick.ltp < *low { *low = tick.ltp; }
+                            let trailing_sl = *low * (1.0 + trail_pct);
+                            if tick.ltp >= trailing_sl {
+                                let order_req = OrderRequest {
+                                    symbol: sym.clone(),
+                                    exchange: exchange.clone(),
+                                    side: OrderSide::Buy,
+                                    order_type: OrderType::Market,
+                                    quantity: qty,
+                                    price: Some(tick.ltp),
+                                    product: ProductType::Intraday,
+                                    tag: Some("tick_trailing_sl".into()),
+                                    ..Default::default()
+                                };
+                                if let Ok(order) = state.oms.submit_order(order_req, None, Some(tick.ltp)) {
+                                    if order.filled_qty > 0 {
+                                        state.sync_oms_fill(&order.symbol, "buy", order.filled_qty,
+                                            order.avg_fill_price, None, None);
+                                        state.log_audit("TICK_TRAILING_SL", Some(&sym),
+                                            &format!("Trailing SL hit at {:.2} (low {:.2}, trail {}%), closed {} qty",
+                                                tick.ltp, *low, trail_pct * 100.0, order.filled_qty));
+                                    }
+                                }
+                                trailing_lows.remove(&sym);
+                            }
+                        }
+                    } else if exited {
+                        // Clean up trailing state when position is closed by SL or TP
+                        trailing_highs.remove(&sym);
+                        trailing_lows.remove(&sym);
                     }
                 }
             }
@@ -245,16 +316,59 @@ pub fn spawn(state: Arc<AppState>) {
                     }
 
                     let sizing_method = SizingMethod::from_str_loose(&sizing_mode);
+
+                    let health = GLOBAL_TRACKER.get_strategy_health(strat_name);
+                    let live_win_rate = if health.total_signals >= 10 {
+                        health.win_rate_recent
+                    } else {
+                        0.50
+                    };
+                    let (live_avg_win, live_avg_loss) = {
+                        let outcomes = GLOBAL_TRACKER.get_all_outcomes();
+                        let strat_outcomes: Vec<&crate::strategy_performance::SignalOutcome> = outcomes.iter()
+                            .filter(|o| o.strategy == *strat_name)
+                            .collect();
+                        let wins: Vec<f64> = strat_outcomes.iter().filter(|o| o.won).map(|o| o.pnl_pct.abs()).collect();
+                        let losses: Vec<f64> = strat_outcomes.iter().filter(|o| !o.won).map(|o| o.pnl_pct.abs()).collect();
+                        let avg_w = if !wins.is_empty() { wins.iter().sum::<f64>() / wins.len() as f64 } else { 1.0 };
+                        let avg_l = if !losses.is_empty() { losses.iter().sum::<f64>() / losses.len() as f64 } else { 1.0 };
+                        (avg_w.max(0.01), avg_l.max(0.01))
+                    };
+
+                    let asset_vol = if window.len() >= 20 {
+                        let returns: Vec<f64> = window.windows(2)
+                            .map(|pair| (pair[1].close / pair[0].close.max(0.01)).ln())
+                            .collect();
+                        let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+                        let var = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (returns.len() - 1) as f64;
+                        var.sqrt().max(0.001)
+                    } else {
+                        0.02
+                    };
+
+                    let portfolio_vol = {
+                        let pos_count = state.positions.len().max(1) as f64;
+                        (asset_vol / pos_count.sqrt()).max(0.001)
+                    };
+
+                    let live_regime = if asset_vol > 0.03 {
+                        if health.avg_pnl_pct > 0.0 { MarketRegime::BullHighVol } else { MarketRegime::BearHighVol }
+                    } else if asset_vol < 0.01 {
+                        if health.avg_pnl_pct > 0.0 { MarketRegime::BullLowVol } else { MarketRegime::BearLowVol }
+                    } else {
+                        MarketRegime::Normal
+                    };
+
                     let sizing_ctx = SizingContext {
                         nav,
                         price: signal.price,
-                        win_rate: 0.55,
-                        avg_win: 1.0,
-                        avg_loss: 1.0,
-                        asset_volatility: 0.02,
+                        win_rate: live_win_rate,
+                        avg_win: live_avg_win,
+                        avg_loss: live_avg_loss,
+                        asset_volatility: asset_vol,
                         target_volatility: 0.15,
-                        portfolio_volatility: 0.12,
-                        regime: MarketRegime::Normal,
+                        portfolio_volatility: portfolio_vol,
+                        regime: live_regime,
                         signal_confidence: calibrated_confidence,
                         max_position_pct,
                         default_qty,

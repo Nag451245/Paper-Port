@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
 use dashmap::DashMap;
@@ -7,23 +8,92 @@ use tracing::{info, warn};
 use crate::rate_limiter::RateLimiter;
 use crate::universe::Universe;
 
-// ─── Sentiment Keywords ──────────────────────────────────────────────
+// ─── Sentiment Keywords (word, weight) ───────────────────────────────
 
-const POSITIVE_WORDS: &[&str] = &[
-    "rally", "surge", "profit", "upgrade", "bullish", "breakout", "gain",
-    "growth", "outperform", "beat", "strong", "record", "high", "positive",
-    "boost", "recover", "buy", "overweight", "target raised", "expansion",
-    "dividend", "bonus", "merger", "acquisition", "approval", "patent",
-    "order win", "results beat", "outlook positive",
+const POSITIVE_KEYWORDS: &[(&str, f64)] = &[
+    ("rally", 0.2), ("surge", 0.2), ("profit", 0.2), ("bullish", 0.2),
+    ("breakout", 0.2), ("gain", 0.2), ("growth", 0.2), ("outperform", 0.2),
+    ("beat", 0.2), ("strong", 0.2), ("record", 0.2), ("high", 0.2),
+    ("positive", 0.2), ("boost", 0.2), ("recover", 0.2), ("buy", 0.2),
+    ("overweight", 0.2), ("target raised", 0.2), ("expansion", 0.2),
+    ("dividend", 0.2), ("bonus", 0.2), ("merger", 0.2), ("acquisition", 0.2),
+    ("approval", 0.2), ("patent", 0.2), ("order win", 0.2),
+    ("results beat", 0.2), ("outlook positive", 0.2),
+    // Stronger-weight keywords
+    ("upgrade", 0.4), ("re-rating", 0.4), ("target upgraded", 0.4),
+    ("strong buy", 0.4), ("blockbuster", 0.4),
 ];
 
-const NEGATIVE_WORDS: &[&str] = &[
-    "crash", "plunge", "loss", "downgrade", "bearish", "breakdown", "fall",
-    "decline", "underperform", "miss", "weak", "low", "negative", "drag",
-    "sell-off", "selloff", "sell", "underweight", "target cut", "contraction",
-    "default", "fraud", "sebi action", "ban", "penalty", "shutdown",
-    "results miss", "outlook negative", "red flag",
+const NEGATIVE_KEYWORDS: &[(&str, f64)] = &[
+    ("crash", 0.2), ("plunge", 0.2), ("loss", 0.2), ("bearish", 0.2),
+    ("breakdown", 0.2), ("fall", 0.2), ("decline", 0.2), ("underperform", 0.2),
+    ("miss", 0.2), ("weak", 0.2), ("low", 0.2), ("negative", 0.2),
+    ("drag", 0.2), ("sell-off", 0.2), ("selloff", 0.2), ("sell", 0.2),
+    ("underweight", 0.2), ("target cut", 0.2), ("contraction", 0.2),
+    ("default", 0.2), ("fraud", 0.2), ("sebi action", 0.2), ("ban", 0.2),
+    ("penalty", 0.2), ("shutdown", 0.2), ("results miss", 0.2),
+    ("outlook negative", 0.2), ("red flag", 0.2),
+    // Stronger-weight keywords
+    ("downgrade", 0.4), ("target downgraded", 0.4),
+    ("strong sell", 0.4), ("scam", 0.4), ("bankruptcy", 0.4),
 ];
+
+// ─── Symbol-to-Company-Name Mapping (top 50 NSE) ────────────────────
+
+fn build_symbol_company_map() -> HashMap<&'static str, &'static str> {
+    let mut m = HashMap::new();
+    m.insert("RELIANCE", "Reliance Industries");
+    m.insert("TCS", "Tata Consultancy");
+    m.insert("INFY", "Infosys");
+    m.insert("HDFCBANK", "HDFC Bank");
+    m.insert("ICICIBANK", "ICICI Bank");
+    m.insert("HINDUNILVR", "Hindustan Unilever");
+    m.insert("SBIN", "State Bank of India");
+    m.insert("BHARTIARTL", "Bharti Airtel");
+    m.insert("ITC", "ITC Limited");
+    m.insert("KOTAKBANK", "Kotak Mahindra Bank");
+    m.insert("LT", "Larsen & Toubro");
+    m.insert("HCLTECH", "HCL Technologies");
+    m.insert("AXISBANK", "Axis Bank");
+    m.insert("ASIANPAINT", "Asian Paints");
+    m.insert("MARUTI", "Maruti Suzuki");
+    m.insert("SUNPHARMA", "Sun Pharma");
+    m.insert("TITAN", "Titan Company");
+    m.insert("BAJFINANCE", "Bajaj Finance");
+    m.insert("BAJFINSV", "Bajaj Finserv");
+    m.insert("WIPRO", "Wipro");
+    m.insert("ULTRACEMCO", "UltraTech Cement");
+    m.insert("ONGC", "Oil and Natural Gas");
+    m.insert("NTPC", "NTPC Limited");
+    m.insert("POWERGRID", "Power Grid");
+    m.insert("M&M", "Mahindra & Mahindra");
+    m.insert("TATAMOTORS", "Tata Motors");
+    m.insert("TATASTEEL", "Tata Steel");
+    m.insert("JSWSTEEL", "JSW Steel");
+    m.insert("ADANIENT", "Adani Enterprises");
+    m.insert("ADANIPORTS", "Adani Ports");
+    m.insert("TECHM", "Tech Mahindra");
+    m.insert("INDUSINDBK", "IndusInd Bank");
+    m.insert("DRREDDY", "Dr Reddys");
+    m.insert("CIPLA", "Cipla");
+    m.insert("DIVISLAB", "Divis Laboratories");
+    m.insert("NESTLEIND", "Nestle India");
+    m.insert("BRITANNIA", "Britannia Industries");
+    m.insert("GRASIM", "Grasim Industries");
+    m.insert("HEROMOTOCO", "Hero MotoCorp");
+    m.insert("EICHERMOT", "Eicher Motors");
+    m.insert("BAJAJ-AUTO", "Bajaj Auto");
+    m.insert("COALINDIA", "Coal India");
+    m.insert("BPCL", "Bharat Petroleum");
+    m.insert("HDFCLIFE", "HDFC Life");
+    m.insert("SBILIFE", "SBI Life Insurance");
+    m.insert("APOLLOHOSP", "Apollo Hospitals");
+    m.insert("TATACONSUM", "Tata Consumer");
+    m.insert("HINDALCO", "Hindalco Industries");
+    m.insert("UPL", "UPL Limited");
+    m.insert("VEDL", "Vedanta");
+    m
+}
 
 // ─── Data Structures ─────────────────────────────────────────────────
 
@@ -96,16 +166,19 @@ impl NewsSentimentStore {
         }
 
         self.symbol_sentiment.clear();
+        let mut article_counts: HashMap<String, usize> = HashMap::new();
         for item in &all_items {
             for sym in &item.symbols_mentioned {
                 let mut entry = self.symbol_sentiment.entry(sym.clone()).or_insert(0.0);
                 *entry += item.sentiment;
+                *article_counts.entry(sym.clone()).or_insert(0) += 1;
             }
         }
 
-        // Normalize: clamp to [-1.0, 1.0]
+        // Normalize by sqrt(article count) to dampen noise from high-volume coverage
         for mut entry in self.symbol_sentiment.iter_mut() {
-            *entry = entry.clamp(-1.0, 1.0);
+            let count = article_counts.get(entry.key()).copied().unwrap_or(1).max(1);
+            *entry = (*entry / (count as f64).sqrt()).clamp(-1.0, 1.0);
         }
 
         if let Ok(mut items) = self.items.lock() {
@@ -217,16 +290,25 @@ fn html_decode(s: &str) -> String {
 
 fn match_symbols(headline: &str, symbols: &[String]) -> Vec<String> {
     let upper = headline.to_uppercase();
+    let lower = headline.to_lowercase();
+    let company_map = build_symbol_company_map();
+
     symbols.iter()
         .filter(|sym| {
             let s = sym.to_uppercase();
             if s.len() < 3 { return false; }
-            upper.contains(&format!(" {} ", s))
+            let ticker_match = upper.contains(&format!(" {} ", s))
                 || upper.starts_with(&format!("{} ", s))
                 || upper.ends_with(&format!(" {}", s))
                 || upper.contains(&format!("{}:", s))
                 || upper.contains(&format!("{},", s))
-                || upper == s
+                || upper == s;
+            if ticker_match { return true; }
+            if let Some(company_name) = company_map.get(sym.as_str()) {
+                lower.contains(&company_name.to_lowercase())
+            } else {
+                false
+            }
         })
         .cloned()
         .collect()
@@ -238,14 +320,14 @@ fn compute_sentiment(text: &str) -> f64 {
     let lower = text.to_lowercase();
     let mut score = 0.0_f64;
 
-    for word in POSITIVE_WORDS {
+    for &(word, weight) in POSITIVE_KEYWORDS {
         if lower.contains(word) {
-            score += 0.2;
+            score += weight;
         }
     }
-    for word in NEGATIVE_WORDS {
+    for &(word, weight) in NEGATIVE_KEYWORDS {
         if lower.contains(word) {
-            score -= 0.2;
+            score -= weight;
         }
     }
 

@@ -478,6 +478,44 @@ impl AppState {
         let _guard = self.position_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         let nav = self.get_nav();
+        if nav <= 0.0 {
+            return Err("NAV is zero or negative — cannot open new positions".into());
+        }
+
+        // Portfolio-level gross/net exposure validation
+        let max_gross = self.config.risk.max_gross_exposure_pct;
+        let max_net = self.config.risk.max_net_exposure_pct;
+        let mut current_gross: f64 = 0.0;
+        let mut current_net: f64 = 0.0;
+        for entry in self.positions.iter() {
+            let p = entry.value();
+            let mv = p.market_value();
+            current_gross += mv;
+            if p.side == "buy" {
+                current_net += mv;
+            } else {
+                current_net -= mv;
+            }
+        }
+        let proposed_mv = pos.entry_price * pos.qty.unsigned_abs() as f64;
+        let proposed_gross = current_gross + proposed_mv;
+        let proposed_net = if pos.side == "buy" {
+            current_net + proposed_mv
+        } else {
+            current_net - proposed_mv
+        };
+        let gross_pct = proposed_gross / nav * 100.0;
+        if gross_pct > max_gross {
+            return Err(format!(
+                "Gross exposure {:.1}% exceeds max {:.1}%", gross_pct, max_gross
+            ));
+        }
+        let net_pct = proposed_net.abs() / nav * 100.0;
+        if net_pct > max_net {
+            return Err(format!(
+                "Net exposure {:.1}% exceeds max {:.1}%", net_pct, max_net
+            ));
+        }
 
         if self.positions.len() >= self.config.risk.max_open_positions {
             return Err(format!("Max open positions ({}) reached", self.config.risk.max_open_positions));
@@ -864,6 +902,37 @@ mod tests {
         let pos = state.positions.get("RELIANCE").unwrap();
         assert_eq!(pos.qty, 20);
         assert!((pos.entry_price - 2550.0).abs() < 0.01, "avg price should be 2550");
+    }
+
+    #[test]
+    fn test_gross_exposure_limit() {
+        let mut config = EngineConfig::default();
+        config.risk.max_gross_exposure_pct = 50.0;
+        config.risk.max_position_size_pct = 100.0;
+        config.risk.max_open_positions = 20;
+        let state = AppState::new(config, 100_000.0);
+
+        let pos1 = Position {
+            symbol: "AAA".into(), side: "buy".into(), qty: 100,
+            entry_price: 400.0, current_price: 400.0, unrealized_pnl: 0.0,
+            realized_pnl: 0.0, entry_time: "2025-01-01T10:00:00".into(),
+            stop_loss: None, take_profit: None,
+            asset_class: crate::broker::AssetClass::Equity,
+            expiry: None, strike: None, option_type: None,
+        };
+        assert!(state.open_position(pos1).is_ok(), "First position (40% gross) should succeed");
+
+        let pos2 = Position {
+            symbol: "BBB".into(), side: "buy".into(), qty: 100,
+            entry_price: 200.0, current_price: 200.0, unrealized_pnl: 0.0,
+            realized_pnl: 0.0, entry_time: "2025-01-01T10:00:00".into(),
+            stop_loss: None, take_profit: None,
+            asset_class: crate::broker::AssetClass::Equity,
+            expiry: None, strike: None, option_type: None,
+        };
+        let result = state.open_position(pos2);
+        assert!(result.is_err(), "Second position should be rejected (total ~60% > 50% limit)");
+        assert!(result.unwrap_err().contains("Gross exposure"));
     }
 
     #[test]

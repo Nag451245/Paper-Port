@@ -110,6 +110,9 @@ impl MarketConfig {
     }
 }
 
+fn default_max_gross_exposure_pct() -> f64 { 300.0 }
+fn default_max_net_exposure_pct() -> f64 { 100.0 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RiskConfig {
@@ -120,6 +123,10 @@ pub struct RiskConfig {
     pub max_open_positions: usize,
     pub max_portfolio_heat_pct: f64,
     pub var_confidence: f64,
+    #[serde(default = "default_max_gross_exposure_pct")]
+    pub max_gross_exposure_pct: f64,
+    #[serde(default = "default_max_net_exposure_pct")]
+    pub max_net_exposure_pct: f64,
 }
 
 impl Default for RiskConfig {
@@ -132,6 +139,8 @@ impl Default for RiskConfig {
             max_open_positions: 10,
             max_portfolio_heat_pct: 6.0,
             var_confidence: 0.95,
+            max_gross_exposure_pct: default_max_gross_exposure_pct(),
+            max_net_exposure_pct: default_max_net_exposure_pct(),
         }
     }
 }
@@ -797,6 +806,12 @@ impl EngineConfig {
         if self.backtest.ema_short_period >= self.backtest.ema_long_period {
             errors.push("backtest.ema_short_period must be < ema_long_period".to_string());
         }
+        if self.risk.max_gross_exposure_pct <= 0.0 {
+            errors.push("risk.max_gross_exposure_pct must be > 0".to_string());
+        }
+        if self.risk.max_net_exposure_pct <= 0.0 {
+            errors.push("risk.max_net_exposure_pct must be > 0".to_string());
+        }
         if self.initial_capital <= 0.0 {
             errors.push("initial_capital must be > 0".to_string());
         }
@@ -838,6 +853,8 @@ pub struct LiveExecutorConfig {
     pub tick_execution_enabled: bool,
     /// Tick-level price threshold percentage above/below entry for immediate execution
     pub tick_threshold_pct: f64,
+    /// Trailing stop-loss percentage (e.g. 0.02 = 2%). None means disabled.
+    pub trail_pct: Option<f64>,
 }
 
 impl Default for LiveExecutorConfig {
@@ -860,6 +877,7 @@ impl Default for LiveExecutorConfig {
             iceberg_visible_qty: 10,
             tick_execution_enabled: false,
             tick_threshold_pct: 0.5,
+            trail_pct: None,
         }
     }
 }

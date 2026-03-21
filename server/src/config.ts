@@ -32,6 +32,7 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   TRADING_MODE: z.enum(['PAPER', 'LIVE']).default('PAPER'),
   RUST_ENGINE_URL: z.string().default('http://127.0.0.1:8400'),
+  OTEL_EXPORTER_OTLP_ENDPOINT: z.string().default(''),
 });
 
 export type Env = z.infer<typeof envSchema>;

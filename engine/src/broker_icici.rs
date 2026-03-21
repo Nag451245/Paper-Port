@@ -3,24 +3,18 @@ use crate::broker::{
     OrderSide, OrderStatus, OrderType, ProductType,
 };
 use crate::config::IciciBreezeConfig;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// ICICI Direct Breeze broker adapter — routes all calls through the
-/// Python Breeze Bridge microservice (server/breeze-bridge/app.py).
-///
-/// The bridge wraps the `breeze_connect` Python SDK and runs on port 8001.
-/// This adapter never calls the ICICI API directly; the bridge handles
-/// authentication, session management, and SDK quirks.
-///
-/// Session lifecycle:
-///   1. The bridge is started separately (e.g. via PM2 or `python app.py`)
-///   2. A session token is obtained via ICICI TOTP login
-///   3. POST /init is called on the bridge with api_key, api_secret, session_token
-///   4. The bridge keeps the session alive and persists it to disk
-///   5. This adapter checks /health to confirm session is active
+const CIRCUIT_BREAKER_FAILURE_THRESHOLD: u64 = 5;
+const CIRCUIT_BREAKER_COOLDOWN_MS: u64 = 30_000;
+const MAX_RETRIES: u32 = 3;
+const INITIAL_BACKOFF_MS: u64 = 200;
+
 pub struct IciciBreezeBroker {
     config: IciciBreezeConfig,
     connected: AtomicBool,
+    consecutive_failures: AtomicU64,
+    circuit_open_since: AtomicU64,
 }
 
 impl IciciBreezeBroker {
@@ -29,6 +23,53 @@ impl IciciBreezeBroker {
         Self {
             config,
             connected: AtomicBool::new(initially_connected),
+            consecutive_failures: AtomicU64::new(0),
+            circuit_open_since: AtomicU64::new(0),
+        }
+    }
+
+    fn is_circuit_open(&self) -> bool {
+        let failures = self.consecutive_failures.load(Ordering::Acquire);
+        if failures < CIRCUIT_BREAKER_FAILURE_THRESHOLD {
+            return false;
+        }
+        let opened_at = self.circuit_open_since.load(Ordering::Acquire);
+        if opened_at == 0 {
+            return false;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if now - opened_at > CIRCUIT_BREAKER_COOLDOWN_MS {
+            self.consecutive_failures.store(0, Ordering::Release);
+            self.circuit_open_since.store(0, Ordering::Release);
+            tracing::info!("Breeze Bridge circuit breaker reset after cooldown");
+            return false;
+        }
+        true
+    }
+
+    fn record_success(&self) {
+        self.consecutive_failures.store(0, Ordering::Release);
+        self.circuit_open_since.store(0, Ordering::Release);
+    }
+
+    fn record_failure(&self) {
+        let prev = self.consecutive_failures.fetch_add(1, Ordering::AcqRel);
+        if prev + 1 >= CIRCUIT_BREAKER_FAILURE_THRESHOLD {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            self.circuit_open_since.compare_exchange(
+                0, now, Ordering::AcqRel, Ordering::Relaxed,
+            ).ok();
+            tracing::warn!(
+                failures = prev + 1,
+                "Breeze Bridge circuit breaker OPEN — failing fast for {}ms",
+                CIRCUIT_BREAKER_COOLDOWN_MS
+            );
         }
     }
 
@@ -81,38 +122,65 @@ impl IciciBreezeBroker {
     }
 
     fn bridge_get(&self, path: &str) -> Result<serde_json::Value, String> {
+        if self.is_circuit_open() {
+            return Err("Breeze Bridge circuit breaker is OPEN — try again later".into());
+        }
         let url = self.bridge_url(path);
-        let resp = ureq::get(&url)
-            .timeout(std::time::Duration::from_secs(10))
-            .call()
-            .map_err(|e| {
-                if matches!(e, ureq::Error::Status(503, _)) {
-                    self.connected.store(false, Ordering::Release);
-                    return "Breeze session not active — initialize via /init".to_string();
+        let mut last_err = String::new();
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let backoff_ms = INITIAL_BACKOFF_MS * (1u64 << (attempt - 1).min(5));
+                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+            }
+            match ureq::get(&url)
+                .timeout(std::time::Duration::from_secs(10))
+                .call()
+            {
+                Ok(resp) => {
+                    self.record_success();
+                    return resp.into_json::<serde_json::Value>()
+                        .map_err(|e| format!("Failed to parse bridge response: {}", e));
                 }
-                format!("Bridge request failed: {}", e)
-            })?;
-
-        resp.into_json::<serde_json::Value>()
-            .map_err(|e| format!("Failed to parse bridge response: {}", e))
+                Err(ureq::Error::Status(503, _)) => {
+                    self.connected.store(false, Ordering::Release);
+                    self.record_failure();
+                    return Err("Breeze session not active — initialize via /init".into());
+                }
+                Err(e) => {
+                    last_err = format!("Bridge GET {} failed (attempt {}): {}", path, attempt + 1, e);
+                    tracing::warn!("{}", last_err);
+                }
+            }
+        }
+        self.record_failure();
+        Err(last_err)
     }
 
     fn bridge_post(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+        if self.is_circuit_open() {
+            return Err("Breeze Bridge circuit breaker is OPEN — try again later".into());
+        }
         let url = self.bridge_url(path);
-        let resp = ureq::post(&url)
+        match ureq::post(&url)
             .timeout(std::time::Duration::from_secs(10))
             .set("Content-Type", "application/json")
             .send_json(body)
-            .map_err(|e| {
-                if matches!(e, ureq::Error::Status(503, _)) {
-                    self.connected.store(false, Ordering::Release);
-                    return "Breeze session not active — initialize via /init".to_string();
-                }
-                format!("Bridge request failed: {}", e)
-            })?;
-
-        resp.into_json::<serde_json::Value>()
-            .map_err(|e| format!("Failed to parse bridge response: {}", e))
+        {
+            Ok(resp) => {
+                self.record_success();
+                resp.into_json::<serde_json::Value>()
+                    .map_err(|e| format!("Failed to parse bridge response: {}", e))
+            }
+            Err(ureq::Error::Status(503, _)) => {
+                self.connected.store(false, Ordering::Release);
+                self.record_failure();
+                Err("Breeze session not active — initialize via /init".into())
+            }
+            Err(e) => {
+                self.record_failure();
+                Err(format!("Bridge POST {} failed: {}", path, e))
+            }
+        }
     }
 
     fn breeze_product(product: ProductType) -> &'static str {

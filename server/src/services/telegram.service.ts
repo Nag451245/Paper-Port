@@ -10,6 +10,29 @@ const SCAN_COOLDOWN_MS = 15_000;
 const CHAT_COOLDOWN_MS = 5_000;
 const PROCESSED_CACHE_SIZE = 500;
 
+const GREETING_PATTERNS = new Set([
+  'hi', 'hello', 'hey', 'hola', 'namaste', 'namaskar', 'namasthe',
+  'vanakkam', 'sat sri akal', 'salaam', 'adab', 'howdy', 'yo',
+  'good morning', 'good afternoon', 'good evening', 'good night',
+  'suprabhat', 'shubh prabhat', 'bonjour', 'konnichiwa', 'annyeong',
+  'hallo', 'ciao', 'ola', 'merhaba', 'salam', 'sawadee',
+  'hey chitti', 'hi chitti', 'hello chitti', 'namaste chitti',
+  'hey there', 'hi there', 'hello there', 'whats up', "what's up",
+  'sup', 'wassup', 'kya haal', 'kya chal raha', 'kaise ho',
+  'how are you', "how's it going", 'howzit',
+]);
+
+const CHITTI_GREETINGS = [
+  "Namaste, trader! Chitti here — your markets companion. The screens are on, the data is flowing. What are we trading today?",
+  "Hey! Chitti at your service. Markets never sleep and neither does my analysis engine. What's on your mind?",
+  "Welcome back! I've been watching the tapes. NIFTY's got an interesting setup today. Ask me anything — scan a symbol, check your portfolio, or just chat markets.",
+  "Hello, trader! Chitti reporting for duty. I've got 76 features, 40+ indicators, and strong opinions. Fire away.",
+  "Yo! Good to see you. I've been crunching numbers while you were away. Want a status update, a scan, or shall we discuss a trade idea?",
+  "Greetings! Chitti here — part quant, part mentor, fully caffeinated. The market's whispering today. What do you want to explore?",
+  "Hey there! Your trading AI is locked and loaded. Ask me for a /scan, /quote, /status — or just talk markets in plain English.",
+  "Namaste! I've been tracking your positions and the broader market. Everything's in check. What shall we look at?",
+];
+
 const KNOWN_SYMBOLS = new Set([
   'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN', 'BHARTIARTL',
   'HINDUNILVR', 'ITC', 'KOTAKBANK', 'LT', 'HCLTECH', 'AXISBANK', 'ASIANPAINT',
@@ -157,10 +180,11 @@ export class TelegramService {
   private async routeMessage(chatId: string, text: string, name: string): Promise<void> {
     if (text === '/start') {
       await this.sendMessage(chatId,
-        `Hello ${name}!\n\n` +
+        `Namaste ${name}! I'm <b>Chitti</b> — your AI trading companion.\n\n` +
         `Your <b>Chat ID</b> is:\n<code>${chatId}</code>\n\n` +
-        `Copy this number, go to <b>PaperPort Settings → Telegram</b>, paste it, and click <b>Connect</b>.\n\n` +
-        `Type <b>/help</b> to see available commands.`);
+        `Copy this number, go to <b>Capital Guard Settings → Telegram</b>, paste it, and click <b>Connect</b>.\n\n` +
+        `Once connected, you can chat with me in plain English, ask for scans, quotes, and more.\n` +
+        `Type <b>/help</b> to see what I can do.`);
       return;
     }
 
@@ -198,6 +222,12 @@ export class TelegramService {
       }
     }
 
+    const lowerText = text.toLowerCase().replace(/[!?.,']/g, '').trim();
+    if (GREETING_PATTERNS.has(lowerText)) {
+      await this.handleGreeting(chatId, name);
+      return;
+    }
+
     const upperText = text.toUpperCase().trim();
     if (KNOWN_SYMBOLS.has(upperText) && !text.startsWith('/')) {
       await this.handleScanCommand(chatId, upperText);
@@ -208,6 +238,19 @@ export class TelegramService {
       await this.handleCommandCenterChat(chatId, text);
       return;
     }
+  }
+
+  private async handleGreeting(chatId: string, name: string): Promise<void> {
+    const user = await this.prisma.user.findFirst({
+      where: { telegramChatId: chatId },
+      select: { id: true, fullName: true },
+    });
+
+    const greeting = CHITTI_GREETINGS[Math.floor(Math.random() * CHITTI_GREETINGS.length)];
+    const userName = user?.fullName?.split(' ')[0] ?? name;
+    const personalizedGreeting = greeting.replace(/trader/i, userName);
+
+    await this.sendMessage(chatId, `<b>🤖 Chitti</b>\n\n${personalizedGreeting}`);
   }
 
   private async handleSmartStatus(chatId: string): Promise<void> {
@@ -272,16 +315,24 @@ export class TelegramService {
 
   private async handleHelp(chatId: string): Promise<void> {
     await this.sendMessage(chatId,
-      `<b>Capital Guard Bot</b>\n\n` +
+      `<b>🤖 Chitti — Capital Guard AI</b>\n\n` +
+      `I'm your AI trading companion with 20+ years of market wisdom, ` +
+      `40+ technical indicators, and strong opinions.\n\n` +
       `<b>Commands:</b>\n` +
-      `/scan SYMBOL — Technical analysis\n` +
-      `/options SYMBOL — Options chain\n` +
-      `/quote SYMBOL — Quick price\n` +
-      `/status — Portfolio & engine status\n` +
+      `/scan SYMBOL — Technical analysis (Rust Engine)\n` +
+      `/options SYMBOL — Options chain + Greeks\n` +
+      `/quote SYMBOL — Live price quote\n` +
+      `/status — Portfolio, bots & engine status\n` +
       `/help — This message\n\n` +
       `<b>Smart features:</b>\n` +
-      `Type a stock symbol (e.g. <b>RELIANCE</b>) for instant scan.\n` +
-      `Ask anything in plain English — the AI understands context and queries live data.`);
+      `• Type a stock symbol (e.g. <b>RELIANCE</b>) for instant scan\n` +
+      `• Say hello in any language — I speak them all\n` +
+      `• Ask anything in plain English — I understand context, query live data, and give you actionable insights\n\n` +
+      `<b>Examples:</b>\n` +
+      `<i>"Should I buy INFY at current levels?"</i>\n` +
+      `<i>"What's the risk on my portfolio?"</i>\n` +
+      `<i>"Morning briefing"</i>\n` +
+      `<i>"How's NIFTY looking?"</i>`);
   }
 
   private async handleScanCommand(chatId: string, symbol: string): Promise<void> {
@@ -473,24 +524,26 @@ export class TelegramService {
     });
     if (!user) {
       await this.sendMessage(chatId,
-        'Not connected to any account.\nPaste your Chat ID in Settings to connect first.');
+        '🤖 Not connected to any Capital Guard account yet.\n\n' +
+        `Your Chat ID: <code>${chatId}</code>\nPaste this in <b>Settings → Telegram</b> to connect.`);
       return;
     }
 
-    await this.sendMessage(chatId, 'Thinking...');
+    await this.sendMessage(chatId, '🤖 <i>Chitti is analyzing...</i>');
 
     try {
       const result = await processCommandCenterChat(user.id, text);
-      const response = result.content || 'No response generated.';
-      const maxLen = 4000;
-      if (response.length > maxLen) {
-        await this.sendMessage(chatId, response.slice(0, maxLen) + '\n\n<i>...truncated</i>');
+      const response = result.content || 'Hmm, I could not form a response. Try rephrasing or ask me something specific.';
+      const maxLen = 3900;
+      const branded = `<b>🤖 Chitti</b>\n\n${response}`;
+      if (branded.length > maxLen) {
+        await this.sendMessage(chatId, branded.slice(0, maxLen) + '\n\n<i>...message trimmed</i>');
       } else {
-        await this.sendMessage(chatId, response);
+        await this.sendMessage(chatId, branded);
       }
     } catch (err) {
       console.error('[Telegram] Command center error:', (err as Error).message);
-      await this.sendMessage(chatId, `Something went wrong. Please try again.`);
+      await this.sendMessage(chatId, '🤖 Something went wrong on my end. Give me a moment and try again.');
     }
   }
 

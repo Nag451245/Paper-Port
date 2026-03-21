@@ -25,6 +25,7 @@ import { riskRoutes } from './routes/risk.js';
 import commandCenterRoutes from './routes/command-center.js';
 import { engineRoutes } from './routes/engine.js';
 import { disconnectPrisma, getPrisma } from './lib/prisma.js';
+import { getRedis } from './lib/redis.js';
 import { AuthService } from './services/auth.service.js';
 import { BotEngine } from './services/bot-engine.js';
 import { LearningEngine } from './services/learning-engine.js';
@@ -51,12 +52,15 @@ import { TickStoreService } from './services/tick-store.service.js';
 import reportRoutes from './routes/reports.js';
 import guardianRoutes from './routes/guardian.js';
 import { isEngineAvailable, ensureEngineAvailable, startDaemon, stopDaemon } from './lib/rust-engine.js';
+import { initTracing } from './lib/tracing.js';
 
 export interface BuildAppOptions {
   logger?: boolean;
 }
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
+  await initTracing();
+
   const app = Fastify({
     logger: options.logger ?? true,
     bodyLimit: 1_048_576, // 1 MB max body
@@ -232,8 +236,28 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       breezeBridgeHealthy = false;
     }
 
-    const overall = checks.database === 'ok' && checks.engine === 'ok' ? 'ok'
-      : checks.database === 'ok' ? 'degraded' : 'error';
+    try {
+      const redis = getRedis();
+      if (redis) {
+        const pong = await redis.ping();
+        checks.redis = pong === 'PONG' ? 'ok' : 'unhealthy';
+      } else {
+        checks.redis = 'not_configured';
+      }
+    } catch {
+      checks.redis = 'error';
+    }
+
+    try {
+      const mlResp = await fetch(`${env.ML_SERVICE_URL}/health`, { signal: AbortSignal.timeout(3000) });
+      checks.ml_service = mlResp.ok ? 'ok' : 'unhealthy';
+    } catch {
+      checks.ml_service = 'unreachable';
+    }
+
+    const engineOk = checks.engine === 'ok' || checks.engine === 'not_installed';
+    const overall = checks.database === 'ok' && engineOk && checks.redis !== 'error' ? 'ok'
+      : checks.database === 'ok' && checks.redis !== 'error' ? 'degraded' : 'error';
 
     const uptimeStatus = uptimeMonitor.getStatus();
 
@@ -323,6 +347,38 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     console.log('[EODReview Cron] Starting end-of-day review...');
     await eodReviewService.runReview();
     console.log('[EODReview Cron] Review complete');
+  });
+
+  // EOD OMS Reconciliation — 15:40 IST = 10:10 UTC
+  orchestrator.scheduleMarketDay('10 10 * * 1-5', async () => {
+    try {
+      const { engineOMSReconcile } = await import('./lib/rust-engine.js');
+      const report = await engineOMSReconcile() as { matched?: number; mismatches?: unknown[] };
+      const matched = report?.matched ?? 0;
+      const mismatches = report?.mismatches ?? [];
+      // Notify Chitti about reconciliation outcome
+      const prisma = getPrisma();
+      const users = await prisma.user.findMany({ where: { isActive: true }, select: { id: true } });
+      if (Array.isArray(mismatches) && mismatches.length > 0) {
+        app.log.error({ mismatches }, `[EOD Reconciliation] ${mismatches.length} position mismatches detected!`);
+        const { emit } = await import('./lib/event-bus.js');
+        await emit('risk', {
+          type: 'RECONCILIATION_MISMATCH',
+          mismatches,
+          timestamp: new Date().toISOString(),
+        });
+        for (const u of users) {
+          guardianService.onEvent(u.id, {
+            type: 'reconciliation_result',
+            data: { matched, mismatchCount: mismatches.length, mismatches },
+          }).catch(() => {});
+        }
+      } else {
+        console.log(`[EOD Reconciliation] All ${matched} positions reconciled — no mismatches`);
+      }
+    } catch (err) {
+      app.log.error(`[EOD Reconciliation] Failed: ${(err as Error).message}`);
+    }
   });
 
   // Record daily P&L — 15:45 IST = 10:15 UTC

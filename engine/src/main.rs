@@ -443,6 +443,8 @@ async fn main() {
     }
 }
 
+// TODO(I10): Add OpenTelemetry OTLP exporter layer when OTEL_EXPORTER_OTLP_ENDPOINT is set.
+// Requires adding crate dependencies: opentelemetry, opentelemetry-otlp, tracing-opentelemetry.
 fn init_tracing(config: &EngineConfig) {
     use tracing_subscriber::{fmt, EnvFilter};
 

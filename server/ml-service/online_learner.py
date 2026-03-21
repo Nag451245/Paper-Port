@@ -155,12 +155,52 @@ class OnlineLearningSystem:
         self.drift_threshold = 0.10
         self.last_drift_check = 0
         self.drift_detected = False
+        self.updates_halted = False
+        self.psi_score = 0.0
+        self.psi_threshold = 0.25
+        self.reference_window_size = 200
+        self._reference_features: List[List[float]] = []
+        self._recent_features: deque = deque(maxlen=200)
+        self._feature_keys: Optional[List[str]] = None
+        self._observation_count = 0
+        self._halt_count = 0
+        self._max_halt_observations = 100
 
     def update(self, features: Dict, outcome: float, trade_id: str = "") -> Dict:
-        sgd_result = self.sgd.partial_update(features, outcome)
-        self.incr_xgb.add_observation(features, outcome)
-        
+        if not self._feature_keys:
+            self._feature_keys = sorted(features.keys())
+        feat_vec = [features.get(k, 0) for k in self._feature_keys]
+
+        self._observation_count += 1
+        if len(self._reference_features) < self.reference_window_size:
+            self._reference_features.append(feat_vec)
+        self._recent_features.append(feat_vec)
+
         self._check_drift()
+
+        if self.updates_halted:
+            self._halt_count += 1
+            if self._halt_count >= self._max_halt_observations:
+                logger.info(
+                    f"Resetting drift reference after {self._halt_count} halted observations "
+                    f"(adapting to new regime)"
+                )
+                self._reference_features = list(self._recent_features)
+                self.updates_halted = False
+                self.drift_detected = False
+                self._halt_count = 0
+                self.psi_score = 0.0
+            return {
+                "status": "halted_drift",
+                "sgd_updates": self.sgd.update_count,
+                "xgb_updates": self.incr_xgb.update_count,
+                "trade_id": trade_id,
+                "drift_detected": self.drift_detected,
+                "psi_score": round(self.psi_score, 4),
+            }
+
+        self.sgd.partial_update(features, outcome)
+        self.incr_xgb.add_observation(features, outcome)
 
         return {
             "status": "updated",
@@ -168,6 +208,7 @@ class OnlineLearningSystem:
             "xgb_updates": self.incr_xgb.update_count,
             "trade_id": trade_id,
             "drift_detected": self.drift_detected,
+            "psi_score": round(self.psi_score, 4),
         }
 
     def predict(self, features: Dict) -> float:
@@ -182,23 +223,68 @@ class OnlineLearningSystem:
             return xgb_prob
         return 0.5
 
+    def _compute_psi(self, reference: np.ndarray, recent: np.ndarray, buckets: int = 10) -> float:
+        """Compute Population Stability Index between reference and recent distributions."""
+        eps = 1e-4
+        breakpoints = np.percentile(reference, np.linspace(0, 100, buckets + 1))
+        breakpoints[0] = -np.inf
+        breakpoints[-1] = np.inf
+        breakpoints = np.unique(breakpoints)
+
+        expected_counts = np.histogram(reference, bins=breakpoints)[0].astype(float)
+        actual_counts = np.histogram(recent, bins=breakpoints)[0].astype(float)
+
+        expected_pct = expected_counts / expected_counts.sum() + eps
+        actual_pct = actual_counts / actual_counts.sum() + eps
+
+        psi = float(np.sum((actual_pct - expected_pct) * np.log(actual_pct / expected_pct)))
+        return psi
+
     def _check_drift(self):
-        if self.sgd.update_count < 50:
-            return
-        
         now = time.time()
         if now - self.last_drift_check < 300:
             return
         self.last_drift_check = now
 
-        online_acc = self.sgd.get_accuracy()
-        drift = abs(online_acc - self.batch_accuracy_baseline)
-        
-        if drift > self.drift_threshold:
-            self.drift_detected = True
-            logger.warning(f"Drift detected: online_acc={online_acc:.3f}, baseline={self.batch_accuracy_baseline:.3f}, gap={drift:.3f}")
-        else:
-            self.drift_detected = False
+        # PSI-based drift (primary signal)
+        if (len(self._reference_features) >= self.reference_window_size
+                and len(self._recent_features) >= self.reference_window_size):
+            ref_arr = np.array(self._reference_features)
+            rec_arr = np.array(list(self._recent_features))
+            psi_per_feature = []
+            for col in range(ref_arr.shape[1]):
+                if np.std(ref_arr[:, col]) < 1e-9:
+                    continue
+                psi_per_feature.append(self._compute_psi(ref_arr[:, col], rec_arr[:, col]))
+            if psi_per_feature:
+                self.psi_score = float(np.mean(psi_per_feature))
+            else:
+                self.psi_score = 0.0
+
+            if self.psi_score > self.psi_threshold:
+                self.drift_detected = True
+                self.updates_halted = True
+                logger.warning(
+                    f"PSI drift detected: psi={self.psi_score:.4f} (threshold={self.psi_threshold}). "
+                    f"Online updates halted."
+                )
+                return
+            else:
+                self.updates_halted = False
+
+        # Accuracy-based drift (secondary signal)
+        if self.sgd.update_count >= 50:
+            online_acc = self.sgd.get_accuracy()
+            drift = abs(online_acc - self.batch_accuracy_baseline)
+            if drift > self.drift_threshold:
+                self.drift_detected = True
+                logger.warning(
+                    f"Accuracy drift detected: online_acc={online_acc:.3f}, "
+                    f"baseline={self.batch_accuracy_baseline:.3f}, gap={drift:.3f}"
+                )
+                return
+
+        self.drift_detected = False
 
     def get_stats(self) -> Dict:
         return {
@@ -209,11 +295,23 @@ class OnlineLearningSystem:
             "xgb_window_size": len(self.incr_xgb.window),
             "xgb_trained": self.incr_xgb.is_trained,
             "drift_detected": self.drift_detected,
+            "updates_halted": self.updates_halted,
+            "psi_score": round(self.psi_score, 4),
             "batch_baseline": self.batch_accuracy_baseline,
         }
 
     def set_batch_baseline(self, accuracy: float):
         self.batch_accuracy_baseline = accuracy
+
+    def reset_drift_reference(self):
+        """Reset the reference window to current recent features, clearing drift halt."""
+        if self._recent_features:
+            self._reference_features = list(self._recent_features)
+        self.updates_halted = False
+        self.drift_detected = False
+        self._halt_count = 0
+        self.psi_score = 0.0
+        logger.info("Drift reference manually reset")
 
 
 online_learner = OnlineLearningSystem()

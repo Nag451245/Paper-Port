@@ -23,13 +23,14 @@ export type ExecutionEvent =
   | { type: 'ORDER_PLACED'; userId: string; orderId: string; symbol: string; side: string; qty: number; orderType: string }
   | { type: 'ORDER_FILLED'; userId: string; orderId: string; symbol: string; fillPrice: number; qty: number; slippageBps: number }
   | { type: 'POSITION_OPENED'; userId: string; positionId: string; symbol: string; side: string; qty: number; entryPrice: number }
-  | { type: 'POSITION_CLOSED'; userId: string; positionId: string; symbol: string; pnl: number; exitPrice: number; strategyTag?: string }
+  | { type: 'POSITION_CLOSED'; userId: string; positionId: string; symbol: string; pnl: number; exitPrice: number; strategyTag?: string; entryPrice?: number; confidence?: number }
   | { type: 'ORDER_STATE_CHANGE'; orderId: string; symbol: string; fromState: string; toState: string; filledQty?: number; avgFillPrice?: number };
 
 export type RiskEvent =
   | { type: 'RISK_CHECK_PASSED'; userId: string; symbol: string; checks: string[] }
   | { type: 'RISK_VIOLATION'; userId: string; symbol: string; violations: string[]; severity: 'warning' | 'critical' }
-  | { type: 'CIRCUIT_BREAKER_TRIGGERED'; userId: string; reason: string; drawdownPct: number };
+  | { type: 'CIRCUIT_BREAKER_TRIGGERED'; userId: string; reason: string; drawdownPct: number }
+  | { type: 'RECONCILIATION_MISMATCH'; mismatches: unknown[]; timestamp: string };
 
 export type SystemEvent =
   | { type: 'MARKET_OPEN'; exchange: string; timestamp: string }
@@ -37,7 +38,8 @@ export type SystemEvent =
   | { type: 'PHASE_CHANGE'; from: string; to: string; timestamp: string }
   | { type: 'KILL_SWITCH_ACTIVATED'; userId: string; timestamp: string }
   | { type: 'KILL_SWITCH_DEACTIVATED'; userId: string; timestamp: string }
-  | { type: 'LEARNING_UPDATE'; userId: string; symbol: string; outcome: string; intradayWinRate: number; totalIntradayTrades: number };
+  | { type: 'LEARNING_UPDATE'; userId: string; symbol: string; outcome: string; intradayWinRate: number; totalIntradayTrades: number }
+  | { type: 'ML_WEIGHTS_UPDATED'; userId: string; version: string; timestamp: string };
 
 export type AppEvent = MarketDataEvent | SignalEvent | ExecutionEvent | RiskEvent | SystemEvent;
 
