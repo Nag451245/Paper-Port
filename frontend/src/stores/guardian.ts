@@ -184,6 +184,11 @@ function applyStatePayload(
 /** Only the first expand-via-toggle with an empty transcript triggers an automatic greeting. */
 let autoGreetingFromToggleSent = false;
 
+export interface AvatarPosition {
+  x: number;
+  y: number;
+}
+
 export interface GuardianStore {
   mood: GuardianMood;
   moodIntensity: number;
@@ -194,6 +199,7 @@ export interface GuardianStore {
   isTyping: boolean;
   isInitialized: boolean;
   pageContext: string;
+  avatarPosition: AvatarPosition | null;
 
   initialize: () => Promise<() => void>;
   fetchState: () => Promise<void>;
@@ -204,6 +210,7 @@ export interface GuardianStore {
   acknowledgeThought: (id: string) => void;
   setPageContext: (page: string) => void;
   clearMessages: () => void;
+  setAvatarPosition: (pos: AvatarPosition) => void;
 }
 
 export const useGuardianStore = create<GuardianStore>((set, get) => ({
@@ -216,6 +223,7 @@ export const useGuardianStore = create<GuardianStore>((set, get) => ({
   isTyping: false,
   isInitialized: false,
   pageContext: '',
+  avatarPosition: null,
 
   initialize: async () => {
     try {
@@ -420,5 +428,9 @@ export const useGuardianStore = create<GuardianStore>((set, get) => ({
 
   clearMessages: () => {
     set({ messages: [] });
+  },
+
+  setAvatarPosition: (pos: AvatarPosition) => {
+    set({ avatarPosition: pos });
   },
 }));

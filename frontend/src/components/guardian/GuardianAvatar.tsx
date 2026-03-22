@@ -1,5 +1,47 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useGuardianStore, type GuardianMood } from '@/stores/guardian';
+
+const STORAGE_KEY = 'chitti-avatar-position';
+const AVATAR_SIZE = 56;
+const DRAG_THRESHOLD = 5;
+
+interface Position {
+  x: number;
+  y: number;
+}
+
+function getDefaultPosition(): Position {
+  return {
+    x: window.innerWidth - AVATAR_SIZE - 24,
+    y: window.innerHeight - AVATAR_SIZE - 24,
+  };
+}
+
+function loadPosition(): Position {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) {
+      const pos = JSON.parse(stored) as Position;
+      if (typeof pos.x === 'number' && typeof pos.y === 'number') {
+        return clampPosition(pos);
+      }
+    }
+  } catch { /* use default */ }
+  return getDefaultPosition();
+}
+
+function savePosition(pos: Position): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(pos));
+  } catch { /* storage full */ }
+}
+
+function clampPosition(pos: Position): Position {
+  return {
+    x: Math.max(0, Math.min(pos.x, window.innerWidth - AVATAR_SIZE)),
+    y: Math.max(0, Math.min(pos.y, window.innerHeight - AVATAR_SIZE)),
+  };
+}
 
 const MOOD_COLORS: Record<GuardianMood, { glow: string; bg: string; particle: string }> = {
   COMPOSED:      { glow: '0 0 18px 4px rgba(45,212,191,0.45), 0 0 40px 8px rgba(96,165,250,0.2)',  bg: 'linear-gradient(135deg, #0d9488 0%, #2563eb 100%)', particle: 'rgba(45,212,191,0.5)'  },
@@ -286,11 +328,72 @@ export default function GuardianAvatar() {
   const initialize = useGuardianStore((s) => s.initialize);
   const toggleExpanded = useGuardianStore((s) => s.toggleExpanded);
 
+  const setAvatarPosition = useGuardianStore((s) => s.setAvatarPosition);
+  const [position, setPosition] = useState<Position>(loadPosition);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragRef = useRef({
+    startX: 0,
+    startY: 0,
+    startPosX: 0,
+    startPosY: 0,
+    moved: false,
+  });
+  const containerRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     let cleanup: (() => void) | undefined;
     initialize().then((fn) => { cleanup = fn; });
     return () => { cleanup?.(); };
   }, [initialize]);
+
+  useEffect(() => {
+    setAvatarPosition(position);
+  }, [position, setAvatarPosition]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setPosition((prev) => clampPosition(prev));
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    const drag = dragRef.current;
+    drag.startX = e.clientX;
+    drag.startY = e.clientY;
+    drag.startPosX = position.x;
+    drag.startPosY = position.y;
+    drag.moved = false;
+    setIsDragging(true);
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  }, [position]);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (!isDragging) return;
+    const drag = dragRef.current;
+    const dx = e.clientX - drag.startX;
+    const dy = e.clientY - drag.startY;
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) < DRAG_THRESHOLD) return;
+    drag.moved = true;
+    const next = clampPosition({
+      x: drag.startPosX + dx,
+      y: drag.startPosY + dy,
+    });
+    setPosition(next);
+  }, [isDragging]);
+
+  const handlePointerUp = useCallback((e: React.PointerEvent) => {
+    if (!isDragging) return;
+    setIsDragging(false);
+    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+    if (dragRef.current.moved) {
+      savePosition(position);
+    } else {
+      toggleExpanded();
+    }
+  }, [isDragging, position, toggleExpanded]);
 
   const undismissedCount = useMemo(
     () => thoughts.filter((t) => !t.dismissed).length,
@@ -303,6 +406,10 @@ export default function GuardianAvatar() {
   const accentColor = MOOD_ACCENT[mood];
   const isCelebratory = mood === 'CELEBRATORY';
 
+  useEffect(() => {
+    console.log('[GuardianAvatar] Rendered — isExpanded:', isExpanded, 'position:', position);
+  }, [isExpanded, position]);
+
   if (isExpanded) return null;
 
   return (
@@ -310,9 +417,22 @@ export default function GuardianAvatar() {
       <style dangerouslySetInnerHTML={{ __html: KEYFRAMES }} />
 
       <div
-        className="fixed bottom-20 right-4 z-50 md:bottom-6 md:right-6 group"
+        ref={containerRef}
         role="region"
         aria-label="Chitti the Trader"
+        style={{
+          position: 'fixed',
+          left: position.x,
+          top: position.y,
+          zIndex: 9999,
+          cursor: isDragging ? 'grabbing' : 'grab',
+          touchAction: 'none',
+          userSelect: 'none',
+        }}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
       >
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           {particles.map((p, i) => (
@@ -342,13 +462,11 @@ export default function GuardianAvatar() {
           }}
         />
 
-        <button
-          type="button"
-          onClick={toggleExpanded}
-          className="relative flex items-center justify-center w-14 h-14 rounded-full cursor-pointer border border-white/10 shadow-lg backdrop-blur-sm transition-shadow duration-300 hover:shadow-xl focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400 overflow-visible"
+        <div
+          className="relative flex items-center justify-center w-14 h-14 rounded-full border border-white/10 shadow-lg backdrop-blur-sm transition-shadow duration-300 hover:shadow-xl overflow-visible"
           style={{
             background: colors.bg,
-            animation: 'guardian-breathe 3s ease-in-out infinite',
+            animation: isDragging ? 'none' : 'guardian-breathe 3s ease-in-out infinite',
           }}
           aria-label={`Chitti the Trader · mood: ${mood.toLowerCase()}`}
         >
@@ -359,7 +477,7 @@ export default function GuardianAvatar() {
               {undismissedCount > 9 ? '9+' : undismissedCount}
             </span>
           )}
-        </button>
+        </div>
 
         <span className="pointer-events-none absolute -bottom-7 left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-black/80 px-2 py-0.5 text-[10px] font-medium text-white/80 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
           chitti &middot; {mood.toLowerCase()}

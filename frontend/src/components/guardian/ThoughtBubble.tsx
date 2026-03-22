@@ -58,10 +58,19 @@ export default function ThoughtBubble() {
     return () => timers.forEach(clearTimeout);
   }, [visible, autoDismiss]);
 
+  const avatarPosition = useGuardianStore((s) => s.avatarPosition);
+
   if (isExpanded || visible.length === 0) return null;
 
+  const bubbleStyle: React.CSSProperties = avatarPosition
+    ? { left: avatarPosition.x - 240, top: avatarPosition.y - (visible.length * 52 + 8) }
+    : { right: 16, bottom: 144 };
+
   return (
-    <div className="fixed bottom-36 right-4 z-50 md:bottom-22 md:right-6 flex flex-col gap-2 items-end pointer-events-none">
+    <div
+      className="fixed z-50 flex flex-col gap-2 items-end pointer-events-none"
+      style={bubbleStyle}
+    >
       <style dangerouslySetInnerHTML={{ __html: `
         @keyframes thought-slide-in {
           0% { opacity: 0; transform: translateY(8px) scale(0.95); }
