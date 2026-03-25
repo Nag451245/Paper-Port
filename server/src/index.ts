@@ -1,3 +1,4 @@
+import { createServer, type Server } from 'net';
 import { buildApp } from './app.js';
 import { env } from './config.js';
 
@@ -7,7 +8,6 @@ process.on('unhandledRejection', (reason) => {
 
 process.on('uncaughtException', (err) => {
   console.error('[UNCAUGHT EXCEPTION]', err.stack ?? err.message);
-  // Node.js is in undefined state after uncaughtException — flush stderr and exit
   process.stderr.write('', () => process.exit(1));
   setTimeout(() => process.exit(1), 3000).unref();
 });
@@ -52,37 +52,79 @@ async function gracefulShutdown(signal: string, app: ReturnType<typeof buildApp>
   }
 }
 
-async function waitForPort(port: number, maxAttempts = 5): Promise<void> {
-  const net = await import('net');
+/**
+ * Claim the port with a raw TCP server to prevent races during heavy init.
+ * Retries with progressive delays and force-kills stale holders after 3 failures.
+ */
+async function reservePort(port: number, host: string): Promise<Server> {
+  const maxAttempts = 10;
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const inUse = await new Promise<boolean>((resolve) => {
-      const srv = net.createServer();
-      srv.once('error', () => resolve(true));
-      srv.once('listening', () => { srv.close(); resolve(false); });
-      srv.listen(port, '0.0.0.0');
-    });
-    if (!inUse) return;
-    console.log(`[Startup] Port ${port} in use — waiting ${attempt}s before retry (${attempt}/${maxAttempts})`);
-    await new Promise(r => setTimeout(r, attempt * 1000));
+    try {
+      const guard = createServer();
+      await new Promise<void>((resolve, reject) => {
+        guard.once('error', reject);
+        guard.once('listening', () => resolve());
+        guard.listen(port, host);
+      });
+      return guard;
+    } catch (err: any) {
+      if (err.code !== 'EADDRINUSE') throw err;
+
+      const delaySec = Math.min(attempt * 2, 10);
+      console.warn(`[Startup] Port ${port} in use — retry ${attempt}/${maxAttempts} in ${delaySec}s`);
+
+      if (attempt >= 3 && process.platform === 'linux') {
+        try {
+          const { execSync } = await import('child_process');
+          execSync(`fuser -k ${port}/tcp 2>/dev/null || true`, { timeout: 5000 });
+          console.log(`[Startup] Sent kill to process on port ${port}`);
+        } catch { /* best effort */ }
+      }
+
+      await new Promise(r => setTimeout(r, delaySec * 1000));
+    }
   }
+
+  console.error(`[FATAL] Cannot bind port ${port} after ${maxAttempts} attempts — exiting`);
+  process.exit(1);
 }
 
 async function main(): Promise<void> {
-  await waitForPort(env.PORT);
+  const portGuard = await reservePort(env.PORT, env.HOST);
+  console.log(`[Startup] Port ${env.PORT} reserved — initializing app...`);
 
-  const app = await buildApp({ logger: false });
+  let app;
+  try {
+    app = await buildApp({ logger: false });
+  } catch (err) {
+    portGuard.close();
+    console.error('[FATAL] App init failed:', err);
+    process.exit(1);
+  }
 
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM', app));
   process.on('SIGINT', () => gracefulShutdown('SIGINT', app));
 
-  try {
-    await app.listen({ host: env.HOST, port: env.PORT });
-    console.log(`Capital Guard backend running on ${env.HOST}:${env.PORT}`);
-    const mem = process.memoryUsage();
-    console.log(`[MEMORY] Startup: Heap ${Math.round(mem.heapUsed / 1024 / 1024)}MB | RSS ${Math.round(mem.rss / 1024 / 1024)}MB`);
-  } catch (err) {
-    console.error('Failed to start server:', err);
-    process.exit(1);
+  portGuard.close();
+  await new Promise<void>(r => portGuard.once('close', r));
+
+  for (let retry = 0; retry < 3; retry++) {
+    try {
+      await app.listen({ host: env.HOST, port: env.PORT });
+      console.log(`Capital Guard backend running on ${env.HOST}:${env.PORT}`);
+      const mem = process.memoryUsage();
+      console.log(`[MEMORY] Startup: Heap ${Math.round(mem.heapUsed / 1024 / 1024)}MB | RSS ${Math.round(mem.rss / 1024 / 1024)}MB`);
+      return;
+    } catch (err: any) {
+      if (err.code === 'EADDRINUSE' && retry < 2) {
+        console.warn(`[Startup] Port ${env.PORT} briefly contested — retry ${retry + 1}/3`);
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
+      console.error('Failed to start server:', err);
+      process.exit(1);
+    }
   }
 }
 

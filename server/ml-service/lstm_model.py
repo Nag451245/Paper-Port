@@ -9,9 +9,9 @@ try:
     import torch
     import torch.nn as nn
     HAS_TORCH = True
-except ImportError:
+except (ImportError, OSError) as e:
     HAS_TORCH = False
-    logger.warning("PyTorch not available — LSTM model will use heuristic fallback")
+    logger.warning(f"PyTorch not available — LSTM model will use heuristic fallback ({e})")
 
 
 class BarSequenceEncoder:

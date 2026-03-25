@@ -93,7 +93,17 @@ fi
 # ── Restart ──
 echo "[6] Restarting services..."
 cd "$APP_DIR"
-pm2 restart all
+
+pm2 stop all 2>/dev/null || true
+sleep 2
+fuser -k 8000/tcp 2>/dev/null || true
+fuser -k 8001/tcp 2>/dev/null || true
+fuser -k 8002/tcp 2>/dev/null || true
+sleep 1
+
+pm2 delete all 2>/dev/null || true
+pm2 start ecosystem.config.cjs
+pm2 save
 sudo systemctl reload nginx 2>/dev/null || true
 
 sleep 3

@@ -1787,16 +1787,37 @@ if __name__ == "__main__":
         request_queue_size = 10
         allow_reuse_address = True
 
-    try:
-        server = ThreadedHTTPServer(("127.0.0.1", port), BreezeHandler)
-    except OSError as e:
-        print(f"[Breeze Bridge] FATAL: Cannot bind to port {port}: {e}", flush=True)
-        print(f"[Breeze Bridge] Try: sudo fuser -k {port}/tcp", flush=True)
+    server = None
+    for attempt in range(1, 11):
+        try:
+            server = ThreadedHTTPServer(("127.0.0.1", port), BreezeHandler)
+            break
+        except OSError as e:
+            if "Address already in use" not in str(e) and "EADDRINUSE" not in str(e):
+                raise
+            print(f"[Breeze Bridge] Port {port} in use — retry {attempt}/10", flush=True)
+            if attempt >= 3:
+                try:
+                    import subprocess
+                    subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True, timeout=5)
+                    print(f"[Breeze Bridge] Sent kill to process on port {port}", flush=True)
+                except Exception:
+                    pass
+            import time
+            time.sleep(min(attempt * 2, 10))
+
+    if server is None:
+        print(f"[Breeze Bridge] FATAL: Cannot bind to port {port} after 10 attempts", flush=True)
         sys.exit(1)
 
-    print(f"[Breeze Bridge] Ready (threaded). Session active: {breeze_instance is not None}", flush=True)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n[Breeze Bridge] Shutting down.", flush=True)
+    def _shutdown_handler(signum, frame):
+        print(f"\n[Breeze Bridge] Received signal {signum} — shutting down.", flush=True)
+        server.shutdown()
         server.server_close()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+    signal.signal(signal.SIGINT, _shutdown_handler)
+
+    print(f"[Breeze Bridge] Ready (threaded). Session active: {breeze_instance is not None}", flush=True)
+    server.serve_forever()

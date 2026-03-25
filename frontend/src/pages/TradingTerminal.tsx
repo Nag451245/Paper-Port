@@ -53,6 +53,12 @@ export default function TradingTerminal() {
   const [trades, setTrades] = useState<any[]>([]);
   const [activeTab, setActiveTab] = useState<Tab>('positions');
 
+  const TAB_PAGE_SIZE = 20;
+  const [orderPage, setOrderPage] = useState(1);
+  const [orderTotal, setOrderTotal] = useState(0);
+  const [tradePage, setTradePage] = useState(1);
+  const [tradeTotal, setTradeTotal] = useState(0);
+
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -76,26 +82,53 @@ export default function TradingTerminal() {
   const lastFetchRef = useRef(0);
   const fetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const fetchOrders = useCallback(async (page: number) => {
+    try {
+      const oRes = await tradingApi.listOrders({ page, limit: TAB_PAGE_SIZE });
+      const oData = oRes.data;
+      if (oData && typeof oData === 'object' && 'orders' in oData) {
+        setOrders((oData as any).orders ?? []);
+        setOrderTotal((oData as any).total ?? 0);
+        setOrderPage((oData as any).page ?? page);
+      } else {
+        setOrders(Array.isArray(oData) ? oData : []);
+      }
+    } catch (e: any) {
+      setError('Failed to load orders: ' + (e?.response?.data?.error ?? e.message));
+    }
+  }, []);
+
+  const fetchTrades = useCallback(async (page: number) => {
+    try {
+      const tRes = await tradingApi.listTrades({ page, limit: TAB_PAGE_SIZE });
+      const tData = tRes.data;
+      if (tData && typeof tData === 'object' && 'trades' in tData) {
+        setTrades((tData as any).trades ?? []);
+        setTradeTotal((tData as any).total ?? 0);
+        setTradePage((tData as any).page ?? page);
+      } else {
+        setTrades(Array.isArray(tData) ? tData : []);
+      }
+    } catch (e: any) {
+      setError('Failed to load trades: ' + (e?.response?.data?.error ?? e.message));
+    }
+  }, []);
+
   const fetchAllImmediate = useCallback(async () => {
     setIsLoading(true);
     const errors: string[] = [];
     try {
-      const [pRes, oRes, posRes, tRes] = await Promise.all([
+      const [pRes, , posRes] = await Promise.all([
         portfolioApi.list().catch((e) => { errors.push('Portfolio: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
-        tradingApi.listOrders({ limit: 200 }).catch((e) => { errors.push('Orders: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
+        fetchOrders(1),
         tradingApi.positions().catch((e) => { errors.push('Positions: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
-        tradingApi.listTrades({ limit: 200 }).catch((e) => { errors.push('Trades: ' + (e?.response?.data?.error ?? e.message)); return { data: [] }; }),
+        fetchTrades(1),
       ]);
 
       const pList = Array.isArray(pRes.data) ? pRes.data : [];
       setPortfolios(pList);
       if (pList.length > 0) setPortfolioId((prev) => prev ?? pList[0].id);
-
-      const oData = oRes.data;
-      setOrders(Array.isArray(oData) ? oData : (oData as any)?.orders ?? []);
       setPositions(Array.isArray(posRes.data) ? posRes.data : []);
-      const tData = tRes.data;
-      setTrades(Array.isArray(tData) ? tData : (tData as any)?.trades ?? []);
 
       if (errors.length > 0) setError('Some data failed to load: ' + errors.join('; '));
     } catch (e: any) {
@@ -104,7 +137,7 @@ export default function TradingTerminal() {
       setIsLoading(false);
       lastFetchRef.current = Date.now();
     }
-  }, []);
+  }, [fetchOrders, fetchTrades]);
 
   const fetchAll = useCallback(() => {
     const now = Date.now();
@@ -291,8 +324,8 @@ export default function TradingTerminal() {
 
   const tabs: { key: Tab; label: string; count: number }[] = [
     { key: 'positions', label: 'Positions', count: positions.length },
-    { key: 'orders', label: 'Orders', count: orders.length },
-    { key: 'trades', label: 'Trades', count: trades.length },
+    { key: 'orders', label: 'Orders', count: orderTotal },
+    { key: 'trades', label: 'Trades', count: tradeTotal },
   ];
 
   return (
@@ -464,10 +497,23 @@ export default function TradingTerminal() {
                 <PositionTable positions={positions} posLtpMap={posLtpMap} onSuccess={setSuccess} onError={setError} onRefresh={fetchAll} />
               )}
               {activeTab === 'orders' && (
-                <OrderTable orders={orders} onCancelOrder={handleCancelOrder} />
+                <OrderTable
+                  orders={orders}
+                  onCancelOrder={handleCancelOrder}
+                  total={orderTotal}
+                  page={orderPage}
+                  pageSize={TAB_PAGE_SIZE}
+                  onPageChange={(p) => fetchOrders(p)}
+                />
               )}
               {activeTab === 'trades' && (
-                <TradeTable trades={trades} />
+                <TradeTable
+                  trades={trades}
+                  total={tradeTotal}
+                  page={tradePage}
+                  pageSize={TAB_PAGE_SIZE}
+                  onPageChange={(p) => fetchTrades(p)}
+                />
               )}
             </>
           )}

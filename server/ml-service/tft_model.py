@@ -10,9 +10,9 @@ try:
     import torch.nn as nn
     import torch.nn.functional as F
     HAS_TORCH = True
-except ImportError:
+except (ImportError, OSError) as e:
     HAS_TORCH = False
-    logger.warning("PyTorch not available — TFT model will use heuristic fallback")
+    logger.warning(f"PyTorch not available — TFT model will use heuristic fallback ({e})")
 
 
 STATIC_FEATURES = ["sector_id", "cap_category", "is_nifty50", "exchange_id"]

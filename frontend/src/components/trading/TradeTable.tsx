@@ -1,5 +1,4 @@
-import { useState } from 'react';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
 import { SideBadge, StrategyBadge } from './StatusBadge';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -16,21 +15,22 @@ function fmtTime(iso: string | null | undefined): string {
   } catch { return String(iso); }
 }
 
-const PAGE_SIZE = 20;
-
 interface TradeTableProps {
   trades: any[];
+  total: number;
+  page: number;
+  pageSize: number;
+  onPageChange: (page: number) => void;
 }
 
-export default function TradeTable({ trades }: TradeTableProps) {
-  const [page, setPage] = useState(0);
-
-  if (trades.length === 0) {
+export default function TradeTable({ trades, total, page, pageSize, onPageChange }: TradeTableProps) {
+  if (total === 0 && trades.length === 0) {
     return <p className="text-center text-slate-400 text-sm py-8">No completed trades yet</p>;
   }
 
-  const totalPages = Math.ceil(trades.length / PAGE_SIZE);
-  const paged = trades.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const startItem = (page - 1) * pageSize + 1;
+  const endItem = Math.min(page * pageSize, total);
 
   return (
     <div>
@@ -50,7 +50,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
             </tr>
           </thead>
           <tbody>
-            {paged.map((trade: any) => {
+            {trades.map((trade: any) => {
               const netPnl = num(trade.netPnl ?? trade.net_pnl);
               return (
                 <tr key={trade.id} className="border-b border-slate-100 hover:bg-slate-50/50">
@@ -79,33 +79,60 @@ export default function TradeTable({ trades }: TradeTableProps) {
       {totalPages > 1 && (
         <div className="flex items-center justify-between pt-3 border-t border-slate-100 mt-2">
           <span className="text-xs text-slate-400">
-            Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, trades.length)} of {trades.length}
+            Showing {startItem}–{endItem} of {total}
           </span>
           <div className="flex items-center gap-1">
             <button
-              onClick={() => setPage(p => Math.max(0, p - 1))}
-              disabled={page === 0}
+              onClick={() => onPageChange(1)}
+              disabled={page <= 1}
+              className="p-1 rounded hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed"
+              title="First page"
+            >
+              <ChevronsLeft className="w-4 h-4 text-slate-500" />
+            </button>
+            <button
+              onClick={() => onPageChange(page - 1)}
+              disabled={page <= 1}
               className="p-1 rounded hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed"
             >
               <ChevronLeft className="w-4 h-4 text-slate-500" />
             </button>
-            {Array.from({ length: totalPages }, (_, i) => (
-              <button
-                key={i}
-                onClick={() => setPage(i)}
-                className={`w-7 h-7 text-xs rounded font-medium ${
-                  i === page ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-100'
-                }`}
-              >
-                {i + 1}
-              </button>
-            )).slice(Math.max(0, page - 2), page + 3)}
+            {Array.from({ length: totalPages }, (_, i) => i + 1)
+              .filter(p => p === 1 || p === totalPages || (p >= page - 2 && p <= page + 2))
+              .reduce<(number | 'ellipsis')[]>((acc, p, idx, arr) => {
+                if (idx > 0 && p - (arr[idx - 1] as number) > 1) acc.push('ellipsis');
+                acc.push(p);
+                return acc;
+              }, [])
+              .map((item, idx) =>
+                item === 'ellipsis' ? (
+                  <span key={`e-${idx}`} className="w-7 h-7 flex items-center justify-center text-xs text-slate-400">…</span>
+                ) : (
+                  <button
+                    key={item}
+                    onClick={() => onPageChange(item as number)}
+                    className={`w-7 h-7 text-xs rounded font-medium ${
+                      item === page ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-100'
+                    }`}
+                  >
+                    {item}
+                  </button>
+                )
+              )}
             <button
-              onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
-              disabled={page >= totalPages - 1}
+              onClick={() => onPageChange(page + 1)}
+              disabled={page >= totalPages}
               className="p-1 rounded hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed"
             >
               <ChevronRight className="w-4 h-4 text-slate-500" />
+            </button>
+            <button
+              onClick={() => onPageChange(totalPages)}
+              disabled={page >= totalPages}
+              className="p-1 rounded hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Last page"
+            >
+              <ChevronsRight className="w-4 h-4 text-slate-500" />
             </button>
           </div>
         </div>

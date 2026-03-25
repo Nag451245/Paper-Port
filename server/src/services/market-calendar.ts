@@ -31,31 +31,30 @@ const NSE_HOLIDAYS: HolidayEntry[] = [
   { date: '2025-10-22', name: 'Diwali (Lakshmi Puja)', exchanges: ['NSE', 'BSE'] },
   { date: '2025-11-05', name: 'Guru Nanak Jayanti', exchanges: ['NSE', 'BSE'] },
   { date: '2025-12-25', name: 'Christmas', exchanges: ['NSE', 'BSE'] },
-  // 2026
+  // 2026 — Official NSE circular (15 trading holidays)
+  // Mahashivratri (Feb 15) and Id-Ul-Fitr (Mar 21) fall on weekends — no trading holiday
+  // Independence Day (Aug 15) falls on Saturday — no trading holiday
   { date: '2026-01-26', name: 'Republic Day', exchanges: ['NSE', 'BSE'] },
-  { date: '2026-02-17', name: 'Mahashivratri', exchanges: ['NSE', 'BSE'] },
   { date: '2026-03-03', name: 'Holi', exchanges: ['NSE', 'BSE'] },
-  { date: '2026-03-20', name: 'Id-Ul-Fitr (Ramadan)', exchanges: ['NSE', 'BSE'] },
-  { date: '2026-03-25', name: 'Shri Ram Navami', exchanges: ['NSE', 'BSE'] },
-  { date: '2026-04-01', name: 'Shri Mahavir Jayanti', exchanges: ['NSE', 'BSE'] },
+  { date: '2026-03-26', name: 'Shri Ram Navami', exchanges: ['NSE', 'BSE'] },
+  { date: '2026-03-31', name: 'Shri Mahavir Jayanti', exchanges: ['NSE', 'BSE'] },
   { date: '2026-04-03', name: 'Good Friday', exchanges: ['NSE', 'BSE'] },
-  { date: '2026-04-14', name: 'Dr. Ambedkar Jayanti', exchanges: ['NSE', 'BSE'] },
+  { date: '2026-04-14', name: 'Dr. Baba Saheb Ambedkar Jayanti', exchanges: ['NSE', 'BSE'] },
   { date: '2026-05-01', name: 'Maharashtra Day', exchanges: ['NSE', 'BSE'] },
   { date: '2026-05-28', name: 'Bakri Id', exchanges: ['NSE', 'BSE'] },
-  { date: '2026-08-15', name: 'Independence Day', exchanges: ['NSE', 'BSE'] },
-  { date: '2026-08-18', name: 'Ganesh Chaturthi', exchanges: ['NSE', 'BSE'] },
+  { date: '2026-06-26', name: 'Muharram', exchanges: ['NSE', 'BSE'] },
+  { date: '2026-09-14', name: 'Ganesh Chaturthi', exchanges: ['NSE', 'BSE'] },
   { date: '2026-10-02', name: 'Mahatma Gandhi Jayanti', exchanges: ['NSE', 'BSE'] },
-  { date: '2026-10-09', name: 'Dussehra', exchanges: ['NSE', 'BSE'] },
-  { date: '2026-10-12', name: 'Diwali (Lakshmi Puja)', exchanges: ['NSE', 'BSE'] },
-  { date: '2026-10-13', name: 'Diwali (Balipratipada)', exchanges: ['NSE', 'BSE'] },
-  { date: '2026-10-25', name: 'Guru Nanak Jayanti', exchanges: ['NSE', 'BSE'] },
+  { date: '2026-10-20', name: 'Dussehra', exchanges: ['NSE', 'BSE'] },
+  { date: '2026-11-10', name: 'Diwali (Balipratipada)', exchanges: ['NSE', 'BSE'] },
+  { date: '2026-11-24', name: 'Prakash Gurpurb Sri Guru Nanak Dev', exchanges: ['NSE', 'BSE'] },
   { date: '2026-12-25', name: 'Christmas', exchanges: ['NSE', 'BSE'] },
 ];
 
 // Muhurat trading windows (Diwali evening sessions)
 const MUHURAT_SESSIONS: { date: string; start: number; end: number }[] = [
   { date: '2025-10-22', start: 1080, end: 1140 }, // 6:00 PM - 7:00 PM
-  { date: '2026-10-12', start: 1080, end: 1140 },
+  { date: '2026-11-08', start: 1080, end: 1140 }, // Diwali Laxmi Pujan (Sunday — Muhurat only)
 ];
 
 export class MarketCalendar {

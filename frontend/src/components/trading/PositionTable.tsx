@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
 import { SideBadge, StrategyBadge } from './StatusBadge';
 import { tradingApi } from '@/services/api';
 
@@ -114,29 +114,56 @@ export default function PositionTable({ positions, posLtpMap, onSuccess, onError
           </span>
           <div className="flex items-center gap-1">
             <button
+              onClick={() => setPage(0)}
+              disabled={page === 0}
+              className="p-1 rounded hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed"
+              title="First page"
+            >
+              <ChevronsLeft className="w-4 h-4 text-slate-500" />
+            </button>
+            <button
               onClick={() => setPage(p => Math.max(0, p - 1))}
               disabled={page === 0}
               className="p-1 rounded hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed"
             >
               <ChevronLeft className="w-4 h-4 text-slate-500" />
             </button>
-            {Array.from({ length: totalPages }, (_, i) => (
-              <button
-                key={i}
-                onClick={() => setPage(i)}
-                className={`w-7 h-7 text-xs rounded font-medium ${
-                  i === page ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-100'
-                }`}
-              >
-                {i + 1}
-              </button>
-            )).slice(Math.max(0, page - 2), page + 3)}
+            {Array.from({ length: totalPages }, (_, i) => i)
+              .filter(p => p === 0 || p === totalPages - 1 || (p >= page - 2 && p <= page + 2))
+              .reduce<(number | 'ellipsis')[]>((acc, p, idx, arr) => {
+                if (idx > 0 && p - (arr[idx - 1] as number) > 1) acc.push('ellipsis');
+                acc.push(p);
+                return acc;
+              }, [])
+              .map((item, idx) =>
+                item === 'ellipsis' ? (
+                  <span key={`e-${idx}`} className="w-7 h-7 flex items-center justify-center text-xs text-slate-400">…</span>
+                ) : (
+                  <button
+                    key={item}
+                    onClick={() => setPage(item as number)}
+                    className={`w-7 h-7 text-xs rounded font-medium ${
+                      item === page ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-100'
+                    }`}
+                  >
+                    {(item as number) + 1}
+                  </button>
+                )
+              )}
             <button
               onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
               disabled={page >= totalPages - 1}
               className="p-1 rounded hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed"
             >
               <ChevronRight className="w-4 h-4 text-slate-500" />
+            </button>
+            <button
+              onClick={() => setPage(totalPages - 1)}
+              disabled={page >= totalPages - 1}
+              className="p-1 rounded hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Last page"
+            >
+              <ChevronsRight className="w-4 h-4 text-slate-500" />
             </button>
           </div>
         </div>

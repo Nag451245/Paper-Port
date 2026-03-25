@@ -11,9 +11,9 @@ try:
     import torch.nn as nn
     import torch.optim as optim
     HAS_TORCH = True
-except ImportError:
+except (ImportError, OSError) as e:
     HAS_TORCH = False
-    logger.warning("PyTorch not available — RL agent will use heuristic fallback")
+    logger.warning(f"PyTorch not available — RL agent will use heuristic fallback ({e})")
 
 
 class ExecutionState:
