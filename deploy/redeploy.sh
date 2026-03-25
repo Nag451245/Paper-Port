@@ -57,11 +57,16 @@ fi
 if $BUILD_SERVER; then
   echo "[3] Rebuilding server..."
   cd "$APP_DIR/server"
-  npm ci --production
+  npm ci
   npx prisma generate
   npx prisma migrate deploy 2>/dev/null || true
   npm run build
-  echo "  Done."
+  if [ $? -eq 0 ]; then
+    echo "  Server build succeeded."
+  else
+    echo "  ERROR: Server build FAILED — check TypeScript errors above"
+    exit 1
+  fi
   echo ""
 fi
 
@@ -69,9 +74,14 @@ fi
 if $BUILD_FRONTEND; then
   echo "[4] Rebuilding frontend..."
   cd "$APP_DIR/frontend"
-  npm ci --production
+  npm ci
   npm run build
-  echo "  Done."
+  if [ $? -eq 0 ]; then
+    echo "  Frontend build succeeded."
+  else
+    echo "  ERROR: Frontend build FAILED"
+    exit 1
+  fi
   echo ""
 fi
 
@@ -90,23 +100,133 @@ if $BUILD_BRIDGE && [ -d "$APP_DIR/server/breeze-bridge" ]; then
   echo ""
 fi
 
+# ── ML Service ──
+if [ -d "$APP_DIR/server/ml-service" ]; then
+  echo "[5b] Checking ML Service..."
+  cd "$APP_DIR/server/ml-service"
+  if [ ! -d "venv" ]; then
+    python3 -m venv venv
+  fi
+  source venv/bin/activate
+  pip install --upgrade pip -q
+  [ -f requirements.txt ] && pip install -r requirements.txt -q
+  deactivate
+  echo "  Done."
+  echo ""
+fi
+
+# ── Ensure data directories exist ──
+mkdir -p "$APP_DIR/logs"
+mkdir -p "$APP_DIR/engine/data"
+mkdir -p "$APP_DIR/server/data"
+
+# ── Write ecosystem.config.cjs (always regenerate to stay in sync) ──
+echo "[6] Writing ecosystem.config.cjs..."
+cat > "$APP_DIR/ecosystem.config.cjs" <<'PM2_CONFIG'
+module.exports = {
+  apps: [
+    {
+      name: 'capital-guard-api',
+      cwd: './server',
+      script: 'dist/index.js',
+      exec_mode: 'fork',
+      node_args: '--max-old-space-size=512',
+      env: { NODE_ENV: 'production' },
+      instances: 1,
+      autorestart: true,
+      max_restarts: 10,
+      restart_delay: 5000,
+      kill_timeout: 10000,
+      max_memory_restart: '450M',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '../logs/api-error.log',
+      out_file: '../logs/api-out.log',
+      merge_logs: true
+    },
+    {
+      name: 'rust-engine',
+      cwd: './engine',
+      script: '../server/bin/capital-guard-engine',
+      interpreter: 'none',
+      exec_mode: 'fork',
+      env: {
+        RUST_LOG: 'info',
+        ENGINE_PORT: '8080'
+      },
+      instances: 1,
+      autorestart: true,
+      max_restarts: 5,
+      restart_delay: 3000,
+      kill_timeout: 5000,
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '../logs/engine-error.log',
+      out_file: '../logs/engine-out.log',
+      merge_logs: true
+    },
+    {
+      name: 'breeze-bridge',
+      cwd: './server/breeze-bridge',
+      script: './venv/bin/python',
+      args: 'app.py',
+      interpreter: 'none',
+      exec_mode: 'fork',
+      env: {
+        PYTHONUNBUFFERED: '1'
+      },
+      instances: 1,
+      autorestart: true,
+      max_restarts: 10,
+      restart_delay: 5000,
+      kill_timeout: 5000,
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '../logs/bridge-error.log',
+      out_file: '../logs/bridge-out.log',
+      merge_logs: true
+    },
+    {
+      name: 'ml-service',
+      cwd: './server/ml-service',
+      script: './venv/bin/python',
+      args: '-m uvicorn app:app --host 0.0.0.0 --port 8002',
+      interpreter: 'none',
+      exec_mode: 'fork',
+      env: {
+        PYTHONUNBUFFERED: '1',
+        ML_SERVICE_PORT: '8002'
+      },
+      instances: 1,
+      autorestart: true,
+      max_restarts: 5,
+      restart_delay: 10000,
+      kill_timeout: 5000,
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '../logs/ml-error.log',
+      out_file: '../logs/ml-out.log',
+      merge_logs: true
+    }
+  ]
+};
+PM2_CONFIG
+echo "  Done."
+
 # ── Restart ──
-echo "[6] Restarting services..."
+echo "[7] Restarting services..."
 cd "$APP_DIR"
 
 pm2 stop all 2>/dev/null || true
+sleep 3
+sudo fuser -k 8000/tcp 2>/dev/null || true
+sudo fuser -k 8001/tcp 2>/dev/null || true
+sudo fuser -k 8002/tcp 2>/dev/null || true
+sudo fuser -k 8080/tcp 2>/dev/null || true
 sleep 2
-fuser -k 8000/tcp 2>/dev/null || true
-fuser -k 8001/tcp 2>/dev/null || true
-fuser -k 8002/tcp 2>/dev/null || true
-sleep 1
 
 pm2 delete all 2>/dev/null || true
 pm2 start ecosystem.config.cjs
 pm2 save
 sudo systemctl reload nginx 2>/dev/null || true
 
-sleep 3
+sleep 5
 
 ELAPSED=$(( $(date +%s) - STARTED ))
 echo ""
@@ -115,7 +235,10 @@ echo "║  Redeploy complete (${ELAPSED}s)       ║"
 echo "╚════════════════════════════════════════╝"
 pm2 status
 echo ""
-echo "Health checks:"
-echo -n "  API:    "; curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/health 2>/dev/null || echo "DOWN"; echo ""
-echo -n "  Engine: "; curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/api/health 2>/dev/null || echo "DOWN"; echo ""
-echo -n "  Bridge: "; curl -s -o /dev/null -w "%{http_code}" http://localhost:8001/health 2>/dev/null || echo "DOWN"; echo ""
+echo "═══ Health Checks ═══"
+echo -n "  API (8000):    "; curl -sf http://localhost:8000/api/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'OK — phase: {d.get(\"market\",{}).get(\"phase\",\"?\")} | open: {d.get(\"market\",{}).get(\"isOpen\",\"?\")}')" 2>/dev/null || echo "DOWN"; echo ""
+echo -n "  Bridge (8001): "; curl -sf -o /dev/null -w "%{http_code}" http://localhost:8001/health 2>/dev/null || echo "DOWN"; echo ""
+echo ""
+echo "═══ Orchestrator Log ═══"
+pm2 logs capital-guard-api --lines 10 --nostream 2>/dev/null | grep -i "orchestrator\|phase\|holiday\|auto-start\|market" || echo "  (no orchestrator output yet — wait 15s for auto-start)"
+echo ""

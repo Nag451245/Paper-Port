@@ -187,7 +187,7 @@ fi
 if [[ "$MODE" != "--frontend-only" ]]; then
   echo "[3/8] Building server..."
   cd "$APP_DIR/server"
-  npm ci --production
+  npm ci
 
   if [ ! -f .env ]; then
     if [ -f .env.example ]; then
@@ -230,7 +230,7 @@ fi
 if [[ "$MODE" != "--server-only" ]]; then
   echo "[4/8] Building frontend..."
   cd "$APP_DIR/frontend"
-  npm ci --production
+  npm ci
 
   if [ ! -f .env.production ]; then
     cat > .env.production <<VITE_ENV
@@ -417,13 +417,16 @@ module.exports = {
 PM2_CONFIG
 
 mkdir -p logs
+mkdir -p "$APP_DIR/engine/data"
+mkdir -p "$APP_DIR/server/data"
 
 pm2 delete all 2>/dev/null || true
 
-fuser -k 8000/tcp 2>/dev/null || true
-fuser -k 8001/tcp 2>/dev/null || true
-fuser -k 8002/tcp 2>/dev/null || true
-sleep 1
+sudo fuser -k 8000/tcp 2>/dev/null || true
+sudo fuser -k 8001/tcp 2>/dev/null || true
+sudo fuser -k 8002/tcp 2>/dev/null || true
+sudo fuser -k 8080/tcp 2>/dev/null || true
+sleep 2
 
 pm2 start ecosystem.config.cjs
 pm2 save
