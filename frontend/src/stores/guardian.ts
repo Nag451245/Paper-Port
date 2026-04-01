@@ -368,11 +368,19 @@ export const useGuardianStore = create<GuardianStore>((set, get) => ({
         moodIntensity: gIntensity !== undefined ? gIntensity : s.moodIntensity,
         isTyping: false,
       }));
-    } catch {
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const serverMsg = err?.response?.data?.error || err?.response?.data?.message;
+      const errDetail = err?.code === 'ECONNABORTED'
+        ? 'Request timed out — server took too long.'
+        : status
+          ? `Server returned ${status}: ${serverMsg || 'unknown error'}`
+          : err?.message || 'Network error';
+      console.error('[Chitti] chat error:', status, serverMsg, err);
       const fallback: ChatMessage = {
         id: newEntityId(),
         role: 'guardian',
-        content: 'My connection wavered for a moment. Try again.',
+        content: `Connection issue: ${errDetail}`,
         timestamp: new Date().toISOString(),
       };
       set((s) => ({
