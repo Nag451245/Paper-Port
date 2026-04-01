@@ -1,0 +1,193 @@
+// NSE/BSE holidays for 2025 and 2026 (update annually)
+const NSE_HOLIDAYS = [
+    // 2025
+    { date: '2025-02-26', name: 'Mahashivratri', exchanges: ['NSE', 'BSE'] },
+    { date: '2025-03-14', name: 'Holi', exchanges: ['NSE', 'BSE'] },
+    { date: '2025-03-31', name: 'Id-Ul-Fitr (Ramadan)', exchanges: ['NSE', 'BSE'] },
+    { date: '2025-04-10', name: 'Shri Mahavir Jayanti', exchanges: ['NSE', 'BSE'] },
+    { date: '2025-04-14', name: 'Dr. Ambedkar Jayanti', exchanges: ['NSE', 'BSE'] },
+    { date: '2025-04-18', name: 'Good Friday', exchanges: ['NSE', 'BSE'] },
+    { date: '2025-05-01', name: 'Maharashtra Day', exchanges: ['NSE', 'BSE'] },
+    { date: '2025-06-07', name: 'Bakri Id', exchanges: ['NSE', 'BSE'] },
+    { date: '2025-08-15', name: 'Independence Day', exchanges: ['NSE', 'BSE'] },
+    { date: '2025-08-16', name: 'Parsi New Year', exchanges: ['NSE', 'BSE'] },
+    { date: '2025-08-27', name: 'Ganesh Chaturthi', exchanges: ['NSE', 'BSE'] },
+    { date: '2025-10-02', name: 'Mahatma Gandhi Jayanti', exchanges: ['NSE', 'BSE'] },
+    { date: '2025-10-21', name: 'Dussehra', exchanges: ['NSE', 'BSE'] },
+    { date: '2025-10-22', name: 'Diwali (Lakshmi Puja)', exchanges: ['NSE', 'BSE'] },
+    { date: '2025-11-05', name: 'Guru Nanak Jayanti', exchanges: ['NSE', 'BSE'] },
+    { date: '2025-12-25', name: 'Christmas', exchanges: ['NSE', 'BSE'] },
+    // 2026 — Official NSE circular (15 trading holidays)
+    // Mahashivratri (Feb 15) and Id-Ul-Fitr (Mar 21) fall on weekends — no trading holiday
+    // Independence Day (Aug 15) falls on Saturday — no trading holiday
+    { date: '2026-01-26', name: 'Republic Day', exchanges: ['NSE', 'BSE'] },
+    { date: '2026-03-03', name: 'Holi', exchanges: ['NSE', 'BSE'] },
+    { date: '2026-03-26', name: 'Shri Ram Navami', exchanges: ['NSE', 'BSE'] },
+    { date: '2026-03-31', name: 'Shri Mahavir Jayanti', exchanges: ['NSE', 'BSE'] },
+    { date: '2026-04-03', name: 'Good Friday', exchanges: ['NSE', 'BSE'] },
+    { date: '2026-04-14', name: 'Dr. Baba Saheb Ambedkar Jayanti', exchanges: ['NSE', 'BSE'] },
+    { date: '2026-05-01', name: 'Maharashtra Day', exchanges: ['NSE', 'BSE'] },
+    { date: '2026-05-28', name: 'Bakri Id', exchanges: ['NSE', 'BSE'] },
+    { date: '2026-06-26', name: 'Muharram', exchanges: ['NSE', 'BSE'] },
+    { date: '2026-09-14', name: 'Ganesh Chaturthi', exchanges: ['NSE', 'BSE'] },
+    { date: '2026-10-02', name: 'Mahatma Gandhi Jayanti', exchanges: ['NSE', 'BSE'] },
+    { date: '2026-10-20', name: 'Dussehra', exchanges: ['NSE', 'BSE'] },
+    { date: '2026-11-10', name: 'Diwali (Balipratipada)', exchanges: ['NSE', 'BSE'] },
+    { date: '2026-11-24', name: 'Prakash Gurpurb Sri Guru Nanak Dev', exchanges: ['NSE', 'BSE'] },
+    { date: '2026-12-25', name: 'Christmas', exchanges: ['NSE', 'BSE'] },
+];
+// Muhurat trading windows (Diwali evening sessions)
+const MUHURAT_SESSIONS = [
+    { date: '2025-10-22', start: 1080, end: 1140 }, // 6:00 PM - 7:00 PM
+    { date: '2026-11-08', start: 1080, end: 1140 }, // Diwali Laxmi Pujan (Sunday — Muhurat only)
+];
+export class MarketCalendar {
+    holidaySet = new Map();
+    constructor() {
+        for (const h of NSE_HOLIDAYS) {
+            this.holidaySet.set(h.date, h);
+        }
+    }
+    getIST() {
+        // Manual UTC+5:30 offset — reliable on all Node.js builds regardless of ICU data
+        const now = new Date();
+        const utcMs = now.getTime() + now.getTimezoneOffset() * 60_000;
+        return new Date(utcMs + 5.5 * 3600_000);
+    }
+    toDateKey(d) {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+    }
+    getTotalMinutes(d) {
+        return d.getHours() * 60 + d.getMinutes();
+    }
+    isHoliday(date, exchange = 'NSE') {
+        const d = date ?? this.getIST();
+        const key = this.toDateKey(d);
+        const entry = this.holidaySet.get(key);
+        if (!entry)
+            return false;
+        return entry.exchanges.includes(exchange);
+    }
+    getHolidayName(date) {
+        const d = date ?? this.getIST();
+        const key = this.toDateKey(d);
+        return this.holidaySet.get(key)?.name ?? null;
+    }
+    isWeekend(date) {
+        const d = date ?? this.getIST();
+        const day = d.getDay();
+        return day === 0 || day === 6;
+    }
+    isMuhuratSession(date) {
+        const d = date ?? this.getIST();
+        const key = this.toDateKey(d);
+        const session = MUHURAT_SESSIONS.find(s => s.date === key);
+        if (!session)
+            return false;
+        const mins = this.getTotalMinutes(d);
+        return mins >= session.start && mins <= session.end;
+    }
+    isMarketOpen(exchange = 'NSE') {
+        const ist = this.getIST();
+        if (this.isMuhuratSession(ist))
+            return true;
+        if (this.isWeekend(ist))
+            return false;
+        if (this.isHoliday(ist, exchange))
+            return false;
+        const mins = this.getTotalMinutes(ist);
+        switch (exchange) {
+            case 'MCX':
+                return mins >= 540 && mins <= 1410; // 9:00 AM - 11:30 PM
+            case 'CDS':
+                return mins >= 540 && mins <= 1020; // 9:00 AM - 5:00 PM
+            default: // NSE/BSE
+                return mins >= 555 && mins <= 930; // 9:15 AM - 3:30 PM
+        }
+    }
+    getMarketPhase() {
+        const ist = this.getIST();
+        if (this.isWeekend(ist))
+            return 'WEEKEND';
+        if (this.isHoliday(ist))
+            return 'HOLIDAY';
+        if (this.isMuhuratSession(ist))
+            return 'MARKET_HOURS';
+        const mins = this.getTotalMinutes(ist);
+        if (mins >= 480 && mins < 555)
+            return 'PRE_MARKET'; // 8:00 - 9:15
+        if (mins >= 555 && mins <= 930)
+            return 'MARKET_HOURS'; // 9:15 - 15:30
+        if (mins > 930 && mins <= 1020)
+            return 'POST_MARKET'; // 15:30 - 17:00
+        return 'AFTER_HOURS';
+    }
+    getPhaseConfig(phase) {
+        switch (phase) {
+            case 'PRE_MARKET':
+                return { pingIntervalMs: 5 * 60_000, botTickMs: 5 * 60_000, scanIntervalMs: 10 * 60_000, botsActive: true, label: 'Pre-Market (8:00-9:15 IST)' };
+            case 'MARKET_HOURS':
+                return { pingIntervalMs: 5 * 60_000, botTickMs: 3 * 60_000, scanIntervalMs: 5 * 60_000, botsActive: true, label: 'Market Hours (9:15-15:30 IST)' };
+            case 'POST_MARKET':
+                return { pingIntervalMs: 10 * 60_000, botTickMs: 5 * 60_000, scanIntervalMs: 10 * 60_000, botsActive: true, label: 'Post-Market (15:30-17:00 IST)' };
+            case 'AFTER_HOURS':
+                return { pingIntervalMs: 14 * 60_000, botTickMs: 10 * 60_000, scanIntervalMs: 30 * 60_000, botsActive: true, label: 'After-Hours' };
+            case 'WEEKEND':
+                return { pingIntervalMs: 30 * 60_000, botTickMs: 30 * 60_000, scanIntervalMs: 0, botsActive: true, label: 'Weekend' };
+            case 'HOLIDAY':
+                return { pingIntervalMs: 30 * 60_000, botTickMs: 30 * 60_000, scanIntervalMs: 0, botsActive: true, label: `Holiday: ${this.getHolidayName() ?? 'Market Closed'}` };
+        }
+    }
+    getNextMarketOpen() {
+        const ist = this.getIST();
+        const check = new Date(ist);
+        for (let i = 0; i < 14; i++) {
+            check.setDate(check.getDate() + (i === 0 ? 0 : 1));
+            const day = check.getDay();
+            if (day === 0 || day === 6)
+                continue;
+            if (this.isHoliday(check))
+                continue;
+            const key = this.toDateKey(check);
+            if (i === 0) {
+                const mins = this.getTotalMinutes(ist);
+                if (mins < 555) {
+                    return { date: `${key} 09:15 IST`, label: 'Today' };
+                }
+                continue;
+            }
+            return { date: `${key} 09:15 IST`, label: this.getDayLabel(check) };
+        }
+        return { date: 'Unknown', label: 'Check calendar' };
+    }
+    getDayLabel(d) {
+        const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        return days[d.getDay()];
+    }
+    getUpcomingHolidays(count = 5) {
+        const today = this.toDateKey(this.getIST());
+        return NSE_HOLIDAYS
+            .filter(h => h.date >= today)
+            .slice(0, count)
+            .map(h => ({ date: h.date, name: h.name }));
+    }
+    getStatus() {
+        const phase = this.getMarketPhase();
+        const config = this.getPhaseConfig(phase);
+        return {
+            phase,
+            phaseLabel: config.label,
+            isOpen: this.isMarketOpen(),
+            isHoliday: this.isHoliday(),
+            holidayName: this.getHolidayName(),
+            isWeekend: this.isWeekend(),
+            nextOpen: this.getNextMarketOpen(),
+            upcomingHolidays: this.getUpcomingHolidays(),
+            timestamp: this.getIST().toISOString(),
+        };
+    }
+}
+//# sourceMappingURL=market-calendar.js.map

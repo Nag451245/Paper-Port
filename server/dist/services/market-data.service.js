@@ -1,0 +1,2406 @@
+import { CacheService, getRedis } from '../lib/redis.js';
+import { getPrisma } from '../lib/prisma.js';
+import { createHash, createDecipheriv } from 'crypto';
+import { createRequire } from 'module';
+import { env } from '../config.js';
+import { createChildLogger } from '../lib/logger.js';
+import { emit } from '../lib/event-bus.js';
+import { istDateStr, istDaysAgo } from '../lib/ist.js';
+const log = createChildLogger('MarketData');
+const require = createRequire(import.meta.url);
+let BreezeConnect = null;
+function getBreezeConnectClass() {
+    if (!BreezeConnect) {
+        try {
+            const mod = require('breezeconnect');
+            BreezeConnect = mod.BreezeConnect || mod.default || mod;
+        }
+        catch (err) {
+            console.log(`[Breeze] Failed to load breezeconnect module: ${err.message}`);
+        }
+    }
+    return BreezeConnect;
+}
+const CACHE_TTL_QUOTE_MARKET_OPEN = 60;
+const CACHE_TTL_QUOTE_MARKET_CLOSED = 3600;
+const CACHE_TTL_HISTORY_INTRADAY = 30;
+const CACHE_TTL_HISTORY = 300;
+const CACHE_TTL_OPTION_CHAIN = 15;
+const CACHE_TTL_SEARCH = 3600;
+const CACHE_TTL_INDICES = 60;
+const FETCH_TIMEOUT_MS = 10_000;
+const BREEZE_TIMEOUT_MS = 20_000;
+function isIndianMarketOpen() {
+    const now = new Date();
+    const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const day = ist.getDay();
+    if (day === 0 || day === 6)
+        return false;
+    const hours = ist.getHours();
+    const minutes = ist.getMinutes();
+    const timeInMinutes = hours * 60 + minutes;
+    return timeInMinutes >= 555 && timeInMinutes <= 930;
+}
+function getQuoteCacheTTL() {
+    return isIndianMarketOpen() ? CACHE_TTL_QUOTE_MARKET_OPEN : CACHE_TTL_QUOTE_MARKET_CLOSED;
+}
+const BREEZE_BRIDGE_URL = env.BREEZE_BRIDGE_URL;
+const BREEZE_STOCK_CODES = {
+    NIFTY: 'NIFTY', BANKNIFTY: 'CNXBAN', FINNIFTY: 'NIFFIN',
+    MIDCPNIFTY: 'NIFSEL', NIFTYNXT50: 'NIFNEX', SENSEX: 'SENSEX',
+    RELIANCE: 'RELIND', HDFCBANK: 'HDFBAN', ICICIBANK: 'ICIBAN',
+    INFY: 'INFTEC', SBIN: 'STABAN', HINDUNILVR: 'HINLEV',
+    BHARTIARTL: 'BHAAIR', KOTAKBANK: 'KOTMAH', LT: 'LARTOU',
+    AXISBANK: 'AXIBAN', BAJFINANCE: 'BAJFI', HCLTECH: 'HCLTEC',
+    TATAMOTORS: 'TATMOT', SUNPHARMA: 'SUNPHA', TITAN: 'TITIND',
+    ASIANPAINT: 'ASIPAI', ADANIENT: 'ADAENT', TATASTEEL: 'TATSTE',
+    POWERGRID: 'POWGRI', JSWSTEEL: 'JSWSTE', 'M&M': 'MAHMAH',
+    BAJAJFINSV: 'BAFINS', ULTRACEMCO: 'ULTCEM', NESTLEIND: 'NESIND',
+    DRREDDY: 'DRREDD', DIVISLAB: 'DIVLAB', HEROMOTOCO: 'HERHON',
+};
+// Parse F&O option symbol like NIFTY20260310248000CE → { underlying: 'NIFTY', expiry: '2026-03-10', strike: 24800, type: 'CE' }
+const FNO_SYMBOL_REGEX = /^([A-Z]+?)(\d{4})(\d{2})(\d{2})(\d+)(CE|PE)$/;
+function parseOptionSymbol(symbol) {
+    const match = symbol.toUpperCase().match(FNO_SYMBOL_REGEX);
+    if (!match)
+        return null;
+    const [, underlying, year, month, day, strikeStr, type] = match;
+    return {
+        underlying,
+        expiry: `${year}-${month}-${day}`,
+        strike: parseInt(strikeStr, 10),
+        type: type,
+    };
+}
+// Cache a live BreezeConnect instance to avoid re-exchanging session on every call
+let breezeInstance = null;
+let breezeInstanceExpiry = 0;
+let breezeInitPromise = null;
+const POPULAR_NSE_STOCKS = [
+    // NIFTY 50
+    ['RELIANCE', 'Reliance Industries Ltd'],
+    ['TCS', 'Tata Consultancy Services Ltd'],
+    ['HDFCBANK', 'HDFC Bank Ltd'],
+    ['INFY', 'Infosys Ltd'],
+    ['ICICIBANK', 'ICICI Bank Ltd'],
+    ['HINDUNILVR', 'Hindustan Unilever Ltd'],
+    ['SBIN', 'State Bank of India'],
+    ['BHARTIARTL', 'Bharti Airtel Ltd'],
+    ['KOTAKBANK', 'Kotak Mahindra Bank Ltd'],
+    ['ITC', 'ITC Ltd'],
+    ['LT', 'Larsen & Toubro Ltd'],
+    ['AXISBANK', 'Axis Bank Ltd'],
+    ['BAJFINANCE', 'Bajaj Finance Ltd'],
+    ['WIPRO', 'Wipro Ltd'],
+    ['HCLTECH', 'HCL Technologies Ltd'],
+    ['MARUTI', 'Maruti Suzuki India Ltd'],
+    ['TATAMOTORS', 'Tata Motors Ltd'],
+    ['SUNPHARMA', 'Sun Pharmaceutical Industries Ltd'],
+    ['TITAN', 'Titan Company Ltd'],
+    ['ASIANPAINT', 'Asian Paints Ltd'],
+    ['ADANIENT', 'Adani Enterprises Ltd'],
+    ['TATASTEEL', 'Tata Steel Ltd'],
+    ['NTPC', 'NTPC Ltd'],
+    ['POWERGRID', 'Power Grid Corporation of India'],
+    ['ONGC', 'Oil and Natural Gas Corporation'],
+    ['JSWSTEEL', 'JSW Steel Ltd'],
+    ['M&M', 'Mahindra & Mahindra Ltd'],
+    ['BAJAJFINSV', 'Bajaj Finserv Ltd'],
+    ['ULTRACEMCO', 'UltraTech Cement Ltd'],
+    ['NESTLEIND', 'Nestle India Ltd'],
+    ['DRREDDY', 'Dr. Reddys Laboratories Ltd'],
+    ['DIVISLAB', 'Divis Laboratories Ltd'],
+    ['CIPLA', 'Cipla Ltd'],
+    ['TECHM', 'Tech Mahindra Ltd'],
+    ['EICHERMOT', 'Eicher Motors Ltd'],
+    ['APOLLOHOSP', 'Apollo Hospitals Enterprise Ltd'],
+    ['BPCL', 'Bharat Petroleum Corporation Ltd'],
+    ['GRASIM', 'Grasim Industries Ltd'],
+    ['HEROMOTOCO', 'Hero MotoCorp Ltd'],
+    ['INDUSINDBK', 'IndusInd Bank Ltd'],
+    ['COALINDIA', 'Coal India Ltd'],
+    ['BRITANNIA', 'Britannia Industries Ltd'],
+    ['SHRIRAMFIN', 'Shriram Finance Ltd'],
+    ['TATACONSUM', 'Tata Consumer Products Ltd'],
+    ['HINDALCO', 'Hindalco Industries Ltd'],
+    ['ADANIPORTS', 'Adani Ports and Special Economic Zone Ltd'],
+    ['SBILIFE', 'SBI Life Insurance Company Ltd'],
+    ['HDFCLIFE', 'HDFC Life Insurance Company Ltd'],
+    ['BAJAJ-AUTO', 'Bajaj Auto Ltd'],
+    // NIFTY Next 50 / Mid-cap
+    ['BANKBARODA', 'Bank of Baroda'],
+    ['PNB', 'Punjab National Bank'],
+    ['CANBK', 'Canara Bank'],
+    ['IDFCFIRSTB', 'IDFC First Bank Ltd'],
+    ['FEDERALBNK', 'Federal Bank Ltd'],
+    ['BANDHANBNK', 'Bandhan Bank Ltd'],
+    ['AUBANK', 'AU Small Finance Bank'],
+    ['TRENT', 'Trent Ltd'],
+    ['ZOMATO', 'Zomato Ltd'],
+    ['JIOFIN', 'Jio Financial Services Ltd'],
+    ['DMART', 'Avenue Supermarts Ltd (DMart)'],
+    ['PIDILITIND', 'Pidilite Industries Ltd'],
+    ['GODREJCP', 'Godrej Consumer Products Ltd'],
+    ['DABUR', 'Dabur India Ltd'],
+    ['MARICO', 'Marico Ltd'],
+    ['COLPAL', 'Colgate-Palmolive India Ltd'],
+    ['HAVELLS', 'Havells India Ltd'],
+    ['VOLTAS', 'Voltas Ltd'],
+    ['SIEMENS', 'Siemens Ltd'],
+    ['ABB', 'ABB India Ltd'],
+    ['BHEL', 'Bharat Heavy Electricals Ltd'],
+    ['HAL', 'Hindustan Aeronautics Ltd'],
+    ['BEL', 'Bharat Electronics Ltd'],
+    ['IRCTC', 'Indian Railway Catering and Tourism Corporation'],
+    ['INDIANB', 'Indian Bank'],
+    ['IOC', 'Indian Oil Corporation Ltd'],
+    ['GAIL', 'GAIL India Ltd'],
+    ['SAIL', 'Steel Authority of India Ltd'],
+    ['VEDL', 'Vedanta Ltd'],
+    ['JINDALSTEL', 'Jindal Steel & Power Ltd'],
+    ['NMDC', 'NMDC Ltd'],
+    ['TATAPOWER', 'Tata Power Company Ltd'],
+    ['ADANIGREEN', 'Adani Green Energy Ltd'],
+    ['ADANIENSOL', 'Adani Energy Solutions Ltd'],
+    ['DLF', 'DLF Ltd'],
+    ['GODREJPROP', 'Godrej Properties Ltd'],
+    ['OBEROIRLTY', 'Oberoi Realty Ltd'],
+    ['PRESTIGE', 'Prestige Estates Projects Ltd'],
+    ['LODHA', 'Macrotech Developers Ltd (Lodha)'],
+    ['PIIND', 'PI Industries Ltd'],
+    ['UPL', 'UPL Ltd'],
+    ['SRF', 'SRF Ltd'],
+    ['BERGEPAINT', 'Berger Paints India Ltd'],
+    ['ICICIGI', 'ICICI Lombard General Insurance'],
+    ['ICICIPRULI', 'ICICI Prudential Life Insurance'],
+    ['MAXHEALTH', 'Max Healthcare Institute Ltd'],
+    ['LICI', 'Life Insurance Corporation of India'],
+    ['MUTHOOTFIN', 'Muthoot Finance Ltd'],
+    ['CHOLAFIN', 'Cholamandalam Investment and Finance'],
+    ['MANAPPURAM', 'Manappuram Finance Ltd'],
+    ['LTIM', 'LTIMindtree Ltd'],
+    ['PERSISTENT', 'Persistent Systems Ltd'],
+    ['COFORGE', 'Coforge Ltd'],
+    ['MPHASIS', 'Mphasis Ltd'],
+    ['LTTS', 'L&T Technology Services Ltd'],
+    ['TATAELXSI', 'Tata Elxsi Ltd'],
+    ['POLYCAB', 'Polycab India Ltd'],
+    ['PAGEIND', 'Page Industries Ltd'],
+    ['TORNTPHARM', 'Torrent Pharmaceuticals Ltd'],
+    ['LUPIN', 'Lupin Ltd'],
+    ['AUROPHARMA', 'Aurobindo Pharma Ltd'],
+    ['BIOCON', 'Biocon Ltd'],
+    ['ALKEM', 'Alkem Laboratories Ltd'],
+    ['LAURUSLABS', 'Laurus Labs Ltd'],
+    ['IPCALAB', 'IPCA Laboratories Ltd'],
+    // Small-cap popular
+    ['DEEPAKNTR', 'Deepak Nitrite Ltd'],
+    ['ATUL', 'Atul Ltd'],
+    ['TATACOMM', 'Tata Communications Ltd'],
+    ['CUMMINSIND', 'Cummins India Ltd'],
+    ['CROMPTON', 'Crompton Greaves Consumer Electricals'],
+    ['BATAINDIA', 'Bata India Ltd'],
+    ['JUBLFOOD', 'Jubilant Foodworks Ltd'],
+    ['MFSL', 'Max Financial Services Ltd'],
+    ['INDHOTEL', 'Indian Hotels Company Ltd'],
+    ['MOTHERSON', 'Samvardhana Motherson International'],
+    ['EXIDEIND', 'Exide Industries Ltd'],
+    ['ESCORTS', 'Escorts Kubota Ltd'],
+    ['MRF', 'MRF Ltd'],
+    ['BALKRISIND', 'Balkrishna Industries Ltd'],
+    ['SYNGENE', 'Syngene International Ltd'],
+    ['AFFLE', 'Affle India Ltd'],
+    ['ROUTE', 'Route Mobile Ltd'],
+    ['KPITTECH', 'KPIT Technologies Ltd'],
+    ['SONACOMS', 'Sona BLW Precision Forgings Ltd'],
+    ['PVRINOX', 'PVR INOX Ltd'],
+    ['ZYDUSLIFE', 'Zydus Lifesciences Ltd'],
+    ['ABCAPITAL', 'Aditya Birla Capital Ltd'],
+    ['CANFINHOME', 'Can Fin Homes Ltd'],
+    ['RBLBANK', 'RBL Bank Ltd'],
+    ['ASTRAL', 'Astral Ltd'],
+    ['SUPREMEIND', 'Supreme Industries Ltd'],
+    ['CLEAN', 'Clean Science and Technology Ltd'],
+    ['NAUKRI', 'Info Edge India Ltd (Naukri)'],
+    ['PAYTM', 'One97 Communications Ltd (Paytm)'],
+    ['POLICYBZR', 'PB Fintech Ltd (PolicyBazaar)'],
+    ['DELHIVERY', 'Delhivery Ltd'],
+    ['KAYNES', 'Kaynes Technology India Ltd'],
+    ['CDSL', 'Central Depository Services India Ltd'],
+    ['BSE', 'BSE Ltd'],
+    ['MCX', 'Multi Commodity Exchange of India Ltd'],
+    ['IDEA', 'Vodafone Idea Ltd'],
+    ['YESBANK', 'Yes Bank Ltd'],
+    ['TATACHEM', 'Tata Chemicals Ltd'],
+    ['PETRONET', 'Petronet LNG Ltd'],
+    ['IGL', 'Indraprastha Gas Ltd'],
+    ['MGL', 'Mahanagar Gas Ltd'],
+    ['CONCOR', 'Container Corporation of India Ltd'],
+    ['IRFC', 'Indian Railway Finance Corporation Ltd'],
+    ['PFC', 'Power Finance Corporation Ltd'],
+    ['RECLTD', 'REC Ltd'],
+    ['NHPC', 'NHPC Ltd'],
+    ['SJVN', 'SJVN Ltd'],
+];
+const POPULAR_MCX_COMMODITIES = [
+    ['GOLD', 'Gold (1 kg)', 62000],
+    ['GOLDM', 'Gold Mini (100 gm)', 62000],
+    ['GOLDPETAL', 'Gold Petal (1 gm)', 6200],
+    ['SILVER', 'Silver (30 kg)', 74000],
+    ['SILVERM', 'Silver Mini (5 kg)', 74000],
+    ['CRUDEOIL', 'Crude Oil (100 barrels)', 5800],
+    ['NATURALGAS', 'Natural Gas (1250 MMBtu)', 230],
+    ['COPPER', 'Copper (2500 kg)', 780],
+    ['ZINC', 'Zinc (5000 kg)', 250],
+    ['LEAD', 'Lead (5000 kg)', 185],
+    ['ALUMINIUM', 'Aluminium (5000 kg)', 210],
+    ['NICKEL', 'Nickel (1500 kg)', 1650],
+    ['COTTON', 'Cotton (25 bales)', 27000],
+    ['MENTHAOIL', 'Mentha Oil (360 kg)', 950],
+    ['CASTORSEED', 'Castor Seed (10 MT)', 5800],
+];
+const POPULAR_CDS_CURRENCIES = [
+    ['USDINR', 'US Dollar / Indian Rupee', 83.25],
+    ['EURINR', 'Euro / Indian Rupee', 90.50],
+    ['GBPINR', 'British Pound / Indian Rupee', 105.30],
+    ['JPYINR', 'Japanese Yen / Indian Rupee', 0.556],
+    ['AUDINR', 'Australian Dollar / Indian Rupee', 54.80],
+    ['CADINR', 'Canadian Dollar / Indian Rupee', 61.50],
+    ['CHFINR', 'Swiss Franc / Indian Rupee', 95.40],
+    ['SGDINR', 'Singapore Dollar / Indian Rupee', 62.10],
+    ['HKDINR', 'Hong Kong Dollar / Indian Rupee', 10.65],
+    ['CNHINR', 'Chinese Yuan / Indian Rupee', 11.50],
+];
+// Yahoo Finance symbol mappings for special cases
+const YAHOO_INDEX_MAP = {
+    'NIFTY 50': '^NSEI',
+    'NIFTY50': '^NSEI',
+    'NIFTY': '^NSEI',
+    'BANKNIFTY': '^NSEBANK',
+    'NIFTYBANK': '^NSEBANK',
+    'NIFTY BANK': '^NSEBANK',
+    'SENSEX': '^BSESN',
+    'INDIA VIX': '^INDIAVIX',
+    'INDIAVIX': '^INDIAVIX',
+};
+function toYahooSymbol(symbol, exchange = 'NSE') {
+    const upper = symbol.toUpperCase();
+    if (YAHOO_INDEX_MAP[upper])
+        return YAHOO_INDEX_MAP[upper];
+    if (upper.endsWith('.NS') || upper.endsWith('.BO') || upper.startsWith('^'))
+        return upper;
+    // M&M → M%26M on Yahoo
+    const encoded = upper.replace('&', '%26');
+    return exchange === 'BSE' ? `${encoded}.BO` : `${encoded}.NS`;
+}
+export class MarketDataService {
+    cache;
+    cookies = '';
+    cookieExpiry = 0;
+    cookieFetchPromise = null;
+    activeNseRequests = 0;
+    constructor(cache) {
+        if (cache) {
+            this.cache = cache;
+        }
+        else {
+            const redis = getRedis();
+            this.cache = redis ? new CacheService(redis) : null;
+        }
+    }
+    // ── Breeze Bridge: live quote from broker (real-time LTP) ──
+    async fetchLiveFromBreezeBridge(symbol, exchange = 'NSE') {
+        try {
+            const bridgeActive = await this.ensureBreezeBridgeSession();
+            if (!bridgeActive)
+                return null;
+            const url = `${BREEZE_BRIDGE_URL}/quote/${encodeURIComponent(symbol)}?exchange=${encodeURIComponent(exchange)}`;
+            const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+            if (!res.ok)
+                return null;
+            const data = await res.json();
+            const ltp = Number(data.ltp ?? data.last_price ?? data.close ?? 0);
+            if (ltp <= 0)
+                return null;
+            return {
+                symbol,
+                exchange,
+                ltp,
+                change: Number(data.change ?? 0),
+                changePercent: Number(data.change_percent ?? data.changePercent ?? 0),
+                open: Number(data.open ?? 0),
+                high: Number(data.high ?? 0),
+                low: Number(data.low ?? 0),
+                close: Number(data.close ?? ltp),
+                volume: Number(data.volume ?? 0),
+                bidPrice: Number(data.bid ?? data.best_bid ?? 0),
+                askPrice: Number(data.ask ?? data.best_ask ?? 0),
+                bidQty: Number(data.bid_qty ?? 0),
+                askQty: Number(data.ask_qty ?? 0),
+                timestamp: data.timestamp ?? new Date().toISOString(),
+            };
+        }
+        catch {
+            return null;
+        }
+    }
+    // ── Yahoo Finance: fallback data source ──
+    async fetchFromYahoo(symbol, exchange = 'NSE') {
+        try {
+            const yahooSym = toYahooSymbol(symbol, exchange);
+            const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSym}?interval=1d&range=1d`;
+            const ac = new AbortController();
+            const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+            const res = await fetch(url, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+                signal: ac.signal,
+            });
+            clearTimeout(timer);
+            if (!res.ok)
+                return null;
+            const data = await res.json();
+            const result = data?.chart?.result?.[0];
+            if (!result)
+                return null;
+            const meta = result.meta ?? {};
+            const quote = result.indicators?.quote?.[0] ?? {};
+            const len = quote.close?.length ?? 0;
+            if (len === 0)
+                return null;
+            const lastIdx = len - 1;
+            const ltp = meta.regularMarketPrice ?? quote.close?.[lastIdx] ?? 0;
+            const prevClose = meta.chartPreviousClose ?? meta.previousClose ?? 0;
+            const open = quote.open?.[lastIdx] ?? meta.regularMarketDayOpen ?? 0;
+            const high = quote.high?.[lastIdx] ?? meta.regularMarketDayHigh ?? 0;
+            const low = quote.low?.[lastIdx] ?? meta.regularMarketDayLow ?? 0;
+            const close = prevClose || ltp;
+            const volume = quote.volume?.[lastIdx] ?? meta.regularMarketVolume ?? 0;
+            const change = ltp - prevClose;
+            const changePercent = prevClose > 0 ? (change / prevClose) * 100 : 0;
+            return {
+                symbol,
+                exchange,
+                ltp,
+                change: Number(change.toFixed(2)),
+                changePercent: Number(changePercent.toFixed(2)),
+                open,
+                high,
+                low,
+                close,
+                volume,
+                bidPrice: 0,
+                askPrice: 0,
+                bidQty: 0,
+                askQty: 0,
+                timestamp: new Date().toISOString(),
+            };
+        }
+        catch {
+            return null;
+        }
+    }
+    async fetchHistoryFromYahoo(symbol, interval, fromDate, toDate, exchange = 'NSE') {
+        try {
+            const yahooSym = toYahooSymbol(symbol, exchange);
+            const yahooInterval = this.mapIntervalToYahoo(interval);
+            const period1 = Math.floor(new Date(fromDate).getTime() / 1000);
+            const period2 = Math.floor(new Date(toDate + 'T23:59:59Z').getTime() / 1000);
+            const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSym}?interval=${yahooInterval}&period1=${period1}&period2=${period2}`;
+            const ac = new AbortController();
+            const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+            const res = await fetch(url, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+                signal: ac.signal,
+            });
+            clearTimeout(timer);
+            if (!res.ok)
+                return [];
+            const data = await res.json();
+            const result = data?.chart?.result?.[0];
+            if (!result)
+                return [];
+            const timestamps = result.timestamp ?? [];
+            const quote = result.indicators?.quote?.[0] ?? {};
+            const bars = [];
+            for (let i = 0; i < timestamps.length; i++) {
+                const o = quote.open?.[i];
+                const h = quote.high?.[i];
+                const l = quote.low?.[i];
+                const c = quote.close?.[i];
+                const v = quote.volume?.[i] ?? 0;
+                if (o == null || c == null)
+                    continue;
+                bars.push({
+                    timestamp: new Date(timestamps[i] * 1000).toISOString().slice(0, 10),
+                    open: Number(o.toFixed(2)),
+                    high: Number((h ?? o).toFixed(2)),
+                    low: Number((l ?? o).toFixed(2)),
+                    close: Number(c.toFixed(2)),
+                    volume: v,
+                });
+            }
+            return bars;
+        }
+        catch {
+            return [];
+        }
+    }
+    mapIntervalToYahoo(interval) {
+        const map = {
+            '1m': '1m', '1min': '1m', 'minute': '1m',
+            '5m': '5m', '5min': '5m', '5minute': '5m',
+            '15m': '15m', '15min': '15m', '15minute': '15m',
+            '30m': '30m', '30min': '30m', '30minute': '30m',
+            '1h': '1h', '60m': '1h', '60min': '1h',
+            '1d': '1d', '1day': '1d', 'day': '1d', 'daily': '1d',
+            '1wk': '1wk', 'week': '1wk', 'weekly': '1wk',
+            '1mo': '1mo', 'month': '1mo', 'monthly': '1mo',
+        };
+        return map[interval.toLowerCase()] ?? '1d';
+    }
+    // ── Public API ──
+    async getQuote(symbol, exchange = 'NSE') {
+        const cacheKey = `quote:${exchange}:${symbol}`;
+        if (this.cache) {
+            const cached = await this.cache.get(cacheKey);
+            if (cached && cached.ltp > 0)
+                return cached;
+        }
+        // F&O option symbol detection (e.g. NIFTY20260310248000CE)
+        const optionInfo = parseOptionSymbol(symbol);
+        if (optionInfo || exchange === 'NFO') {
+            const fnoQuote = await this.fetchFnOQuote(symbol, optionInfo);
+            if (fnoQuote && fnoQuote.ltp > 0) {
+                if (this.cache)
+                    await this.cache.set(cacheKey, fnoQuote, getQuoteCacheTTL());
+                return fnoQuote;
+            }
+            return fnoQuote ?? this.emptyQuote(symbol, exchange);
+        }
+        if (exchange === 'MCX') {
+            const quote = await this.getMCXQuote(symbol);
+            if (this.cache)
+                await this.cache.set(cacheKey, quote, getQuoteCacheTTL());
+            return quote;
+        }
+        if (exchange === 'CDS') {
+            const quote = await this.getCDSQuote(symbol);
+            if (this.cache)
+                await this.cache.set(cacheKey, quote, getQuoteCacheTTL());
+            return quote;
+        }
+        // PRIMARY: Breeze Bridge live quote (real-time LTP from broker)
+        const breezeQuote = await this.fetchLiveFromBreezeBridge(symbol, exchange);
+        if (breezeQuote && breezeQuote.ltp > 0) {
+            if (this.cache)
+                await this.cache.set(cacheKey, breezeQuote, getQuoteCacheTTL());
+            return breezeQuote;
+        }
+        // Fallback 1: NSE direct scraping (real-time during market hours)
+        const nseQuote = await this.fetchFromNSE(symbol);
+        if (nseQuote && nseQuote.ltp > 0) {
+            if (this.cache)
+                await this.cache.set(cacheKey, nseQuote, getQuoteCacheTTL());
+            return nseQuote;
+        }
+        // Fallback 2: Yahoo Finance (may return daily close, not live LTP)
+        const yahooQuote = await this.fetchFromYahoo(symbol, exchange);
+        if (yahooQuote && yahooQuote.ltp > 0) {
+            if (this.cache)
+                await this.cache.set(cacheKey, yahooQuote, getQuoteCacheTTL());
+            return yahooQuote;
+        }
+        // Fallback 3: Breeze historical (last bar close)
+        try {
+            const today = istDateStr();
+            const weekAgo = istDaysAgo(7);
+            const bars = await this.fetchFromBreeze(symbol, '1day', weekAgo, today);
+            if (bars.length > 0) {
+                const latest = bars[bars.length - 1];
+                const historicalQuote = {
+                    symbol,
+                    exchange,
+                    ltp: latest.close,
+                    change: latest.close - latest.open,
+                    changePercent: latest.open > 0 ? ((latest.close - latest.open) / latest.open) * 100 : 0,
+                    open: latest.open,
+                    high: latest.high,
+                    low: latest.low,
+                    close: latest.close,
+                    volume: latest.volume,
+                    bidPrice: 0,
+                    askPrice: 0,
+                    bidQty: 0,
+                    askQty: 0,
+                    timestamp: latest.timestamp ?? new Date().toISOString(),
+                };
+                if (this.cache)
+                    await this.cache.set(cacheKey, historicalQuote, getQuoteCacheTTL());
+                return historicalQuote;
+            }
+        }
+        catch { /* Breeze historical fallback failed */ }
+        return nseQuote ?? this.emptyQuote(symbol, exchange);
+    }
+    async getMarketDepth(symbol, exchange = 'NSE') {
+        const cacheKey = `depth:${exchange}:${symbol}`;
+        if (this.cache) {
+            const cached = await this.cache.get(cacheKey);
+            if (cached)
+                return cached;
+        }
+        let bids = [];
+        let asks = [];
+        // Try NSE trade info API for market depth
+        try {
+            const nseUrl = `https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(symbol)}&section=trade_info`;
+            const cookies = await this.ensureNseCookies();
+            const res = await fetch(nseUrl, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'application/json',
+                    'Cookie': cookies,
+                },
+                signal: AbortSignal.timeout(8000),
+            });
+            if (res.ok) {
+                const data = await res.json();
+                const marketDeptOrderBook = data?.marketDeptOrderBook;
+                if (marketDeptOrderBook) {
+                    const bidData = marketDeptOrderBook.bid ?? [];
+                    const askData = marketDeptOrderBook.ask ?? [];
+                    bids = bidData.map((b) => ({
+                        price: Number(b.price ?? 0),
+                        qty: Number(b.quantity ?? 0),
+                        orders: Number(b.noOrders ?? b.orders ?? 0),
+                    })).filter((b) => b.price > 0);
+                    asks = askData.map((a) => ({
+                        price: Number(a.price ?? 0),
+                        qty: Number(a.quantity ?? 0),
+                        orders: Number(a.noOrders ?? a.orders ?? 0),
+                    })).filter((a) => a.price > 0);
+                }
+            }
+        }
+        catch { /* fallback below */ }
+        // Fallback: Try Breeze bridge
+        if (bids.length === 0 && asks.length === 0) {
+            try {
+                const bridgeUrl = BREEZE_BRIDGE_URL;
+                const res = await fetch(`${bridgeUrl}/quote/${encodeURIComponent(symbol)}?exchange=${exchange}`, {
+                    signal: AbortSignal.timeout(5000),
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.ltp > 0) {
+                        const ltp = data.ltp;
+                        const tickSize = ltp > 1000 ? 0.05 : 0.05;
+                        for (let i = 0; i < 5; i++) {
+                            bids.push({ price: Number((ltp - tickSize * (i + 1)).toFixed(2)), qty: 0, orders: 0 });
+                            asks.push({ price: Number((ltp + tickSize * (i + 1)).toFixed(2)), qty: 0, orders: 0 });
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+        const totalBidQty = bids.reduce((s, b) => s + b.qty, 0);
+        const totalAskQty = asks.reduce((s, a) => s + a.qty, 0);
+        const imbalanceRatio = totalAskQty > 0 ? Number((totalBidQty / totalAskQty).toFixed(3)) : 0;
+        const result = { symbol, bids, asks, totalBidQty, totalAskQty, imbalanceRatio };
+        if (this.cache)
+            await this.cache.set(cacheKey, result, 5);
+        return result;
+    }
+    async ensureNseCookies() {
+        const cacheKey = 'nse_cookies';
+        if (this.cache) {
+            const cached = await this.cache.get(cacheKey);
+            if (cached)
+                return cached;
+        }
+        try {
+            const res = await fetch('https://www.nseindia.com', {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+                signal: AbortSignal.timeout(5000),
+            });
+            const cookies = res.headers.get('set-cookie') ?? '';
+            if (this.cache && cookies)
+                await this.cache.set(cacheKey, cookies, 300);
+            return cookies;
+        }
+        catch {
+            return '';
+        }
+    }
+    async getHistory(symbol, interval, fromDate, toDate, userId, exchange = 'NSE') {
+        const ttl = interval.includes('day') || interval.includes('1d') ? CACHE_TTL_HISTORY : CACHE_TTL_HISTORY_INTRADAY;
+        const cacheKey = `history:${exchange}:${symbol}:${interval}:${fromDate}:${toDate}`;
+        if (this.cache) {
+            const cached = await this.cache.get(cacheKey);
+            if (cached)
+                return cached;
+        }
+        // Check persistent candle store first
+        try {
+            const prisma = getPrisma();
+            const stored = await prisma.candleStore.findMany({
+                where: {
+                    symbol, exchange, interval,
+                    timestamp: { gte: new Date(fromDate), lte: new Date(toDate) },
+                },
+                orderBy: { timestamp: 'asc' },
+            });
+            if (stored.length >= 5) {
+                const bars = stored.map((c) => ({
+                    timestamp: c.timestamp.toISOString(),
+                    open: Number(c.open), high: Number(c.high),
+                    low: Number(c.low), close: Number(c.close), volume: Number(c.volume),
+                }));
+                if (this.cache)
+                    await this.cache.set(cacheKey, bars, ttl);
+                return bars;
+            }
+        }
+        catch { /* DB not available, continue to live fetch */ }
+        if (exchange === 'MCX' || exchange === 'CDS') {
+            const bars = this.generateSimulatedHistory(symbol, exchange, fromDate, toDate);
+            if (this.cache)
+                await this.cache.set(cacheKey, bars, ttl);
+            return bars;
+        }
+        const bars = await this.fetchFromBreeze(symbol, interval, fromDate, toDate, userId, exchange);
+        if (bars.length > 0) {
+            if (this.cache)
+                await this.cache.set(cacheKey, bars, ttl);
+            this.backfillCandleStore(symbol, exchange, interval, bars).catch(err => log.warn({ err, symbol }, 'Failed to backfill candle store'));
+            return this.validateCandles(bars, symbol, interval);
+        }
+        const yahooBars = await this.fetchHistoryFromYahoo(symbol, interval, fromDate, toDate, exchange);
+        if (yahooBars.length > 0) {
+            if (this.cache)
+                await this.cache.set(cacheKey, yahooBars, ttl);
+            this.backfillCandleStore(symbol, exchange, interval, yahooBars).catch(err => log.warn({ err, symbol }, 'Failed to backfill candle store'));
+            return this.validateCandles(yahooBars, symbol, interval);
+        }
+        return [];
+    }
+    validateCandles(bars, symbol, interval) {
+        if (bars.length < 2)
+            return bars;
+        const issues = [];
+        const closes = bars.map(b => b.close);
+        const mean = closes.reduce((a, b) => a + b, 0) / closes.length;
+        const stdDev = Math.sqrt(closes.reduce((s, c) => s + (c - mean) ** 2, 0) / closes.length);
+        // Step 1: Remove outliers (>3 sigma from mean)
+        let filtered = bars;
+        if (stdDev > 0) {
+            const before = filtered.length;
+            filtered = filtered.filter(b => Math.abs(b.close - mean) <= 3 * stdDev);
+            if (before - filtered.length > 0) {
+                issues.push(`removed ${before - filtered.length} outlier bars (>3σ)`);
+            }
+        }
+        // Step 2: Detect and interpolate small gaps (1-2 missing bars)
+        const expectedMs = interval.includes('day') || interval.includes('1d') ? 86400000
+            : interval.includes('1h') || interval.includes('60') ? 3600000
+                : interval.includes('5m') || interval.includes('5min') ? 300000
+                    : 60000;
+        const interpolated = [filtered[0]];
+        for (let i = 1; i < filtered.length; i++) {
+            const ts = filtered[i].timestamp;
+            const prevTs = filtered[i - 1].timestamp;
+            if (ts && prevTs) {
+                const gap = new Date(ts).getTime() - new Date(prevTs).getTime();
+                const missingBars = Math.round(gap / expectedMs) - 1;
+                if (missingBars >= 1 && missingBars <= 2) {
+                    // Interpolate missing bars
+                    for (let j = 1; j <= missingBars; j++) {
+                        const frac = j / (missingBars + 1);
+                        const interpTs = new Date(new Date(prevTs).getTime() + expectedMs * j).toISOString();
+                        const prev = filtered[i - 1];
+                        const next = filtered[i];
+                        interpolated.push({
+                            timestamp: interpTs.includes('T') ? interpTs : interpTs.slice(0, 10),
+                            open: Number((prev.close + (next.open - prev.close) * frac).toFixed(2)),
+                            high: Number((Math.max(prev.high, next.high) * (1 - frac * 0.1)).toFixed(2)),
+                            low: Number((Math.min(prev.low, next.low) * (1 + frac * 0.1)).toFixed(2)),
+                            close: Number((prev.close + (next.close - prev.close) * frac).toFixed(2)),
+                            volume: Math.round((prev.volume + next.volume) / 2),
+                        });
+                    }
+                    issues.push(`interpolated ${missingBars} gap(s) near ${ts}`);
+                }
+                else if (missingBars > 2) {
+                    issues.push(`large gap at ${ts} (${missingBars + 1} intervals) — flagged for review`);
+                }
+            }
+            interpolated.push(filtered[i]);
+        }
+        // Step 3: Detect overnight gaps >10% for corporate action review
+        for (let i = 1; i < interpolated.length; i++) {
+            const prevClose = interpolated[i - 1].close;
+            if (prevClose > 0) {
+                const gapPct = Math.abs(interpolated[i].open - prevClose) / prevClose * 100;
+                if (gapPct > 10) {
+                    issues.push(`large overnight gap ${gapPct.toFixed(1)}% at ${interpolated[i].timestamp} — possible corporate action`);
+                }
+            }
+        }
+        if (issues.length > 0) {
+            log.warn({ symbol, interval, issueCount: issues.length, sample: issues.slice(0, 5) }, 'Data quality: processed');
+            emit('market-data', {
+                type: 'DATA_QUALITY_REPORT', symbol, interval,
+                issues: issues.slice(0, 10),
+                barCount: interpolated.length,
+                lastTimestamp: interpolated[interpolated.length - 1]?.timestamp ?? new Date().toISOString(),
+            }).catch(err => log.warn({ err, symbol }, 'Failed to emit DATA_QUALITY_REPORT'));
+        }
+        return interpolated;
+    }
+    /**
+     * Check if data is fresh enough for live trading (not stale during market hours).
+     */
+    isDataFresh(timestamp, maxAgeMs = 5 * 60 * 1000) {
+        const now = Date.now();
+        const dataTime = new Date(timestamp).getTime();
+        const age = now - dataTime;
+        // Only enforce during Indian market hours (9:15-15:30 IST = 3:45-10:00 UTC)
+        const utcHour = new Date().getUTCHours();
+        const utcMin = new Date().getUTCMinutes();
+        const utcMins = utcHour * 60 + utcMin;
+        const marketOpen = 3 * 60 + 45;
+        const marketClose = 10 * 60;
+        const isMarketHours = utcMins >= marketOpen && utcMins <= marketClose;
+        if (isMarketHours && age > maxAgeMs) {
+            log.warn({ age: Math.round(age / 1000), maxAgeSec: maxAgeMs / 1000 }, 'Stale data detected during market hours');
+            return false;
+        }
+        return true;
+    }
+    async backfillCandleStore(symbol, exchange, interval, bars) {
+        try {
+            const prisma = getPrisma();
+            const records = bars
+                .filter(b => b.timestamp && b.close > 0)
+                .map(b => ({
+                symbol, exchange, interval,
+                timestamp: new Date(b.timestamp),
+                open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume ?? 0,
+            }));
+            if (records.length === 0)
+                return;
+            // Upsert in batches to avoid unique constraint violations
+            for (const rec of records) {
+                await prisma.candleStore.upsert({
+                    where: {
+                        symbol_exchange_interval_timestamp: {
+                            symbol: rec.symbol, exchange: rec.exchange,
+                            interval: rec.interval, timestamp: rec.timestamp,
+                        },
+                    },
+                    update: { open: rec.open, high: rec.high, low: rec.low, close: rec.close, volume: rec.volume },
+                    create: rec,
+                }).catch(err => log.warn({ err, symbol: rec.symbol }, 'Failed to upsert candle store record'));
+            }
+        }
+        catch {
+            // Non-critical — don't block the main data flow
+        }
+    }
+    async getTopMovers(count = 20) {
+        const cacheKey = `market:top-movers:${count}`;
+        if (this.cache) {
+            const cached = await this.cache.get(cacheKey);
+            if (cached)
+                return cached;
+        }
+        // Primary: Yahoo Finance batch quote for NIFTY 50 constituents
+        const yahooResult = await this.fetchTopMoversFromYahoo(count);
+        if (yahooResult.gainers.length > 0 || yahooResult.losers.length > 0) {
+            if (this.cache)
+                await this.cache.set(cacheKey, yahooResult, 60);
+            return yahooResult;
+        }
+        // Fallback: NSE scraping
+        try {
+            const res = await this.nseFetch('https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500');
+            if (!res.ok) {
+                await res.text().catch(() => { });
+                return this.fallbackMovers(count);
+            }
+            const data = await res.json();
+            const stocks = data.data ?? [];
+            if (stocks.length === 0)
+                return this.fallbackMovers(count);
+            const mapped = stocks
+                .filter((s) => s.symbol && s.symbol !== 'NIFTY 500' && s.lastPrice > 0)
+                .map((s) => ({
+                symbol: s.symbol,
+                name: s.meta?.companyName ?? s.symbol,
+                ltp: s.lastPrice ?? 0,
+                change: s.change ?? 0,
+                changePercent: s.pChange ?? 0,
+                volume: s.totalTradedVolume ?? 0,
+                open: s.open ?? 0,
+                high: s.dayHigh ?? 0,
+                low: s.dayLow ?? 0,
+                previousClose: s.previousClose ?? 0,
+            }));
+            const sorted = [...mapped].sort((a, b) => b.changePercent - a.changePercent);
+            const gainers = sorted.slice(0, count);
+            const losers = sorted.slice(-count).reverse();
+            const result = { gainers, losers };
+            if (this.cache)
+                await this.cache.set(cacheKey, result, 60);
+            return result;
+        }
+        catch {
+            return this.fallbackMovers(count);
+        }
+    }
+    async fetchTopMoversFromYahoo(count) {
+        const symbols = POPULAR_NSE_STOCKS.map(([code]) => code);
+        const movers = [];
+        // Fetch in batches of 8 to avoid overloading
+        const batchSize = 8;
+        for (let i = 0; i < symbols.length; i += batchSize) {
+            const batch = symbols.slice(i, i + batchSize);
+            const promises = batch.map(async (sym) => {
+                try {
+                    const quote = await this.fetchFromYahoo(sym, 'NSE');
+                    if (quote && quote.ltp > 0) {
+                        const entry = POPULAR_NSE_STOCKS.find(([code]) => code === sym);
+                        movers.push({
+                            symbol: sym,
+                            name: entry?.[1] ?? sym,
+                            ltp: quote.ltp,
+                            change: quote.change,
+                            changePercent: quote.changePercent,
+                            volume: quote.volume,
+                            open: quote.open,
+                            high: quote.high,
+                            low: quote.low,
+                            previousClose: quote.close,
+                        });
+                    }
+                }
+                catch { /* skip */ }
+            });
+            await Promise.all(promises);
+        }
+        if (movers.length === 0)
+            return { gainers: [], losers: [] };
+        const sorted = [...movers].sort((a, b) => b.changePercent - a.changePercent);
+        return {
+            gainers: sorted.slice(0, count),
+            losers: sorted.slice(-count).reverse(),
+        };
+    }
+    async getIndices() {
+        const cacheKey = 'market:indices';
+        if (this.cache) {
+            const cached = await this.cache.get(cacheKey);
+            if (cached)
+                return cached;
+        }
+        const indices = [];
+        // ── Primary: Breeze Bridge (live broker data) ──
+        const bridgeActive = await this.ensureBreezeBridgeSession();
+        if (bridgeActive) {
+            try {
+                const res = await fetch(`${BREEZE_BRIDGE_URL}/indices`, {
+                    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    const breezeIndices = data?.indices ?? [];
+                    for (const idx of breezeIndices) {
+                        if (idx.name && idx.value > 0) {
+                            indices.push({
+                                name: idx.name,
+                                value: Number(Number(idx.value).toFixed(2)),
+                                change: Number(Number(idx.change ?? 0).toFixed(2)),
+                                changePercent: Number(Number(idx.changePercent ?? 0).toFixed(2)),
+                            });
+                        }
+                    }
+                    if (indices.length > 0) {
+                        log.info(`Indices from Breeze: ${indices.map(i => i.name).join(', ')}`);
+                    }
+                }
+            }
+            catch { /* Breeze bridge unavailable */ }
+        }
+        // ── Fallback: Yahoo Finance for any missing indices ──
+        const expectedIndices = [
+            ['^NSEI', 'NIFTY 50'],
+            ['^NSEBANK', 'NIFTY BANK'],
+            ['^BSESN', 'SENSEX'],
+            ['^INDIAVIX', 'INDIA VIX'],
+        ];
+        const fetchedNames = new Set(indices.map(i => i.name));
+        const missingFromYahoo = expectedIndices.filter(([, name]) => !fetchedNames.has(name));
+        if (missingFromYahoo.length > 0) {
+            const yahooPromises = missingFromYahoo.map(async ([sym, name]) => {
+                try {
+                    const encoded = encodeURIComponent(sym);
+                    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encoded}?interval=1d&range=1d`;
+                    const ac = new AbortController();
+                    const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+                    const res = await fetch(url, {
+                        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+                        signal: ac.signal,
+                    });
+                    clearTimeout(timer);
+                    if (!res.ok)
+                        return;
+                    const data = await res.json();
+                    const meta = data?.chart?.result?.[0]?.meta;
+                    if (!meta)
+                        return;
+                    const value = meta.regularMarketPrice ?? 0;
+                    const prevClose = meta.chartPreviousClose ?? 0;
+                    const change = value - prevClose;
+                    const changePercent = prevClose > 0 ? (change / prevClose) * 100 : 0;
+                    indices.push({
+                        name,
+                        value: Number(value.toFixed(2)),
+                        change: Number(change.toFixed(2)),
+                        changePercent: Number(changePercent.toFixed(2)),
+                    });
+                }
+                catch { /* skip */ }
+            });
+            await Promise.all(yahooPromises);
+        }
+        // ── Fallback: BSE API specifically for SENSEX ──
+        if (!indices.some(i => i.name === 'SENSEX')) {
+            try {
+                const ac = new AbortController();
+                const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+                const res = await fetch('https://api.bseindia.com/BseIndiaAPI/api/GetSensexData/w?code=16', {
+                    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', Accept: 'application/json' },
+                    signal: ac.signal,
+                });
+                clearTimeout(timer);
+                if (res.ok) {
+                    const bseData = await res.json();
+                    const currentVal = parseFloat(bseData?.CurrValue ?? bseData?.ltp ?? '0');
+                    const prevClose = parseFloat(bseData?.PrevClose ?? bseData?.prevclose ?? '0');
+                    if (currentVal > 0) {
+                        const change = prevClose > 0 ? currentVal - prevClose : 0;
+                        const changePct = prevClose > 0 ? (change / prevClose) * 100 : 0;
+                        indices.push({
+                            name: 'SENSEX',
+                            value: Number(currentVal.toFixed(2)),
+                            change: Number(change.toFixed(2)),
+                            changePercent: Number(changePct.toFixed(2)),
+                        });
+                    }
+                }
+            }
+            catch { /* BSE fallback failed */ }
+        }
+        if (indices.length > 0 && this.cache) {
+            await this.cache.set(cacheKey, indices, CACHE_TTL_INDICES);
+        }
+        if (indices.length > 0)
+            return indices;
+        // ── Last resort: NSE allIndices ──
+        try {
+            const res = await this.nseFetch('https://www.nseindia.com/api/allIndices');
+            if (!res.ok) {
+                await res.text().catch(() => { });
+                return [];
+            }
+            const data = await res.json();
+            return (data.data ?? []).slice(0, 10).map((idx) => ({
+                name: idx.index === 'S&P BSE SENSEX' ? 'SENSEX' : idx.index,
+                value: idx.last,
+                change: idx.variation,
+                changePercent: idx.percentChange,
+            }));
+        }
+        catch {
+            return [];
+        }
+    }
+    async getVIX() {
+        const cacheKey = 'market:vix';
+        if (this.cache) {
+            const cached = await this.cache.get(cacheKey);
+            if (cached)
+                return cached;
+        }
+        try {
+            const url = `https://query1.finance.yahoo.com/v8/finance/chart/%5EINDIAVIX?interval=1d&range=1d`;
+            const ac = new AbortController();
+            const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+            const res = await fetch(url, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+                signal: ac.signal,
+            });
+            clearTimeout(timer);
+            if (res.ok) {
+                const data = await res.json();
+                const meta = data?.chart?.result?.[0]?.meta;
+                if (meta?.regularMarketPrice) {
+                    const value = meta.regularMarketPrice;
+                    const prevClose = meta.chartPreviousClose ?? value;
+                    const result = {
+                        value: Number(value.toFixed(2)),
+                        change: Number((value - prevClose).toFixed(2)),
+                        changePercent: Number((prevClose > 0 ? ((value - prevClose) / prevClose) * 100 : 0).toFixed(2)),
+                    };
+                    if (this.cache)
+                        await this.cache.set(cacheKey, result, CACHE_TTL_INDICES);
+                    return result;
+                }
+            }
+        }
+        catch { /* Yahoo failed */ }
+        // Fallback: NSE
+        try {
+            const res = await this.nseFetch('https://www.nseindia.com/api/allIndices');
+            if (!res.ok) {
+                await res.text().catch(() => { });
+                return { value: 0, change: 0, changePercent: 0 };
+            }
+            const data = await res.json();
+            const vix = (data.data ?? []).find((idx) => idx.index === 'INDIA VIX');
+            if (vix) {
+                const result = { value: vix.last, change: vix.variation, changePercent: vix.percentChange };
+                if (this.cache)
+                    await this.cache.set(cacheKey, result, CACHE_TTL_INDICES);
+                return result;
+            }
+        }
+        catch { /* NSE failed too */ }
+        return { value: 0, change: 0, changePercent: 0 };
+    }
+    async getFIIDII() {
+        const cacheKey = 'market:fii-dii';
+        if (this.cache) {
+            const cached = await this.cache.get(cacheKey);
+            if (cached)
+                return cached;
+        }
+        const empty = {
+            date: istDateStr(),
+            fiiBuy: 0, fiiSell: 0, fiiNet: 0,
+            diiBuy: 0, diiSell: 0, diiNet: 0,
+        };
+        // Primary: NSE FII/DII activity
+        try {
+            const res = await this.nseFetch('https://www.nseindia.com/api/fiidiiActivity/WDM');
+            if (res.ok) {
+                const data = await res.json();
+                const fii = (data ?? []).find((r) => (r.category ?? '').toLowerCase().includes('fii') || (r.category ?? '').toLowerCase().includes('fpi'));
+                const dii = (data ?? []).find((r) => (r.category ?? '').toLowerCase().includes('dii'));
+                if (fii || dii) {
+                    const result = {
+                        date: fii?.date ?? dii?.date ?? empty.date,
+                        fiiBuy: Number(fii?.buyValue ?? 0),
+                        fiiSell: Number(fii?.sellValue ?? 0),
+                        fiiNet: Number(fii?.netValue ?? 0),
+                        diiBuy: Number(dii?.buyValue ?? 0),
+                        diiSell: Number(dii?.sellValue ?? 0),
+                        diiNet: Number(dii?.netValue ?? 0),
+                    };
+                    if (this.cache)
+                        await this.cache.set(cacheKey, result, 600);
+                    return result;
+                }
+            }
+        }
+        catch { /* NSE failed */ }
+        // Fallback: MoneyControl / NSDL
+        try {
+            const res = await this.nseFetch('https://www.nseindia.com/api/fiidiiActivity');
+            if (res.ok) {
+                const data = await res.json();
+                if (data?.fpiDayData || data?.diiDayData) {
+                    const fpi = data.fpiDayData ?? {};
+                    const dii = data.diiDayData ?? {};
+                    const result = {
+                        date: fpi.date ?? dii.date ?? empty.date,
+                        fiiBuy: Number(fpi.buyValue ?? 0),
+                        fiiSell: Number(fpi.sellValue ?? 0),
+                        fiiNet: Number(fpi.netValue ?? 0),
+                        diiBuy: Number(dii.buyValue ?? 0),
+                        diiSell: Number(dii.sellValue ?? 0),
+                        diiNet: Number(dii.netValue ?? 0),
+                    };
+                    if (this.cache)
+                        await this.cache.set(cacheKey, result, 600);
+                    return result;
+                }
+            }
+        }
+        catch { /* fallback failed */ }
+        return empty;
+    }
+    async getAvailableExpiries(symbol) {
+        const cacheKey = `expiries:${symbol}`;
+        if (this.cache) {
+            const cached = await this.cache.get(cacheKey);
+            if (cached)
+                return { expiries: cached };
+        }
+        // Source 1: Python Breeze Bridge (official SDK — most reliable)
+        const bridgeActive = await this.ensureBreezeBridgeSession();
+        if (bridgeActive) {
+            try {
+                const bridgeUrl = `${BREEZE_BRIDGE_URL}/expiries/${encodeURIComponent(symbol)}`;
+                const ac = new AbortController();
+                const timer = setTimeout(() => ac.abort(), 15_000);
+                const res = await fetch(bridgeUrl, { signal: ac.signal });
+                clearTimeout(timer);
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.expiries && data.expiries.length > 0) {
+                        console.log(`[Expiries] ${symbol} → Breeze Python Bridge: ${data.expiries.join(', ')}`);
+                        if (this.cache)
+                            await this.cache.set(cacheKey, data.expiries, 3600);
+                        return { expiries: data.expiries };
+                    }
+                }
+            }
+            catch (err) {
+                console.log(`[Expiries] ${symbol} → Breeze Python Bridge error: ${err}`);
+            }
+            // Bridge returned no expiries — try getting them from the full option chain
+            try {
+                const chainResult = await this.fetchFromBreezeBridge(symbol);
+                if (chainResult?.expiries?.length > 0) {
+                    console.log(`[Expiries] ${symbol} → extracted from Bridge chain: ${chainResult.expiries.join(', ')}`);
+                    if (this.cache)
+                        await this.cache.set(cacheKey, chainResult.expiries, 3600);
+                    return { expiries: chainResult.expiries };
+                }
+            }
+            catch { /* fall through */ }
+        }
+        // Fallback: NSE India - authoritative source with ALL expiry dates
+        try {
+            const fmtD = (d) => {
+                const y = d.getFullYear();
+                const m = String(d.getMonth() + 1).padStart(2, '0');
+                const dd = String(d.getDate()).padStart(2, '0');
+                return `${y}-${m}-${dd}`;
+            };
+            const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX'].includes(symbol.toUpperCase());
+            const nseUrl = isIndex
+                ? `https://www.nseindia.com/api/option-chain-indices?symbol=${encodeURIComponent(symbol.toUpperCase())}`
+                : `https://www.nseindia.com/api/option-chain-equities?symbol=${encodeURIComponent(symbol.toUpperCase())}`;
+            const res = await this.nseFetch(nseUrl);
+            if (res.ok) {
+                const data = await res.json();
+                const records = data?.records ?? data?.filtered ?? {};
+                const raw = records?.expiryDates ?? [];
+                const now = new Date();
+                now.setHours(0, 0, 0, 0);
+                const expiries = raw
+                    .map((d) => {
+                    const parsed = new Date(d);
+                    return isNaN(parsed.getTime()) ? '' : fmtD(parsed);
+                })
+                    .filter(d => d && new Date(d) >= now)
+                    .sort();
+                if (expiries.length > 0) {
+                    if (this.cache)
+                        await this.cache.set(cacheKey, expiries, 3600);
+                    return { expiries };
+                }
+            }
+        }
+        catch { /* NSE may be blocked from cloud servers */ }
+        // No bridge, no NSE — session error
+        return { expiries: [], sessionError: true, message: 'Breeze API session not active. Please generate a session in Settings.' };
+    }
+    async getOptionsChain(symbol, expiry) {
+        const cacheKey = expiry ? `options:${symbol}:${expiry}` : `options:${symbol}`;
+        if (this.cache) {
+            const cached = await this.cache.get(cacheKey);
+            if (cached)
+                return cached;
+        }
+        // Primary: Python Breeze Bridge (official Python SDK — most reliable)
+        const bridgeActive = await this.ensureBreezeBridgeSession();
+        if (bridgeActive) {
+            try {
+                const bridgeResult = await this.fetchFromBreezeBridge(symbol, expiry);
+                if (bridgeResult && bridgeResult.strikes && bridgeResult.strikes.length > 0) {
+                    console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze Python Bridge (${bridgeResult.strikes.length} strikes)`);
+                    if (this.cache)
+                        await this.cache.set(cacheKey, bridgeResult, 10);
+                    return bridgeResult;
+                }
+                console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Bridge returned 0 strikes, trying fallbacks`);
+            }
+            catch (err) {
+                console.log(`[OptionChain] ${symbol} → Breeze Python Bridge error: ${err}`);
+            }
+        }
+        // Fallback 1: NSE India
+        try {
+            const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX'].includes(symbol.toUpperCase());
+            const url = isIndex
+                ? `https://www.nseindia.com/api/option-chain-indices?symbol=${encodeURIComponent(symbol.toUpperCase())}`
+                : `https://www.nseindia.com/api/option-chain-equities?symbol=${encodeURIComponent(symbol.toUpperCase())}`;
+            const res = await this.nseFetch(url);
+            if (res.ok) {
+                const data = await res.json();
+                const result = this.parseOptionsChain(symbol, data, expiry);
+                if (result.strikes.length > 0) {
+                    console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → NSE India (${result.strikes.length} strikes)`);
+                    if (this.cache)
+                        await this.cache.set(cacheKey, result, 60);
+                    return result;
+                }
+            }
+        }
+        catch { /* NSE blocked from cloud */ }
+        // Fallback 2: NiftyTrader
+        try {
+            const niftyTraderResult = await this.fetchOptionsChainFromNiftyTrader(symbol, expiry);
+            if (niftyTraderResult && niftyTraderResult.strikes && niftyTraderResult.strikes.length > 0) {
+                console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → NiftyTrader (${niftyTraderResult.strikes.length} strikes)`);
+                if (this.cache)
+                    await this.cache.set(cacheKey, niftyTraderResult, 60);
+                return niftyTraderResult;
+            }
+        }
+        catch { /* NiftyTrader unavailable */ }
+        // All sources exhausted
+        if (bridgeActive) {
+            console.log(`[OptionChain] ${symbol} → Bridge active but all sources returned 0 strikes`);
+            return { symbol, strikes: [], expiry: expiry ?? '', expiries: [] };
+        }
+        console.log(`[OptionChain] ${symbol} → No Breeze bridge session, no fallback`);
+        return { symbol, strikes: [], expiry: expiry ?? '', expiries: [], sessionError: true,
+            message: 'Breeze API session not active. Please generate a session in Settings.' };
+    }
+    async fetchOptionsChainFromNiftyTrader(symbol, expiry) {
+        const sym = symbol.toUpperCase().replace(/\s+/g, '').toLowerCase();
+        let url = `https://webapi.niftytrader.in/webapi/option/option-chain-data?symbol=${encodeURIComponent(sym)}`;
+        if (expiry)
+            url += `&expiry_date=${encodeURIComponent(expiry)}`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 15000);
+        try {
+            const res = await fetch(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'application/json',
+                },
+                signal: ac.signal,
+            });
+            clearTimeout(timer);
+            if (!res.ok)
+                return null;
+            const json = await res.json();
+            if (json.result !== 1 || !json.resultData?.opDatas?.length)
+                return null;
+            const rows = json.resultData.opDatas;
+            const spotPrice = Number(rows[0]?.index_close) || 0;
+            const expiry = rows[0]?.expiry_date
+                ? rows[0].expiry_date.split('T')[0]
+                : '';
+            const strikes = rows.map((r) => ({
+                strike: Number(r.strike_price) || 0,
+                callOI: Number(r.calls_oi) || 0,
+                callOIChange: Number(r.calls_change_oi) || 0,
+                callVolume: Number(r.calls_volume) || 0,
+                callIV: Number(r.calls_iv) || 0,
+                callLTP: Number(r.calls_ltp) || 0,
+                callNetChange: Number(r.calls_net_change) || 0,
+                callBidPrice: Number(r.calls_bid_price) || 0,
+                callAskPrice: Number(r.calls_ask_price) || 0,
+                callDelta: Number(r.call_delta) || 0,
+                callGamma: Number(r.call_gamma) || 0,
+                callTheta: Number(r.call_theta) || 0,
+                callVega: Number(r.call_vega) || 0,
+                callBuildup: r.calls_builtup ?? '',
+                putOI: Number(r.puts_oi) || 0,
+                putOIChange: Number(r.puts_change_oi) || 0,
+                putVolume: Number(r.puts_volume) || 0,
+                putIV: Number(r.puts_iv) || 0,
+                putLTP: Number(r.puts_ltp) || 0,
+                putNetChange: Number(r.puts_net_change) || 0,
+                putBidPrice: Number(r.puts_bid_price) || 0,
+                putAskPrice: Number(r.puts_ask_price) || 0,
+                putDelta: Number(r.put_delta) || 0,
+                putGamma: Number(r.put_gamma) || 0,
+                putTheta: Number(r.put_theta) || 0,
+                putVega: Number(r.put_vega) || 0,
+                putBuildup: r.puts_builtup ?? '',
+            })).filter((s) => s.strike > 0)
+                .sort((a, b) => a.strike - b.strike);
+            const totalCallOI = strikes.reduce((s, st) => s + st.callOI, 0);
+            const totalPutOI = strikes.reduce((s, st) => s + st.putOI, 0);
+            const pcr = totalCallOI > 0 ? Math.round((totalPutOI / totalCallOI) * 100) / 100 : 0;
+            let maxPainStrike = 0, minPain = Infinity;
+            for (const st of strikes) {
+                let pain = 0;
+                for (const s2 of strikes) {
+                    if (s2.strike < st.strike)
+                        pain += (st.strike - s2.strike) * s2.callOI;
+                    if (s2.strike > st.strike)
+                        pain += (s2.strike - st.strike) * s2.putOI;
+                }
+                if (pain < minPain) {
+                    minPain = pain;
+                    maxPainStrike = st.strike;
+                }
+            }
+            const uniqueExpiries = [...new Set(rows.map((r) => r.expiry_date ? r.expiry_date.split('T')[0] : '').filter(Boolean))].sort();
+            return {
+                symbol: symbol.toUpperCase(),
+                expiry,
+                underlyingValue: spotPrice,
+                spotPrice,
+                strikes,
+                pcr,
+                maxPain: maxPainStrike,
+                totalCallOI,
+                totalPutOI,
+                expiries: uniqueExpiries,
+                source: 'niftytrader',
+            };
+        }
+        catch {
+            clearTimeout(timer);
+            return null;
+        }
+    }
+    async search(query, limit = 10, exchange) {
+        if (!query || query.length < 1)
+            return [];
+        const cacheKey = `search:${exchange ?? 'ALL'}:${query.toLowerCase()}`;
+        if (this.cache) {
+            const cached = await this.cache.get(cacheKey);
+            if (cached)
+                return cached;
+        }
+        const q = query.toLowerCase();
+        const qNorm = q.replace(/[-\s]/g, '');
+        const existingSymbols = new Set();
+        const results = [];
+        const fuzzyMatch = (code, name) => {
+            const cNorm = code.toLowerCase().replace(/[-\s]/g, '');
+            const nNorm = name.toLowerCase().replace(/[-\s]/g, '');
+            return cNorm.includes(qNorm) || nNorm.includes(qNorm)
+                || code.toLowerCase().includes(q) || name.toLowerCase().includes(q);
+        };
+        const addResult = (r) => {
+            if (!existingSymbols.has(r.symbol)) {
+                results.push(r);
+                existingSymbols.add(r.symbol);
+            }
+        };
+        // MCX and CDS only come from local lists
+        if (!exchange || exchange === 'MCX') {
+            POPULAR_MCX_COMMODITIES
+                .filter(([code, name]) => fuzzyMatch(code, name))
+                .forEach(([code, name]) => addResult({
+                stock_code: code, symbol: code, name, exchange: 'MCX', segment: 'commodity', token: '',
+            }));
+        }
+        if (!exchange || exchange === 'CDS') {
+            POPULAR_CDS_CURRENCIES
+                .filter(([code, name]) => fuzzyMatch(code, name))
+                .forEach(([code, name]) => addResult({
+                stock_code: code, symbol: code, name, exchange: 'CDS', segment: 'currency', token: '',
+            }));
+        }
+        // For NSE/BSE: instant local results + parallel dynamic search for ALL listed stocks
+        if (!exchange || exchange === 'NSE' || exchange === 'BSE') {
+            // Instant: check the popular list for sub-millisecond response
+            POPULAR_NSE_STOCKS
+                .filter(([code, name]) => fuzzyMatch(code, name))
+                .forEach(([code, name]) => addResult({
+                stock_code: code, symbol: code, name, exchange: 'NSE', segment: 'equity', token: '',
+            }));
+            // Dynamic: query Yahoo Finance + NSE for ALL 2000+ NSE / 5000+ BSE stocks
+            const dynamicResults = await this.searchAllExchanges(query, limit);
+            for (const dr of dynamicResults)
+                addResult(dr);
+        }
+        const sliced = results.slice(0, limit);
+        if (sliced.length > 0 && this.cache) {
+            await this.cache.set(cacheKey, sliced, CACHE_TTL_SEARCH);
+        }
+        return sliced;
+    }
+    async searchAllExchanges(query, limit) {
+        // Run Yahoo Finance and NSE search in parallel for speed
+        const [yahooResults, nseResults] = await Promise.all([
+            this.searchViaYahoo(query, limit),
+            this.searchViaNSE(query, limit),
+        ]);
+        // Merge: prefer NSE results (authoritative symbol names), then Yahoo
+        const merged = [];
+        const seen = new Set();
+        for (const r of nseResults) {
+            if (!seen.has(r.symbol)) {
+                merged.push(r);
+                seen.add(r.symbol);
+            }
+        }
+        for (const r of yahooResults) {
+            if (!seen.has(r.symbol)) {
+                merged.push(r);
+                seen.add(r.symbol);
+            }
+        }
+        return merged.slice(0, limit);
+    }
+    async searchViaYahoo(query, limit) {
+        try {
+            const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=${Math.min(limit + 5, 20)}&newsCount=0&listsCount=0&quotesQueryId=tss_match_phrase_query`;
+            const ac = new AbortController();
+            const timer = setTimeout(() => ac.abort(), 5000);
+            const res = await fetch(url, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+                signal: ac.signal,
+            });
+            clearTimeout(timer);
+            if (!res.ok)
+                return [];
+            const data = await res.json();
+            const quotes = data?.quotes ?? [];
+            return quotes
+                .filter((q) => {
+                const exch = (q.exchange ?? '').toUpperCase();
+                return exch === 'NSI' || exch === 'NSE' || exch === 'BSE' || exch === 'BOM'
+                    || (q.symbol ?? '').endsWith('.NS') || (q.symbol ?? '').endsWith('.BO');
+            })
+                .map((q) => {
+                let symbol = q.symbol ?? '';
+                symbol = symbol.replace(/\.(NS|BO)$/, '');
+                const exchange = (q.exchange ?? '').toUpperCase() === 'BOM' || (q.symbol ?? '').endsWith('.BO') ? 'BSE' : 'NSE';
+                return {
+                    stock_code: symbol,
+                    symbol,
+                    name: q.longname ?? q.shortname ?? symbol,
+                    exchange,
+                    segment: q.quoteType === 'EQUITY' ? 'equity' : (q.quoteType ?? 'equity').toLowerCase(),
+                    token: '',
+                };
+            })
+                .slice(0, limit);
+        }
+        catch {
+            return [];
+        }
+    }
+    async searchViaNSE(query, limit) {
+        try {
+            const url = `https://www.nseindia.com/api/search/autocomplete?q=${encodeURIComponent(query)}`;
+            const res = await this.nseFetch(url);
+            if (!res.ok) {
+                await res.text().catch(() => { });
+                return [];
+            }
+            const data = await res.json();
+            const results = [];
+            for (const item of (data?.symbols ?? [])) {
+                const symbol = (item.symbol ?? '').toUpperCase();
+                if (!symbol)
+                    continue;
+                results.push({
+                    stock_code: symbol,
+                    symbol,
+                    name: item.symbol_info ?? item.company_name ?? symbol,
+                    exchange: 'NSE',
+                    segment: 'equity',
+                    token: '',
+                });
+                if (results.length >= limit)
+                    break;
+            }
+            return results;
+        }
+        catch {
+            return [];
+        }
+    }
+    async getIndicesForExchange(exchange) {
+        if (exchange === 'MCX') {
+            return [
+                { name: 'MCX iCOMDEX Composite', value: 5890 + Math.random() * 50, change: (Math.random() - 0.45) * 30, changePercent: (Math.random() - 0.45) * 0.5 },
+                { name: 'MCX iCOMDEX Bullion', value: 17200 + Math.random() * 100, change: (Math.random() - 0.45) * 80, changePercent: (Math.random() - 0.45) * 0.4 },
+                { name: 'MCX iCOMDEX Metal', value: 8100 + Math.random() * 40, change: (Math.random() - 0.45) * 35, changePercent: (Math.random() - 0.45) * 0.5 },
+                { name: 'MCX iCOMDEX Energy', value: 4200 + Math.random() * 30, change: (Math.random() - 0.45) * 25, changePercent: (Math.random() - 0.45) * 0.6 },
+            ].map(i => ({ ...i, value: Number(i.value.toFixed(2)), change: Number(i.change.toFixed(2)), changePercent: Number(i.changePercent.toFixed(2)) }));
+        }
+        if (exchange === 'CDS') {
+            return POPULAR_CDS_CURRENCIES.slice(0, 4).map(([code, _name, base]) => {
+                const variation = (Math.random() - 0.48) * base * 0.003;
+                return {
+                    name: code, value: Number((base + variation).toFixed(4)),
+                    change: Number(variation.toFixed(4)), changePercent: Number(((variation / base) * 100).toFixed(2)),
+                };
+            });
+        }
+        return this.getIndices();
+    }
+    // ── NSE direct scraping (fallback) ──
+    async ensureCookies() {
+        if (this.cookies && Date.now() < this.cookieExpiry)
+            return;
+        if (this.cookieFetchPromise) {
+            await this.cookieFetchPromise;
+            return;
+        }
+        this.cookieFetchPromise = (async () => {
+            try {
+                const ac = new AbortController();
+                const timer = setTimeout(() => ac.abort(), 6000);
+                const res = await fetch('https://www.nseindia.com', {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': 'text/html',
+                    },
+                    signal: ac.signal,
+                });
+                clearTimeout(timer);
+                try {
+                    const reader = res.body?.getReader();
+                    if (reader) {
+                        while (!(await reader.read()).done) { }
+                    }
+                }
+                catch { /* drain */ }
+                const setCookieHeaders = res.headers.getSetCookie?.() ?? [];
+                if (setCookieHeaders.length > 0) {
+                    this.cookies = setCookieHeaders.map((c) => c.split(';')[0]).join('; ');
+                    this.cookieExpiry = Date.now() + 4 * 60 * 1000;
+                }
+            }
+            catch { /* ignore */ }
+            finally {
+                this.cookieFetchPromise = null;
+            }
+        })();
+        await this.cookieFetchPromise;
+    }
+    async nseFetch(url) {
+        while (this.activeNseRequests >= 2) {
+            await new Promise(r => setTimeout(r, 200));
+        }
+        this.activeNseRequests++;
+        try {
+            await this.ensureCookies();
+            const headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/json',
+                'Referer': 'https://www.nseindia.com/',
+            };
+            if (this.cookies)
+                headers['Cookie'] = this.cookies;
+            const ac = new AbortController();
+            const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+            const res = await fetch(url, { headers, redirect: 'follow', signal: ac.signal });
+            clearTimeout(timer);
+            return res;
+        }
+        catch (err) {
+            throw err;
+        }
+        finally {
+            this.activeNseRequests--;
+        }
+    }
+    async fetchFromNSE(symbol) {
+        try {
+            const res = await this.nseFetch(`https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(symbol)}`);
+            if (!res.ok) {
+                await res.text().catch(() => { });
+                return null;
+            }
+            const data = await res.json();
+            const priceInfo = data.priceInfo ?? {};
+            return {
+                symbol: data.info?.symbol ?? symbol,
+                exchange: 'NSE',
+                ltp: priceInfo.lastPrice ?? 0,
+                change: priceInfo.change ?? 0,
+                changePercent: priceInfo.pChange ?? 0,
+                open: priceInfo.open ?? 0,
+                high: priceInfo.intraDayHighLow?.max ?? 0,
+                low: priceInfo.intraDayHighLow?.min ?? 0,
+                close: priceInfo.previousClose ?? 0,
+                volume: data.securityWiseDP?.quantityTraded ?? 0,
+                bidPrice: 0,
+                askPrice: 0,
+                bidQty: 0,
+                askQty: 0,
+                timestamp: new Date().toISOString(),
+            };
+        }
+        catch {
+            return null;
+        }
+    }
+    // ── Breeze API (fallback) ──
+    async getBreezeSDK() {
+        if (breezeInstance && Date.now() < breezeInstanceExpiry) {
+            return breezeInstance;
+        }
+        // Prevent concurrent generateSession calls which each download a huge security
+        // master file and parse it synchronously, blocking the event loop
+        if (breezeInitPromise)
+            return breezeInitPromise;
+        breezeInitPromise = this._initBreezeSDK();
+        try {
+            return await breezeInitPromise;
+        }
+        finally {
+            breezeInitPromise = null;
+        }
+    }
+    async _initBreezeSDK() {
+        const creds = await this.getAnyBreezeCredentials();
+        if (!creds)
+            return null;
+        try {
+            const BreezeClass = getBreezeConnectClass();
+            if (!BreezeClass) {
+                console.log('[Breeze SDK] breezeconnect module not available');
+                return null;
+            }
+            const breeze = new BreezeClass({ appKey: creds.apiKey });
+            // Monkey-patch: skip the heavy getStockScriptList() which downloads a multi-MB
+            // security master ZIP and parses it synchronously, blocking the event loop for 30-60s.
+            // We don't need it — we build our own option chain requests.
+            breeze.getStockScriptList = async function () { };
+            await breeze.generateSession(creds.secretKey, creds.sessionToken);
+            if (!breeze.apiSession) {
+                console.log('[Breeze SDK] generateSession succeeded but no apiSession');
+                return null;
+            }
+            console.log(`[Breeze SDK] Session initialized, apiSession length: ${breeze.apiSession.length}`);
+            breezeInstance = breeze;
+            breezeInstanceExpiry = Date.now() + 30 * 60 * 1000;
+            return breeze;
+        }
+        catch (err) {
+            console.log(`[Breeze SDK] generateSession failed: ${err?.message ?? err}`);
+            return null;
+        }
+    }
+    async fetchFromBreeze(symbol, interval, fromDate, toDate, _userId, exchange = 'NSE') {
+        const breezeInterval = this.mapInterval(interval);
+        const bridgeActive = await this.ensureBreezeBridgeSession();
+        if (!bridgeActive)
+            return [];
+        try {
+            const url = `${BREEZE_BRIDGE_URL}/historical/${encodeURIComponent(symbol)}?interval=${encodeURIComponent(breezeInterval)}&from=${encodeURIComponent(fromDate)}&to=${encodeURIComponent(toDate)}&exchange=${encodeURIComponent(exchange)}`;
+            const ac = new AbortController();
+            const timer = setTimeout(() => ac.abort(), 15_000);
+            const res = await fetch(url, { signal: ac.signal });
+            clearTimeout(timer);
+            if (!res.ok)
+                return [];
+            const data = await res.json();
+            if (data.error || !data.bars)
+                return [];
+            return data.bars.map((bar) => ({
+                timestamp: (bar.timestamp ?? '').slice(0, 19),
+                open: Number(bar.open) || 0,
+                high: Number(bar.high) || 0,
+                low: Number(bar.low) || 0,
+                close: Number(bar.close) || 0,
+                volume: Number(bar.volume) || 0,
+            })).filter((b) => b.open > 0);
+        }
+        catch {
+            return [];
+        }
+    }
+    async getAnyBreezeCredentials(userId) {
+        try {
+            const prisma = getPrisma();
+            let credential = null;
+            if (userId) {
+                credential = await prisma.breezeCredential.findUnique({ where: { userId } });
+            }
+            if (!credential) {
+                credential = await prisma.breezeCredential.findFirst({
+                    where: { sessionToken: { not: null } },
+                    orderBy: { updatedAt: 'desc' },
+                });
+            }
+            if (!credential?.sessionToken) {
+                console.log('[Breeze Creds] No credential with sessionToken found in DB');
+                return null;
+            }
+            if (credential.sessionExpiresAt && new Date(credential.sessionExpiresAt) < new Date()) {
+                console.log(`[Breeze Creds] Session expired at ${credential.sessionExpiresAt}`);
+                return null;
+            }
+            const key = createHash('sha256').update(env.ENCRYPTION_KEY).digest();
+            const decryptField = (encrypted) => {
+                const [ivHex, data] = encrypted.split(':');
+                const iv = Buffer.from(ivHex, 'hex');
+                const decipher = createDecipheriv('aes-256-cbc', key, iv);
+                let decrypted = decipher.update(data, 'hex', 'utf8');
+                decrypted += decipher.final('utf8');
+                return decrypted;
+            };
+            let sessionToken = credential.sessionToken;
+            try {
+                sessionToken = decryptField(sessionToken);
+            }
+            catch {
+                // might be stored unencrypted from an older version
+            }
+            const apiKey = decryptField(credential.encryptedApiKey);
+            const secretKey = decryptField(credential.encryptedSecret);
+            console.log(`[Breeze Creds] Found credentials — apiKey: ${apiKey.substring(0, 8)}..., sessionToken length: ${sessionToken.length}, expires: ${credential.sessionExpiresAt}`);
+            return { apiKey, secretKey, sessionToken };
+        }
+        catch (err) {
+            console.log(`[Breeze Creds] Exception: ${err.message}`);
+            return null;
+        }
+    }
+    mapInterval(interval) {
+        const map = {
+            '1d': 'day', '1day': 'day', 'day': 'day', 'daily': 'day',
+            '1m': 'minute', '1min': 'minute', 'minute': 'minute',
+            '5m': '5minute', '5min': '5minute', '5minute': '5minute',
+            '15m': '15minute', '15min': '15minute', '15minute': '15minute',
+            '30m': '30minute', '30min': '30minute', '30minute': '30minute',
+        };
+        return map[interval.toLowerCase()] ?? 'day';
+    }
+    // ── Helpers ──
+    generateSimulatedHistory(symbol, exchange, fromDate, toDate) {
+        const mcxEntry = POPULAR_MCX_COMMODITIES.find(([code]) => code === symbol.toUpperCase());
+        const cdsEntry = POPULAR_CDS_CURRENCIES.find(([code]) => code === symbol.toUpperCase());
+        const basePrice = exchange === 'MCX' ? (mcxEntry?.[2] ?? 1000) : (cdsEntry?.[2] ?? 83);
+        const bars = [];
+        const start = new Date(fromDate);
+        const end = new Date(toDate);
+        let currentPrice = basePrice;
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+            if (d.getDay() === 0 || (exchange !== 'MCX' && d.getDay() === 6))
+                continue;
+            const dailyChange = (Math.random() - 0.48) * basePrice * 0.015;
+            const open = currentPrice;
+            const close = Number((open + dailyChange).toFixed(exchange === 'CDS' ? 4 : 2));
+            const high = Number((Math.max(open, close) * (1 + Math.random() * 0.008)).toFixed(exchange === 'CDS' ? 4 : 2));
+            const low = Number((Math.min(open, close) * (1 - Math.random() * 0.008)).toFixed(exchange === 'CDS' ? 4 : 2));
+            bars.push({
+                timestamp: d.toISOString().slice(0, 10),
+                open, high, low, close,
+                volume: Math.floor(Math.random() * (exchange === 'MCX' ? 50000 : 200000)) + 5000,
+            });
+            currentPrice = close;
+        }
+        return bars;
+    }
+    async diagnoseBreezeConnection() {
+        const steps = {};
+        // Step 1: Check credentials in DB
+        const creds = await this.getAnyBreezeCredentials();
+        steps.credentials = creds
+            ? { found: true, apiKeyPrefix: creds.apiKey.substring(0, 8) + '...', sessionTokenLength: creds.sessionToken.length }
+            : { found: false };
+        if (!creds)
+            return { steps, result: 'FAIL — no credentials' };
+        // Step 2: Initialize SDK (handles session exchange internally)
+        try {
+            const breeze = await this.getBreezeSDK();
+            steps.sdkInit = breeze
+                ? { success: true, apiSessionLength: breeze.apiSession?.length ?? 0, userId: breeze.userId ?? 'unknown' }
+                : { success: false };
+            if (!breeze)
+                return { steps, result: 'FAIL — SDK session exchange failed' };
+            // Step 3: Test option chain call via SDK
+            const body = {
+                stock_code: 'NIFTY',
+                exchange_code: 'NFO',
+                product_type: 'options',
+                right: 'call',
+                strike_price: '24000',
+            };
+            const headers = breeze.generateHeaders(body);
+            const response = await breeze.makeRequest('GET', 'optionchain', body, headers);
+            const data = response?.data;
+            steps.optionChain = {
+                apiStatus: data?.Status,
+                recordCount: Array.isArray(data?.Success) ? data.Success.length : 0,
+                error: data?.Error ?? null,
+                sampleRecord: Array.isArray(data?.Success) && data.Success.length > 0 ? data.Success[0] : null,
+            };
+        }
+        catch (err) {
+            steps.sdkError = { message: err.message, code: err.code, stack: err.stack?.substring(0, 300) };
+        }
+        // Step 4: Check Python Breeze Bridge
+        try {
+            const hRes = await fetch(`${BREEZE_BRIDGE_URL}/health`, { signal: AbortSignal.timeout(3_000) });
+            if (hRes.ok) {
+                steps.pythonBridge = await hRes.json();
+            }
+            else {
+                steps.pythonBridge = { status: 'unreachable', httpStatus: hRes.status };
+            }
+        }
+        catch (err) {
+            steps.pythonBridge = { status: 'unreachable', error: err.message };
+        }
+        const ok = steps.optionChain?.recordCount > 0 || steps.pythonBridge?.session_active;
+        return { steps, result: ok ? 'OK' : 'FAIL' };
+    }
+    buildBreezePayload(fields) {
+        const body = {};
+        for (const [key, val] of Object.entries(fields)) {
+            if (val !== '' && val != null)
+                body[key] = val;
+        }
+        return JSON.stringify(body);
+    }
+    buildBreezeHeaders(creds, payload) {
+        const timestamp = new Date().toISOString().split('.')[0] + '.000Z';
+        const checksum = createHash('sha256')
+            .update(timestamp + payload + creds.secretKey)
+            .digest('hex');
+        return {
+            headers: {
+                'Content-Type': 'application/json',
+                'X-AppKey': creds.apiKey,
+                'X-SessionToken': creds.sessionToken,
+                'X-Timestamp': timestamp,
+                'X-Checksum': `token ${checksum}`,
+            },
+            timestamp,
+        };
+    }
+    async ensureBreezeBridgeSession() {
+        try {
+            const hRes = await fetch(`${BREEZE_BRIDGE_URL}/health`, { signal: AbortSignal.timeout(3_000) });
+            if (!hRes.ok)
+                return false;
+            const health = await hRes.json();
+            if (health.session_active === true)
+                return true;
+            // Bridge is running but has no session — try to auto-initialize from DB credentials
+            return this.autoInitBreezeBridge();
+        }
+        catch {
+            return false;
+        }
+    }
+    _bridgeInitPromise = null;
+    async autoInitBreezeBridge() {
+        if (this._bridgeInitPromise)
+            return this._bridgeInitPromise;
+        this._bridgeInitPromise = this._doAutoInitBreezeBridge();
+        try {
+            return await this._bridgeInitPromise;
+        }
+        finally {
+            this._bridgeInitPromise = null;
+        }
+    }
+    async _doAutoInitBreezeBridge() {
+        try {
+            const creds = await this.getAnyBreezeCredentials();
+            if (!creds) {
+                log.info('Bridge has no session and no credentials in DB');
+                return false;
+            }
+            log.info('Bridge running but no session — auto-initializing from DB credentials');
+            const body = JSON.stringify({
+                api_key: creds.apiKey,
+                api_secret: creds.secretKey,
+                session_token: creds.sessionToken,
+            });
+            const res = await fetch(`${BREEZE_BRIDGE_URL}/init`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body,
+                signal: AbortSignal.timeout(25_000),
+            });
+            if (!res.ok) {
+                log.warn({ status: res.status }, 'Bridge auto-init failed');
+                return false;
+            }
+            const result = await res.json();
+            if (result.success) {
+                log.info('Bridge auto-initialized successfully from DB credentials');
+                return true;
+            }
+            log.warn({ error: result.error }, 'Bridge auto-init returned failure');
+            return false;
+        }
+        catch (err) {
+            log.warn({ err }, 'Bridge auto-init exception');
+            return false;
+        }
+    }
+    async fetchFromBreezeBridge(symbol, expiry) {
+        await this.ensureBreezeBridgeSession();
+        const url = `${BREEZE_BRIDGE_URL}/option-chain/${encodeURIComponent(symbol)}${expiry ? `?expiry=${encodeURIComponent(expiry)}` : ''}`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 20_000);
+        const res = await fetch(url, { signal: ac.signal });
+        clearTimeout(timer);
+        if (!res.ok)
+            throw new Error(`Bridge returned ${res.status}`);
+        const data = await res.json();
+        if (data.error)
+            throw new Error(data.error);
+        return data;
+    }
+    async fetchOptionsChainFromBreeze(symbol, expiryDate) {
+        const breeze = await this.getBreezeSDK();
+        if (!breeze)
+            return null;
+        const expiry = expiryDate ? `${expiryDate}T06:00:00.000Z` : this.getNextExpiry(symbol);
+        const allStrikes = new Map();
+        let spotPrice = 0;
+        for (const right of ['call', 'put']) {
+            try {
+                const breezeCode = BREEZE_STOCK_CODES[symbol.toUpperCase()] ?? symbol.toUpperCase();
+                const body = {
+                    stock_code: breezeCode,
+                    exchange_code: 'NFO',
+                    product_type: 'options',
+                    expiry_date: expiry,
+                    right,
+                };
+                const headers = breeze.generateHeaders(body);
+                console.log(`[Breeze Chain] Requesting ${right} for ${symbol} expiry=${expiry}`);
+                const response = await breeze.makeRequest('GET', 'optionchain', body, headers);
+                const data = response?.data;
+                if (!data || data.Status !== 200 || data.Error) {
+                    console.log(`[Breeze Chain] ${right} API error — Status: ${data?.Status}, Error: ${JSON.stringify(data?.Error)?.substring(0, 300)}`);
+                    continue;
+                }
+                const records = data.Success ?? [];
+                if (!Array.isArray(records))
+                    continue;
+                console.log(`[Breeze Chain] ${right} returned ${records.length} records`);
+                for (const rec of records) {
+                    const strike = Number(rec.strike_price) || 0;
+                    if (strike <= 0)
+                        continue;
+                    if (!spotPrice && rec.spot_price) {
+                        spotPrice = Number(rec.spot_price) || 0;
+                    }
+                    const existing = allStrikes.get(strike) ?? {
+                        strike,
+                        callOI: 0, callOIChange: 0, callVolume: 0, callIV: 0, callLTP: 0,
+                        callDelta: 0, callGamma: 0, callTheta: 0, callVega: 0,
+                        putOI: 0, putOIChange: 0, putVolume: 0, putIV: 0, putLTP: 0,
+                        putDelta: 0, putGamma: 0, putTheta: 0, putVega: 0,
+                    };
+                    const ltp = Number(rec.ltp) || 0;
+                    const oi = Number(rec.open_interest) || 0;
+                    const volume = Number(rec.total_quantity_traded) || 0;
+                    const iv = Number(rec.implied_volatility) || 0;
+                    const oiChange = Number(rec.change_oi) ?? 0;
+                    if (right === 'call') {
+                        existing.callOI = oi;
+                        existing.callOIChange = oiChange;
+                        existing.callVolume = volume;
+                        existing.callIV = iv;
+                        existing.callLTP = ltp;
+                    }
+                    else {
+                        existing.putOI = oi;
+                        existing.putOIChange = oiChange;
+                        existing.putVolume = volume;
+                        existing.putIV = iv;
+                        existing.putLTP = ltp;
+                    }
+                    allStrikes.set(strike, existing);
+                }
+            }
+            catch (err) {
+                console.log(`[Breeze Chain] ${right} exception: ${err.message}`);
+            }
+        }
+        if (allStrikes.size === 0)
+            return null;
+        const strikes = [...allStrikes.values()].sort((a, b) => a.strike - b.strike);
+        const totalCallOI = strikes.reduce((s, st) => s + st.callOI, 0);
+        const totalPutOI = strikes.reduce((s, st) => s + st.putOI, 0);
+        const pcr = totalCallOI > 0 ? Math.round((totalPutOI / totalCallOI) * 100) / 100 : 0;
+        let maxPainStrike = 0, minPain = Infinity;
+        for (const st of strikes) {
+            let pain = 0;
+            for (const s2 of strikes) {
+                if (s2.strike < st.strike)
+                    pain += (st.strike - s2.strike) * s2.putOI;
+                if (s2.strike > st.strike)
+                    pain += (s2.strike - st.strike) * s2.callOI;
+            }
+            if (pain < minPain) {
+                minPain = pain;
+                maxPainStrike = st.strike;
+            }
+        }
+        return {
+            symbol,
+            expiry: expiry.slice(0, 10),
+            underlyingValue: spotPrice,
+            spotPrice,
+            strikes,
+            pcr,
+            maxPain: maxPainStrike,
+            totalCallOI,
+            totalPutOI,
+        };
+    }
+    async fetchExpiryDatesFromBreeze(symbol) {
+        const breeze = await this.getBreezeSDK();
+        if (!breeze)
+            return [];
+        try {
+            const defaultStrike = symbol.toUpperCase() === 'NIFTY' ? '24000'
+                : symbol.toUpperCase() === 'BANKNIFTY' ? '50000'
+                    : symbol.toUpperCase() === 'FINNIFTY' ? '23000'
+                        : symbol.toUpperCase() === 'MIDCPNIFTY' ? '12000'
+                            : '20000';
+            const body = {
+                stock_code: symbol.toUpperCase(),
+                exchange_code: 'NFO',
+                product_type: 'options',
+                right: 'call',
+                strike_price: defaultStrike,
+            };
+            const headers = breeze.generateHeaders(body);
+            console.log(`[Breeze Expiries] Requesting expiries for ${symbol} with strike=${defaultStrike}`);
+            const response = await breeze.makeRequest('GET', 'optionchain', body, headers);
+            const data = response?.data;
+            if (!data || data.Status !== 200 || data.Error) {
+                console.log(`[Breeze Expiries] API error — Status: ${data?.Status}, Error: ${JSON.stringify(data?.Error)?.substring(0, 300)}`);
+                return [];
+            }
+            const records = data.Success ?? [];
+            if (!Array.isArray(records) || records.length === 0) {
+                console.log(`[Breeze Expiries] No records returned`);
+                return [];
+            }
+            console.log(`[Breeze Expiries] Got ${records.length} records, extracting unique expiry dates`);
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const expirySet = new Set();
+            for (const rec of records) {
+                const raw = rec.expiry_date ?? '';
+                if (!raw)
+                    continue;
+                const dateStr = typeof raw === 'string' ? raw.split('T')[0] : '';
+                if (dateStr && new Date(dateStr + 'T12:00:00Z') >= today) {
+                    expirySet.add(dateStr);
+                }
+            }
+            return [...expirySet].sort();
+        }
+        catch (err) {
+            console.log(`[Breeze Expiries] Exception: ${err.message}`);
+            return [];
+        }
+    }
+    getNextExpiry(symbol) {
+        const now = new Date();
+        const sym = (symbol ?? '').toUpperCase();
+        const fmt = (d) => {
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const dd = String(d.getDate()).padStart(2, '0');
+            return `${y}-${m}-${dd}T06:00:00.000Z`;
+        };
+        // SEBI Nov 2024: only NIFTY (NSE) and SENSEX (BSE) have weekly expiry.
+        // Everything else (BANKNIFTY, FINNIFTY, stocks) is monthly only.
+        if (sym === 'SENSEX') {
+            // BSE SENSEX: weekly Thursday
+            const day = now.getDay();
+            let daysUntil = (4 - day + 7) % 7; // Thursday = 4
+            if (daysUntil === 0 && now.getHours() >= 15)
+                daysUntil = 7;
+            const expiry = new Date(now);
+            expiry.setDate(expiry.getDate() + daysUntil);
+            return fmt(expiry);
+        }
+        if (sym === 'NIFTY' || sym === '') {
+            // NSE NIFTY: weekly Tuesday (default for unknown symbols)
+            const day = now.getDay();
+            let daysUntil = (2 - day + 7) % 7; // Tuesday = 2
+            if (daysUntil === 0 && now.getHours() >= 15)
+                daysUntil = 7;
+            const expiry = new Date(now);
+            expiry.setDate(expiry.getDate() + daysUntil);
+            return fmt(expiry);
+        }
+        // All others: monthly — last Tuesday of the month
+        const lastTuesday = (y, m) => {
+            const d = new Date(y, m + 1, 0); // last day of month
+            while (d.getDay() !== 2)
+                d.setDate(d.getDate() - 1); // Tuesday = 2
+            return d;
+        };
+        let exp = lastTuesday(now.getFullYear(), now.getMonth());
+        if (exp < now || (exp.toDateString() === now.toDateString() && now.getHours() >= 15)) {
+            const nextMonth = now.getMonth() + 1;
+            exp = lastTuesday(now.getFullYear() + (nextMonth > 11 ? 1 : 0), nextMonth % 12);
+        }
+        return fmt(exp);
+    }
+    parseOptionsChain(symbol, data, targetExpiry) {
+        const records = data?.records ?? data?.filtered ?? {};
+        const allData = records?.data ?? [];
+        const expiries = (records?.expiryDates ?? []).map((d) => d.split('T')[0]);
+        const expiry = targetExpiry
+            ? expiries.find(e => e === targetExpiry) ?? expiries[0] ?? ''
+            : expiries[0] ?? '';
+        const underlyingValue = records?.underlyingValue ?? 0;
+        const filtered = allData.filter((d) => {
+            const dExp = (d.expiryDate ?? '').split('T')[0];
+            return dExp === expiry;
+        });
+        const strikes = filtered.map((d) => ({
+            strike: d.strikePrice,
+            callOI: d.CE?.openInterest ?? 0,
+            callOIChange: d.CE?.changeinOpenInterest ?? 0,
+            callLTP: d.CE?.lastPrice ?? 0,
+            callIV: d.CE?.impliedVolatility ?? 0,
+            putOI: d.PE?.openInterest ?? 0,
+            putOIChange: d.PE?.changeinOpenInterest ?? 0,
+            putLTP: d.PE?.lastPrice ?? 0,
+            putIV: d.PE?.impliedVolatility ?? 0,
+        }));
+        const totalCallOI = strikes.reduce((s, st) => s + st.callOI, 0);
+        const totalPutOI = strikes.reduce((s, st) => s + st.putOI, 0);
+        const pcr = totalCallOI > 0 ? totalPutOI / totalCallOI : 0;
+        let maxPainStrike = 0, minPain = Infinity;
+        for (const st of strikes) {
+            let pain = 0;
+            for (const s2 of strikes) {
+                if (s2.strike < st.strike)
+                    pain += (st.strike - s2.strike) * s2.putOI;
+                if (s2.strike > st.strike)
+                    pain += (s2.strike - st.strike) * s2.callOI;
+            }
+            if (pain < minPain) {
+                minPain = pain;
+                maxPainStrike = st.strike;
+            }
+        }
+        return {
+            symbol, expiry, underlyingValue,
+            strikes, pcr: Math.round(pcr * 100) / 100,
+            maxPain: maxPainStrike,
+            totalCallOI, totalPutOI, expiries,
+        };
+    }
+    async getMCXQuote(symbol) {
+        const YAHOO_MCX_MAP = {
+            GOLD: 'GC=F', GOLDM: 'GC=F', GOLDPETAL: 'GC=F',
+            SILVER: 'SI=F', SILVERM: 'SI=F',
+            CRUDEOIL: 'CL=F', NATURALGAS: 'NG=F',
+            COPPER: 'HG=F', ZINC: 'ZN=F', LEAD: 'PB=F',
+            ALUMINIUM: 'ALI=F', NICKEL: 'NI=F',
+        };
+        const entry = POPULAR_MCX_COMMODITIES.find(([code]) => code === symbol.toUpperCase());
+        const fallbackPrice = entry?.[2] ?? 1000;
+        const yahooTicker = YAHOO_MCX_MAP[symbol.toUpperCase()];
+        if (yahooTicker) {
+            try {
+                const cacheKey = `mcx_yahoo_${yahooTicker}`;
+                if (this.cache) {
+                    const cached = await this.cache.get(cacheKey);
+                    if (cached)
+                        return cached;
+                }
+                const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooTicker}?interval=1d&range=2d`;
+                const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(8000) });
+                if (res.ok) {
+                    const json = await res.json();
+                    const result = json?.chart?.result?.[0];
+                    const meta = result?.meta;
+                    if (meta?.regularMarketPrice) {
+                        const ltp = Number(meta.regularMarketPrice.toFixed(2));
+                        const prevClose = Number(meta.previousClose?.toFixed(2) ?? ltp);
+                        const change = Number((ltp - prevClose).toFixed(2));
+                        const changePercent = prevClose > 0 ? Number(((change / prevClose) * 100).toFixed(2)) : 0;
+                        const quote = {
+                            symbol, exchange: 'MCX', ltp, change, changePercent,
+                            open: Number((meta.regularMarketOpen ?? ltp).toFixed(2)),
+                            high: Number((meta.regularMarketDayHigh ?? ltp).toFixed(2)),
+                            low: Number((meta.regularMarketDayLow ?? ltp).toFixed(2)),
+                            close: prevClose, volume: meta.regularMarketVolume ?? 0,
+                            bidPrice: Number((ltp - 0.5).toFixed(2)), askPrice: Number((ltp + 0.5).toFixed(2)),
+                            bidQty: 0, askQty: 0, timestamp: new Date().toISOString(),
+                        };
+                        this.cache?.set(cacheKey, quote, 30);
+                        return quote;
+                    }
+                }
+            }
+            catch { }
+        }
+        return {
+            symbol, exchange: 'MCX', ltp: fallbackPrice, change: 0, changePercent: 0,
+            open: fallbackPrice, high: fallbackPrice, low: fallbackPrice, close: fallbackPrice,
+            volume: 0, bidPrice: fallbackPrice, askPrice: fallbackPrice, bidQty: 0, askQty: 0,
+            timestamp: new Date().toISOString(),
+        };
+    }
+    async getCDSQuote(symbol) {
+        const YAHOO_CDS_MAP = {
+            USDINR: 'USDINR=X', EURINR: 'EURINR=X', GBPINR: 'GBPINR=X',
+            JPYINR: 'JPYINR=X', AUDINR: 'AUDINR=X', CADINR: 'CADINR=X',
+            CHFINR: 'CHFINR=X', SGDINR: 'SGDINR=X', HKDINR: 'HKDINR=X',
+            CNHINR: 'CNHINR=X',
+        };
+        const entry = POPULAR_CDS_CURRENCIES.find(([code]) => code === symbol.toUpperCase());
+        const fallbackPrice = entry?.[2] ?? 83;
+        const yahooTicker = YAHOO_CDS_MAP[symbol.toUpperCase()];
+        if (yahooTicker) {
+            try {
+                const cacheKey = `cds_yahoo_${yahooTicker}`;
+                if (this.cache) {
+                    const cached = await this.cache.get(cacheKey);
+                    if (cached)
+                        return cached;
+                }
+                const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooTicker}?interval=1d&range=2d`;
+                const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(8000) });
+                if (res.ok) {
+                    const json = await res.json();
+                    const result = json?.chart?.result?.[0];
+                    const meta = result?.meta;
+                    if (meta?.regularMarketPrice) {
+                        const ltp = Number(meta.regularMarketPrice.toFixed(4));
+                        const prevClose = Number(meta.previousClose?.toFixed(4) ?? ltp);
+                        const change = Number((ltp - prevClose).toFixed(4));
+                        const changePercent = prevClose > 0 ? Number(((change / prevClose) * 100).toFixed(2)) : 0;
+                        const quote = {
+                            symbol, exchange: 'CDS', ltp, change, changePercent,
+                            open: Number((meta.regularMarketOpen ?? ltp).toFixed(4)),
+                            high: Number((meta.regularMarketDayHigh ?? ltp).toFixed(4)),
+                            low: Number((meta.regularMarketDayLow ?? ltp).toFixed(4)),
+                            close: prevClose, volume: meta.regularMarketVolume ?? 0,
+                            bidPrice: Number((ltp - 0.0025).toFixed(4)), askPrice: Number((ltp + 0.0025).toFixed(4)),
+                            bidQty: 0, askQty: 0, timestamp: new Date().toISOString(),
+                        };
+                        this.cache?.set(cacheKey, quote, 30);
+                        return quote;
+                    }
+                }
+            }
+            catch { }
+        }
+        return {
+            symbol, exchange: 'CDS', ltp: fallbackPrice, change: 0, changePercent: 0,
+            open: fallbackPrice, high: fallbackPrice, low: fallbackPrice, close: fallbackPrice,
+            volume: 0, bidPrice: fallbackPrice, askPrice: fallbackPrice, bidQty: 0, askQty: 0,
+            timestamp: new Date().toISOString(),
+        };
+    }
+    async fetchFnOQuote(symbol, parsed) {
+        if (!parsed)
+            return null;
+        try {
+            const bridgeActive = await this.ensureBreezeBridgeSession();
+            if (!bridgeActive) {
+                console.log(`[FnOQuote] Bridge not active for ${symbol}`);
+                return null;
+            }
+            const bridgeUrl = `${BREEZE_BRIDGE_URL}/option-chain/${encodeURIComponent(parsed.underlying)}?expiry=${encodeURIComponent(parsed.expiry)}`;
+            const ac = new AbortController();
+            const timer = setTimeout(() => ac.abort(), 15_000);
+            const res = await fetch(bridgeUrl, { signal: ac.signal });
+            clearTimeout(timer);
+            if (!res.ok)
+                return null;
+            const data = await res.json();
+            if (!data.strikes || !Array.isArray(data.strikes))
+                return null;
+            // Bridge returns strikes with callLTP/putLTP, callOI/putOI, etc.
+            for (const s of data.strikes) {
+                if (s.strike !== parsed.strike)
+                    continue;
+                const isCall = parsed.type === 'CE';
+                const ltp = isCall ? s.callLTP : s.putLTP;
+                if (!ltp || ltp <= 0)
+                    continue;
+                const netChange = isCall ? (s.callNetChange ?? 0) : (s.putNetChange ?? 0);
+                const prevClose = ltp - netChange;
+                const changePct = prevClose > 0 ? (netChange / prevClose) * 100 : 0;
+                console.log(`[FnOQuote] ${symbol}: LTP=₹${ltp}, change=${netChange}`);
+                return {
+                    symbol,
+                    exchange: 'NFO',
+                    ltp,
+                    change: netChange,
+                    changePercent: changePct,
+                    open: 0,
+                    high: 0,
+                    low: 0,
+                    close: prevClose > 0 ? prevClose : ltp,
+                    volume: isCall ? (s.callVolume ?? 0) : (s.putVolume ?? 0),
+                    bidPrice: isCall ? (s.callBidPrice ?? 0) : (s.putBidPrice ?? 0),
+                    askPrice: isCall ? (s.callAskPrice ?? 0) : (s.putAskPrice ?? 0),
+                    bidQty: 0,
+                    askQty: 0,
+                    timestamp: new Date().toISOString(),
+                };
+            }
+            console.log(`[FnOQuote] ${symbol}: strike ${parsed.strike} not found in chain (${data.strikes.length} strikes)`);
+        }
+        catch (err) {
+            console.log(`[FnOQuote] Failed to fetch ${symbol}: ${err.message}`);
+        }
+        return null;
+    }
+    emptyQuote(symbol, exchange) {
+        return {
+            symbol, exchange, ltp: 0, change: 0, changePercent: 0,
+            open: 0, high: 0, low: 0, close: 0, volume: 0,
+            bidPrice: 0, askPrice: 0, bidQty: 0, askQty: 0,
+            timestamp: new Date().toISOString(),
+        };
+    }
+    fallbackMovers(_count) {
+        return { gainers: [], losers: [] };
+    }
+    async getLotSizes() {
+        const cacheKey = 'lot-sizes:all';
+        if (this.cache) {
+            const cached = await this.cache.get(cacheKey);
+            if (cached)
+                return cached;
+        }
+        try {
+            const url = `${BREEZE_BRIDGE_URL}/lot-sizes`;
+            const ac = new AbortController();
+            const timer = setTimeout(() => ac.abort(), 20_000);
+            const res = await fetch(url, { signal: ac.signal });
+            clearTimeout(timer);
+            if (res.ok) {
+                const data = await res.json();
+                if (data.lotSizes && Object.keys(data.lotSizes).length > 0) {
+                    const result = { lotSizes: data.lotSizes, source: data.source || 'bridge' };
+                    if (this.cache)
+                        await this.cache.set(cacheKey, result, 3600);
+                    return result;
+                }
+            }
+        }
+        catch (err) {
+            console.log(`[LotSizes] Bridge fetch error: ${err}`);
+        }
+        return { lotSizes: {}, source: 'none' };
+    }
+}
+//# sourceMappingURL=market-data.service.js.map

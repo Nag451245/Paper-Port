@@ -1,0 +1,1037 @@
+import { spawn } from 'child_process';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
+import { existsSync, mkdirSync, createWriteStream, chmodSync, statSync, unlinkSync } from 'fs';
+import https from 'https';
+import { createInterface } from 'readline';
+import { randomUUID } from 'crypto';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const RELEASE_URL = 'https://github.com/Nag451245/Paper-Port/releases/download/engine-latest/capital-guard-engine';
+const DOWNLOAD_TARGET = resolve(__dirname, '..', '..', 'bin', 'capital-guard-engine');
+const ENGINE_PATHS = [
+    resolve(__dirname, '..', '..', 'bin', 'capital-guard-engine.exe'),
+    resolve(__dirname, '..', '..', 'bin', 'capital-guard-engine'),
+    resolve(__dirname, '..', '..', '..', 'engine', 'target', 'release', 'capital-guard-engine.exe'),
+    resolve(__dirname, '..', '..', '..', 'engine', 'target', 'release', 'capital-guard-engine'),
+];
+function findBinary() {
+    for (const p of ENGINE_PATHS) {
+        if (existsSync(p))
+            return p;
+    }
+    return null;
+}
+let cachedBinary;
+function getBinary() {
+    if (cachedBinary === undefined) {
+        cachedBinary = findBinary();
+    }
+    return cachedBinary;
+}
+export function isEngineAvailable() {
+    return getBinary() !== null;
+}
+function followRedirects(url, redirects = 0) {
+    if (redirects > 5)
+        return Promise.reject(new Error('Too many redirects'));
+    return new Promise((resolve, reject) => {
+        https.get(url, { headers: { 'User-Agent': 'CapitalGuard/1.0' } }, (res) => {
+            if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                console.log(`  ↳ Redirect ${res.statusCode} → ${res.headers.location.substring(0, 80)}...`);
+                res.resume();
+                followRedirects(res.headers.location, redirects + 1).then(resolve, reject);
+            }
+            else {
+                resolve(res);
+            }
+        }).on('error', reject);
+    });
+}
+export async function ensureEngineAvailable() {
+    if (isEngineAvailable()) {
+        console.log(`[rust-engine] Binary already available at ${cachedBinary}`);
+        return true;
+    }
+    console.log(`[rust-engine] Binary not found, downloading from GitHub Releases...`);
+    console.log(`[rust-engine] URL: ${RELEASE_URL}`);
+    console.log(`[rust-engine] Target: ${DOWNLOAD_TARGET}`);
+    try {
+        mkdirSync(dirname(DOWNLOAD_TARGET), { recursive: true });
+        const res = await followRedirects(RELEASE_URL);
+        if (res.statusCode !== 200) {
+            console.error(`[rust-engine] Download failed: HTTP ${res.statusCode}`);
+            res.resume();
+            return false;
+        }
+        await new Promise((resolve, reject) => {
+            const file = createWriteStream(DOWNLOAD_TARGET);
+            res.pipe(file);
+            file.on('finish', () => { file.close(); resolve(); });
+            file.on('error', reject);
+            res.on('error', reject);
+        });
+        try {
+            chmodSync(DOWNLOAD_TARGET, 0o755);
+        }
+        catch { /* Windows doesn't need chmod */ }
+        const size = statSync(DOWNLOAD_TARGET).size;
+        console.log(`[rust-engine] Downloaded ${size} bytes`);
+        if (size < 10_000) {
+            console.error(`[rust-engine] Binary too small (${size} bytes), likely an error page. Removing.`);
+            unlinkSync(DOWNLOAD_TARGET);
+            return false;
+        }
+        cachedBinary = undefined;
+        const available = isEngineAvailable();
+        console.log(`[rust-engine] Engine available: ${available}`);
+        return available;
+    }
+    catch (err) {
+        console.error(`[rust-engine] Download error: ${err.message}`);
+        return false;
+    }
+}
+const ENGINE_TIMEOUT_MS = 30_000;
+const MAX_INPUT_SIZE = 2 * 1024 * 1024;
+// ── Persistent Daemon ──
+let daemonProc = null;
+let daemonRL = null;
+const pendingRequests = new Map();
+let daemonReady = false;
+// Circuit breaker: stop respawning if daemon crashes too often, with automatic cooldown reset
+let crashCount = 0;
+let lastCrashTime = 0;
+let circuitOpenSince = 0;
+const MAX_CRASHES = 5;
+const CRASH_WINDOW_MS = 60_000;
+const CIRCUIT_COOLDOWN_MS = 5 * 60_000;
+function checkCircuitBreaker() {
+    const now = Date.now();
+    if (now - lastCrashTime > CRASH_WINDOW_MS) {
+        crashCount = 0;
+    }
+    if (crashCount >= MAX_CRASHES) {
+        if (circuitOpenSince === 0)
+            circuitOpenSince = now;
+        if (now - circuitOpenSince < CIRCUIT_COOLDOWN_MS) {
+            console.error(`[rust-engine] Circuit breaker open: ${crashCount} crashes in ${CRASH_WINDOW_MS / 1000}s. Cooldown ${Math.round((CIRCUIT_COOLDOWN_MS - (now - circuitOpenSince)) / 1000)}s remaining.`);
+            return false;
+        }
+        crashCount = 0;
+        circuitOpenSince = 0;
+        console.log('[rust-engine] Circuit breaker reset after cooldown — retrying daemon');
+    }
+    return true;
+}
+function recordCrash() {
+    crashCount++;
+    lastCrashTime = Date.now();
+    console.warn(`[rust-engine] Crash count: ${crashCount}/${MAX_CRASHES}`);
+}
+function spawnDaemon() {
+    const binary = getBinary();
+    if (!binary)
+        return false;
+    if (!checkCircuitBreaker())
+        return false;
+    try {
+        const proc = spawn(binary, ['--daemon'], { stdio: ['pipe', 'pipe', 'pipe'] });
+        proc.on('error', (err) => {
+            console.error(`[rust-engine] Daemon error: ${err.message}`);
+            recordCrash();
+            teardownDaemon();
+        });
+        proc.on('exit', (code) => {
+            console.warn(`[rust-engine] Daemon exited with code ${code}`);
+            if (code !== 0)
+                recordCrash();
+            teardownDaemon();
+        });
+        const rl = createInterface({ input: proc.stdout, crlfDelay: Infinity });
+        rl.on('line', (line) => {
+            try {
+                const resp = JSON.parse(line);
+                const reqId = resp.id;
+                if (reqId && pendingRequests.has(reqId)) {
+                    const pending = pendingRequests.get(reqId);
+                    clearTimeout(pending.timer);
+                    pendingRequests.delete(reqId);
+                    pending.resolve(resp);
+                }
+            }
+            catch { /* skip malformed lines */ }
+        });
+        proc.stderr?.on('data', (chunk) => {
+            const msg = chunk.toString().trim();
+            if (msg)
+                console.log(`[rust-engine:stderr] ${msg}`);
+        });
+        daemonProc = proc;
+        daemonRL = rl;
+        daemonReady = true;
+        console.log(`[rust-engine] Daemon started (PID ${proc.pid})`);
+        return true;
+    }
+    catch (err) {
+        console.error(`[rust-engine] Failed to start daemon: ${err.message}`);
+        return false;
+    }
+}
+function teardownDaemon() {
+    daemonReady = false;
+    for (const [id, pending] of pendingRequests) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('Daemon terminated'));
+        pendingRequests.delete(id);
+    }
+    if (daemonRL) {
+        daemonRL.close();
+        daemonRL = null;
+    }
+    if (daemonProc) {
+        try {
+            daemonProc.kill();
+        }
+        catch { /* already dead */ }
+        daemonProc = null;
+    }
+}
+async function sendToDaemon(command, data) {
+    if (!daemonReady || !daemonProc || daemonProc.exitCode !== null) {
+        if (!spawnDaemon())
+            throw new Error('Cannot start engine daemon');
+    }
+    const id = randomUUID();
+    const input = JSON.stringify({ id, command, data });
+    if (input.length > MAX_INPUT_SIZE)
+        throw new Error('Input too large for engine');
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            pendingRequests.delete(id);
+            reject(new Error('Engine request timed out'));
+        }, ENGINE_TIMEOUT_MS);
+        pendingRequests.set(id, { resolve, reject, timer });
+        try {
+            daemonProc.stdin.write(input + '\n');
+        }
+        catch (err) {
+            clearTimeout(timer);
+            pendingRequests.delete(id);
+            teardownDaemon();
+            reject(new Error(`Failed to write to daemon: ${err.message}`));
+        }
+    });
+}
+// ── Single-shot fallback (used when daemon fails) ──
+async function runEngineSingleShot(command, data) {
+    const binary = getBinary();
+    if (!binary)
+        throw new Error('Rust engine binary not found');
+    const input = JSON.stringify({ command, data });
+    if (input.length > MAX_INPUT_SIZE)
+        throw new Error('Input too large for engine');
+    return new Promise((resolve, reject) => {
+        const proc = spawn(binary, [], { stdio: ['pipe', 'pipe', 'pipe'], timeout: ENGINE_TIMEOUT_MS });
+        const chunks = [];
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (!settled) {
+                settled = true;
+                proc.kill('SIGKILL');
+                reject(new Error('Engine timed out'));
+            }
+        }, ENGINE_TIMEOUT_MS);
+        proc.stdout.on('data', (chunk) => chunks.push(chunk));
+        proc.on('error', (err) => { if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            reject(err);
+        } });
+        proc.on('close', (code) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(timer);
+            const stdout = Buffer.concat(chunks).toString('utf-8').trim();
+            if (code !== 0) {
+                reject(new Error(`Engine exited with code ${code}`));
+                return;
+            }
+            try {
+                resolve(JSON.parse(stdout));
+            }
+            catch {
+                reject(new Error('Engine returned invalid JSON'));
+            }
+        });
+        proc.stdin.write(input);
+        proc.stdin.end();
+    });
+}
+async function runEngine(command, data) {
+    try {
+        return await sendToDaemon(command, data);
+    }
+    catch {
+        return runEngineSingleShot(command, data);
+    }
+}
+export function startDaemon() {
+    return spawnDaemon();
+}
+export function stopDaemon() {
+    teardownDaemon();
+}
+export async function engineBacktest(data) {
+    const res = await runEngine('backtest', data);
+    if (!res.success)
+        throw new Error(res.error ?? 'Backtest failed');
+    return res.data;
+}
+export async function engineSignals(data) {
+    const res = await runEngine('signals', data);
+    if (!res.success)
+        throw new Error(res.error ?? 'Signals computation failed');
+    return res.data;
+}
+export async function engineRisk(data) {
+    const res = await runEngine('risk', data);
+    if (!res.success)
+        throw new Error(res.error ?? 'Risk computation failed');
+    return res.data;
+}
+export async function engineGreeks(data) {
+    const res = await runEngine('greeks', data);
+    if (!res.success)
+        throw new Error(res.error ?? 'Greeks computation failed');
+    return res.data;
+}
+export async function engineOptimize(data) {
+    if (!isEngineAvailable()) {
+        return jsOptimizeFallback(data);
+    }
+    try {
+        const res = await runEngine('optimize', data);
+        if (!res.success)
+            throw new Error(res.error ?? 'Optimize failed');
+        return res.data;
+    }
+    catch {
+        return jsOptimizeFallback(data);
+    }
+}
+function jsOptimizeFallback(data) {
+    const keys = Object.keys(data.param_grid);
+    const combos = generateCombos(keys, data.param_grid);
+    const results = [];
+    for (const combo of combos) {
+        const { sharpe, winRate, pf, cagr, mdd, trades } = jsBacktestWithParams(data, combo);
+        results.push({
+            params: combo,
+            sharpe_ratio: sharpe,
+            win_rate: winRate,
+            profit_factor: pf,
+            cagr,
+            max_drawdown: mdd,
+            total_trades: trades,
+        });
+    }
+    results.sort((a, b) => b.sharpe_ratio - a.sharpe_ratio);
+    const best = results[0] ?? { params: {}, sharpe_ratio: 0, win_rate: 0, profit_factor: 0, cagr: 0, max_drawdown: 0, total_trades: 0 };
+    return {
+        best_params: best.params,
+        best_sharpe: best.sharpe_ratio,
+        best_win_rate: best.win_rate,
+        best_profit_factor: best.profit_factor,
+        all_results: results,
+    };
+}
+function generateCombos(keys, grid) {
+    if (keys.length === 0)
+        return [{}];
+    const [first, ...rest] = keys;
+    const subCombos = generateCombos(rest, grid);
+    const result = [];
+    for (const val of grid[first]) {
+        for (const sub of subCombos) {
+            result.push({ [first]: val, ...sub });
+        }
+    }
+    return result;
+}
+function jsBacktestWithParams(data, params) {
+    const emaShort = params.ema_short ?? 9;
+    const emaLong = params.ema_long ?? 21;
+    const candles = data.candles;
+    let nav = data.initial_capital;
+    let peak = nav;
+    let maxDD = 0;
+    const pnls = [];
+    let position = null;
+    for (let i = 0; i < candles.length; i++) {
+        if (i >= emaLong) {
+            const eShort = computeEMA(candles, i, emaShort);
+            const eLong = computeEMA(candles, i, emaLong);
+            if (!position && eShort > eLong) {
+                position = { price: candles[i].close };
+            }
+            else if (position && eShort < eLong) {
+                const qty = Math.floor((nav * 0.1) / position.price);
+                const pnl = (candles[i].close - position.price) * qty;
+                nav += pnl;
+                pnls.push(pnl);
+                position = null;
+            }
+        }
+        if (nav > peak)
+            peak = nav;
+        const dd = (peak - nav) / peak;
+        if (dd > maxDD)
+            maxDD = dd;
+    }
+    const wins = pnls.filter(p => p > 0);
+    const losses = pnls.filter(p => p < 0);
+    const winRate = pnls.length > 0 ? (wins.length / pnls.length) * 100 : 0;
+    const totalWin = wins.reduce((s, v) => s + v, 0);
+    const totalLoss = losses.reduce((s, v) => s + Math.abs(v), 0);
+    const pf = totalLoss > 0 ? totalWin / totalLoss : 0;
+    const returns = pnls.map(p => p / data.initial_capital);
+    const mean = returns.length > 0 ? returns.reduce((s, v) => s + v, 0) / returns.length : 0;
+    const variance = returns.length > 1 ? returns.reduce((s, v) => s + (v - mean) ** 2, 0) / returns.length : 0;
+    const std = Math.sqrt(variance);
+    const sharpe = std > 0 ? (mean / std) * Math.sqrt(252) : 0;
+    const totalReturn = (nav - data.initial_capital) / data.initial_capital;
+    const years = candles.length / 252;
+    const cagr = years > 0 ? ((1 + totalReturn) ** (1 / years) - 1) * 100 : 0;
+    return {
+        sharpe: round2(sharpe),
+        winRate: round2(winRate),
+        pf: round2(pf),
+        cagr: round2(cagr),
+        mdd: round2(maxDD * 100),
+        trades: pnls.length,
+    };
+}
+function computeEMA(candles, endIdx, period) {
+    if (endIdx < period - 1)
+        return 0;
+    const mul = 2 / (period + 1);
+    let ema = candles[endIdx - period + 1].close;
+    for (let i = endIdx - period + 2; i <= endIdx; i++) {
+        ema = (candles[i].close - ema) * mul + ema;
+    }
+    return ema;
+}
+function round2(v) {
+    return Math.round(v * 100) / 100;
+}
+export async function engineWalkForward(data) {
+    if (!isEngineAvailable()) {
+        return jsWalkForwardFallback(data);
+    }
+    try {
+        const res = await runEngine('walk_forward', data);
+        if (!res.success)
+            throw new Error(res.error ?? 'Walk-forward failed');
+        return res.data;
+    }
+    catch {
+        return jsWalkForwardFallback(data);
+    }
+}
+function jsWalkForwardFallback(data) {
+    const numFolds = Math.min(Math.max(data.num_folds ?? 5, 2), 10);
+    const isRatio = data.in_sample_ratio ?? 0.7;
+    const foldSize = Math.floor(data.candles.length / numFolds);
+    const folds = [];
+    for (let f = 0; f < numFolds; f++) {
+        const start = f * foldSize;
+        const end = f === numFolds - 1 ? data.candles.length : (f + 1) * foldSize;
+        const foldCandles = data.candles.slice(start, end);
+        const split = Math.floor(foldCandles.length * isRatio);
+        if (split < 15 || foldCandles.length - split < 5)
+            continue;
+        const inSample = { ...data, candles: foldCandles.slice(0, split) };
+        const isResult = jsBacktestWithParams(inSample, {});
+        const oosResult = jsBacktestWithParams({ ...data, candles: foldCandles.slice(split) }, {});
+        const deg = isResult.sharpe > 0 ? 1 - oosResult.sharpe / isResult.sharpe : 0;
+        folds.push({
+            fold: f, in_sample_sharpe: isResult.sharpe, out_sample_sharpe: oosResult.sharpe,
+            in_sample_win_rate: isResult.winRate, out_sample_win_rate: oosResult.winRate,
+            best_params: {}, out_sample_trades: oosResult.trades, out_sample_pnl: 0, degradation: round2(deg),
+        });
+    }
+    const n = folds.length || 1;
+    return {
+        folds,
+        aggregate: {
+            avg_in_sample_sharpe: round2(folds.reduce((s, f) => s + f.in_sample_sharpe, 0) / n),
+            avg_out_sample_sharpe: round2(folds.reduce((s, f) => s + f.out_sample_sharpe, 0) / n),
+            avg_degradation: round2(folds.reduce((s, f) => s + f.degradation, 0) / n),
+            total_out_sample_trades: folds.reduce((s, f) => s + f.out_sample_trades, 0),
+            total_out_sample_pnl: 0,
+            consistency_score: round2(folds.filter(f => f.out_sample_sharpe > 0).length / n),
+        },
+        best_robust_params: {},
+        overfitting_score: 0,
+    };
+}
+export async function engineAdvancedSignals(data) {
+    if (!isEngineAvailable()) {
+        return {};
+    }
+    try {
+        const res = await runEngine('advanced_signals', data);
+        if (!res.success)
+            throw new Error(res.error ?? 'Advanced signals failed');
+        return res.data;
+    }
+    catch {
+        return {};
+    }
+}
+export async function engineIVSurface(data) {
+    if (!isEngineAvailable()) {
+        return { surface: [], skew_analysis: { current_skew: 0, skew_direction: 'BALANCED', put_call_iv_ratio: 1, atm_iv: 0.2, smile_curvature: 0 }, anomalies: [], term_structure: [], summary: { overall_iv_level: 'MODERATE', skew_regime: 'FLAT', term_structure_shape: 'FLAT', mispriced_options_count: 0, signal: 'NEUTRAL' } };
+    }
+    try {
+        const res = await runEngine('iv_surface', data);
+        if (!res.success)
+            throw new Error(res.error ?? 'IV surface failed');
+        return res.data;
+    }
+    catch {
+        return { surface: [], skew_analysis: { current_skew: 0, skew_direction: 'BALANCED', put_call_iv_ratio: 1, atm_iv: 0.2, smile_curvature: 0 }, anomalies: [], term_structure: [], summary: { overall_iv_level: 'MODERATE', skew_regime: 'FLAT', term_structure_shape: 'FLAT', mispriced_options_count: 0, signal: 'NEUTRAL' } };
+    }
+}
+export async function engineScan(data) {
+    const res = await runEngine('scan', data);
+    if (!res.success)
+        throw new Error(res.error ?? 'Scan computation failed');
+    return res.data;
+}
+// ── Monte Carlo Simulation ──
+export async function engineMonteCarlo(data) {
+    const res = await runEngine('monte_carlo', data);
+    if (!res.success)
+        throw new Error(res.error ?? 'Monte Carlo failed');
+    return res.data;
+}
+// ── Portfolio Optimization (Markowitz + Black-Litterman) ──
+export async function enginePortfolioOptimize(data) {
+    const res = await runEngine('optimize_portfolio', data);
+    if (!res.success)
+        throw new Error(res.error ?? 'Portfolio optimization failed');
+    return res.data;
+}
+// ── Options Strategy Analyzer ──
+export async function engineOptionsStrategy(data) {
+    const res = await runEngine('options_strategy', data);
+    if (!res.success)
+        throw new Error(res.error ?? 'Options strategy analysis failed');
+    return res.data;
+}
+// ── Pairs Trading Correlation Scanner ──
+export async function engineCorrelation(data) {
+    const res = await runEngine('correlation', data);
+    if (!res.success)
+        throw new Error(res.error ?? 'Correlation analysis failed');
+    return res.data;
+}
+// ── ML Feature Store (Feature Extraction, Regime Detection, Anomaly Detection) ──
+export async function engineFeatureStore(data) {
+    const res = await runEngine('feature_store', data);
+    if (!res.success)
+        throw new Error(res.error ?? 'Feature store operation failed');
+    return res.data;
+}
+// ── Multi-Timeframe Scan ──
+export async function engineMultiTimeframeScan(data) {
+    const res = await runEngine('multi_timeframe_scan', data);
+    if (!res.success)
+        throw new Error(res.error ?? 'Multi-timeframe scan failed');
+    return res.data;
+}
+export async function engineMLScore(data) {
+    const res = await runEngine('ml_score', data);
+    if (!res.success)
+        throw new Error(res.error ?? 'ML scorer failed');
+    return res.data;
+}
+export async function engineHealth() {
+    const res = await runEngine('health', {});
+    if (!res.success)
+        throw new Error(res.error ?? 'Health check failed');
+    return res.data;
+}
+export async function engineListStrategies() {
+    const res = await runEngine('list_strategies', {});
+    if (!res.success)
+        throw new Error(res.error ?? 'List strategies failed');
+    return res.data;
+}
+export async function enginePortfolioSnapshot() {
+    const res = await runEngine('portfolio_snapshot', {});
+    if (!res.success)
+        throw new Error(res.error ?? 'Portfolio snapshot failed');
+    return res.data;
+}
+export async function engineListPositions() {
+    const res = await runEngine('list_positions', {});
+    if (!res.success)
+        throw new Error(res.error ?? 'List positions failed');
+    return res.data;
+}
+// ── Kill Switch ──
+export async function engineKillSwitch(activate) {
+    const cmd = activate ? 'kill_switch' : 'kill_switch_off';
+    const res = await runEngine(cmd, {});
+    if (!res.success)
+        throw new Error(res.error ?? 'Kill switch operation failed');
+    return res.data;
+}
+// ── Audit Log ──
+export async function engineAuditLog() {
+    const res = await runEngine('audit_log', {});
+    if (!res.success)
+        throw new Error(res.error ?? 'Audit log retrieval failed');
+    return res.data;
+}
+export async function engineOMSSubmitOrder(data) {
+    const res = await runEngine('oms_submit_order', data);
+    if (!res.success)
+        throw new Error(res.error ?? 'OMS order submission failed');
+    return res.data;
+}
+export async function engineOMSCancelOrder(orderId) {
+    const res = await runEngine('oms_cancel_order', { order_id: orderId });
+    if (!res.success)
+        throw new Error(res.error ?? 'OMS cancel failed');
+    return res.data;
+}
+export async function engineOMSModifyOrder(orderId, updates) {
+    const res = await runEngine('oms_modify_order', { order_id: orderId, ...updates });
+    if (!res.success)
+        throw new Error(res.error ?? 'OMS modify failed');
+    return res.data;
+}
+export async function engineOMSCancelAll() {
+    const res = await runEngine('oms_cancel_all', {});
+    if (!res.success)
+        throw new Error(res.error ?? 'OMS cancel all failed');
+    return res.data;
+}
+export async function engineOMSOrders(strategyId) {
+    const data = strategyId ? { strategy_id: strategyId } : {};
+    const res = await runEngine('oms_orders', data);
+    if (!res.success)
+        throw new Error(res.error ?? 'OMS orders retrieval failed');
+    return res.data;
+}
+export async function engineOMSReconcile() {
+    const res = await runEngine('oms_reconcile', {});
+    if (!res.success)
+        throw new Error(res.error ?? 'OMS reconciliation failed');
+    return res.data;
+}
+// ── Alerts ──
+export async function engineAlerts(minSeverity, limit) {
+    const data = {};
+    if (minSeverity)
+        data.min_severity = minSeverity;
+    if (limit)
+        data.limit = limit;
+    const res = await runEngine('alerts', data);
+    if (!res.success)
+        throw new Error(res.error ?? 'Alerts retrieval failed');
+    return res.data;
+}
+export async function engineAlertCounts() {
+    const res = await runEngine('alert_counts', {});
+    if (!res.success)
+        throw new Error(res.error ?? 'Alert counts retrieval failed');
+    return res.data;
+}
+export async function engineAlertAcknowledge(alertId) {
+    const res = await runEngine('alert_acknowledge', { alert_id: alertId });
+    if (!res.success)
+        throw new Error(res.error ?? 'Alert acknowledge failed');
+    return res.data;
+}
+// ── Broker ──
+export async function engineBrokerStatus() {
+    const res = await runEngine('broker_refresh_status', {});
+    if (!res.success)
+        throw new Error(res.error ?? 'Broker status failed');
+    return res.data;
+}
+export async function engineBrokerInitSession() {
+    const res = await runEngine('broker_init_session', {});
+    if (!res.success)
+        throw new Error(res.error ?? 'Broker session init failed');
+    return res.data;
+}
+// ── Broker Market Data (via Rust Engine HTTP API → Breeze Bridge) ──
+async function engineHttpGet(path, timeoutMs = 30_000) {
+    const { env } = await import('../config.js');
+    const baseUrl = env.RUST_ENGINE_URL;
+    const url = `${baseUrl}${path}`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    try {
+        const res = await fetch(url, { signal: ac.signal });
+        clearTimeout(timer);
+        if (!res.ok) {
+            const body = await res.text().catch(() => '');
+            throw new Error(`Engine HTTP ${res.status}: ${body}`);
+        }
+        return res.json();
+    }
+    catch (err) {
+        clearTimeout(timer);
+        if (err.name === 'AbortError')
+            throw new Error(`Engine request timed out: ${path}`);
+        throw err;
+    }
+}
+export async function engineBrokerOptionChain(symbol, expiry) {
+    const qs = expiry ? `?expiry=${encodeURIComponent(expiry)}` : '';
+    return engineHttpGet(`/api/broker/option_chain/${encodeURIComponent(symbol)}${qs}`, 30_000);
+}
+export async function engineBrokerExpiries(symbol) {
+    return engineHttpGet(`/api/broker/expiries/${encodeURIComponent(symbol)}`, 20_000);
+}
+export async function engineBrokerLotSizes() {
+    return engineHttpGet('/api/broker/lot_sizes', 20_000);
+}
+export async function engineBrokerQuote(symbol) {
+    return engineHttpGet(`/api/broker/quote/${encodeURIComponent(symbol)}`, 10_000);
+}
+export async function engineMarketDataPrices() {
+    return engineHttpGet('/api/market_data/prices', 10_000);
+}
+export async function engineScanActiveSymbols() {
+    const res = await engineHttpGet('/api/scan/active_symbols', 10_000);
+    const data = res;
+    return { count: data?.count ?? 0, symbols: data?.symbols ?? [] };
+}
+export async function engineScanStatus() {
+    return engineHttpGet('/api/scan/status', 15_000);
+}
+export async function engineOptionsSignals() {
+    try {
+        const res = await engineHttpGet('/api/options/signals', 15_000);
+        return Array.isArray(res) ? res : [];
+    }
+    catch {
+        return [];
+    }
+}
+export async function engineOptionsData(symbol) {
+    try {
+        return await engineHttpGet(`/api/options/data/${encodeURIComponent(symbol)}`, 15_000);
+    }
+    catch {
+        return null;
+    }
+}
+export async function engineUniverseRefresh() {
+    const { env } = await import('../config.js');
+    const baseUrl = env.RUST_ENGINE_URL;
+    const url = `${baseUrl}/api/universe/refresh`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 60_000);
+    try {
+        const resp = await fetch(url, { method: 'POST', signal: ac.signal });
+        return await resp.json();
+    }
+    finally {
+        clearTimeout(timer);
+    }
+}
+/**
+ * Non-blocking check: returns true if the Rust engine kill switch is active.
+ * Returns false if the engine is unreachable (fail-open to avoid breaking existing flow).
+ */
+export async function isKillSwitchActive() {
+    try {
+        const res = await runEngine('portfolio_snapshot', {});
+        if (res.success && res.data && typeof res.data === 'object') {
+            return res.data.killed === true;
+        }
+        return false;
+    }
+    catch {
+        return false;
+    }
+}
+export async function enginePerformanceSummary() {
+    try {
+        return await engineHttpGet('/api/performance/summary', 15_000);
+    }
+    catch {
+        return null;
+    }
+}
+export async function engineStrategyHealth(strategy) {
+    try {
+        const path = strategy ? `/api/performance/health/${encodeURIComponent(strategy)}` : '/api/performance/health';
+        return await engineHttpGet(path, 15_000);
+    }
+    catch {
+        return null;
+    }
+}
+export async function engineCalibrateConfidence(confidence, strategy, regime = 'neutral') {
+    try {
+        const { env } = await import('../config.js');
+        const url = `${env.RUST_ENGINE_URL}/api/performance/calibrate`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 10_000);
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confidence, strategy, regime }),
+            signal: ac.signal,
+        });
+        clearTimeout(timer);
+        return await res.json();
+    }
+    catch {
+        return null;
+    }
+}
+export async function engineRecordOutcome(outcome) {
+    try {
+        const { env } = await import('../config.js');
+        const url = `${env.RUST_ENGINE_URL}/api/performance/record`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 10_000);
+        await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ outcome: { ...outcome, timestamp: new Date().toISOString() } }),
+            signal: ac.signal,
+        });
+        clearTimeout(timer);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+export async function engineActiveStrategies() {
+    try {
+        return await engineHttpGet('/api/performance/strategies', 10_000);
+    }
+    catch {
+        return null;
+    }
+}
+export async function engineExecutionPlan(params) {
+    try {
+        const { env } = await import('../config.js');
+        const url = `${env.RUST_ENGINE_URL}/api/execution/plan`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 10_000);
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(params),
+            signal: ac.signal,
+        });
+        clearTimeout(timer);
+        return await res.json();
+    }
+    catch {
+        return null;
+    }
+}
+export async function engineExecutionQuality(params) {
+    try {
+        const { env } = await import('../config.js');
+        const url = `${env.RUST_ENGINE_URL}/api/execution/quality`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 10_000);
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(params),
+            signal: ac.signal,
+        });
+        clearTimeout(timer);
+        return await res.json();
+    }
+    catch {
+        return null;
+    }
+}
+export async function engineOptimalSize(params) {
+    try {
+        const { env } = await import('../config.js');
+        const url = `${env.RUST_ENGINE_URL}/api/execution/optimal_size`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 10_000);
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(params),
+            signal: ac.signal,
+        });
+        clearTimeout(timer);
+        return await res.json();
+    }
+    catch {
+        return null;
+    }
+}
+// ─── Training Data Export ────────────────────────────────────────────
+export async function engineTrainingData() {
+    try {
+        return await engineHttpGet('/api/performance/training_data', 30_000);
+    }
+    catch {
+        return null;
+    }
+}
+// ─── Tick Data ──────────────────────────────────────────────────────
+export async function engineTickData(symbol) {
+    try {
+        return await engineHttpGet(`/api/market_data/ticks/${encodeURIComponent(symbol)}`, 10_000);
+    }
+    catch {
+        return null;
+    }
+}
+// ─── Strategy Discovery ─────────────────────────────────────────────
+export async function engineDiscoveryRun(candles_by_symbol) {
+    try {
+        const { env } = await import('../config.js');
+        const url = `${env.RUST_ENGINE_URL}/api/discovery/run`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 120_000);
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ candles_by_symbol: candles_by_symbol ?? {} }),
+            signal: ac.signal,
+        });
+        clearTimeout(timer);
+        return await res.json();
+    }
+    catch {
+        return null;
+    }
+}
+export async function engineDiscoveryResults() {
+    try {
+        return await engineHttpGet('/api/discovery/results', 15_000);
+    }
+    catch {
+        return null;
+    }
+}
+export async function engineDiscoveryApply() {
+    try {
+        const { env } = await import('../config.js');
+        const url = `${env.RUST_ENGINE_URL}/api/discovery/apply`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 30_000);
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+            signal: ac.signal,
+        });
+        clearTimeout(timer);
+        return await res.json();
+    }
+    catch {
+        return null;
+    }
+}
+// ─── Order Book Analysis ─────────────────────────────────────────────
+export async function engineOrderbookAnalyze(data) {
+    try {
+        const { env } = await import('../config.js');
+        const url = `${env.RUST_ENGINE_URL}/api/orderbook/analyze`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 15_000);
+        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data), signal: ac.signal });
+        clearTimeout(timer);
+        return await res.json();
+    }
+    catch {
+        return null;
+    }
+}
+// ─── Correlation Guard ───────────────────────────────────────────────
+export async function engineCorrelationGuard(data) {
+    try {
+        const { env } = await import('../config.js');
+        const url = `${env.RUST_ENGINE_URL}/api/correlation_guard/check`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 15_000);
+        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data), signal: ac.signal });
+        clearTimeout(timer);
+        return await res.json();
+    }
+    catch {
+        return null;
+    }
+}
+// ─── Execution Analytics ─────────────────────────────────────────────
+export async function engineExecutionAnalytics(data) {
+    try {
+        const { env } = await import('../config.js');
+        const url = `${env.RUST_ENGINE_URL}/api/execution_analytics`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 15_000);
+        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data), signal: ac.signal });
+        clearTimeout(timer);
+        return await res.json();
+    }
+    catch {
+        return null;
+    }
+}
+// ─── Signal Ranker ───────────────────────────────────────────────────
+export async function engineSignalRanker(data) {
+    try {
+        const { env } = await import('../config.js');
+        const url = `${env.RUST_ENGINE_URL}/api/signal_ranker`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 15_000);
+        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data), signal: ac.signal });
+        clearTimeout(timer);
+        return await res.json();
+    }
+    catch {
+        return null;
+    }
+}
+// ─── Paper-Live Bridge ───────────────────────────────────────────────
+export async function enginePaperLiveBridge(data) {
+    try {
+        const { env } = await import('../config.js');
+        const url = `${env.RUST_ENGINE_URL}/api/paper_live_bridge`;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 15_000);
+        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data), signal: ac.signal });
+        clearTimeout(timer);
+        return await res.json();
+    }
+    catch {
+        return null;
+    }
+}
+export function _getCircuitBreakerState() {
+    return { crashCount, lastCrashTime, circuitOpenSince, MAX_CRASHES, CRASH_WINDOW_MS, CIRCUIT_COOLDOWN_MS };
+}
+export function _resetCircuitBreakerForTesting() {
+    crashCount = 0;
+    lastCrashTime = 0;
+    circuitOpenSince = 0;
+}
+//# sourceMappingURL=rust-engine.js.map

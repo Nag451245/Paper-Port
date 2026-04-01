@@ -1,0 +1,136 @@
+import { z } from 'zod';
+import { MarketDataService } from '../services/market-data.service.js';
+import { GlobalMarketService } from '../services/global-market.service.js';
+import { authenticate, getUserId } from '../middleware/auth.js';
+import { istDateStr, istDaysAgo } from '../lib/ist.js';
+const symbolParam = z.string().min(1).max(30).regex(/^[A-Z0-9&_-]+$/i, 'Invalid symbol');
+const intervalParam = z.string().regex(/^(1d|1day|day|daily|1h|1hour|hour|5m|5min|5minute|15m|15min|15minute|30m|30min|30minute)$/i).default('1day');
+const dateParam = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+export async function marketRoutes(app) {
+    const service = new MarketDataService();
+    app.get('/quote/:symbol', async (request, reply) => {
+        const sym = symbolParam.safeParse(request.params.symbol);
+        if (!sym.success)
+            return reply.code(400).send({ error: 'Invalid symbol' });
+        const query = request.query;
+        const quote = await service.getQuote(sym.data, query.exchange ?? 'NSE');
+        return reply.send(quote);
+    });
+    app.get('/history/:symbol', { preHandler: [authenticate] }, async (request, reply) => {
+        const sym = symbolParam.safeParse(request.params.symbol);
+        if (!sym.success)
+            return reply.code(400).send({ error: 'Invalid symbol' });
+        const query = request.query;
+        const userId = getUserId(request);
+        const interval = intervalParam.safeParse(query.interval ?? '1day');
+        const bars = await service.getHistory(sym.data, interval.success ? interval.data : '1day', query.from_date ?? istDaysAgo(30), query.to_date ?? istDateStr(), userId, query.exchange ?? 'NSE');
+        if (bars.length === 0) {
+            return reply.send({ error: 'No historical data. Configure Breeze API credentials and session token in Settings.', data: [] });
+        }
+        return reply.send(bars);
+    });
+    app.get('/search', async (request, reply) => {
+        const query = request.query;
+        const q = (query.q ?? '').replace(/[^a-zA-Z0-9&\- ]/g, '').slice(0, 30);
+        const limit = Math.min(Math.max(Number(query.limit) || 10, 1), 50);
+        const results = await service.search(q, limit, query.exchange);
+        return reply.send(results);
+    });
+    app.get('/indices', async (request, reply) => {
+        const query = request.query;
+        const indices = query.exchange
+            ? await service.getIndicesForExchange(query.exchange)
+            : await service.getIndices();
+        return reply.send(indices);
+    });
+    app.get('/vix', async (_request, reply) => {
+        const vix = await service.getVIX();
+        return reply.send(vix);
+    });
+    app.get('/fii-dii', async (_request, reply) => {
+        const data = await service.getFIIDII();
+        return reply.send(data);
+    });
+    app.get('/options-chain/:symbol/expiries', async (request, reply) => {
+        const sym = symbolParam.safeParse(request.params.symbol);
+        if (!sym.success)
+            return reply.code(400).send({ error: 'Invalid symbol' });
+        try {
+            const result = await service.getAvailableExpiries(sym.data);
+            return reply.send({
+                symbol: sym.data,
+                expiries: result.expiries,
+                ...(result.sessionError ? { sessionError: true, message: 'Breeze API session not configured. Please enter your ICICI Breeze session key in Settings.' } : {}),
+            });
+        }
+        catch {
+            return reply.send({ symbol: sym.data, expiries: [] });
+        }
+    });
+    app.get('/options-chain/:symbol', async (request, reply) => {
+        const sym = symbolParam.safeParse(request.params.symbol);
+        if (!sym.success)
+            return reply.code(400).send({ error: 'Invalid symbol' });
+        const query = request.query;
+        try {
+            const data = await service.getOptionsChain(sym.data, query.expiry);
+            return reply.send(data);
+        }
+        catch {
+            return reply.send({ symbol: sym.data, expiry: '', strikes: [], expiries: [], message: 'Options data temporarily unavailable' });
+        }
+    });
+    app.get('/market-depth/:symbol', async (request, reply) => {
+        const sym = symbolParam.safeParse(request.params.symbol);
+        if (!sym.success)
+            return reply.code(400).send({ error: 'Invalid symbol' });
+        const symbol = sym.data;
+        const exchange = (request.query.exchange ?? 'NSE');
+        try {
+            const depth = await service.getMarketDepth(symbol, exchange);
+            return reply.send(depth);
+        }
+        catch {
+            return reply.send({ symbol, bids: [], asks: [], totalBidQty: 0, totalAskQty: 0 });
+        }
+    });
+    app.get('/lot-sizes', async (_request, reply) => {
+        try {
+            const result = await service.getLotSizes();
+            return reply.send(result);
+        }
+        catch (err) {
+            return reply.send({ lotSizes: {}, source: 'error', error: err.message });
+        }
+    });
+    app.get('/breeze-diag', { preHandler: [authenticate] }, async (_request, reply) => {
+        try {
+            const result = await service.diagnoseBreezeConnection();
+            return reply.send(result);
+        }
+        catch (err) {
+            return reply.send({ error: err.message });
+        }
+    });
+    const globalMarketService = new GlobalMarketService();
+    app.get('/global-intelligence', async (_request, reply) => {
+        const intel = globalMarketService.getLatestIntelligence();
+        if (intel) {
+            return reply.send(intel);
+        }
+        return reply.send({
+            message: 'Intelligence scan not yet run. Will be available after pre-market scan.',
+            timestamp: new Date().toISOString(),
+        });
+    });
+    app.post('/global-intelligence/refresh', { preHandler: [authenticate] }, async (_request, reply) => {
+        try {
+            const intel = await globalMarketService.runDailyIntelligenceScan();
+            return reply.send(intel);
+        }
+        catch (err) {
+            return reply.code(500).send({ error: err.message });
+        }
+    });
+}
+//# sourceMappingURL=market.js.map

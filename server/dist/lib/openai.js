@@ -1,0 +1,426 @@
+import { env } from '../config.js';
+const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+const DEFAULT_MODEL = 'gemini-2.5-flash';
+// ── Rate Limiter: queues requests so we never exceed RPM ──
+const MAX_RPM = 14;
+const WINDOW_MS = 60_000;
+const MAX_RETRIES = 3;
+const CIRCUIT_OPEN_MS = 2 * 60_000;
+let requestTimestamps = [];
+let circuitOpenUntil = 0;
+let consecutiveFailures = 0;
+const pendingQueue = [];
+let draining = false;
+function isCircuitOpen() {
+    if (circuitOpenUntil > 0 && Date.now() < circuitOpenUntil)
+        return true;
+    if (circuitOpenUntil > 0 && Date.now() >= circuitOpenUntil) {
+        circuitOpenUntil = 0;
+        consecutiveFailures = 0;
+        console.log('[Gemini] Circuit breaker reset — resuming API calls');
+    }
+    return false;
+}
+function openCircuit(retryAfterSec) {
+    const cooldownMs = retryAfterSec
+        ? retryAfterSec * 1000
+        : CIRCUIT_OPEN_MS;
+    circuitOpenUntil = Date.now() + cooldownMs;
+    console.warn(`[Gemini] Circuit breaker OPEN for ${Math.round(cooldownMs / 1000)}s — quota/rate limit hit`);
+}
+export function getOpenAIStatus() {
+    const now = Date.now();
+    requestTimestamps = requestTimestamps.filter(t => now - t < WINDOW_MS);
+    return {
+        circuitOpen: isCircuitOpen(),
+        queueLength: pendingQueue.length,
+        recentRequests: requestTimestamps.length,
+        cooldownRemainingMs: circuitOpenUntil > now ? circuitOpenUntil - now : 0,
+    };
+}
+async function acquireSlot() {
+    const now = Date.now();
+    requestTimestamps = requestTimestamps.filter(t => now - t < WINDOW_MS);
+    if (requestTimestamps.length < MAX_RPM) {
+        requestTimestamps.push(now);
+        return;
+    }
+    return new Promise((resolve) => {
+        pendingQueue.push({ resolve });
+        scheduleDrain();
+    });
+}
+function scheduleDrain() {
+    if (draining)
+        return;
+    draining = true;
+    const check = () => {
+        const now = Date.now();
+        requestTimestamps = requestTimestamps.filter(t => now - t < WINDOW_MS);
+        while (pendingQueue.length > 0 && requestTimestamps.length < MAX_RPM) {
+            const next = pendingQueue.shift();
+            requestTimestamps.push(now);
+            next.resolve();
+        }
+        if (pendingQueue.length > 0) {
+            const oldest = requestTimestamps[0];
+            const waitMs = Math.max(100, WINDOW_MS - (now - oldest) + 50);
+            setTimeout(check, waitMs);
+        }
+        else {
+            draining = false;
+        }
+    };
+    const now = Date.now();
+    const oldest = requestTimestamps[0];
+    const waitMs = oldest ? Math.max(100, WINDOW_MS - (now - oldest) + 50) : 100;
+    setTimeout(check, waitMs);
+}
+async function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+}
+function buildGeminiBody(messages, temperature, maxTokens, responseFormat) {
+    let systemText = '';
+    const contents = [];
+    for (const msg of messages) {
+        if (msg.role === 'system') {
+            systemText += (systemText ? '\n' : '') + msg.content;
+        }
+        else {
+            contents.push({
+                role: msg.role === 'assistant' ? 'model' : 'user',
+                parts: [{ text: msg.content }],
+            });
+        }
+    }
+    if (contents.length === 0) {
+        contents.push({ role: 'user', parts: [{ text: 'Hello' }] });
+    }
+    const generationConfig = {
+        temperature,
+        maxOutputTokens: maxTokens,
+    };
+    if (responseFormat?.type === 'json_object') {
+        generationConfig.responseMimeType = 'application/json';
+    }
+    const body = { contents, generationConfig };
+    if (systemText) {
+        if (responseFormat?.type === 'json_object') {
+            systemText += '\n\nIMPORTANT: Respond with valid JSON only. No markdown, no code fences, no extra text.';
+        }
+        body.systemInstruction = { parts: [{ text: systemText }] };
+    }
+    return body;
+}
+function getApiKey() {
+    return env.GEMINI_API_KEY || env.OPENAI_API_KEY;
+}
+/**
+ * Strips markdown code fences that Gemini sometimes wraps around JSON responses.
+ * e.g. "```json\n{...}\n```" → "{...}"
+ */
+function stripMarkdownFences(text) {
+    let s = text.trim();
+    const fenceMatch = s.match(/^```(?:json|JSON)?\s*\n?([\s\S]*?)\n?\s*```$/);
+    if (fenceMatch) {
+        return fenceMatch[1].trim();
+    }
+    return s;
+}
+export async function chatCompletion(options) {
+    if (isCircuitOpen()) {
+        const remaining = Math.round((circuitOpenUntil - Date.now()) / 1000);
+        throw new Error(`Gemini circuit breaker open — cooling down for ${remaining}s. Quota/rate limit was exceeded.`);
+    }
+    const { messages, model = DEFAULT_MODEL, temperature = 0.7, maxTokens = 8192, responseFormat } = options;
+    const apiKey = getApiKey();
+    if (!apiKey) {
+        throw new Error('No AI API key configured (set GEMINI_API_KEY in environment)');
+    }
+    const url = `${GEMINI_BASE_URL}/${model}:generateContent?key=${apiKey}`;
+    const body = buildGeminiBody(messages, temperature, maxTokens, responseFormat);
+    let lastError = null;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        if (attempt > 0 && isCircuitOpen()) {
+            throw lastError ?? new Error('Gemini circuit breaker opened during retry');
+        }
+        await acquireSlot();
+        try {
+            const ac = new AbortController();
+            const timer = setTimeout(() => ac.abort(), 60_000);
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+                signal: ac.signal,
+            });
+            clearTimeout(timer);
+            if (response.status === 429) {
+                const errorBody = await response.text();
+                consecutiveFailures++;
+                let retryAfterSec;
+                try {
+                    const errData = JSON.parse(errorBody);
+                    const retryInfo = errData?.error?.details?.find?.((d) => d['@type']?.includes('RetryInfo'));
+                    if (retryInfo?.retryDelay) {
+                        retryAfterSec = parseInt(retryInfo.retryDelay, 10) || undefined;
+                    }
+                }
+                catch { /* ignore parse error */ }
+                if (consecutiveFailures >= 3 || errorBody.includes('RESOURCE_EXHAUSTED') || errorBody.includes('exceeded your current quota')) {
+                    openCircuit(retryAfterSec);
+                    throw new Error(`Gemini API error (429): ${errorBody}`);
+                }
+                const backoffMs = retryAfterSec
+                    ? retryAfterSec * 1000
+                    : Math.min(2000 * Math.pow(2, attempt), 30_000);
+                console.warn(`[Gemini] Rate limited (attempt ${attempt + 1}/${MAX_RETRIES}), backing off ${Math.round(backoffMs / 1000)}s`);
+                await sleep(backoffMs);
+                lastError = new Error(`Gemini API error (429): ${errorBody}`);
+                continue;
+            }
+            if (!response.ok) {
+                const errorBody = await response.text();
+                throw new Error(`Gemini API error (${response.status}): ${errorBody}`);
+            }
+            consecutiveFailures = 0;
+            const data = await response.json();
+            const candidate = data.candidates?.[0];
+            if (!candidate) {
+                throw new Error(`Gemini returned no candidates: ${JSON.stringify(data).slice(0, 500)}`);
+            }
+            let content = candidate.content?.parts
+                ?.map((p) => p.text ?? '')
+                .join('')
+                .trim();
+            const reason = candidate.finishReason;
+            if (reason === 'MAX_TOKENS') {
+                console.warn(`[Gemini] Response truncated (MAX_TOKENS). Got ${content?.length ?? 0} chars — will attempt repair.`);
+            }
+            if (!content) {
+                throw new Error(`Gemini returned empty response (finishReason: ${reason})`);
+            }
+            content = stripMarkdownFences(content);
+            return content;
+        }
+        catch (err) {
+            lastError = err instanceof Error ? err : new Error(String(err));
+            if (lastError.message.includes('circuit breaker') || lastError.message.includes('exceeded your current quota') || lastError.message.includes('RESOURCE_EXHAUSTED')) {
+                throw lastError;
+            }
+            if (attempt === MAX_RETRIES - 1) {
+                throw lastError;
+            }
+        }
+    }
+    throw lastError ?? new Error('Gemini request failed after retries');
+}
+export function _resetForTesting() {
+    requestTimestamps = [];
+    circuitOpenUntil = 0;
+    consecutiveFailures = 0;
+    pendingQueue.length = 0;
+    draining = false;
+}
+/**
+ * Attempt to extract valid JSON from a potentially malformed response.
+ * Handles: markdown fences, extra text around JSON, truncated JSON,
+ * incomplete values, trailing commas, partial key-value pairs.
+ */
+function extractJSON(raw) {
+    let s = stripMarkdownFences(raw).trim();
+    // Already valid?
+    try {
+        JSON.parse(s);
+        return s;
+    }
+    catch { /* continue */ }
+    // Extract first JSON object or array from the string
+    const objStart = s.indexOf('{');
+    const arrStart = s.indexOf('[');
+    let start = -1;
+    let openChar = '{';
+    let closeChar = '}';
+    if (objStart >= 0 && (arrStart < 0 || objStart <= arrStart)) {
+        start = objStart;
+    }
+    else if (arrStart >= 0) {
+        start = arrStart;
+        openChar = '[';
+        closeChar = ']';
+    }
+    if (start < 0)
+        return s;
+    // Find the matching close bracket, accounting for nesting and strings
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let end = -1;
+    for (let i = start; i < s.length; i++) {
+        const ch = s[i];
+        if (escape) {
+            escape = false;
+            continue;
+        }
+        if (ch === '\\') {
+            escape = true;
+            continue;
+        }
+        if (ch === '"') {
+            inString = !inString;
+            continue;
+        }
+        if (inString)
+            continue;
+        if (ch === openChar)
+            depth++;
+        if (ch === closeChar) {
+            depth--;
+            if (depth === 0) {
+                end = i;
+                break;
+            }
+        }
+    }
+    if (end > start) {
+        const extracted = s.slice(start, end + 1);
+        try {
+            JSON.parse(extracted);
+            return extracted;
+        }
+        catch { /* continue to repair */ }
+    }
+    // Truncated response: try aggressive repair
+    let truncated = end > start ? s.slice(start, end + 1) : s.slice(start);
+    truncated = repairTruncatedJSON(truncated);
+    try {
+        JSON.parse(truncated);
+        return truncated;
+    }
+    catch { /* give up */ }
+    return s;
+}
+function repairTruncatedJSON(s) {
+    // Strip trailing incomplete string value (e.g. `"reason": "some text that got cu`)
+    s = s.replace(/,\s*"[^"]*"\s*:\s*"[^"]*$/, '');
+    // Strip trailing incomplete number value (e.g. `"entry": 175`)
+    s = s.replace(/,\s*"[^"]*"\s*:\s*[\d.]+$/, '');
+    // Strip trailing incomplete key (e.g. `"targ`)
+    s = s.replace(/,\s*"[^"]*$/, '');
+    // Strip trailing incomplete key-value without value (e.g. `"target":`)
+    s = s.replace(/,\s*"[^"]*"\s*:\s*$/, '');
+    // Strip trailing comma + whitespace
+    s = s.replace(/,\s*$/, '');
+    // Count unclosed structures
+    let opens = 0, closes = 0, oArr = 0, cArr = 0;
+    let inStr = false, esc = false;
+    for (const ch of s) {
+        if (esc) {
+            esc = false;
+            continue;
+        }
+        if (ch === '\\') {
+            esc = true;
+            continue;
+        }
+        if (ch === '"') {
+            inStr = !inStr;
+            continue;
+        }
+        if (inStr)
+            continue;
+        if (ch === '{')
+            opens++;
+        if (ch === '}')
+            closes++;
+        if (ch === '[')
+            oArr++;
+        if (ch === ']')
+            cArr++;
+    }
+    if (inStr)
+        s += '"';
+    // Re-strip trailing partial value after closing string
+    s = s.replace(/,\s*$/, '');
+    for (let i = 0; i < oArr - cArr; i++)
+        s += ']';
+    for (let i = 0; i < opens - closes; i++)
+        s += '}';
+    return s;
+}
+export async function chatCompletionJSON(options) {
+    const raw = await chatCompletion({
+        ...options,
+        responseFormat: { type: 'json_object' },
+    });
+    // Fast path: raw is already valid JSON
+    try {
+        return JSON.parse(raw);
+    }
+    catch { /* try extraction */ }
+    // Robust extraction: strip fences, find JSON, repair truncation
+    const extracted = extractJSON(raw);
+    try {
+        return JSON.parse(extracted);
+    }
+    catch {
+        console.warn(`[Gemini] JSON parse failed after extraction. Raw length: ${raw.length}, first 500 chars: ${raw.slice(0, 500)}`);
+        // Attempt partial extraction: find the last complete object in an array
+        const partialArray = tryExtractPartialArray(raw);
+        if (partialArray) {
+            try {
+                return JSON.parse(partialArray);
+            }
+            catch { /* continue to fallback */ }
+        }
+        const fallback = raw.includes('"signals"') ? '{"signals":[]}' : '{}';
+        return JSON.parse(fallback);
+    }
+}
+function tryExtractPartialArray(raw) {
+    const signalsIdx = raw.indexOf('"signals"');
+    if (signalsIdx < 0)
+        return null;
+    const arrStart = raw.indexOf('[', signalsIdx);
+    if (arrStart < 0)
+        return null;
+    // Find complete objects within the array by looking for },{ pattern
+    let lastCompleteObj = -1;
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let i = arrStart + 1; i < raw.length; i++) {
+        const ch = raw[i];
+        if (esc) {
+            esc = false;
+            continue;
+        }
+        if (ch === '\\') {
+            esc = true;
+            continue;
+        }
+        if (ch === '"') {
+            inStr = !inStr;
+            continue;
+        }
+        if (inStr)
+            continue;
+        if (ch === '{')
+            depth++;
+        if (ch === '}') {
+            depth--;
+            if (depth === 0)
+                lastCompleteObj = i;
+        }
+    }
+    if (lastCompleteObj > arrStart) {
+        const completeSignals = raw.slice(arrStart, lastCompleteObj + 1) + ']';
+        const prefix = raw.slice(0, arrStart);
+        const objStart = prefix.lastIndexOf('{');
+        if (objStart >= 0) {
+            return prefix.slice(objStart) + completeSignals + '}';
+        }
+    }
+    return null;
+}
+//# sourceMappingURL=openai.js.map

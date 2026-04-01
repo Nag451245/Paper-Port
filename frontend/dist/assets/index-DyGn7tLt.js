@@ -1,0 +1,1 @@
+function i(n){if(n==null)return"₹0";const t=Math.abs(n),r=n<0?"-":"";return t>=1e7?`${r}₹${(t/1e7).toFixed(2)} Cr`:t>=1e5?`${r}₹${(t/1e5).toFixed(2)} L`:`${r}₹${t.toLocaleString("en-IN",{maximumFractionDigits:2})}`}export{i as f};

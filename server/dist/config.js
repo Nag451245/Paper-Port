@@ -1,0 +1,46 @@
+import { z } from 'zod';
+import { config as dotenvConfig } from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+dotenvConfig({ path: resolve(__dirname, '..', '.env') });
+const envSchema = z.object({
+    DATABASE_URL: z.string().min(1),
+    DIRECT_URL: z.string().default(''),
+    REDIS_URL: z.string().default(''),
+    OPENAI_API_KEY: z.string().default(''),
+    GEMINI_API_KEY: z.string().default(''),
+    BREEZE_API_KEY: z.string().default(''),
+    BREEZE_SECRET_KEY: z.string().default(''),
+    BREEZE_SESSION_TOKEN: z.string().default(''),
+    JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters for security'),
+    JWT_ALGORITHM: z.string().default('HS256'),
+    JWT_EXPIRES_IN: z.string().default('24h'),
+    ENCRYPTION_KEY: z.string().min(16, 'ENCRYPTION_KEY must be at least 16 characters'),
+    CORS_ORIGINS: z.string().default('http://localhost:5173'),
+    HOST: z.string().default('0.0.0.0'),
+    PORT: z.coerce.number().default(8000),
+    NODE_ENV: z.string().default('development'),
+    NEWS_API_KEY: z.string().default(''),
+    GNEWS_API_KEY: z.string().default(''),
+    ML_SERVICE_URL: z.string().url().default('http://localhost:8002'),
+    BREEZE_BRIDGE_URL: z.string().url().default('http://127.0.0.1:8001'),
+    LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+    TRADING_MODE: z.enum(['PAPER', 'LIVE']).default('PAPER'),
+    RUST_ENGINE_URL: z.string().default('http://127.0.0.1:8400'),
+    OTEL_EXPORTER_OTLP_ENDPOINT: z.string().default(''),
+});
+function loadConfig() {
+    const parsed = envSchema.safeParse(process.env);
+    if (!parsed.success) {
+        const formatted = parsed.error.flatten().fieldErrors;
+        const missing = Object.entries(formatted)
+            .map(([key, errs]) => `  ${key}: ${errs?.join(', ')}`)
+            .join('\n');
+        throw new Error(`Invalid environment variables:\n${missing}`);
+    }
+    return parsed.data;
+}
+export const env = loadConfig();
+//# sourceMappingURL=config.js.map
