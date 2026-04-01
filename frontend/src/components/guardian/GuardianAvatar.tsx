@@ -119,101 +119,91 @@ function ChibiEyes({ mood, accentColor }: { mood: GuardianMood; accentColor: str
     case 'COMPOSED':
       return (
         <>
-          <path d="M19 20 Q23 16 27 20" stroke="#1e293b" strokeWidth="1.8" fill="none" strokeLinecap="round" />
-          <path d="M29 20 Q33 16 37 20" stroke="#1e293b" strokeWidth="1.8" fill="none" strokeLinecap="round" />
+          <path d="M20 20 Q23 17 26 20" stroke={accentColor} strokeWidth="2" fill="none" strokeLinecap="round" />
+          <path d="M30 20 Q33 17 36 20" stroke={accentColor} strokeWidth="2" fill="none" strokeLinecap="round" />
         </>
       );
     case 'ALERT':
       return (
         <>
-          <circle cx="23" cy="19" r="3.5" fill="white" />
+          <circle cx="23" cy="19" r="3" fill={accentColor} opacity="0.3" />
           <circle cx="23" cy="19" r="2" fill={accentColor} />
-          <circle cx="23" cy="18.2" r="1" fill="#1e293b" />
-          <circle cx="24" cy="17.5" r="0.5" fill="white" />
-          <circle cx="33" cy="19" r="3.5" fill="white" />
+          <circle cx="24" cy="18" r="0.8" fill="white" opacity="0.8" />
+          <circle cx="33" cy="19" r="3" fill={accentColor} opacity="0.3" />
           <circle cx="33" cy="19" r="2" fill={accentColor} />
-          <circle cx="33" cy="18.2" r="1" fill="#1e293b" />
-          <circle cx="34" cy="17.5" r="0.5" fill="white" />
+          <circle cx="34" cy="18" r="0.8" fill="white" opacity="0.8" />
         </>
       );
     case 'FOCUSED':
       return (
         <>
-          <path d="M19 21 Q23 17 27 20" stroke="#1e293b" strokeWidth="2.2" fill="none" strokeLinecap="round" />
-          <path d="M29 20 Q33 17 37 21" stroke="#1e293b" strokeWidth="2.2" fill="none" strokeLinecap="round" />
+          <rect x="20" y="18" width="6" height="3" rx="1" fill={accentColor} opacity="0.9" />
+          <rect x="30" y="18" width="6" height="3" rx="1" fill={accentColor} opacity="0.9" />
         </>
       );
     case 'CAUTIOUS':
       return (
         <>
-          <path d="M20 18 Q23 22 26 18" stroke="#1e293b" strokeWidth="1.8" fill="none" strokeLinecap="round" />
-          <path d="M30 18 Q33 22 36 18" stroke="#1e293b" strokeWidth="1.8" fill="none" strokeLinecap="round" />
+          <path d="M20 21 Q23 18 26 21" stroke={accentColor} strokeWidth="2.5" fill="none" strokeLinecap="round" />
+          <path d="M30 21 Q33 18 36 21" stroke={accentColor} strokeWidth="2.5" fill="none" strokeLinecap="round" />
+          <path d="M20 17 L26 18.5" stroke={accentColor} strokeWidth="1" fill="none" strokeLinecap="round" opacity="0.5" />
+          <path d="M36 18.5 L30 17" stroke={accentColor} strokeWidth="1" fill="none" strokeLinecap="round" opacity="0.5" />
         </>
       );
     case 'CELEBRATORY':
       return (
         <>
-          <path d="M19 20 Q23 16 27 20" stroke="#1e293b" strokeWidth="2.2" fill="none" strokeLinecap="round" />
-          <path d="M29 20 Q33 16 37 20" stroke="#1e293b" strokeWidth="2.2" fill="none" strokeLinecap="round" />
+          <path d="M20 20 Q23 15 26 20" stroke={accentColor} strokeWidth="2.5" fill="none" strokeLinecap="round" />
+          <path d="M30 20 Q33 15 36 20" stroke={accentColor} strokeWidth="2.5" fill="none" strokeLinecap="round" />
         </>
       );
     case 'REFLECTIVE':
       return (
         <>
-          <circle cx="23" cy="19" r="3" fill="white" />
-          <circle cx="23" cy="20.5" r="1.8" fill={accentColor} />
-          <circle cx="23" cy="21" r="0.8" fill="#1e293b" />
-          <circle cx="33" cy="19" r="3" fill="white" />
-          <circle cx="33" cy="20.5" r="1.8" fill={accentColor} />
-          <circle cx="33" cy="21" r="0.8" fill="#1e293b" />
+          <circle cx="23" cy="20" r="2.5" fill={accentColor} opacity="0.3" />
+          <circle cx="23" cy="21" r="1.5" fill={accentColor} />
+          <circle cx="33" cy="20" r="2.5" fill={accentColor} opacity="0.3" />
+          <circle cx="33" cy="21" r="1.5" fill={accentColor} />
         </>
       );
     case 'VIGILANT':
       return (
         <>
-          <path d="M20 21 L23 18 L26 21" stroke="#1e293b" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-          <path d="M30 21 L33 18 L36 21" stroke="#1e293b" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M20 20 L23 17 L26 20" stroke={accentColor} strokeWidth="2.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M30 20 L33 17 L36 20" stroke={accentColor} strokeWidth="2.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
         </>
       );
     case 'CONTEMPLATIVE':
       return (
         <>
-          <circle cx="23" cy="20" r="3" fill="white" />
-          <circle cx="23" cy="20" r="1.8" fill={accentColor} />
-          <circle cx="23" cy="20" r="0.7" fill="#1e293b" />
-          <path d="M19.5 18 Q23 16 26.5 18 L26.5 19.5 Q23 17.5 19.5 19.5Z" fill="#fcd9b6" />
-          <circle cx="33" cy="20" r="3" fill="white" />
-          <circle cx="33" cy="20" r="1.8" fill={accentColor} />
-          <circle cx="33" cy="20" r="0.7" fill="#1e293b" />
-          <path d="M29.5 18 Q33 16 36.5 18 L36.5 19.5 Q33 17.5 29.5 19.5Z" fill="#fcd9b6" />
+          <circle cx="23" cy="20" r="2.5" fill={accentColor} opacity="0.25" />
+          <circle cx="23" cy="20" r="1.5" fill={accentColor} opacity="0.7" />
+          <circle cx="33" cy="20" r="2.5" fill={accentColor} opacity="0.25" />
+          <circle cx="33" cy="20" r="1.5" fill={accentColor} opacity="0.7" />
         </>
       );
   }
 }
 
 function ChibiMouth({ mood }: { mood: GuardianMood }) {
+  const c = MOOD_ACCENT[mood];
   switch (mood) {
     case 'COMPOSED':
-      return <path d="M24 26 Q28 29 32 26" stroke="#1e293b" strokeWidth="1.2" fill="none" strokeLinecap="round" />;
+      return <path d="M24 27 Q28 29 32 27" stroke={c} strokeWidth="1.2" fill="none" strokeLinecap="round" opacity="0.7" />;
     case 'ALERT':
-      return <ellipse cx="28" cy="27" rx="2" ry="1.5" fill="#1e293b" />;
+      return <ellipse cx="28" cy="27" rx="2.5" ry="1.5" fill={c} opacity="0.5" />;
     case 'FOCUSED':
-      return <line x1="25" y1="26" x2="31" y2="26" stroke="#1e293b" strokeWidth="1.5" strokeLinecap="round" />;
+      return <line x1="24" y1="27" x2="32" y2="27" stroke={c} strokeWidth="1.5" strokeLinecap="round" opacity="0.6" />;
     case 'CAUTIOUS':
-      return <path d="M23 27 Q25.5 29 28 27 Q30.5 25 33 27" stroke="#1e293b" strokeWidth="1.2" fill="none" strokeLinecap="round" />;
+      return <path d="M24 28 Q28 26 32 28" stroke={c} strokeWidth="1.2" fill="none" strokeLinecap="round" opacity="0.6" />;
     case 'CELEBRATORY':
-      return (
-        <>
-          <path d="M22 25 Q28 32 34 25" stroke="#1e293b" strokeWidth="1.5" fill="none" strokeLinecap="round" />
-          <path d="M23 26 Q28 30 33 26" fill="white" opacity="0.8" />
-        </>
-      );
+      return <path d="M23 26 Q28 31 33 26" stroke={c} strokeWidth="1.5" fill="none" strokeLinecap="round" opacity="0.8" />;
     case 'REFLECTIVE':
-      return <path d="M25 27 Q28 29 31 27" stroke="#1e293b" strokeWidth="1" fill="none" strokeLinecap="round" />;
+      return <path d="M25 27 Q28 29 31 27" stroke={c} strokeWidth="1" fill="none" strokeLinecap="round" opacity="0.5" />;
     case 'VIGILANT':
-      return <line x1="24" y1="26" x2="32" y2="26" stroke="#1e293b" strokeWidth="1.5" strokeLinecap="round" />;
+      return <line x1="24" y1="27" x2="32" y2="27" stroke={c} strokeWidth="1.5" strokeLinecap="round" opacity="0.7" />;
     case 'CONTEMPLATIVE':
-      return <path d="M25 27 Q28 29 31 27" stroke="#1e293b" strokeWidth="1" fill="none" strokeLinecap="round" />;
+      return <path d="M25 28 Q28 29 31 28" stroke={c} strokeWidth="1" fill="none" strokeLinecap="round" opacity="0.5" />;
   }
 }
 
@@ -259,62 +249,53 @@ function ChibiAccessories({ mood, accentColor }: { mood: GuardianMood; accentCol
 }
 
 function ChibiTrader({ mood, accentColor }: { mood: GuardianMood; accentColor: string }) {
-  const isReflective = mood === 'REFLECTIVE';
-
   return (
     <svg viewBox="0 0 56 56" className="w-full h-full" style={{ overflow: 'visible' }}>
-      <ellipse cx="28" cy="12" rx="13" ry="7" fill="#4a3728" />
+      <defs>
+        <linearGradient id="helmet-grad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#334155" />
+          <stop offset="100%" stopColor="#1e293b" />
+        </linearGradient>
+        <linearGradient id="visor-grad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor={accentColor} stopOpacity="0.9" />
+          <stop offset="100%" stopColor={accentColor} stopOpacity="0.5" />
+        </linearGradient>
+        <filter id="glow-f">
+          <feGaussianBlur stdDeviation="1.5" result="blur" />
+          <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+        </filter>
+      </defs>
 
-      <circle cx="16" cy="21" r="2.5" fill="#fcd9b6" />
-      <circle cx="40" cy="21" r="2.5" fill="#fcd9b6" />
+      <rect x="26" y="2" width="4" height="6" rx="2" fill="#475569" />
+      <circle cx="28" cy="2" r="2.5" fill={accentColor} opacity="0.8" />
 
-      <circle cx="28" cy="20" r="11" fill="#fcd9b6" />
+      <circle cx="28" cy="22" r="14" fill="url(#helmet-grad)" />
+      <circle cx="28" cy="22" r="12.5" fill="#1e293b" />
 
-      <path d="M16 18 Q18 10 23 11 Q20 14 21 17Z" fill="#4a3728" />
-      <path d="M23 11 Q28 7 33 11 Q28 10 23 11Z" fill="#4a3728" />
-      <path d="M33 11 Q38 10 40 18 Q39 14 37 12 Q35 13 33 11Z" fill="#4a3728" />
+      <ellipse cx="28" cy="21" rx="10" ry="7" fill="url(#visor-grad)" opacity="0.15" />
 
-      <circle cx="18" cy="23" r="2.5" fill="#f9a8d4" opacity="0.3" />
-      <circle cx="38" cy="23" r="2.5" fill="#f9a8d4" opacity="0.3" />
-
-      <ChibiEyes mood={mood} accentColor={accentColor} />
-
-      <path d="M27 23 Q28 24.5 29 23" stroke="#d4a574" strokeWidth="0.8" fill="none" strokeLinecap="round" />
+      <g filter="url(#glow-f)">
+        <ChibiEyes mood={mood} accentColor={accentColor} />
+      </g>
 
       <ChibiMouth mood={mood} />
 
-      <rect x="25" y="30" width="6" height="4" rx="2" fill="#fcd9b6" />
+      <circle cx="15" cy="22" r="2.5" fill="#334155" stroke="#475569" strokeWidth="0.5" />
+      <circle cx="15" cy="22" r="1" fill={accentColor} opacity="0.6" />
+      <circle cx="41" cy="22" r="2.5" fill="#334155" stroke="#475569" strokeWidth="0.5" />
+      <circle cx="41" cy="22" r="1" fill={accentColor} opacity="0.6" />
 
-      <path d="M19 33 L15 52 L41 52 L37 33 Q28 37 19 33Z" fill="#1e293b" />
+      <path d="M22 35 L18 36 Q16 42 17 48 L20 48 Q19 43 21 38Z" fill="#334155" />
+      <circle cx="17" cy="48" r="2" fill="#475569" />
+      <circle cx="17" cy="48" r="1" fill={accentColor} opacity="0.4" />
+      <path d="M34 35 L38 36 Q40 42 39 48 L36 48 Q37 43 35 38Z" fill="#334155" />
+      <circle cx="39" cy="48" r="2" fill="#475569" />
+      <circle cx="39" cy="48" r="1" fill={accentColor} opacity="0.4" />
 
-      <path d="M24 33 L28 40 L32 33" fill="#e2e8f0" />
-
-      <path d="M24 33 L27 39 L25 39 L21.5 34Z" fill={accentColor} opacity="0.5" />
-      <path d="M32 33 L29 39 L31 39 L34.5 34Z" fill={accentColor} opacity="0.5" />
-
-      <path d="M27.2 35 L28.8 35 L28.5 36.5 L27.5 36.5Z" fill={accentColor} />
-      <path
-        d="M27.5 36.5 L28.5 36.5 L29 44 L27 44Z"
-        fill={accentColor}
-        opacity="0.85"
-        transform="rotate(3,28,40)"
-      />
-
-      {isReflective ? (
-        <>
-          <path d="M19 35 Q13 42 12 48" stroke="#1e293b" strokeWidth="4.5" fill="none" strokeLinecap="round" />
-          <circle cx="12" cy="48" r="2.2" fill="#fcd9b6" />
-          <path d="M37 35 Q40 30 35 27" stroke="#1e293b" strokeWidth="4.5" fill="none" strokeLinecap="round" />
-          <circle cx="35" cy="27" r="2.2" fill="#fcd9b6" />
-        </>
-      ) : (
-        <>
-          <path d="M19 35 Q13 42 12 48" stroke="#1e293b" strokeWidth="4.5" fill="none" strokeLinecap="round" />
-          <circle cx="12" cy="48" r="2.2" fill="#fcd9b6" />
-          <path d="M37 35 Q43 42 44 48" stroke="#1e293b" strokeWidth="4.5" fill="none" strokeLinecap="round" />
-          <circle cx="44" cy="48" r="2.2" fill="#fcd9b6" />
-        </>
-      )}
+      <path d="M22 34 Q28 38 34 34 L34 44 Q28 48 22 44Z" fill="#334155" />
+      <path d="M25 37 L28 42 L31 37" fill="none" stroke={accentColor} strokeWidth="1" strokeLinecap="round" opacity="0.7" />
+      <line x1="24" y1="40" x2="32" y2="40" stroke={accentColor} strokeWidth="0.5" opacity="0.3" />
+      <line x1="24" y1="42" x2="32" y2="42" stroke={accentColor} strokeWidth="0.5" opacity="0.3" />
 
       <ChibiAccessories mood={mood} accentColor={accentColor} />
     </svg>

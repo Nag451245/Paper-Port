@@ -156,16 +156,16 @@ function MiniChibi({
   size?: 'sm' | 'lg';
 }) {
   const isLg = size === 'lg';
-  const containerClass = isLg ? 'w-12 h-12' : 'w-8 h-8';
-  const svgClass = isLg ? 'w-10 h-10' : 'w-[26px] h-[26px]';
+  const containerClass = isLg ? 'w-14 h-14' : 'w-9 h-9';
+  const svgClass = isLg ? 'w-11 h-11' : 'w-7 h-7';
   const glowStyle = isLg
-    ? { backgroundColor: `${moodColor}15`, boxShadow: `0 0 16px ${moodColor}30` }
-    : { backgroundColor: `${moodColor}20`, boxShadow: `0 0 10px ${moodColor}40` };
+    ? { backgroundColor: `${moodColor}15`, boxShadow: `0 0 20px ${moodColor}35, inset 0 0 8px ${moodColor}10` }
+    : { backgroundColor: `${moodColor}18`, boxShadow: `0 0 12px ${moodColor}40` };
 
   return (
     <div
       className={`rounded-full flex items-center justify-center shrink-0 ${containerClass}`}
-      style={glowStyle}
+      style={{ ...glowStyle, border: `1px solid ${moodColor}30` }}
     >
       <svg
         className={svgClass}
@@ -174,19 +174,16 @@ function MiniChibi({
         xmlns="http://www.w3.org/2000/svg"
         aria-hidden
       >
-        <path
-          d="M 7 12 C 7 6 25 6 25 12 C 25 10 23 7 16 7 C 9 7 7 10 7 12 Z"
-          fill="#4a3728"
-        />
-        <circle cx="16" cy="17" r="9" fill="#fcd9b6" />
+        <rect x="14.5" y="1" width="3" height="4" rx="1.5" fill="#475569" />
+        <circle cx="16" cy="1.5" r="1.5" fill={moodColor} opacity="0.8" />
+        <circle cx="16" cy="16" r="10" fill="#1e293b" />
+        <circle cx="16" cy="16" r="9" fill="#0f172a" stroke="#334155" strokeWidth="0.5" />
         <ChibiEyes mood={mood} moodColor={moodColor} />
-        <path
-          d="M 13 20.5 Q 16 23 19 20.5"
-          stroke="#4a3728"
-          strokeWidth="1.1"
-          strokeLinecap="round"
-          fill="none"
-        />
+        <path d="M13 20 Q16 22 19 20" stroke={moodColor} strokeWidth="0.8" fill="none" strokeLinecap="round" opacity="0.6" />
+        <circle cx="6.5" cy="16" r="1.5" fill="#334155" />
+        <circle cx="6.5" cy="16" r="0.6" fill={moodColor} opacity="0.5" />
+        <circle cx="25.5" cy="16" r="1.5" fill="#334155" />
+        <circle cx="25.5" cy="16" r="0.6" fill={moodColor} opacity="0.5" />
       </svg>
     </div>
   );
@@ -196,22 +193,24 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
   const isGuardian = msg.role === 'guardian';
 
   return (
-    <div className={isGuardian ? '' : 'ml-auto'} style={{ maxWidth: '85%' }}>
-      <p className={`text-xs mb-0.5 ${isGuardian ? 'text-teal-400' : 'text-teal-300 text-right'}`}>
-        {isGuardian ? 'Chitti' : 'You'}
-      </p>
-      <div
-        className={
-          isGuardian
-            ? 'bg-slate-800 text-slate-100 rounded-xl rounded-tl-none px-3.5 py-2.5 text-sm leading-relaxed'
-            : 'bg-teal-600 text-white rounded-xl rounded-tr-none px-3.5 py-2.5 text-sm leading-relaxed'
-        }
-      >
-        {msg.content}
+    <div className={`flex ${isGuardian ? 'justify-start' : 'justify-end'}`}>
+      <div style={{ maxWidth: '82%' }}>
+        <p className={`text-[10px] font-medium mb-1 tracking-wide uppercase ${isGuardian ? 'text-teal-400/70' : 'text-cyan-300/70 text-right'}`}>
+          {isGuardian ? 'Chitti' : 'You'}
+        </p>
+        <div
+          className={
+            isGuardian
+              ? 'bg-gradient-to-br from-slate-800 to-slate-800/80 text-slate-100 rounded-2xl rounded-tl-sm px-4 py-3 text-sm leading-relaxed border border-slate-700/50'
+              : 'bg-gradient-to-br from-teal-600 to-teal-700 text-white rounded-2xl rounded-tr-sm px-4 py-3 text-sm leading-relaxed shadow-lg shadow-teal-900/20'
+          }
+        >
+          {msg.content}
+        </div>
+        <p className={`text-[10px] text-slate-500/70 mt-1 ${isGuardian ? '' : 'text-right'}`}>
+          {formatTime(msg.timestamp)}
+        </p>
       </div>
-      <p className={`text-xs text-slate-500 mt-1 ${isGuardian ? '' : 'text-right'}`}>
-        {formatTime(msg.timestamp)}
-      </p>
     </div>
   );
 }
@@ -285,51 +284,65 @@ export default function GuardianChatPanel() {
 
   return (
     <div
-      className={`fixed z-50 flex flex-col rounded-2xl shadow-2xl overflow-hidden
+      className={`fixed z-50 flex flex-col rounded-2xl overflow-hidden
         bottom-20 right-4 sm:bottom-6 sm:right-6
-        transition-all duration-200 ease-out
-        ${isExpanded ? 'scale-100 opacity-100' : 'scale-95 opacity-0 pointer-events-none'}`}
+        transition-all duration-300 ease-out
+        ${isExpanded ? 'scale-100 opacity-100' : 'scale-90 opacity-0 pointer-events-none'}`}
       style={{
-        width: 380,
-        maxHeight: 600,
-        backgroundColor: '#0f172a',
+        width: 390,
+        maxHeight: 620,
+        backgroundColor: '#0b1120',
         borderWidth: 1,
         borderStyle: 'solid',
-        borderColor: moodColor,
-        boxShadow: `0 0 20px ${moodColor}22, 0 25px 50px -12px rgba(0,0,0,0.5)`,
+        borderColor: `${moodColor}40`,
+        boxShadow: `0 0 30px ${moodColor}18, 0 0 60px ${moodColor}08, 0 25px 50px -12px rgba(0,0,0,0.6)`,
       }}
     >
-      {/* Header */}
-      <div className="flex items-start gap-3 px-4 py-3">
+      <div
+        className="flex items-center gap-3 px-4 py-3.5"
+        style={{
+          background: `linear-gradient(135deg, ${moodColor}12 0%, transparent 60%)`,
+          borderBottom: `1px solid ${moodColor}25`,
+        }}
+      >
         <MiniChibi mood={mood} moodColor={moodColor} size="sm" />
 
-        <div className="flex-1 min-w-0 pt-0.5">
-          <p className="text-sm font-bold tracking-widest text-white/90">CHITTI</p>
-          <p className="text-xs" style={{ color: moodColor }}>
-            The Trader · {MOOD_LABELS[mood]}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <p className="text-sm font-bold tracking-[0.15em] text-white/90">CHITTI</p>
+            <span
+              className="w-1.5 h-1.5 rounded-full animate-pulse"
+              style={{ backgroundColor: moodColor }}
+            />
+          </div>
+          <p className="text-[11px] text-slate-400">
+            AI Trading Companion · <span style={{ color: moodColor }}>{MOOD_LABELS[mood]}</span>
           </p>
         </div>
 
         <button
           onClick={() => setExpanded(false)}
-          className="shrink-0 p-1 rounded hover:bg-white/10 transition-colors"
+          className="shrink-0 p-1.5 rounded-lg hover:bg-white/10 transition-colors"
         >
           <X className="w-4 h-4 text-slate-400" />
         </button>
       </div>
 
-      {/* Mood Strip */}
-      <div className="h-0.5 w-full" style={{ backgroundColor: moodColor }} />
+      <div
+        className="h-px w-full"
+        style={{ background: `linear-gradient(90deg, transparent, ${moodColor}60, transparent)` }}
+      />
 
-      {/* Chat Area */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-3" style={{ minHeight: 200 }}>
+      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4" style={{ minHeight: 220 }}>
         {isEmpty && (
-          <div className="flex flex-col items-center justify-center h-full gap-3 py-10">
+          <div className="flex flex-col items-center justify-center h-full gap-4 py-12">
             <MiniChibi mood={mood} moodColor={moodColor} size="lg" />
-            <p className="text-slate-400 italic text-sm text-center max-w-[250px] leading-relaxed">
-              I am Chitti. I see everything this platform sees — every trade, every signal, every risk. Ask me
-              anything.
-            </p>
+            <div className="text-center max-w-[260px]">
+              <p className="text-white/80 font-medium text-sm mb-1">Ready to assist</p>
+              <p className="text-slate-500 text-xs leading-relaxed">
+                I monitor every trade, signal, and risk metric in real-time. Ask me anything about your portfolio.
+              </p>
+            </div>
           </div>
         )}
 
@@ -340,14 +353,18 @@ export default function GuardianChatPanel() {
         {isTyping && <TypingIndicator />}
       </div>
 
-      {/* Context Suggestions */}
       {showSuggestions && (
-        <div className="flex flex-wrap gap-1.5 px-4 pb-2">
+        <div className="flex flex-wrap gap-1.5 px-4 pb-3">
           {suggestions.map((text) => (
             <button
               key={text}
               onClick={() => void handleSend(text)}
-              className="bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 px-3 py-1 rounded-full transition-colors"
+              className="text-xs px-3 py-1.5 rounded-full transition-all duration-200 hover:scale-105"
+              style={{
+                backgroundColor: `${moodColor}12`,
+                color: `${moodColor}`,
+                border: `1px solid ${moodColor}25`,
+              }}
             >
               {text}
             </button>
@@ -355,10 +372,13 @@ export default function GuardianChatPanel() {
         </div>
       )}
 
-      {/* Input Area */}
       <form
         onSubmit={handleSubmit}
-        className="flex items-center gap-2 px-3 py-2.5 border-t border-slate-700 bg-slate-800/80 backdrop-blur-sm"
+        className="flex items-center gap-2 px-3 py-3 border-t backdrop-blur-sm"
+        style={{
+          borderColor: `${moodColor}15`,
+          background: 'linear-gradient(180deg, #0f172a 0%, #0b1120 100%)',
+        }}
       >
         <input
           ref={inputRef}
@@ -367,12 +387,20 @@ export default function GuardianChatPanel() {
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="Ask Chitti..."
-          className="flex-1 bg-slate-700 text-white placeholder-slate-400 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-teal-500/50"
+          className="flex-1 bg-slate-800/80 text-white placeholder-slate-500 rounded-xl px-4 py-2.5 text-sm outline-none transition-all duration-200"
+          style={{
+            border: `1px solid ${moodColor}20`,
+            boxShadow: input.trim() ? `0 0 8px ${moodColor}15` : 'none',
+          }}
         />
         <button
           type="submit"
           disabled={!canSend}
-          className="w-10 h-10 rounded-xl bg-teal-600 hover:bg-teal-500 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition-colors shrink-0"
+          className="w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 shrink-0 disabled:opacity-30 disabled:cursor-not-allowed"
+          style={{
+            background: canSend ? `linear-gradient(135deg, ${moodColor}, ${moodColor}cc)` : '#1e293b',
+            boxShadow: canSend ? `0 4px 12px ${moodColor}30` : 'none',
+          }}
         >
           <Send className="w-4 h-4 text-white" />
         </button>

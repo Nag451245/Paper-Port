@@ -554,7 +554,7 @@ ${memoriesContext}`;
 
       const content = await chatCompletion({
         messages,
-        model: 'gemini-2.5-pro',
+        model: 'gemini-2.5-flash',
         temperature,
       });
 
@@ -709,7 +709,7 @@ Generate a single brief observation, insight, or alert (1-2 sentences max). Rule
           { role: 'system', content: prompt },
           { role: 'user', content: 'Share your current thought.' },
         ],
-        model: 'gemini-2.5-pro',
+        model: 'gemini-2.5-flash',
         temperature: MOOD_TEMPERATURES[state.mood as MoodType] ?? 0.5,
         maxTokens: 200,
       });
