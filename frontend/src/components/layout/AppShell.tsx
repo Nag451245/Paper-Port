@@ -32,9 +32,7 @@ function GuardianErrorFallback() {
 function SafeGuardianWrapper() {
   const [hasError, setHasError] = useState(false);
 
-  useEffect(() => {
-    console.log('[AppShell] SafeGuardianWrapper mounted');
-  }, []);
+  useEffect(() => {}, []);
 
   if (hasError) {
     return <GuardianErrorFallback />;
@@ -49,7 +47,6 @@ function SafeGuardianWrapper() {
 
 function GuardianWrapperInner({ onError }: { onError: () => void }) {
   useEffect(() => {
-    console.log('[AppShell] GuardianWrapperInner mounted — all Guardian chunks loaded');
     window.addEventListener('error', (e) => {
       if (e.message?.includes('Guardian') || e.message?.includes('guardian')) {
         onError();
@@ -69,9 +66,7 @@ function GuardianWrapperInner({ onError }: { onError: () => void }) {
 export default function AppShell() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
-  useEffect(() => {
-    console.log('[AppShell] Mounted');
-  }, []);
+  useEffect(() => {}, []);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/30 to-indigo-50/20 text-slate-900">
@@ -91,44 +86,6 @@ export default function AppShell() {
       </main>
 
       <GuardianPageTracker />
-
-      {/* Inline test avatar — if this shows, the layout supports fixed positioning */}
-      <div
-        id="chitti-test-beacon"
-        style={{
-          position: 'fixed',
-          bottom: 24,
-          right: 24,
-          zIndex: 99999,
-          width: 60,
-          height: 60,
-          borderRadius: '50%',
-          background: 'linear-gradient(135deg, #0d9488, #2563eb)',
-          boxShadow: '0 0 20px rgba(45,212,191,0.6), 0 4px 12px rgba(0,0,0,0.3)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          cursor: 'pointer',
-          border: '2px solid rgba(255,255,255,0.3)',
-          animation: 'guardian-breathe 3s ease-in-out infinite',
-        }}
-      >
-        <svg viewBox="0 0 56 56" style={{ width: 44, height: 44, overflow: 'visible' }}>
-          <circle cx="28" cy="20" r="11" fill="#fcd9b6" />
-          <ellipse cx="28" cy="12" rx="13" ry="7" fill="#4a3728" />
-          <path d="M19 20 Q23 16 27 20" stroke="#1e293b" strokeWidth="1.8" fill="none" strokeLinecap="round" />
-          <path d="M29 20 Q33 16 37 20" stroke="#1e293b" strokeWidth="1.8" fill="none" strokeLinecap="round" />
-          <path d="M24 26 Q28 29 32 26" stroke="#1e293b" strokeWidth="1.2" fill="none" strokeLinecap="round" />
-          <path d="M19 33 L15 52 L41 52 L37 33 Q28 37 19 33Z" fill="#1e293b" />
-        </svg>
-      </div>
-      <style dangerouslySetInnerHTML={{ __html: `
-        @keyframes guardian-breathe {
-          0%, 100% { transform: scale(1); }
-          50% { transform: scale(1.06); }
-        }
-      ` }} />
-
       <SafeGuardianWrapper />
     </div>
   );

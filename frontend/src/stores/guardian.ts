@@ -343,7 +343,7 @@ export const useGuardianStore = create<GuardianStore>((set, get) => ({
       const { data } = await api.post<unknown>('/guardian/chat', {
         message: trimmed,
         pageContext: get().pageContext,
-      });
+      }, { timeout: 60_000 });
       const d = asRecord(data);
       const text = d.content ?? d.message ?? d.response ?? d.reply;
       const guardianContent = typeof text === 'string' ? text : text != null ? String(text) : '';
