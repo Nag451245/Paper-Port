@@ -57,10 +57,10 @@ fi
 if $BUILD_SERVER; then
   echo "[3] Rebuilding server..."
   cd "$APP_DIR/server"
-  npm ci
+  npm ci --production
   npx prisma generate
   npx prisma migrate deploy 2>/dev/null || true
-  npm run build
+  npx -y typescript tsc
   if [ $? -eq 0 ]; then
     echo "  Server build succeeded."
   else
@@ -74,8 +74,8 @@ fi
 if $BUILD_FRONTEND; then
   echo "[4] Rebuilding frontend..."
   cd "$APP_DIR/frontend"
-  npm ci
-  npm run build
+  npm ci --production
+  npx -y vite build
   if [ $? -eq 0 ]; then
     echo "  Frontend build succeeded."
   else

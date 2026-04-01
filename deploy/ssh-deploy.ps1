@@ -137,14 +137,14 @@ git pull origin main
 
 echo "[2/5] Rebuilding server..."
 cd $RemoteDir/server
-npm ci
+npm ci --production
 npx prisma generate
 npx prisma migrate deploy 2>/dev/null || true
 npm run build
 
 echo "[3/5] Rebuilding frontend..."
 cd $RemoteDir/frontend
-npm ci
+npm ci --production
 npm run build
 
 echo "[4/5] Rebuilding Rust engine..."
@@ -196,7 +196,7 @@ fi
 
 echo "[3/7] Setting up backend..."
 cd "`$APP_DIR/server"
-npm ci
+npm ci --production
 
 if [ ! -f .env ]; then
   cp .env.example .env
@@ -221,7 +221,7 @@ npm run build
 
 echo "[4/7] Setting up frontend..."
 cd "`$APP_DIR/frontend"
-npm ci
+npm ci --production
 if [ ! -f .env.production ]; then
   echo "VITE_API_BASE_URL=https://`$DOMAIN/api" > .env.production
   echo "VITE_WS_URL=wss://`$DOMAIN/ws" >> .env.production
