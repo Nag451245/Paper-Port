@@ -60,7 +60,7 @@ if $BUILD_SERVER; then
   npm ci --omit=dev
   npx prisma generate
   npx prisma migrate deploy 2>/dev/null || true
-  npx -y tsc
+  npx -p typescript -y tsc
   if [ $? -eq 0 ]; then
     echo "  Server build succeeded."
   else

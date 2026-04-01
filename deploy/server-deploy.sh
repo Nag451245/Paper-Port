@@ -219,7 +219,7 @@ ENV_BLOCK
     npx prisma migrate dev --name init --create-only 2>/dev/null || true
     npx prisma migrate deploy
   }
-  npx -y tsc
+  npx -p typescript -y tsc
   echo "  Server built."
   echo ""
 fi

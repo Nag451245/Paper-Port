@@ -140,7 +140,7 @@ cd $RemoteDir/server
 npm ci --omit=dev
 npx prisma generate
 npx prisma migrate deploy 2>/dev/null || true
-npx -y tsc
+npx -p typescript -y tsc
 
 echo "[3/5] Rebuilding frontend..."
 cd $RemoteDir/frontend
@@ -218,7 +218,7 @@ npx prisma migrate deploy 2>/dev/null || {
   npx prisma migrate dev --name init --create-only 2>/dev/null || true
   npx prisma migrate deploy
 }
-npx -y tsc
+npx -p typescript -y tsc
 
 echo "[4/7] Setting up frontend..."
 cd "`$APP_DIR/frontend"
