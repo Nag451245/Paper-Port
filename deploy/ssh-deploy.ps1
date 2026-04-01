@@ -137,15 +137,16 @@ git pull origin main
 
 echo "[2/5] Rebuilding server..."
 cd $RemoteDir/server
-npm ci --production
+npm ci --omit=dev
 npx prisma generate
 npx prisma migrate deploy 2>/dev/null || true
-npm run build
+npx -y tsc
 
 echo "[3/5] Rebuilding frontend..."
 cd $RemoteDir/frontend
-npm ci --production
-npm run build
+npm ci
+npx vite build
+rm -rf node_modules
 
 echo "[4/5] Rebuilding Rust engine..."
 if [ -d "$RemoteDir/engine" ]; then
@@ -196,7 +197,7 @@ fi
 
 echo "[3/7] Setting up backend..."
 cd "`$APP_DIR/server"
-npm ci --production
+npm ci --omit=dev
 
 if [ ! -f .env ]; then
   cp .env.example .env
@@ -217,16 +218,17 @@ npx prisma migrate deploy 2>/dev/null || {
   npx prisma migrate dev --name init --create-only 2>/dev/null || true
   npx prisma migrate deploy
 }
-npm run build
+npx -y tsc
 
 echo "[4/7] Setting up frontend..."
 cd "`$APP_DIR/frontend"
-npm ci --production
+npm ci
 if [ ! -f .env.production ]; then
   echo "VITE_API_BASE_URL=https://`$DOMAIN/api" > .env.production
   echo "VITE_WS_URL=wss://`$DOMAIN/ws" >> .env.production
 fi
-npm run build
+npx vite build
+rm -rf node_modules
 
 echo "[5/7] Configuring Nginx..."
 EXTERNAL_IP=`$(curl -s ifconfig.me)

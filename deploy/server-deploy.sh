@@ -187,7 +187,7 @@ fi
 if [[ "$MODE" != "--frontend-only" ]]; then
   echo "[3/8] Building server..."
   cd "$APP_DIR/server"
-  npm ci --production
+  npm ci --omit=dev
 
   if [ ! -f .env ]; then
     if [ -f .env.example ]; then
@@ -219,7 +219,7 @@ ENV_BLOCK
     npx prisma migrate dev --name init --create-only 2>/dev/null || true
     npx prisma migrate deploy
   }
-  npx -y typescript tsc
+  npx -y tsc
   echo "  Server built."
   echo ""
 fi
@@ -230,7 +230,7 @@ fi
 if [[ "$MODE" != "--server-only" ]]; then
   echo "[4/8] Building frontend..."
   cd "$APP_DIR/frontend"
-  npm ci --production
+  npm ci
 
   if [ ! -f .env.production ]; then
     cat > .env.production <<VITE_ENV
@@ -239,7 +239,8 @@ VITE_WS_URL=wss://$DOMAIN/ws
 VITE_ENV
   fi
 
-  npx -y vite build
+  npx vite build
+  rm -rf node_modules
   echo "  Frontend built."
   echo ""
 fi
