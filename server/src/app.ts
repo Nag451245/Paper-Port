@@ -419,8 +419,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     } catch (err) { console.error('[GlobalMarket Cron] Error:', (err as Error).message); }
   });
 
-  // Intra-day intelligence refresh disabled to reduce Gemini API costs.
-  // Only the 08:45 pre-market scan runs (see above).
+  // Intra-day intelligence refresh — every 30 min during market hours (9:15-15:30 IST = 3:45-10:00 UTC)
+  orchestrator.scheduleMarketDay('*/30 3-10 * * 1-5', async () => {
+    try {
+      await globalMarketService.runDailyIntelligenceScan();
+    } catch (err) { app.log.warn(`[GlobalMarket] Intraday refresh failed: ${(err as Error).message}`); }
+  });
 
   // Morning boot — only on market days
   orchestrator.scheduleMarketDay('20 3 * * 1-5', async () => {
