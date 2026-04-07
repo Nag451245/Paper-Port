@@ -174,7 +174,7 @@ export function registerAllWorkers(prisma, learningEngine, botEngine) {
                 if ('userId' in event) {
                     wsHub.broadcastToUser(event.userId, { type: 'signal_generated', data: event });
                     const confidence = event.confidence ?? 0;
-                    if (confidence >= 0.5) {
+                    if (confidence >= 0.3) {
                         telegram.notifySignal(event.userId, event.symbol, event.direction ?? 'LONG', confidence, event.entry ?? 0, event.target ?? 0, event.stopLoss ?? 0, event.source).catch(err => log.warn({ err }, 'Telegram signal notification failed'));
                     }
                 }

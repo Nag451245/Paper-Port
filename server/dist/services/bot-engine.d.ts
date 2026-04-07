@@ -64,6 +64,7 @@ export declare class BotEngine {
     private decisionFusion;
     private lessonsEngine;
     private regimeDetector;
+    private telegramService;
     constructor(prisma: PrismaClient, oms?: OrderManagementService);
     /**
      * Load trained ML weights from the database (persisted by nightly LearningEngine).

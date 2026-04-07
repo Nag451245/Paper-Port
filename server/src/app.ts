@@ -419,12 +419,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     } catch (err) { console.error('[GlobalMarket Cron] Error:', (err as Error).message); }
   });
 
-  // Intra-day intelligence refresh — every 30 min during market hours (9:15-15:30 IST = 3:45-10:00 UTC)
-  orchestrator.scheduleMarketDay('*/30 3-10 * * 1-5', async () => {
-    try {
-      await globalMarketService.runDailyIntelligenceScan();
-    } catch (err) { app.log.warn(`[GlobalMarket] Intraday refresh failed: ${(err as Error).message}`); }
-  });
+  // Intra-day intelligence refresh disabled to reduce Gemini API costs.
+  // Only the 08:45 pre-market scan runs (see above).
 
   // Morning boot — only on market days
   orchestrator.scheduleMarketDay('20 3 * * 1-5', async () => {
@@ -608,8 +604,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
   });
 
-  // Guardian proactive thought generation — every 3 min during market hours
-  orchestrator.scheduleMarketDay('*/3 3-10 * * 1-5', async () => {
+  // Guardian proactive thought generation — every 60 min during market hours (reduced from 3 min to cut Gemini costs)
+  orchestrator.scheduleMarketDay('0 4-10 * * 1-5', async () => {
     try {
       const prisma = getPrisma();
       const users = await prisma.user.findMany({ where: { isActive: true }, select: { id: true } });
@@ -618,7 +614,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         const lastThoughtAge = state.lastThoughtAt
           ? Date.now() - new Date(state.lastThoughtAt).getTime()
           : Infinity;
-        if (lastThoughtAge > 3 * 60 * 1000) {
+        if (lastThoughtAge > 55 * 60 * 1000) {
           await guardianService.getAwareness(u.id);
           await guardianService.generateThought(u.id);
         }

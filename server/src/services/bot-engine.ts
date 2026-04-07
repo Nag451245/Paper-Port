@@ -25,6 +25,7 @@ import { mlScore, isMLServiceAvailable, mlScoreSequence, mlScoreTFT, mlEnsembleS
 import { StrategyRegistry, type Bar as StrategyBar, type Signal as StrategySignal } from './strategy-sdk.js';
 import { RegimeDetectorService } from './regime-detector.service.js';
 import { PortfolioOptimizerService } from './portfolio-optimizer.service.js';
+import { TelegramService } from './telegram.service.js';
 
 const log = createChildLogger('BotEngine');
 
@@ -245,6 +246,7 @@ export class BotEngine {
   private decisionFusion = new DecisionFusionService();
   private lessonsEngine = new LessonsEngineService();
   private regimeDetector: RegimeDetectorService;
+  private telegramService: TelegramService;
 
   constructor(private prisma: PrismaClient, oms?: OrderManagementService) {
     this.tradeService = new TradeService(prisma, oms);
@@ -256,6 +258,7 @@ export class BotEngine {
     this.twapExecutor = new TWAPExecutor(prisma);
     this.twapExecutor.setTradeService(this.tradeService);
     this.regimeDetector = new RegimeDetectorService(prisma);
+    this.telegramService = new TelegramService(prisma);
     this._rustAvailable = isEngineAvailable();
     console.log(`[BotEngine] Initialized — Rust engine: ${this._rustAvailable ? 'AVAILABLE' : 'NOT FOUND (using Gemini AI only)'}`);
 
@@ -898,76 +901,8 @@ export class BotEngine {
         }
       }
 
-      // --- GPT fallback: runs when Rust is unavailable OR Rust produced no signals ---
-      if (signals.length === 0 && uniqueSymbols.length > 0) {
-        try {
-          const topMovers = uniqueSymbols.slice(0, 15);
-          const moverSummary = topMovers.map(m => {
-            const dayRange = m.high > 0 ? `Range: ₹${m.low.toFixed(2)}-₹${m.high.toFixed(2)}` : '';
-            const volStr = m.volume > 0 ? `Vol: ${(m.volume / 100000).toFixed(1)}L` : '';
-            return `${m.symbol} (${(m as any).moverType}): ₹${m.ltp.toFixed(2)} (${m.changePercent >= 0 ? '+' : ''}${m.changePercent.toFixed(1)}%) | Open: ₹${m.open.toFixed(2)} | PrevClose: ₹${m.previousClose.toFixed(2)} | ${dayRange} | ${volStr}`;
-          }).join('\n');
-
-          const gptResult = await chatCompletionJSON<{
-            signals: Array<{
-              symbol: string;
-              direction: 'BUY' | 'SELL';
-              confidence: number;
-              entry: number;
-              stopLoss: number;
-              target: number;
-              reason: string;
-            }>;
-          }>({
-            messages: [
-              { role: 'system', content: `You are a professional market scanner for Indian equities (NSE).
-Analyze the top movers and generate 3-5 actionable trade signals with precise price levels.
-
-For each signal, you MUST provide:
-- entry: the exact price to enter (use current LTP or a level nearby)
-- stopLoss: a specific price level (typically 1-2% from entry for intraday)
-- target: a specific price level (minimum 1:1.5 risk/reward ratio)
-- reason: a technical reason referencing actual prices and patterns from the data
-
-Rules:
-- In a falling market, generate MORE SELL/SHORT signals
-- In a rising market, generate MORE BUY signals
-- Use the actual OHLC data to set stop-loss at previous support/resistance
-- Calculate risk/reward: (target-entry)/(entry-stopLoss) should be >= 1.5
-- This is paper trading — be aggressive, generate at least 3 signals
-
-Respond in JSON: {"signals": [{"symbol":"X","direction":"BUY|SELL","confidence":0.0-1.0,"entry":price,"stopLoss":price,"target":price,"reason":"specific technical reason"}]}
-IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra text outside JSON.` },
-              { role: 'user', content: `Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n\nTop Movers:\n${moverSummary}\n\nGenerate detailed trade signals with entry, stop-loss, and target prices.` },
-            ],
-            temperature: 0.3,
-            maxTokens: 4096,
-          });
-
-          if (gptResult.signals) {
-            for (const sig of gptResult.signals) {
-              if (sig.confidence < 0.6) continue;
-              const mover = moverMap.get(sig.symbol);
-              signals.push({
-                symbol: sig.symbol,
-                name: mover?.name ?? sig.symbol,
-                direction: sig.direction,
-                confidence: sig.confidence,
-                ltp: mover?.ltp ?? sig.entry,
-                changePercent: mover?.changePercent ?? 0,
-                entry: sig.entry,
-                stopLoss: sig.stopLoss,
-                target: sig.target,
-                indicators: {},
-                votes: {},
-                moverType: (mover as any)?.moverType ?? 'gainer',
-              });
-            }
-          }
-        } catch {
-          /* GPT scan failed — will retry next cycle */
-        }
-      }
+      // GPT fallback removed to reduce Gemini API costs.
+      // Rust engine is the sole signal source for market scans.
 
       // Enrich scan signals with VIX context when available
       try {
@@ -1722,9 +1657,8 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
 
       // Pyramiding disabled — was causing bots to pile up on existing positions
 
-      // --- Step 2: GPT/Gemini analysis (always runs for market commentary + AI signals) ---
-      console.log(`[BotEngine] Bot ${botId}: running GPT/Gemini analysis cycle`);
-      await this.runGptBotCycle(botId, userId, bot, symbols);
+      // GPT/Gemini bot cycle disabled to reduce API costs (~92% reduction).
+      // Rust engine signals via handleRustSignals (Step 1) are the primary signal source.
 
       // --- Step 3: Executor bots pick up pending high-confidence signals ---
       if (bot.role === 'EXECUTOR' || bot.role === 'SCANNER') {
@@ -1878,7 +1812,8 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
     }
 
     for (const sig of prioritized.slice(0, 5)) {
-      const gptApproved = await this.gptValidateSignal(sig, bot, userId);
+      // Use ML-only validation for all bot roles (no Gemini API cost)
+      const gptApproved = await this.mlValidateSignal(sig);
 
       // --- Intelligent Trading Brain: ML scoring + memory gate ---
       let fusionDecision: any = null;
@@ -2183,6 +2118,20 @@ IMPORTANT: Keep each reason under 30 words. Return at most 5 signals. No extra t
         log.info({ count: qualifying.length }, 'Options signals emitted from Rust engine');
       }
     } catch { /* options signals are best-effort */ }
+
+    // Consolidated Telegram notification for all Rust scan signals
+    if (rustSignals.length > 0) {
+      try {
+        const lines = rustSignals.slice(0, 10).map(sig => {
+          const emoji = sig.direction === 'BUY' ? '🟢' : '🔴';
+          return `${emoji} <b>${sig.direction} ${sig.symbol}</b> @ ₹${sig.entry.toFixed(2)} | Conf: ${(sig.confidence * 100).toFixed(0)}% | SL: ₹${sig.stop_loss.toFixed(2)} | T: ₹${sig.target.toFixed(2)}`;
+        });
+        const summary = `🦀 <b>Rust Engine Scan</b> — ${rustSignals.length} signal(s)${optionsSignalCount > 0 ? ` + ${optionsSignalCount} options` : ''}\n\n${lines.join('\n')}`;
+        await this.telegramService.notifyUser(userId, '🦀 Rust Scan Summary', summary);
+      } catch (err) {
+        log.warn({ err, userId }, 'Failed to send Rust scan Telegram summary');
+      }
+    }
 
     await this.prisma.tradingBot.update({
       where: { id: botId },
@@ -2915,120 +2864,12 @@ INSTRUCTIONS:
               }
             }
           }
-          // Don't return — always continue to GPT for full market analysis
         }
       }
 
-      // --- Step 2: GPT/Gemini analysis (always runs for market view + signals) ---
-      let quotes: string;
-      try {
-        quotes = await this.fetchQuotes(watchSymbols);
-      } catch {
-        quotes = watchSymbols.map(s => `${s}: price data temporarily unavailable`).join('\n');
-      }
-
-      let fnoCtx = '';
-      try {
-        fnoCtx = await this.fetchFnOContext(watchSymbols.slice(0, 3));
-      } catch { /* skip */ }
-
-      const pnlPct = initCap > 0 ? ((nav - initCap) / initCap * 100).toFixed(2) : '0';
-
-      const posInfo = positions.map(p =>
-        `${p.symbol} | ${p.side} ${p.qty}@₹${Number(p.avgEntryPrice).toFixed(1)} | P&L: ₹${Number(p.unrealizedPnl).toFixed(0)}`
-      ).join('\n') || 'No open positions';
-
-      const result = await chatCompletionJSON<{
-        signals: Array<{
-          symbol: string;
-          direction: 'BUY' | 'SELL' | 'HOLD';
-          score: number;
-          rationale: string;
-          entry: number;
-          stopLoss: number;
-          target: number;
-          gateScores: Record<string, number>;
-        }>;
-        marketView: string;
-        riskAlerts: string[];
-      }>({
-        messages: [
-          { role: 'system', content: `You are an AI trading agent for the Indian markets (NSE/BSE for equities, MCX for commodities, CDS for forex).
-Mode: ${config.mode} | Min score: ${config.minSignalScore}
-Analyze the market data and portfolio across all markets. Generate actionable trade signals.
-
-Score each signal through 9 gates (0-100 each):
-g1_trend, g2_momentum, g3_volatility, g4_volume, g5_options_flow,
-g6_global_macro, g7_fii_dii, g8_sentiment, g9_risk
-
-Respond in JSON:
-{
-  "signals": [{"symbol":"X","direction":"BUY|SELL","score":0.0-1.0,"rationale":"why",
-    "entry":0,"stopLoss":0,"target":0,
-    "gateScores":{"g1_trend":75,"g2_momentum":60,...}}],
-  "marketView": "1-2 sentence market view",
-  "riskAlerts": ["any risk warnings"]
-}
-Generate 0-3 signals. Only include high-conviction ones (score >= ${config.minSignalScore}).` },
-          { role: 'user', content: `Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
-Portfolio: NAV ₹${nav.toFixed(0)} | P&L: ${pnlPct}% | Signals today: ${todaySignalCount}/${maxDaily}
-
-Positions:\n${posInfo}
-
-Market Data:\n${quotes}${fnoCtx}
-
-Scan and generate signals. Both BUY and SELL are valid — stocks can be shorted. Keep reasons concise (<30 words each).` },
-        ],
-        temperature: 0.4,
-        maxTokens: 4096,
-      });
-
-      if (result.signals) {
-        for (const sig of result.signals) {
-          if (sig.score >= (config.minSignalScore || 0.6) && (sig.direction === 'BUY' || sig.direction === 'SELL')) {
-            const gptExecThreshold = config.mode === 'AUTONOMOUS' ? 0.55 : config.mode === 'SIGNAL' ? 0.65 : 0.75;
-            const autoExecute = sig.score >= gptExecThreshold;
-
-            // Use GPT-provided gate scores if they have G1-G9 keys, otherwise derive them
-            const hasGates = sig.gateScores && Object.keys(sig.gateScores).some(k => k.startsWith('g1'));
-            const finalGateScores = hasGates
-              ? { source: 'gpt-fallback', ...sig.gateScores }
-              : this.deriveGateScores(sig.score, undefined, undefined, { source: 'gpt-fallback', riskReward: true });
-
-            await this.prisma.aITradeSignal.create({
-              data: {
-                userId,
-                symbol: sig.symbol,
-                signalType: sig.direction,
-                compositeScore: sig.score,
-                gateScores: JSON.stringify(finalGateScores),
-                rationale: `${sig.rationale} | Entry: ₹${sig.entry} | SL: ₹${sig.stopLoss} | Target: ₹${sig.target}`,
-                status: autoExecute ? 'EXECUTED' : 'PENDING',
-                executedAt: autoExecute ? new Date() : null,
-                expiresAt: new Date(Date.now() + 4 * 60 * 60_000),
-              },
-            });
-
-            if (autoExecute) {
-              const gptTradeResult = await this.executeTrade(userId, sig.symbol, sig.direction, sig.rationale, undefined, {
-                confidence: sig.score,
-                ltp: sig.entry,
-                signalSource: 'AI_AGENT',
-                stopLoss: sig.stopLoss,
-                target: sig.target,
-              });
-              if (!gptTradeResult.success) {
-                await this.prisma.aITradeSignal.updateMany({
-                  where: { userId, symbol: sig.symbol, status: 'EXECUTED', executedAt: { not: null } },
-                  data: { status: 'PENDING', executedAt: null },
-                });
-                console.log(`[BotEngine] Agent: rolled back EXECUTED → PENDING for ${sig.symbol}: ${gptTradeResult.message}`);
-              }
-            }
-          }
-        }
-        console.log(`[BotEngine] Agent cycle completed — ${result.signals?.length ?? 0} signals, view: ${result.marketView?.substring(0, 80) ?? 'N/A'}`);
-      }
+      // GPT/Gemini agent analysis disabled to reduce API costs.
+      // Rust engine signals (Step 1 above) are the sole signal source.
+      console.log(`[BotEngine] Agent cycle completed — Rust-only mode`);
     } catch (err) {
       console.error(`[BotEngine] Agent cycle error:`, (err as Error).message);
     }
