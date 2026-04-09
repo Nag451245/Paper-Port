@@ -419,8 +419,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     } catch (err) { console.error('[GlobalMarket Cron] Error:', (err as Error).message); }
   });
 
-  // Intra-day intelligence refresh — every 30 min during market hours (9:15-15:30 IST = 3:45-10:00 UTC)
-  orchestrator.scheduleMarketDay('*/30 3-10 * * 1-5', async () => {
+  // Intra-day intelligence refresh — every 2 hours during market hours (reduced from 30 min to cut Gemini costs)
+  orchestrator.scheduleMarketDay('0 5,7,9 * * 1-5', async () => {
     try {
       await globalMarketService.runDailyIntelligenceScan();
     } catch (err) { app.log.warn(`[GlobalMarket] Intraday refresh failed: ${(err as Error).message}`); }
@@ -608,25 +608,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
   });
 
-  // Guardian proactive thought generation — every 60 min during market hours (reduced from 3 min to cut Gemini costs)
-  orchestrator.scheduleMarketDay('0 4-10 * * 1-5', async () => {
-    try {
-      const prisma = getPrisma();
-      const users = await prisma.user.findMany({ where: { isActive: true }, select: { id: true } });
-      for (const u of users) {
-        const state = await guardianService.getOrCreateState(u.id);
-        const lastThoughtAge = state.lastThoughtAt
-          ? Date.now() - new Date(state.lastThoughtAt).getTime()
-          : Infinity;
-        if (lastThoughtAge > 55 * 60 * 1000) {
-          await guardianService.getAwareness(u.id);
-          await guardianService.generateThought(u.id);
-        }
-      }
-    } catch (err) {
-      app.log.warn({ err }, '[Guardian] Proactive thought generation failed');
-    }
-  });
+  // Guardian proactive thought generation — disabled to cut Gemini costs.
+  // Thoughts are still generated on-demand when users interact with Chitti.
 
   // Guardian morning boot greeting — 9:00 IST = 3:30 UTC
   orchestrator.scheduleMarketDay('30 3 * * 1-5', async () => {
@@ -874,22 +857,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const { AIAgentService } = await import('./services/ai-agent.service.js');
     const agentService = new AIAgentService(prisma, oms);
 
-    // During market hours (9:15 AM - 3:30 PM IST = UTC 3:45 - 10:00)
-    // Cron runs every 20 min from UTC 4-10 (covers 9:30 IST to 15:30 IST)
-    orchestrator.scheduleMarketDay('*/20 4-10 * * 1-5', async () => {
-      app.log.info('[Briefing] Refreshing market briefing (market hours)');
-      await agentService.regenerateBriefing();
-    });
-
-    // Before market (7 AM - 9 AM IST): every hour → UTC 1:30-3:30
-    orchestrator.scheduleMarketDay('30 1,2,3 * * 1-5', async () => {
-      app.log.info('[Briefing] Refreshing pre-market briefing');
-      await agentService.regenerateBriefing();
-    });
-
-    // After market (4 PM - 8 PM IST): every hour → UTC 10:30-14:30
-    orchestrator.scheduleMarketDay('30 10,11,12,13,14 * * 1-5', async () => {
-      app.log.info('[Briefing] Refreshing post-market briefing');
+    // Market briefing refresh — every 2 hours during market hours only (reduced from 20 min to cut Gemini costs)
+    orchestrator.scheduleMarketDay('0 4,6,8,10 * * 1-5', async () => {
+      app.log.info('[Briefing] Refreshing market briefing (2-hourly)');
       await agentService.regenerateBriefing();
     });
 
