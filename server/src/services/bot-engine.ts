@@ -5,6 +5,7 @@ import { TradeService } from './trade.service.js';
 import { OrderManagementService } from './oms.service.js';
 import { engineScan, engineRisk, engineSignals, isEngineAvailable, engineScanActiveSymbols, engineOptionsSignals, engineRecordOutcome, engineCalibrateConfidence, engineExecutionPlan, enginePerformanceSummary, type ScanSignal, type OptionsSignalResult, type ExecutionPlan } from '../lib/rust-engine.js';
 import { calculateMaxPain, calculateIVPercentile, calculateGreeks } from './options.service.js';
+import { buildOptionSymbol, detectExchange as detectExchangeForUnderlying } from '../lib/instrument.js';
 import { TargetTracker, type TargetProgress } from './target-tracker.service.js';
 import { GlobalMarketService } from './global-market.service.js';
 import { DecisionAuditService, type DecisionRecord } from './decision-audit.service.js';
@@ -216,6 +217,7 @@ export class BotEngine {
   private lastScanResult: MarketScanResult | null = null;
   private scanInProgress = false;
   private _killSwitchActive = false;
+  private killedUsers = new Set<string>();
   private cycleInProgress = new Set<string>();
   private rollingAccuracy = new Map<string, RollingAccuracy>();
   private tickInterval = DEFAULT_TICK_INTERVAL;
@@ -678,15 +680,63 @@ export class BotEngine {
 
   get killSwitchActive(): boolean { return this._killSwitchActive; }
 
-  activateKillSwitch(): void {
-    this._killSwitchActive = true;
-    this.stopAll();
-    log.fatal('KILL SWITCH ACTIVATED — all trading halted');
+  /**
+   * Deterministic idempotency key for an automated order.
+   *
+   * Bot cycles overlap: a slow tick can still be running when the next fires,
+   * and a restart replays whatever the scanner produces. Keying on
+   * user+symbol+side+minute means a repeated signal returns the original order
+   * instead of stacking a second position on the same idea.
+   *
+   * The minute bucket is deliberately coarser than nothing but finer than a
+   * session, so a genuinely new signal later in the day still trades.
+   */
+  private buildBotOrderKey(userId: string, symbol: string, side: string, botId?: string): string {
+    const minuteBucket = Math.floor(Date.now() / 60_000);
+    return `bot:${botId ?? 'agent'}:${userId}:${symbol}:${side}:${minuteBucket}`;
   }
 
-  deactivateKillSwitch(): void {
+  /** True if trading is halted for this user, either globally or just for them. */
+  isKilledForUser(userId: string): boolean {
+    return this._killSwitchActive || this.killedUsers.has(userId);
+  }
+
+  /** Stop only the bots, agent and scanner belonging to one user. */
+  stopAllForUser(userId: string): void {
+    for (const [botId, bot] of this.runningBots) {
+      if (bot.userId === userId) this.stopBot(botId);
+    }
+    this.stopAgent(userId);
+    if (this.scannerUserId === userId) this.stopMarketScan();
+  }
+
+  /**
+   * Halt trading. Scoped to one user unless called with no userId, which is
+   * the operator-level global halt (startup/shutdown paths only) — a request
+   * from an authenticated user must always pass their own userId, or one
+   * account can stop every other account's trading.
+   */
+  activateKillSwitch(userId?: string): void {
+    if (userId) {
+      this.killedUsers.add(userId);
+      this.stopAllForUser(userId);
+      log.fatal({ userId }, 'KILL SWITCH ACTIVATED for user — their trading halted');
+      return;
+    }
+    this._killSwitchActive = true;
+    this.stopAll();
+    log.fatal('GLOBAL KILL SWITCH ACTIVATED — all trading halted');
+  }
+
+  deactivateKillSwitch(userId?: string): void {
+    if (userId) {
+      this.killedUsers.delete(userId);
+      log.warn({ userId }, 'Kill switch deactivated for user — their trading re-enabled');
+      return;
+    }
     this._killSwitchActive = false;
-    log.warn('Kill switch deactivated — trading re-enabled');
+    this.killedUsers.clear();
+    log.warn('Global kill switch deactivated — trading re-enabled');
   }
 
   private async detectCurrentRegime(
@@ -995,8 +1045,8 @@ export class BotEngine {
     signalMeta?: { confidence?: number; indicators?: string; ltp?: number; signalSource?: string; stopLoss?: number; target?: number; execAlgo?: string; execSlices?: number },
   ): Promise<{ success: boolean; message: string }> {
     try {
-      if (this._killSwitchActive) {
-        return { success: false, message: 'KILL SWITCH ACTIVE — all trading halted' };
+      if (this.isKilledForUser(userId)) {
+        return { success: false, message: 'KILL SWITCH ACTIVE — trading halted' };
       }
 
       const exchange = this.detectExchange(symbol);
@@ -1138,6 +1188,7 @@ export class BotEngine {
         }
 
         const order = await this.tradeService.placeOrder(userId, {
+          clientOrderId: this.buildBotOrderKey(userId, symbol, 'BUY', botId),
           portfolioId: portfolio.id,
           symbol,
           side: 'BUY',
@@ -1276,6 +1327,7 @@ export class BotEngine {
         }
 
         const order = await this.tradeService.placeOrder(userId, {
+          clientOrderId: this.buildBotOrderKey(userId, symbol, 'SELL', botId),
           portfolioId: portfolio.id,
           symbol,
           side: 'SELL',
@@ -1324,21 +1376,51 @@ export class BotEngine {
     strategyName: string,
     legs: { type: string; strike: number; action: string; qty?: number }[],
     botId?: string,
+    expiry?: string,
   ): Promise<{ success: boolean; message: string }> {
     try {
       const portfolio = await this.prisma.portfolio.findFirst({ where: { userId } });
       if (!portfolio) return { success: false, message: 'No portfolio found' };
 
+      // An option leg without an expiry does not identify a tradeable contract.
+      // This used to build `NIFTY24000CE`, which (a) no quote path can parse, so
+      // the position could never be priced, and (b) netted this week's and next
+      // week's same-strike contract into one row at a blended entry price.
+      // Refuse rather than open an unidentifiable position.
+      if (!expiry) {
+        return {
+          success: false,
+          message: `${strategyName}: refused — multi-leg option orders require an explicit expiry. ` +
+            `The signal source did not supply one.`,
+        };
+      }
+
       const tag = `BOT:${strategyName}`;
       let filled = 0;
       let failed = 0;
+      const failures: string[] = [];
 
-      // Get lot size for the underlying
+      // Lot size is recorded on the row; `qty` stays in units.
       const lotSize = await this.getLotSizeForSymbol(symbol);
 
       for (const leg of legs) {
         const qty = (leg.qty || 1) * lotSize;
-        const optSymbol = `${symbol}${leg.strike}${leg.type}`;
+        const optionType = String(leg.type).toUpperCase();
+        if (optionType !== 'CE' && optionType !== 'PE') {
+          failed++;
+          failures.push(`bad leg type "${leg.type}"`);
+          continue;
+        }
+
+        let optSymbol: string;
+        try {
+          optSymbol = buildOptionSymbol(symbol, expiry, leg.strike, optionType);
+        } catch (err) {
+          failed++;
+          failures.push((err as Error).message);
+          continue;
+        }
+
         try {
           await this.tradeService.placeOrder(userId, {
             portfolioId: portfolio.id,
@@ -1346,13 +1428,18 @@ export class BotEngine {
             side: leg.action as 'BUY' | 'SELL',
             orderType: 'MARKET',
             qty,
-            instrumentToken: `${symbol}-NFO-${leg.strike}-${leg.type}`,
+            instrumentToken: optSymbol,
             exchange: 'NFO',
             strategyTag: tag,
+            expiry,
+            strike: leg.strike,
+            optionType,
+            lotSize,
           });
           filled++;
-        } catch {
+        } catch (err) {
           failed++;
+          failures.push((err as Error).message);
         }
       }
 
@@ -1363,7 +1450,16 @@ export class BotEngine {
       if (failed === 0) {
         return { success: true, message: `${strategyName}: ${filled} legs placed for ${symbol}` };
       }
-      return { success: filled > 0, message: `${strategyName}: ${filled} filled, ${failed} failed` };
+
+      // A partially-filled defined-risk structure is NOT a success. An iron
+      // condor that places its two shorts and loses its two wings is a naked
+      // strangle, and reporting `success: true` on that is how a bounded-risk
+      // position silently becomes an unbounded one.
+      return {
+        success: false,
+        message: `${strategyName}: UNBALANCED — ${filled} of ${legs.length} legs filled, ` +
+          `${failed} failed (${failures.join('; ')}). Open legs need manual review.`,
+      };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return { success: false, message: msg };
@@ -1384,13 +1480,12 @@ export class BotEngine {
     return defaults[symbol.toUpperCase()] || 50;
   }
 
+  /**
+   * Delegates to lib/instrument.ts, which holds the single copy of the
+   * commodity/currency underlying lists. This method used to carry its own.
+   */
   private detectExchange(symbol: string): string {
-    const mcxSymbols = ['GOLD', 'GOLDM', 'GOLDPETAL', 'SILVER', 'SILVERM', 'CRUDEOIL', 'NATURALGAS', 'COPPER', 'ZINC', 'LEAD', 'ALUMINIUM', 'NICKEL', 'COTTON', 'MENTHAOIL', 'CASTORSEED'];
-    const cdsSymbols = ['USDINR', 'EURINR', 'GBPINR', 'JPYINR', 'AUDINR', 'CADINR', 'CHFINR', 'SGDINR', 'HKDINR', 'CNHINR'];
-    const upper = symbol.toUpperCase();
-    if (mcxSymbols.includes(upper)) return 'MCX';
-    if (cdsSymbols.includes(upper)) return 'CDS';
-    return 'NSE';
+    return detectExchangeForUnderlying(symbol);
   }
 
   private cachedAllocations: Record<string, number> | null = null;
@@ -1592,7 +1687,7 @@ export class BotEngine {
           for (const cd of candleData) {
             if (cd.candles && cd.candles.length >= 10) {
               const recentCloses = cd.candles.slice(-20).map((c: any) => c.close);
-              const rets = [];
+              const rets: number[] = [];
               for (let j = 1; j < recentCloses.length; j++) {
                 if (recentCloses[j - 1] > 0) {
                   rets.push((recentCloses[j] - recentCloses[j - 1]) / recentCloses[j - 1]);
@@ -2564,8 +2659,9 @@ Approve or reject?` },
     const systemPrompt = ROLE_PROMPTS[bot.role] || ROLE_PROMPTS.SCANNER;
 
     const responseFormat = bot.role === 'FNO_STRATEGIST'
-      ? `Respond in JSON: { "message": "analysis (3-5 sentences with price levels)", "messageType": "signal|alert|info", "action": "1-line summary", "signals": [{"symbol":"X","direction":"BUY_CE|BUY_PE|SELL_CE|SELL_PE|IRON_CONDOR|STRADDLE|STRANGLE|BULL_SPREAD|BEAR_SPREAD|BUY|SELL|HOLD","confidence":0.0-1.0,"entry":price,"stopLoss":price,"target":price,"reason":"<25 words","strategy":"name","riskReward":"1:2.5","legs":[{"type":"CE|PE","strike":0,"action":"BUY|SELL","qty":1}]}] }
-IMPORTANT: Max 4 signals. Keep total response under 1500 chars. No extra text outside JSON.`
+      ? `Respond in JSON: { "message": "analysis (3-5 sentences with price levels)", "messageType": "signal|alert|info", "action": "1-line summary", "signals": [{"symbol":"X","direction":"BUY_CE|BUY_PE|SELL_CE|SELL_PE|IRON_CONDOR|STRADDLE|STRANGLE|BULL_SPREAD|BEAR_SPREAD|BUY|SELL|HOLD","confidence":0.0-1.0,"entry":price,"stopLoss":price,"target":price,"reason":"<25 words","strategy":"name","riskReward":"1:2.5","expiry":"YYYY-MM-DD","legs":[{"type":"CE|PE","strike":0,"action":"BUY|SELL","qty":1}]}] }
+IMPORTANT: Max 4 signals. Keep total response under 1500 chars. No extra text outside JSON.
+"expiry" is MANDATORY whenever "legs" is present — it is the contract expiry date. A leg without an expiry does not identify a tradeable contract and will be rejected.`
       : `Respond in JSON: { "message": "analysis (3-5 sentences with prices and trends)", "messageType": "signal|alert|info", "action": "1-line summary e.g. 'SELL RELIANCE @1350 SL:1375 TGT:1310'", "signals": [{"symbol":"X","direction":"BUY|SELL","confidence":0.0-1.0,"entry":price,"stopLoss":price,"target":price,"reason":"<25 words","riskReward":"1:2.5"}] }
 IMPORTANT: Max 4 signals. Keep total response under 1500 chars. No extra text outside JSON.`;
 
@@ -2573,7 +2669,7 @@ IMPORTANT: Max 4 signals. Keep total response under 1500 chars. No extra text ou
       message: string;
       messageType: string;
       action?: string;
-      signals?: Array<{ symbol: string; direction: string; confidence: number; entry?: number; stopLoss?: number; target?: number; reason: string; riskReward?: string; strategy?: string; legs?: any[] }>;
+      signals?: Array<{ symbol: string; direction: string; confidence: number; entry?: number; stopLoss?: number; target?: number; reason: string; riskReward?: string; strategy?: string; legs?: any[]; expiry?: string }>;
     }>({
       messages: [
         { role: 'system', content: `${systemPrompt}\n${responseFormat}` },
@@ -2675,7 +2771,7 @@ INSTRUCTIONS:
           if (shouldExecute) {
             let result: { success: boolean; message: string };
             if (isMultiLeg) {
-              result = await this.executeMultiLegStrategy(userId, sig.symbol, sig.strategy || sig.direction, sig.legs!, botId);
+              result = await this.executeMultiLegStrategy(userId, sig.symbol, sig.strategy || sig.direction, sig.legs!, botId, sig.expiry);
             } else {
               result = await this.executeTrade(userId, sig.symbol, sig.direction as 'BUY' | 'SELL', rationale, botId, {
                 confidence: sig.confidence,

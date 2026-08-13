@@ -865,14 +865,16 @@ export default function StrategyBuilder() {
                             legs: legs.map(l => ({ type: l.type, strike: l.strike, action: l.action, qty: l.qty, premium: l.premium })),
                           });
                           const d = data as any;
-                          if (d.failed > 0) {
-                            setExecResult({ ok: false, msg: `${d.filled} filled, ${d.pending} pending, ${d.failed} failed` });
-                          } else {
-                            setExecResult({ ok: true, msg: `Strategy deployed: ${d.filled} filled, ${d.pending} pending` });
-                            fetchDeployedStrategies();
-                          }
+                          setExecResult({ ok: true, msg: `Strategy deployed: ${d.filled} filled, ${d.pending} pending` });
+                          fetchDeployedStrategies();
                         } catch (err: any) {
-                          setExecResult({ ok: false, msg: err?.response?.data?.error || err?.message || 'Execution failed' });
+                          // A partial fill comes back 409, not 2xx: some legs are
+                          // live and the structure is not the one that was priced.
+                          // Refresh the deployed list either way so the orphan legs
+                          // are visible and can be exited.
+                          const d = err?.response?.data;
+                          setExecResult({ ok: false, msg: d?.error || err?.message || 'Execution failed' });
+                          if (d?.unbalanced) fetchDeployedStrategies();
                         }
                         setExecuting(false);
                       }}

@@ -1571,29 +1571,45 @@ class BreezeHandler(BaseHTTPRequestHandler):
             elif path.startswith("/quote/"):
                 symbol = path.split("/")[-1].upper()
                 exchange = params.get("exchange", ["NSE"])[0]
+                # A commodity or futures quote is per CONTRACT, so Breeze needs
+                # product_type="futures" plus the expiry. product_type was
+                # hardcoded to "cash" with no expiry, which is why an MCX quote
+                # could never return an LTP.
+                product_type = params.get("product_type", ["cash"])[0]
+                expiry = params.get("expiry", [None])[0]
                 if breeze_instance is None:
                     self.send_json({"error": "Breeze session not active"}, 503)
                     return
 
-                # Try multiple code resolutions: original symbol, cash code, NFO code
-                codes_to_try = []
-                cash_code = _resolve_cash_code(symbol)
-                nfo_code = _resolve_stock_code(symbol)
-                seen = set()
-                for c in [symbol, cash_code, nfo_code]:
-                    if c not in seen:
-                        seen.add(c)
-                        codes_to_try.append(c)
+                # Try multiple code resolutions: original symbol, cash code, NFO code.
+                # MCX commodity codes are used verbatim — the equity/NFO resolvers
+                # would mangle them.
+                if exchange.upper() == "MCX":
+                    codes_to_try = [symbol]
+                else:
+                    codes_to_try = []
+                    cash_code = _resolve_cash_code(symbol)
+                    nfo_code = _resolve_stock_code(symbol)
+                    seen = set()
+                    for c in [symbol, cash_code, nfo_code]:
+                        if c not in seen:
+                            seen.add(c)
+                            codes_to_try.append(c)
 
                 last_err = None
                 for code in codes_to_try:
                     try:
+                        quote_kwargs = {
+                            "stock_code": code,
+                            "exchange_code": exchange,
+                            "product_type": product_type,
+                            "timeout": 4,
+                        }
+                        if expiry:
+                            quote_kwargs["expiry_date"] = f"{expiry}T06:00:00.000Z"
                         result = _call_with_timeout(
                             breeze_instance.get_quotes,
-                            stock_code=code,
-                            exchange_code=exchange,
-                            product_type="cash",
-                            timeout=4,
+                            **quote_kwargs,
                         )
                         if result is None:
                             continue

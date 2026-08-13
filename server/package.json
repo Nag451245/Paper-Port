@@ -18,7 +18,8 @@
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
     "test:e2e": "vitest run tests/e2e",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "db:backfill:derivatives": "tsx scripts/backfill-derivative-columns.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.0",

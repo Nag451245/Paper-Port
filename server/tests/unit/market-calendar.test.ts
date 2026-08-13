@@ -74,16 +74,25 @@ describe('MarketCalendar', () => {
   });
 
   describe('isMuhuratSession', () => {
+    // Diwali Laxmi Pujan 2026 is Sunday 8 November — see MUHURAT_SESSIONS in
+    // market-calendar.ts. (These tests previously used 2026-10-12, a Monday,
+    // which is not in the table at all.)
+    //
+    // isMuhuratSession reads LOCAL date/time fields (toDateKey/getTotalMinutes
+    // use getFullYear/getHours), so the Date must be built with the local
+    // constructor for its fields to read as IST wall-clock. A UTC string like
+    // '2026-11-08T13:00:00Z' would read as 13:00 on a UTC server, not 18:30.
     it('should return true during Diwali muhurat session 2026', () => {
-      // 2026-10-12 muhurat: 1080-1140 mins (18:00-19:00 IST)
-      // IST 18:30 = UTC 13:00
-      const muhuratTime = new Date('2026-10-12T13:00:00Z');
+      // 18:30 IST = 1110 minutes, inside the 1080-1140 window
+      const muhuratTime = new Date(2026, 10, 8, 18, 30);
       expect(calendar.isMuhuratSession(muhuratTime)).toBe(true);
     });
 
     it('should return false outside muhurat window', () => {
-      // 2026-10-12 at 15:00 IST = UTC 09:30 (outside 18:00-19:00 window)
-      const nonMuhurat = new Date('2026-10-12T09:30:00Z');
+      // Same date, 15:00 = 900 minutes — outside the 18:00-19:00 window.
+      // Using the muhurat date here means this actually exercises the time
+      // gate rather than just failing the date lookup.
+      const nonMuhurat = new Date(2026, 10, 8, 15, 0);
       expect(calendar.isMuhuratSession(nonMuhurat)).toBe(false);
     });
 

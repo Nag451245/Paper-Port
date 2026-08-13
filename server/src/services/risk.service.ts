@@ -6,6 +6,7 @@ import { emit } from '../lib/event-bus.js';
 import { MarginCalculatorService } from './margin-calculator.service.js';
 import { PositionLimitsService } from './position-limits.service.js';
 import { MetricsService } from './metrics.service.js';
+import { parseInstrumentSymbol } from '../lib/instrument.js';
 
 const log = createChildLogger('RiskService');
 
@@ -467,13 +468,29 @@ export class RiskService {
 
     // Rule 15: Margin sufficiency check
     try {
+      // Segment was hardcoded to EQ/NSE, so an NFO option was margined with
+      // equity ELM rates. It is derived from the contract now.
+      //
+      // 'COM' is deliberately absent: MarginCalculator has no commodity rate,
+      // and inventing one would be picking a risk number. Commodity and futures
+      // positions are blocked upstream by lib/margin-guard.ts until a real
+      // SPAN + exposure model exists, so nothing reaches here mis-margined.
+      let contractSegment: 'EQ' | 'FO' | 'CD' = 'EQ';
+      let contractExchange = 'NSE';
+      try {
+        const spec = parseInstrumentSymbol(symbol);
+        contractExchange = spec.exchange;
+        if (spec.segment === 'FO') contractSegment = 'FO';
+        else if (spec.segment === 'CD') contractSegment = 'CD';
+      } catch { /* unparseable symbol — treat as equity */ }
+
       const margin = this.marginCalculator.calculateMarginRequired({
         symbol,
         qty,
         price,
         side: side as 'BUY' | 'SELL',
-        segment: 'EQ',
-        exchange: 'NSE',
+        segment: contractSegment,
+        exchange: contractExchange,
       });
       const availableCapital = Number(portfolio.currentNav);
       const sufficiency = this.marginCalculator.checkMarginSufficiency(userId, margin.totalRequired, availableCapital);

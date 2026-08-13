@@ -115,12 +115,51 @@ model Position {
   openedAt        DateTime @default(now()) @map("opened_at")
   closedAt        DateTime? @map("closed_at")
 
+  // Protective stop resting AT THE BROKER (LIVE mode only). Tracked here rather
+  // than as an Order row because TradeService.matchPendingOrders fills every
+  // PENDING/SUBMITTED order it finds, which would spuriously trigger the stop.
+  brokerStopOrderId     String?  @map("broker_stop_order_id")
+  brokerStopTriggerPrice Decimal? @map("broker_stop_trigger_price")
+  brokerStopQty         Int?     @map("broker_stop_qty")
+  brokerStopPlacedAt    DateTime? @map("broker_stop_placed_at")
+
+  // ── Derivative identity ──
+  // Contract identity for F&O and commodity positions. This used to be encoded
+  // in `strategyTag` as "OPT:CE:24000:2026-08-28", competing for a column that
+  // is also the strategy-attribution key for the learning engine (Thompson
+  // sampling, alpha decay, allocation caps) — so a position could carry contract
+  // metadata OR a strategy name, never both, and every option trade was
+  // invisible to attribution. `product` likewise replaces encoding INTRADAY vs
+  // DELIVERY in the same string.
+  //
+  // Every column is nullable: equity rows leave them unset, and existing
+  // fixtures/rows predate them. `qty` remains in UNITS (contracts), never lots —
+  // `lotSize` records units-per-lot so lots stay a display/input concern and the
+  // cost, P&L, NAV and sizing math is untouched.
+  segment         String?   // EQ | FO | CD | COM
+  instrumentType  String?   @map("instrument_type") // EQUITY | FUTURES | OPTIONS (costs.ts InstrumentKind)
+  underlying      String?   // NIFTY, CRUDEOIL, RELIANCE — the spot this is priced against
+  expiry          DateTime? // contract expiry, normalized to IST midnight for identity
+  strike          Decimal?
+  optionType      String?   @map("option_type")     // CE | PE (matches TradeService input naming)
+  lotSize         Int?      @map("lot_size")
+  product         String?   // INTRADAY | DELIVERY | MARGIN (matches BrokerOrderInput.product)
+
+  // Set by the strategyTag backfill when a legacy "OPT:" tag could not be parsed
+  // into the columns above. A strike or expiry is never guessed — it is flagged.
+  metaNeedsReview Boolean   @default(false) @map("meta_needs_review")
+
   portfolio Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
   orders    Order[]
   trades    Trade[]
 
   @@index([status, openedAt])
   @@index([symbol])
+  @@index([brokerStopOrderId])
+  // Position netting. The lookup was {portfolioId, symbol, side, status} against
+  // a bare symbol, so two expiries at the same strike merged into one row with a
+  // blended average price; expiry/strike/optionType now discriminate them.
+  @@index([portfolioId, symbol, side, status])
   @@map("positions")
 }
 
@@ -153,8 +192,26 @@ model Order {
   spreadCostBps   Decimal? @map("spread_cost_bps")
   impactCost      Decimal? @map("impact_cost")
   brokerOrderId   String?  @map("broker_order_id")
+  // Caller-supplied idempotency key. The UNIQUE constraint is what actually
+  // prevents a duplicate order — a retry (client timeout, bot re-tick, proxy
+  // replay) reuses the key and gets the original order back instead of placing
+  // a second one at the broker.
+  clientOrderId   String?  @unique @map("client_order_id")
   createdAt       DateTime @default(now()) @map("created_at")
   filledAt        DateTime? @map("filled_at")
+
+  // ── Derivative identity ── see the Position model for the rationale.
+  // These are what the broker adapter needs in order to place an F&O order at
+  // all: Breeze requires expiry_date, right and strike_price alongside a
+  // product of "options"/"futures", none of which the adapter currently sends.
+  segment         String?
+  instrumentType  String?   @map("instrument_type")
+  underlying      String?
+  expiry          DateTime?
+  strike          Decimal?
+  optionType      String?   @map("option_type")
+  lotSize         Int?      @map("lot_size")
+  product         String?
 
   portfolio Portfolio  @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
   position  Position?  @relation(fields: [positionId], references: [id])
@@ -183,6 +240,19 @@ model Trade {
   holdDuration String? @map("hold_duration")
   strategyTag  String? @map("strategy_tag")
   aiRationale  String? @map("ai_rationale")
+
+  // ── Derivative identity ── see the Position model for the rationale.
+  // Recorded on the closed trade too, so realised F&O P&L can be attributed by
+  // segment and expiry after the position row is gone. Without this, an options
+  // performance review cannot separate a weekly from a monthly contract.
+  segment        String?
+  instrumentType String?   @map("instrument_type")
+  underlying     String?
+  expiry         DateTime?
+  strike         Decimal?
+  optionType     String?   @map("option_type")
+  lotSize        Int?      @map("lot_size")
+  product        String?
 
   portfolio    Portfolio      @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
   position     Position       @relation(fields: [positionId], references: [id])

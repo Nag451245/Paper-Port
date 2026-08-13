@@ -1014,7 +1014,7 @@ Top losers: ${JSON.stringify(topLosers)}`,
       }
 
       // Build training data, enriching with full 76-feature vectors from the Feature Store
-      const trainingData = [];
+      const trainingData: Array<{ features: Record<string, number | number[]> & { raw_features: number[] }; outcome: number }> = [];
       for (const d of decisions) {
         const snapshot = typeof d.marketDataSnapshot === 'string'
           ? JSON.parse(d.marketDataSnapshot) : d.marketDataSnapshot;

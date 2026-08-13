@@ -23,11 +23,17 @@ vi.mock('../../src/lib/prisma.js', () => {
     user: { findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
     breezeCredential: { findUnique: vi.fn(), upsert: vi.fn() },
     portfolio: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn() },
-    position: { findUnique: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
+    position: { findUnique: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), count: vi.fn() },
     order: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn(), count: vi.fn() },
     trade: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), count: vi.fn() },
     watchlist: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), delete: vi.fn() },
     watchlistItem: { findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn(), delete: vi.fn() },
+    // Read by the risk gate, which now fails CLOSED — unmocked models mean
+    // every order is rejected rather than silently sailing through unchecked.
+    tradingTarget: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
+    dailyPnlRecord: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn(), upsert: vi.fn() },
+    riskEvent: { create: vi.fn(), findMany: vi.fn() },
+    strategyParam: { findFirst: vi.fn(), findMany: vi.fn(), upsert: vi.fn() },
     $disconnect: vi.fn(),
     $transaction: vi.fn().mockImplementation(async (fn: any) => fn(mock)),
     $queryRaw: vi.fn().mockResolvedValue([{ 1: 1 }]),
@@ -44,7 +50,25 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => { await app.close(); });
-beforeEach(() => { vi.clearAllMocks(); });
+/**
+ * Re-arm the models the risk gate reads. Must run after clearAllMocks: the gate
+ * fails closed, so an unset mock returns undefined, the gate throws, and the
+ * order is rejected for safety.
+ */
+function allowRiskChecks(): void {
+  mockPrisma.tradingTarget.findFirst.mockResolvedValue(null);
+  mockPrisma.portfolio.findMany.mockResolvedValue([
+    { id: 'p1', userId: 'test-user', initialCapital: 1_000_000, currentNav: 1_000_000, isDefault: true },
+  ]);
+  mockPrisma.position.count.mockResolvedValue(0);
+  mockPrisma.position.findMany.mockResolvedValue([]);
+  mockPrisma.trade.findMany.mockResolvedValue([]);
+  mockPrisma.dailyPnlRecord.findMany.mockResolvedValue([]);
+  mockPrisma.riskEvent.create.mockResolvedValue({});
+  mockPrisma.strategyParam.findFirst.mockResolvedValue(null);
+}
+
+beforeEach(() => { vi.clearAllMocks(); allowRiskChecks(); });
 
 function authHeaders(userId = 'test-user') {
   return { authorization: `Bearer ${app.jwt.sign({ sub: userId })}` };

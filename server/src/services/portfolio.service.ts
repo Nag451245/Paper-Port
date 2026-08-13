@@ -1,7 +1,7 @@
 import { PrismaClient, type Prisma } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
 import { istDateStr, istMidnight } from '../lib/ist.js';
-import { calculateCosts } from '../lib/costs.js';
+import { calculateCosts, resolveInstrumentKind } from '../lib/costs.js';
 
 export interface PortfolioSummary {
   totalNav: number;
@@ -128,8 +128,26 @@ export class PortfolioService {
     }
 
     const totalNav = availableCash + investedValue + unrealizedPnl;
+
+    // Total P&L is mark-to-market: realized plus open-position movement.
+    // (A portfolio holding a large unrealized winner must not report zero.)
     const totalPnl = totalNav - initialCapital;
-    const dayPnl = todayRealizedPnl + unrealizedPnl;
+
+    // Day P&L is realized-only — the P&L of trades actually closed today.
+    //
+    // It previously added `unrealizedPnl`, which is the *lifetime* gain on open
+    // positions, not today's movement: a position opened months ago sitting on
+    // +50k added 50k to "today" every day forever. Computing a true
+    // mark-to-market day P&L needs a previous-close reference the schema does
+    // not yet populate (see PerformanceSnapshot, currently unused).
+    //
+    // Realized-only also matches RiskService.getDailyRiskSummary and
+    // TargetTracker.computeTodayPnl, which drive the daily loss limit and the
+    // circuit breaker — so the number on the dashboard is the same number that
+    // halts trading. Open-position movement is reported separately as
+    // `unrealizedPnl`. This was the original REG-002 fix; see
+    // tests/regression/regression-bugs.test.ts.
+    const dayPnl = todayRealizedPnl;
     const dayPnlBase = totalNav > 0 ? totalNav : initialCapital;
 
     return {
@@ -380,7 +398,10 @@ export class PortfolioService {
       }
 
       const entrySide = pos.side === 'LONG' ? 'BUY' : 'SELL';
-      const ec = calculateCosts(pos.qty, entryPrice, entrySide, pos.exchange ?? 'NSE');
+      const ec = calculateCosts(
+        pos.qty, entryPrice, entrySide, pos.exchange ?? 'NSE',
+        resolveInstrumentKind(pos.exchange ?? 'NSE', pos.symbol),
+      );
       openEntryCosts += ec.totalCost;
     }
 

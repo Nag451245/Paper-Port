@@ -35,8 +35,136 @@ function getBinary(): string | null {
   return cachedBinary;
 }
 
+/**
+ * Engine usability.
+ *
+ * `null` = present but not yet proven to run; `false` = proven not to run.
+ *
+ * A file on disk is not a working engine. The shipped binary is built for
+ * Linux, so on Windows `existsSync` is true while every spawn fails with
+ * ENOENT — which is how the dashboard came to display "Rust Engine: Active"
+ * for a process that had never started and was generating no signals. An
+ * autonomous system that misreports its own health will act confidently on
+ * nothing, so this is tracked as a distinct state rather than inferred.
+ */
+let engineUsable: boolean | null = null;
+let engineUnusableReason: string | null = null;
+
+/** Spawn failures that mean the binary will never run here — not transient. */
+const FATAL_SPAWN_CODES = new Set(['ENOENT', 'EACCES', 'ENOEXEC', 'EPERM']);
+
+function markEngineUnusable(reason: string): void {
+  if (engineUsable === false) return;
+  engineUsable = false;
+  engineUnusableReason = reason;
+  console.error(`[rust-engine] Marked UNUSABLE: ${reason}. Signals will not be generated.`);
+}
+
+function markEngineUsable(): void {
+  engineUsable = true;
+  engineUnusableReason = null;
+}
+
+/**
+ * True when the engine can plausibly serve requests.
+ *
+ * Optimistic before verification (so the startup download path still works),
+ * but once a spawn has definitively failed or the crash circuit breaker has
+ * tripped, this reports false and stays false.
+ */
 export function isEngineAvailable(): boolean {
+  if (engineUsable === false) return false;
   return getBinary() !== null;
+}
+
+export function getEngineStatus(): {
+  status: 'ok' | 'unverified' | 'unusable' | 'not_installed';
+  binary: string | null;
+  reason: string | null;
+  daemonRunning: boolean;
+  crashCount: number;
+} {
+  const binary = getBinary();
+  const status = binary === null ? 'not_installed'
+    : engineUsable === false ? 'unusable'
+    : engineUsable === true ? 'ok'
+    : 'unverified';
+  return {
+    status,
+    binary,
+    reason: engineUnusableReason,
+    daemonRunning: daemonReady && daemonProc !== null && daemonProc.exitCode === null,
+    crashCount,
+  };
+}
+
+/**
+ * Actually run the binary and require a response. This is the difference
+ * between "the file is there" and "the engine works".
+ */
+export async function verifyEngineBinary(): Promise<boolean> {
+  const binary = getBinary();
+  if (!binary) {
+    markEngineUnusable('binary not found');
+    return false;
+  }
+
+  return new Promise<boolean>((resolvePromise) => {
+    let settled = false;
+    const finish = (ok: boolean, reason?: string) => {
+      if (settled) return;
+      settled = true;
+      if (ok) markEngineUsable();
+      else markEngineUnusable(reason ?? 'probe failed');
+      resolvePromise(ok);
+    };
+
+    let proc: ChildProcess;
+    try {
+      proc = spawn(binary, [], { stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (err: any) {
+      finish(false, `spawn threw: ${err?.message ?? err}`);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+      finish(false, 'probe timed out');
+    }, 10_000);
+
+    const chunks: Buffer[] = [];
+    proc.stdout?.on('data', (c: Buffer) => chunks.push(c));
+
+    proc.on('error', (err: any) => {
+      clearTimeout(timer);
+      const code = err?.code ?? 'UNKNOWN';
+      const hint = FATAL_SPAWN_CODES.has(code)
+        ? ` (${code} — usually a binary built for a different OS/architecture, or missing execute permission)`
+        : ` (${code})`;
+      finish(false, `spawn failed: ${err?.message ?? err}${hint}`);
+    });
+
+    proc.on('close', () => {
+      clearTimeout(timer);
+      const out = Buffer.concat(chunks).toString('utf-8').trim();
+      // Any parseable response means the binary executed and speaks our protocol.
+      if (!out) return finish(false, 'engine produced no output');
+      try {
+        JSON.parse(out.split('\n')[0]);
+        finish(true);
+      } catch {
+        finish(false, `engine output was not JSON: ${out.slice(0, 120)}`);
+      }
+    });
+
+    try {
+      proc.stdin?.write(JSON.stringify({ command: 'health', data: {} }) + '\n');
+      proc.stdin?.end();
+    } catch (err: any) {
+      clearTimeout(timer);
+      finish(false, `could not write to engine stdin: ${err?.message ?? err}`);
+    }
+  });
 }
 
 function followRedirects(url: string, redirects = 0): Promise<import('http').IncomingMessage> {
@@ -56,7 +184,15 @@ function followRedirects(url: string, redirects = 0): Promise<import('http').Inc
 
 export async function ensureEngineAvailable(): Promise<boolean> {
   if (isEngineAvailable()) {
-    console.log(`[rust-engine] Binary already available at ${cachedBinary}`);
+    console.log(`[rust-engine] Binary found at ${cachedBinary} — verifying it runs...`);
+    // Presence is not health. Probe it before reporting the engine as available,
+    // otherwise a binary for the wrong platform is advertised as working.
+    const ok = await verifyEngineBinary();
+    if (!ok) {
+      console.error(`[rust-engine] Binary is present but NOT USABLE: ${engineUnusableReason}`);
+      return false;
+    }
+    console.log('[rust-engine] Verified — engine responds');
     return true;
   }
 
@@ -151,6 +287,12 @@ function recordCrash(): void {
   crashCount++;
   lastCrashTime = Date.now();
   console.warn(`[rust-engine] Crash count: ${crashCount}/${MAX_CRASHES}`);
+  // Once the breaker trips, stop advertising the engine as available. Callers
+  // (bot cycles, /health, the dashboard badge) need to see that the primary
+  // signal source is down rather than silently producing nothing.
+  if (crashCount >= MAX_CRASHES) {
+    markEngineUnusable(`daemon crashed ${crashCount} times within ${CRASH_WINDOW_MS / 1000}s`);
+  }
 }
 
 function spawnDaemon(): boolean {
@@ -160,8 +302,14 @@ function spawnDaemon(): boolean {
 
   try {
     const proc = spawn(binary, ['--daemon'], { stdio: ['pipe', 'pipe', 'pipe'] });
-    proc.on('error', (err) => {
+    proc.on('error', (err: any) => {
       console.error(`[rust-engine] Daemon error: ${err.message}`);
+      // ENOENT/EACCES/ENOEXEC here are not transient — the binary cannot run on
+      // this machine at all (typically built for another OS). Retrying is
+      // pointless and, worse, isEngineAvailable() would keep claiming health.
+      if (FATAL_SPAWN_CODES.has(err?.code)) {
+        markEngineUnusable(`daemon spawn failed with ${err.code}: ${err.message}`);
+      }
       recordCrash();
       teardownDaemon();
     });

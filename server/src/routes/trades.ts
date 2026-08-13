@@ -6,6 +6,7 @@ import { DecisionAuditService } from '../services/decision-audit.service.js';
 import { OrderManagementService } from '../services/oms.service.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
+import { buildOptionSymbol } from '../lib/instrument.js';
 
 const placeOrderSchema = z.object({
   portfolio_id: z.string().uuid(),
@@ -18,6 +19,8 @@ const placeOrderSchema = z.object({
   instrument_token: z.string().default(''),
   exchange: z.enum(['NSE', 'BSE', 'NFO', 'MCX', 'CDS']).default('NSE'),
   strategy_tag: z.string().optional(),
+  /** Idempotency key; the Idempotency-Key header takes precedence. */
+  client_order_id: z.string().min(8).max(128).optional(),
   expiry: z.string().optional(),
   strike: z.number().positive().optional(),
   option_type: z.enum(['CE', 'PE']).optional(),
@@ -41,7 +44,15 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
 
     try {
       const userId = getUserId(request);
+      // Idempotency-Key header (standard) or client_order_id in the body.
+      // Retrying with the same key returns the original order rather than
+      // placing a second one.
+      const idempotencyKey =
+        (request.headers['idempotency-key'] as string | undefined)?.trim() ||
+        parsed.data.client_order_id;
+
       const order = await service.placeOrder(userId, {
+        clientOrderId: idempotencyKey || undefined,
         portfolioId: parsed.data.portfolio_id,
         symbol: parsed.data.symbol,
         side: parsed.data.side,
@@ -275,7 +286,9 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
 
       for (let i = 0; i < legs.length; i++) {
         const leg = legs[i];
-        const optSymbol = `${symbol}${expiry.replace(/-/g, '')}${leg.strike}${leg.type}`;
+        // Same grammar as before, but built by the shared helper so the format
+        // lives in exactly one place.
+        const optSymbol = buildOptionSymbol(symbol, expiry, leg.strike, leg.type);
         try {
           const order = await service.placeOrder(userId, {
             portfolioId: portfolio_id,
@@ -284,7 +297,7 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
             orderType: 'MARKET',
             qty: leg.qty,
             price: leg.premium && leg.premium > 0 ? leg.premium : undefined,
-            instrumentToken: `${symbol}-NFO-${leg.strike}-${leg.type}`,
+            instrumentToken: optSymbol,
             exchange: 'NFO',
             strategyTag: tag,
             expiry,
@@ -298,11 +311,20 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
         }
       }
 
+      // A leg that came back REJECTED/CANCELLED without throwing is just as
+      // absent from the structure as one that threw, so it counts against the
+      // balance check too — otherwise a rejected wing reads as "not failed".
+      const DEAD = new Set(['REJECTED', 'CANCELLED', 'EXPIRED', 'FAILED']);
       const filled = results.filter(r => r.order?.status === 'FILLED').length;
-      const pending = results.filter(r => r.order?.status === 'PENDING').length;
+      const rejected = results.filter(r => r.order && DEAD.has(r.order.status)).length;
+      const pending = results.filter(r => r.order && r.order.status !== 'FILLED' && !DEAD.has(r.order.status)).length;
       const failed = results.filter(r => r.error).length;
 
-      return reply.code(201).send({
+      // Legs that are working or done vs. legs that will never exist.
+      const opened = filled + pending;
+      const missing = failed + rejected;
+
+      const payload = {
         strategy: strategy_name || 'Custom',
         symbol,
         expiry,
@@ -310,8 +332,34 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
         filled,
         pending,
         failed,
+        rejected,
         results,
-      });
+      };
+
+      if (missing === 0) {
+        return reply.code(201).send({ ...payload, unbalanced: false });
+      }
+
+      // A partially-filled defined-risk structure is NOT a success. An iron
+      // condor that places its two shorts and loses its two wings is a naked
+      // strangle — bounded risk silently became unbounded — so this must not
+      // come back as a 2xx a caller can read as a clean entry. Mirrors
+      // BotEngine.executeMultiLegStrategy, which returns success:false here.
+      const reasons = results.filter(r => r.error).map(r => `leg ${r.leg}: ${r.error}`);
+      for (const r of results) {
+        if (r.order && DEAD.has(r.order.status)) reasons.push(`leg ${r.leg}: ${r.order.status}`);
+      }
+
+      const error = opened > 0
+        ? `${payload.strategy}: UNBALANCED — ${opened} of ${legs.length} legs open, ` +
+          `${missing} not placed (${reasons.join('; ')}). Open legs need manual review.`
+        : `${payload.strategy}: no legs were placed — ${missing} of ${legs.length} failed ` +
+          `(${reasons.join('; ')}). Nothing is open.`;
+
+      // 409: the resulting book conflicts with the structure that was asked for.
+      // Distinguishable from 400 (bad request) and 500 (server fault); the body
+      // still carries the full per-leg breakdown so a caller can reconcile.
+      return reply.code(409).send({ ...payload, unbalanced: opened > 0, error });
     } catch (err) {
       if (err instanceof TradeError) return reply.code(err.statusCode).send({ error: err.message });
       throw err;

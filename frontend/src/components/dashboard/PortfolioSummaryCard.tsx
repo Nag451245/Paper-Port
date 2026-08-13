@@ -21,7 +21,7 @@ export default function PortfolioSummaryCard({ data }: Props) {
 
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <p className="text-xs text-slate-400">Day P&L</p>
+          <p className="text-xs text-slate-400">Day P&L (realized)</p>
           <div className="flex items-center gap-1.5">
             {dayPositive ? (
               <TrendingUp className="h-4 w-4 text-emerald-600" />

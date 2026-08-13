@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { AuthService, AuthError } from '../services/auth.service.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
+import { createBreezeState, consumeBreezeState } from '../lib/oauth-state.js';
 import { env } from '../config.js';
 
 const registerSchema = z.object({
@@ -223,7 +224,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.get('/breeze-session/login-url', { preHandler: [authenticate] }, async (request, reply) => {
     try {
       const userId = getUserId(request);
-      const state = app.jwt.sign({ sub: userId, type: 'breeze_session_state' }, { expiresIn: '15m' });
+      // Opaque single-use nonce, NOT a JWT — this value is handed to ICICI and
+      // ends up in their logs, browser history and Referer headers.
+      const state = await createBreezeState(userId);
       const payload = await authService.createBreezeLoginUrl(userId, state);
       return reply.send({
         login_url: payload.loginUrl,
@@ -276,16 +279,16 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
     if (state) {
       try {
-        const payload = app.jwt.verify<{ sub: string; type?: string }>(state);
-        if (payload?.sub && payload.type === 'breeze_session_state') {
-          await authService.saveSessionToken(payload.sub, token);
+        const stateUserId = await consumeBreezeState(state);
+        if (stateUserId) {
+          await authService.saveSessionToken(stateUserId, token);
           const safeOrigin = escapeHtml(origin);
           return reply.type('text/html').send(
             `<html><body><script>window.opener&&window.opener.postMessage({type:"breeze_session_saved"},"${safeOrigin}");window.close();</script><h3>Session saved! You can close this tab.</h3></body></html>`,
           );
         }
       } catch {
-        // state verification failed, fall through to manual save page
+        // state lookup failed, fall through to manual save page
       }
     }
 

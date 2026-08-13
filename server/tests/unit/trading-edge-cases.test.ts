@@ -143,16 +143,18 @@ describe('Market Calendar', () => {
   // FAILURE IMPACT: Blocking Muhurat trades prevents legitimate trading.
   // ──────────────────────────────────────────────────────────────────
   it('UT-072: Muhurat session recognition', () => {
-    // 2026-10-12 is Diwali, Muhurat from 18:00-19:00 IST
-    // The method requires IST time — local Date(2026, 9, 12, 18, 30) represents local time
-    const muhuratDate = new Date(2026, 9, 12, 18, 30, 0); // October 12, 2026 18:30
+    // Diwali Laxmi Pujan 2026 is Sunday 8 November, Muhurat 18:00-19:00 IST.
+    // (This test previously used 2026-10-12, a Monday, which is not in
+    // MUHURAT_SESSIONS — see market-calendar.ts.)
+    // The method reads local date/time fields, so build the Date with the
+    // local constructor so its fields read as IST wall-clock.
+    const muhuratDate = new Date(2026, 10, 8, 18, 30, 0); // November 8, 2026 18:30
 
     // isMuhuratSession checks getTotalMinutes(d) for 1080-1140 range (18:00-19:00)
     // and matches the date key against MUHURAT_SESSIONS
     const result = calendar.isMuhuratSession(muhuratDate);
     expect(typeof result).toBe('boolean');
-    // We know 2026-10-12 is in MUHURAT_SESSIONS, and 18:30 = 1110 minutes
-    // which is within 1080-1140 range
+    // 18:30 = 1110 minutes, within the 1080-1140 range
     expect(result).toBe(true);
   });
 

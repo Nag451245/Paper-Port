@@ -35,6 +35,7 @@ function createMockPrisma() {
       findMany: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn(),
+      count: vi.fn(),
     },
     trade: {
       create: vi.fn(),
@@ -43,10 +44,34 @@ function createMockPrisma() {
       count: vi.fn(),
     },
     $transaction: vi.fn().mockImplementation(async (fn: (tx: any) => Promise<any>) => fn(prisma)),
-    dailyPnlRecord: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
+    dailyPnlRecord: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), findMany: vi.fn() },
     riskEvent: { create: vi.fn() },
+    // The risk gate now fails CLOSED, so the models it reads must be mocked or
+    // every order is rejected. Previously the gate swallowed the resulting
+    // TypeError and let the order through — these tests passed *because* the
+    // safety check was broken.
+    tradingTarget: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
+    strategyParam: { findFirst: vi.fn(), findMany: vi.fn(), upsert: vi.fn() },
   };
   return prisma;
+}
+
+/**
+ * Give the risk gate enough to evaluate cleanly and allow the order.
+ * No active trading target => enforceTargetRisk returns allowed early;
+ * empty positions/trades => preTradeCheck finds no violations.
+ */
+function allowRiskChecks(prisma: any): void {
+  prisma.tradingTarget.findFirst.mockResolvedValue(null);
+  prisma.position.count.mockResolvedValue(0);
+  prisma.position.findMany.mockResolvedValue([]);
+  prisma.portfolio.findMany.mockResolvedValue([
+    { id: 'p1', userId: 'user1', initialCapital: 1_000_000, currentNav: 1_000_000, isDefault: true },
+  ]);
+  prisma.trade.findMany.mockResolvedValue([]);
+  prisma.dailyPnlRecord.findMany.mockResolvedValue([]);
+  prisma.riskEvent.create.mockResolvedValue({});
+  prisma.strategyParam.findFirst.mockResolvedValue(null);
 }
 
 describe('TradeService', () => {
@@ -55,6 +80,7 @@ describe('TradeService', () => {
 
   beforeEach(() => {
     mockPrisma = createMockPrisma();
+    allowRiskChecks(mockPrisma);
     service = new TradeService(mockPrisma);
   });
 
@@ -417,6 +443,97 @@ describe('TradeService', () => {
       const expectedEnd = new Date('2025-12-31');
       expectedEnd.setHours(23, 59, 59, 999);
       expect(findCall.where.exitTime.lte).toEqual(expectedEnd);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // Risk gate must FAIL CLOSED, and must actually run on market orders.
+  //
+  // Both of these were broken together: the gate caught infrastructure errors
+  // and logged 'non-blocking', and it skipped preTradeCheck whenever
+  // `input.price` was absent — which is every MARKET order a bot places. So a
+  // bot could place unlimited unchecked market orders, and a transient DB fault
+  // disabled every limit at once. The suite passed throughout.
+  // ══════════════════════════════════════════════════════════════════════
+  describe('risk gate', () => {
+    const marketOrder = {
+      portfolioId: 'p1', symbol: 'RELIANCE', side: 'BUY',
+      orderType: 'MARKET', qty: 10, instrumentToken: 'RELIANCE',
+    } as any;
+
+    beforeEach(() => {
+      mockPrisma.portfolio.findUnique.mockResolvedValue({
+        id: 'p1', userId: 'user1', currentNav: 1_000_000, initialCapital: 1_000_000,
+      });
+    });
+
+    it('REJECTS the order when the risk layer throws, instead of trading unchecked', async () => {
+      // Simulate an infrastructure fault inside RiskService
+      mockPrisma.portfolio.findMany.mockRejectedValue(new Error('db connection lost'));
+
+      await expect(service.placeOrder('user1', marketOrder)).rejects.toThrow(TradeError);
+      await expect(service.placeOrder('user1', marketOrder)).rejects.toThrow(/rejected for safety/i);
+      expect(mockPrisma.order.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects with 503 so the caller can distinguish "unknown" from "denied"', async () => {
+      mockPrisma.portfolio.findMany.mockRejectedValue(new Error('db connection lost'));
+
+      await service.placeOrder('user1', marketOrder).catch((err: TradeError) => {
+        expect(err.statusCode).toBe(503);
+      });
+      expect.assertions(1);
+    });
+
+    it('risk-checks a MARKET order using the live quote, not a skipped zero price', async () => {
+      // The bug: bots pass price: undefined on MARKET orders, so estPrice was 0
+      // and `if (estPrice > 0)` skipped position/concentration/fat-finger limits.
+      // A 10-lot order at the mocked LTP of 2500 must be evaluated at 25,000.
+      let seenPrice: number | undefined;
+      let seenQty: number | undefined;
+      mockPrisma.position.count.mockImplementation(async () => { return 0; });
+
+      const riskModule = await import('../../src/services/risk.service.js');
+      const spy = vi.spyOn(riskModule.RiskService.prototype, 'preTradeCheck')
+        .mockImplementation(async (_u: string, _s: string, _side: string, qty: number, price: number) => {
+          seenPrice = price;
+          seenQty = qty;
+          return { allowed: true, violations: [], warnings: [] } as any;
+        });
+
+      mockPrisma.order.create.mockResolvedValue({ id: 'o1', symbol: 'RELIANCE', qty: 10, status: 'PENDING' });
+      mockPrisma.order.findUnique.mockResolvedValue({ id: 'o1', status: 'FILLED', qty: 10, filledQty: 10 });
+      mockPrisma.order.update.mockResolvedValue({});
+      mockPrisma.position.findFirst.mockResolvedValue(null);
+      mockPrisma.position.create.mockResolvedValue({ id: 'pos1' });
+      mockPrisma.portfolio.update.mockResolvedValue({});
+
+      await service.placeOrder('user1', marketOrder).catch(() => { /* downstream mocks are incomplete; the gate is what matters */ });
+
+      expect(spy).toHaveBeenCalled();
+      expect(seenPrice).toBe(2500);
+      expect(seenQty).toBe(10);
+      spy.mockRestore();
+    });
+
+    it('blocks the order when the position-limit check reports a violation', async () => {
+      const riskModule = await import('../../src/services/risk.service.js');
+      const spy = vi.spyOn(riskModule.RiskService.prototype, 'preTradeCheck')
+        .mockResolvedValue({ allowed: false, violations: ['Order value exceeds Rs 500,000'], warnings: [] } as any);
+
+      await expect(service.placeOrder('user1', marketOrder)).rejects.toThrow(/Risk check failed/);
+      expect(mockPrisma.order.create).not.toHaveBeenCalled();
+      spy.mockRestore();
+    });
+
+    it('rejects rather than guessing when the symbol cannot be priced', async () => {
+      const mdModule = await import('../../src/services/market-data.service.js');
+      const svc = new TradeService(mockPrisma as any);
+      (svc as any).marketData = { getQuote: vi.fn().mockResolvedValue({ ltp: 0 }) };
+
+      await expect(svc.placeOrder('user1', marketOrder)).rejects.toThrow(/unable to fetch current price/i);
+      expect(mockPrisma.order.create).not.toHaveBeenCalled();
+      expect(mdModule).toBeDefined();
     });
   });
 });

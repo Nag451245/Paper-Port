@@ -7,6 +7,7 @@ import { OrderManagementService } from './oms.service.js';
 import { wsHub } from '../lib/websocket.js';
 import { DecisionAuditService } from './decision-audit.service.js';
 import { createChildLogger } from '../lib/logger.js';
+import { istDateStr, istMidnight, istMinutesSinceMidnight, parseHHMM } from '../lib/ist.js';
 
 const log = createChildLogger('IntradayManager');
 
@@ -29,6 +30,8 @@ export class IntradayManager {
   private circuitBreakerHandle: ReturnType<typeof setInterval> | null = null;
   private circuitBreakerTriggered = false;
   private maxDrawdownPct = 3.0;
+  /** IST date (YYYY-MM-DD) on which auto square-off last ran, for idempotency. */
+  private lastSquareOffDate: string | null = null;
 
   private decisionAudit: DecisionAuditService;
 
@@ -56,15 +59,10 @@ export class IntradayManager {
     this.circuitBreakerTriggered = false;
     console.log(`[IntradayManager] Auto square-off armed for ${this.squareOffTime} IST | Circuit breaker at ${this.maxDrawdownPct}% drawdown`);
 
-    this.squareOffHandle = setInterval(async () => {
-      const now = new Date();
-      const istHours = (now.getUTCHours() + 5) % 24 + (now.getUTCMinutes() + 30 >= 60 ? 1 : 0);
-      const istMinutes = (now.getUTCMinutes() + 30) % 60;
-      const currentTime = `${istHours.toString().padStart(2, '0')}:${istMinutes.toString().padStart(2, '0')}`;
-
-      if (currentTime === this.squareOffTime) {
-        await this.squareOffAllIntraday();
-      }
+    this.squareOffHandle = setInterval(() => {
+      this.runSquareOffCheck().catch(err =>
+        log.error({ err }, 'Auto square-off cycle failed')
+      );
     }, 30_000);
 
     this.circuitBreakerHandle = setInterval(async () => {
@@ -114,13 +112,86 @@ export class IntradayManager {
     }
   }
 
+  /**
+   * One tick of the auto square-off check.
+   *
+   * Fires when the deadline has PASSED, not when a clock string equals it. The
+   * previous version compared `"HH:MM" === this.squareOffTime` off a drifting
+   * 30s timer: a single delayed tick skipped the square-off for the whole day
+   * and left intraday positions to carry overnight into a gap. It also built the
+   * hour as `(getUTCHours() + 5) % 24 + carry`, which yields 24 between
+   * 18:30-19:00 UTC, and could fire twice inside the same minute.
+   *
+   * `lastSquareOffDate` makes this idempotent per IST day, and is assigned
+   * before the await so a slow square-off cannot be re-entered by the next tick.
+   */
+  async runSquareOffCheck(): Promise<boolean> {
+    const today = istDateStr();
+    if (this.lastSquareOffDate === today) return false;
+
+    const deadline = parseHHMM(this.squareOffTime);
+    if (deadline === null) {
+      log.error({ squareOffTime: this.squareOffTime }, 'Invalid square-off time — auto square-off cannot run');
+      return false;
+    }
+    if (istMinutesSinceMidnight() < deadline) return false;
+
+    this.lastSquareOffDate = today;
+    log.warn({ squareOffTime: this.squareOffTime }, 'Auto square-off deadline reached — closing intraday positions');
+    await this.squareOffAllIntraday();
+    return true;
+  }
+
+  /**
+   * Mark open positions to market using LIVE quotes.
+   *
+   * Deliberately does NOT trust `position.unrealizedPnl`. That column is
+   * written only by StopLossMonitor and PriceFeedService, both of which are
+   * started by the market-open cron — so after a mid-session restart it silently
+   * freezes at its last value. A circuit breaker reading that column would then
+   * compute a stale (often near-zero) drawdown at exactly the moment it is most
+   * needed. The stored value is used only as a per-position last resort, and the
+   * caller is told how many positions fell back to it.
+   */
+  private async computeLiveUnrealized(
+    positions: Array<{ symbol: string; exchange: string | null; side: string; qty: number; avgEntryPrice: unknown; unrealizedPnl: unknown }>,
+  ): Promise<{ unrealizedPnl: number; staleCount: number }> {
+    if (positions.length === 0) return { unrealizedPnl: 0, staleCount: 0 };
+
+    const marks = await Promise.allSettled(
+      positions.map(p => this.marketData.getQuote(p.symbol, p.exchange ?? 'NSE')),
+    );
+
+    let unrealizedPnl = 0;
+    let staleCount = 0;
+
+    for (let i = 0; i < positions.length; i++) {
+      const p = positions[i];
+      const settled = marks[i];
+      const ltp = settled.status === 'fulfilled' ? Number((settled.value as any)?.ltp ?? 0) : 0;
+
+      if (ltp > 0) {
+        const entry = Number(p.avgEntryPrice);
+        unrealizedPnl += p.side === 'LONG'
+          ? (ltp - entry) * p.qty
+          : (entry - ltp) * p.qty;
+      } else {
+        staleCount++;
+        unrealizedPnl += Number(p.unrealizedPnl ?? 0);
+      }
+    }
+
+    return { unrealizedPnl, staleCount };
+  }
+
   private async checkIntradayDrawdown(): Promise<void> {
     const portfolios = await this.prisma.portfolio.findMany({
       select: { id: true, userId: true, initialCapital: true },
     });
 
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    // IST day boundary — a server-local setHours(0,0,0,0) attributes trades to
+    // the wrong day on a UTC host (this is REG-001).
+    const todayStart = istMidnight();
 
     for (const pf of portfolios) {
       const capital = Number(pf.initialCapital);
@@ -137,7 +208,15 @@ export class IntradayManager {
         select: { id: true, symbol: true, exchange: true, side: true, qty: true, avgEntryPrice: true, unrealizedPnl: true },
       });
 
-      const unrealizedPnl = openPositions.reduce((s, p) => s + Number(p.unrealizedPnl ?? 0), 0);
+      const { unrealizedPnl, staleCount } = await this.computeLiveUnrealized(openPositions);
+
+      if (staleCount > 0) {
+        // Loud on purpose: a breaker running on partially stale marks is a
+        // breaker that may not fire. Better to know than to assume it is armed.
+        log.error({ userId: pf.userId, staleCount, total: openPositions.length },
+          'Circuit breaker could not price some positions — drawdown may be understated');
+      }
+
       const combinedExposure = realizedPnl + unrealizedPnl;
       const drawdownPct = capital > 0 ? Math.abs(Math.min(combinedExposure, 0)) / capital * 100 : 0;
 
@@ -201,10 +280,26 @@ export class IntradayManager {
       ? { portfolio: { userId } }
       : {};
 
+    // Exclude delivery positions by the `product` column, still honouring the
+    // legacy strategyTag convention for rows written before that column existed.
+    //
+    // The explicit `{ OR: [{ col: null }, ...] }` is REQUIRED, not defensive
+    // styling. SQL three-valued logic makes `NOT (col = 'DELIVERY')` evaluate to
+    // NULL — not TRUE — when col IS NULL, so those rows are filtered OUT of the
+    // result. Two consequences, both verified against the database:
+    //
+    //   - The previous tag-only filter silently skipped every position with a
+    //     NULL strategyTag, so manually-placed positions were never squared off.
+    //   - Naively adding `product` to that filter would have skipped every row
+    //     with a NULL product — i.e. the entire existing book immediately after
+    //     the derivative-columns migration.
     const openPositions = await this.prisma.position.findMany({
       where: {
         status: 'OPEN',
-        NOT: { strategyTag: { contains: 'DELIVERY' } },
+        AND: [
+          { OR: [{ product: null }, { product: { not: 'DELIVERY' } }] },
+          { OR: [{ strategyTag: null }, { NOT: { strategyTag: { contains: 'DELIVERY' } } }] },
+        ],
         ...portfolioFilter,
       },
       include: { portfolio: { select: { userId: true } } },
@@ -340,13 +435,11 @@ export class IntradayManager {
       data: { qty: remainingQty },
     });
 
-    const portfolio = await this.prisma.portfolio.findUnique({ where: { id: position.portfolioId } });
-    if (portfolio) {
-      await this.prisma.portfolio.update({
-        where: { id: position.portfolioId },
-        data: { currentNav: Number(portfolio.currentNav) + (exitPrice * exitQty - totalCost) },
-      });
-    }
+    // Atomic increment — a read-modify-write here loses concurrent fills' deltas
+    await this.prisma.portfolio.update({
+      where: { id: position.portfolioId },
+      data: { currentNav: { increment: exitPrice * exitQty - totalCost } },
+    });
 
     return {
       exitedQty: exitQty,
@@ -378,11 +471,11 @@ export class IntradayManager {
       data: { qty: newQty, avgEntryPrice: newAvg },
     });
 
-    const portfolio = await this.prisma.portfolio.findUnique({ where: { id: position.portfolioId } });
-    if (portfolio && position.side === 'LONG') {
+    if (position.side === 'LONG') {
+      // Atomic increment — see squareOffPosition above
       await this.prisma.portfolio.update({
         where: { id: position.portfolioId },
-        data: { currentNav: Number(portfolio.currentNav) - price * additionalQty },
+        data: { currentNav: { decrement: price * additionalQty } },
       });
     }
 
@@ -402,12 +495,18 @@ export class IntradayManager {
       throw new Error('Position not found or unauthorized');
     }
 
-    const currentTag = position.strategyTag ?? '';
-    const newTag = currentTag.replace('INTRADAY', 'DELIVERY');
-
+    // Product type lives in its own column now.
+    //
+    // This used to be `strategyTag.replace('INTRADAY', 'DELIVERY')`, which only
+    // did anything when the tag literally contained the word INTRADAY. For a
+    // position tagged with a strategy name — `BOT:momentum`, the common case —
+    // the replace was a no-op, the tag was written back unchanged, and this
+    // method still returned `{ converted: true }`. The position then remained
+    // eligible for EOD square-off, so a user who asked to hold for delivery got
+    // force-sold anyway.
     await this.prisma.position.update({
       where: { id: positionId },
-      data: { strategyTag: newTag || 'DELIVERY' },
+      data: { product: 'DELIVERY' },
     });
 
     return { converted: true };

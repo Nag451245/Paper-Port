@@ -5,6 +5,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypt
 import https from 'https';
 import * as OTPAuth from 'otpauth';
 import { env } from '../config.js';
+import { getRedis } from '../lib/redis.js';
 
 const SALT_ROUNDS = 12;
 
@@ -131,20 +132,47 @@ function deriveEncryptionKey(secret: string): Buffer {
   return createHash('sha256').update(secret).digest();
 }
 
+/**
+ * Credential encryption.
+ *
+ * Writes AES-256-GCM as `v2:<iv>:<authTag>:<ciphertext>`. GCM is authenticated,
+ * so tampering with a stored credential fails loudly instead of decrypting to
+ * attacker-influenced plaintext.
+ *
+ * Reads still accept the legacy unauthenticated `aes-256-cbc` format
+ * (`<iv>:<ciphertext>`) so existing rows keep working; they are upgraded to v2
+ * the next time the credential is written.
+ */
+const CIPHER_V2 = 'v2';
+
 function encrypt(text: string, secret: string): string {
   const key = deriveEncryptionKey(secret);
-  const iv = randomBytes(16);
-  const cipher = createCipheriv('aes-256-cbc', key, iv);
-  let encrypted = cipher.update(text, 'utf8', 'hex');
-  encrypted += cipher.final('hex');
-  return iv.toString('hex') + ':' + encrypted;
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return `${CIPHER_V2}:${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
 }
 
 function decrypt(encryptedText: string, secret: string): string {
   const key = deriveEncryptionKey(secret);
-  const [ivHex, encrypted] = encryptedText.split(':');
-  const iv = Buffer.from(ivHex, 'hex');
-  const decipher = createDecipheriv('aes-256-cbc', key, iv);
+  const parts = encryptedText.split(':');
+
+  if (parts[0] === CIPHER_V2) {
+    if (parts.length !== 4) throw new Error('Malformed v2 ciphertext');
+    const [, ivHex, tagHex, dataHex] = parts;
+    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(ivHex, 'hex'));
+    decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
+    return Buffer.concat([
+      decipher.update(Buffer.from(dataHex, 'hex')),
+      decipher.final(),
+    ]).toString('utf8');
+  }
+
+  // Legacy AES-256-CBC — unauthenticated, read-only for migration
+  if (parts.length !== 2) throw new Error('Malformed ciphertext');
+  const [ivHex, encrypted] = parts;
+  const decipher = createDecipheriv('aes-256-cbc', key, Buffer.from(ivHex, 'hex'));
   let decrypted = decipher.update(encrypted, 'hex', 'utf8');
   decrypted += decipher.final('utf8');
   return decrypted;
@@ -189,56 +217,132 @@ export class AuthService {
     return { user: toProfile(user), userId: user.id };
   }
 
-  private loginAttempts = new Map<string, { count: number; lockedUntil: number }>();
+  /**
+   * Failed-login throttling.
+   *
+   * Backed by Redis when configured, so the counter survives a restart and is
+   * shared across PM2/container instances — an in-process Map is trivially
+   * defeated by either. The Map remains as a single-instance fallback; it is
+   * swept on write so attacker-supplied emails cannot grow it without bound.
+   */
+  private loginAttempts = new Map<string, { count: number; lockedUntil: number; seenAt: number }>();
   private readonly MAX_LOGIN_ATTEMPTS = 5;
   private readonly LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+  private readonly ATTEMPT_WINDOW_MS = 60 * 60 * 1000; // forget stale counters after 1h
+  private readonly MAX_TRACKED_EMAILS = 10_000;
 
-  private checkLockout(email: string): void {
-    const record = this.loginAttempts.get(email);
-    if (record && record.lockedUntil > Date.now()) {
-      const remainingMs = record.lockedUntil - Date.now();
-      const remainingMin = Math.ceil(remainingMs / 60_000);
-      throw new AuthError(`Account temporarily locked. Try again in ${remainingMin} minute(s).`, 429);
+  private attemptKey(email: string): string {
+    return `login_attempts:${email.toLowerCase()}`;
+  }
+
+  private sweepLoginAttempts(): void {
+    const now = Date.now();
+    for (const [key, rec] of this.loginAttempts) {
+      if (rec.lockedUntil <= now && now - rec.seenAt > this.ATTEMPT_WINDOW_MS) {
+        this.loginAttempts.delete(key);
+      }
     }
-    if (record && record.lockedUntil <= Date.now()) {
-      this.loginAttempts.delete(email);
+    if (this.loginAttempts.size > this.MAX_TRACKED_EMAILS) {
+      const oldest = [...this.loginAttempts.entries()]
+        .sort((a, b) => a[1].seenAt - b[1].seenAt)
+        .slice(0, this.loginAttempts.size - this.MAX_TRACKED_EMAILS);
+      for (const [key] of oldest) this.loginAttempts.delete(key);
     }
   }
 
-  private recordFailedAttempt(email: string): void {
-    const record = this.loginAttempts.get(email) || { count: 0, lockedUntil: 0 };
+  private async checkLockout(email: string): Promise<void> {
+    const key = this.attemptKey(email);
+    const redis = getRedis();
+
+    if (redis) {
+      try {
+        const lockedUntil = await redis.get(`${key}:locked`);
+        if (lockedUntil && Number(lockedUntil) > Date.now()) {
+          const remainingMin = Math.ceil((Number(lockedUntil) - Date.now()) / 60_000);
+          throw new AuthError(`Account temporarily locked. Try again in ${remainingMin} minute(s).`, 429);
+        }
+        return;
+      } catch (err) {
+        if (err instanceof AuthError) throw err;
+        // Redis unreachable — fall through to the in-process counter
+      }
+    }
+
+    const record = this.loginAttempts.get(key);
+    if (record && record.lockedUntil > Date.now()) {
+      const remainingMin = Math.ceil((record.lockedUntil - Date.now()) / 60_000);
+      throw new AuthError(`Account temporarily locked. Try again in ${remainingMin} minute(s).`, 429);
+    }
+    if (record && record.lockedUntil <= Date.now()) {
+      this.loginAttempts.delete(key);
+    }
+  }
+
+  private async recordFailedAttempt(email: string): Promise<void> {
+    const key = this.attemptKey(email);
+    const redis = getRedis();
+
+    if (redis) {
+      try {
+        const count = await redis.incr(key);
+        if (count === 1) {
+          await redis.pexpire(key, this.ATTEMPT_WINDOW_MS);
+        }
+        if (count >= this.MAX_LOGIN_ATTEMPTS) {
+          const until = Date.now() + this.LOCKOUT_DURATION_MS;
+          await redis.set(`${key}:locked`, String(until), 'PX', this.LOCKOUT_DURATION_MS);
+          console.warn(`[SECURITY] Account locked for ${email} after ${count} failed attempts`);
+        }
+        return;
+      } catch {
+        // Redis unreachable — fall through to the in-process counter
+      }
+    }
+
+    this.sweepLoginAttempts();
+    const record = this.loginAttempts.get(key) ?? { count: 0, lockedUntil: 0, seenAt: Date.now() };
     record.count += 1;
+    record.seenAt = Date.now();
     if (record.count >= this.MAX_LOGIN_ATTEMPTS) {
       record.lockedUntil = Date.now() + this.LOCKOUT_DURATION_MS;
       console.warn(`[SECURITY] Account locked for ${email} after ${record.count} failed attempts`);
     }
-    this.loginAttempts.set(email, record);
+    this.loginAttempts.set(key, record);
   }
 
-  private clearFailedAttempts(email: string): void {
-    this.loginAttempts.delete(email);
+  private async clearFailedAttempts(email: string): Promise<void> {
+    const key = this.attemptKey(email);
+    const redis = getRedis();
+    if (redis) {
+      try {
+        await redis.del(key, `${key}:locked`);
+      } catch { /* fall through */ }
+    }
+    this.loginAttempts.delete(key);
   }
 
   async login(input: LoginInput): Promise<{ user: UserProfile; userId: string }> {
-    this.checkLockout(input.email);
+    await this.checkLockout(input.email);
 
     const user = await this.prisma.user.findUnique({ where: { email: input.email } });
     if (!user) {
-      this.recordFailedAttempt(input.email);
+      await this.recordFailedAttempt(input.email);
       throw new AuthError('Invalid email or password', 401);
-    }
-
-    if (!user.isActive) {
-      throw new AuthError('Account is deactivated', 403);
     }
 
     const valid = await bcrypt.compare(input.password, user.passwordHash);
     if (!valid) {
-      this.recordFailedAttempt(input.email);
+      await this.recordFailedAttempt(input.email);
       throw new AuthError('Invalid email or password', 401);
     }
 
-    this.clearFailedAttempts(input.email);
+    // Checked only after the password verifies — reporting "deactivated" to an
+    // unauthenticated caller would confirm which emails have accounts.
+    if (!user.isActive) {
+      throw new AuthError('Account is deactivated', 403);
+    }
+
+    await this.clearFailedAttempts(input.email);
 
     return { user: toProfile(user), userId: user.id };
   }
@@ -438,8 +542,11 @@ export class AuthService {
     if (hasValidSession && credential.sessionToken) {
       try {
         sessionToken = decrypt(credential.sessionToken, this.encKey);
-      } catch {
-        sessionToken = credential.sessionToken;
+      } catch (err) {
+        // Never fall back to the raw ciphertext — that ships garbage to the
+        // broker and hides key-rotation or corruption problems.
+        console.error(`[Breeze] Session token decrypt failed for user ${userId}: ${(err as Error).message}`);
+        sessionToken = null;
       }
     }
     return {
@@ -480,13 +587,29 @@ export class AuthService {
     const apiKey = decrypt(credential.encryptedApiKey, this.encKey);
     const secretKey = decrypt(credential.encryptedSecret, this.encKey);
     let rawTotp: string;
-    try { rawTotp = decrypt(credential.totpSecret, this.encKey); } catch { rawTotp = credential.totpSecret; }
+    try {
+      rawTotp = decrypt(credential.totpSecret, this.encKey);
+    } catch (err) {
+      throw new AuthError(
+        `Stored TOTP secret could not be decrypted (${(err as Error).message}). ` +
+        'Re-enter it in Settings — this usually means ENCRYPTION_KEY changed.',
+        500,
+      );
+    }
 
     let loginId: string | null = null;
     let loginPassword: string | null = null;
     if (credential.encryptedLoginId && credential.encryptedLoginPassword) {
-      try { loginId = decrypt(credential.encryptedLoginId, this.encKey); } catch { /* */ }
-      try { loginPassword = decrypt(credential.encryptedLoginPassword, this.encKey); } catch { /* */ }
+      try {
+        loginId = decrypt(credential.encryptedLoginId, this.encKey);
+        loginPassword = decrypt(credential.encryptedLoginPassword, this.encKey);
+      } catch (err) {
+        // Leave both null so we fall through to the direct-API strategy rather
+        // than POSTing undecryptable bytes to ICICI as a password.
+        loginId = null;
+        loginPassword = null;
+        console.error(`[Breeze] Login credential decrypt failed for user ${userId}: ${(err as Error).message}`);
+      }
     }
 
     let sessionToken: string | null = null;

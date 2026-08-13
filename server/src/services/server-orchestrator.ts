@@ -5,6 +5,7 @@ import type { BotEngine } from './bot-engine.js';
 import type { LearningEngine } from './learning-engine.js';
 import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
+import { leaderElection } from '../lib/leader-election.js';
 
 const log = createChildLogger('Orchestrator');
 
@@ -208,6 +209,12 @@ export class ServerOrchestrator {
    */
   scheduleMarketDay(cronExpression: string, handler: () => Promise<void> | void): cron.ScheduledTask {
     const task = cron.schedule(cronExpression, async () => {
+      // Only the leader runs automated work. Without this every instance would
+      // run every job — the order matcher, bot ticks, the square-off — so a
+      // second process doubles position size and each one's per-process risk
+      // limits see only half the true exposure.
+      if (!leaderElection.isLeader()) return;
+
       if (this.calendar.isHoliday() || this.calendar.isWeekend()) {
         const reason = this.calendar.isHoliday()
           ? `Holiday: ${this.calendar.getHolidayName()}`
@@ -230,6 +237,7 @@ export class ServerOrchestrator {
    */
   scheduleAlways(cronExpression: string, handler: () => Promise<void> | void): cron.ScheduledTask {
     const task = cron.schedule(cronExpression, async () => {
+      if (!leaderElection.isLeader()) return;
       try {
         await handler();
       } catch (err) {

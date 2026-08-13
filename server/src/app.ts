@@ -51,8 +51,9 @@ import { OMSRecoveryService } from './services/oms-recovery.service.js';
 import { TickStoreService } from './services/tick-store.service.js';
 import reportRoutes from './routes/reports.js';
 import guardianRoutes from './routes/guardian.js';
-import { isEngineAvailable, ensureEngineAvailable, startDaemon, stopDaemon } from './lib/rust-engine.js';
+import { isEngineAvailable, ensureEngineAvailable, startDaemon, stopDaemon, getEngineStatus } from './lib/rust-engine.js';
 import { initTracing } from './lib/tracing.js';
+import { leaderElection } from './lib/leader-election.js';
 
 export interface BuildAppOptions {
   logger?: boolean;
@@ -101,6 +102,18 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.decorate('orchestrator', orchestrator);
   app.decorate('oms', oms);
 
+  // Elect a single writer BEFORE anything that schedules automated work.
+  // Registered first so it resolves ahead of every other onReady hook — the
+  // market-services arming and the orchestrator both consult isLeader().
+  app.addHook('onReady', async () => {
+    await leaderElection.start();
+    const s = leaderElection.getStatus();
+    app.log.info(
+      `[Leader] instance=${s.instanceId} leader=${s.isLeader} coordinated=${s.coordinated}` +
+      (s.coordinated ? '' : ' (no Redis — single-instance assumption)'),
+    );
+  });
+
   await app.register(sensible);
 
   await app.register(helmet, {
@@ -120,8 +133,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     } : false,
   });
 
+  // 5000/min was high enough to be no limit at all. 600/min (10 rps) still
+  // covers a busy polling dashboard; raise RATE_LIMIT_MAX if a real client
+  // legitimately needs more.
   await app.register(rateLimit, {
-    max: 5000,
+    max: env.RATE_LIMIT_MAX,
     timeWindow: '1 minute',
     keyGenerator: (req) => {
       const user = (req as any).user;
@@ -222,7 +238,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
 
     try {
-      checks.engine = isEngineAvailable() ? 'ok' : 'not_installed';
+      // Reports 'unusable' when the binary exists but cannot run (e.g. built
+      // for another platform) — previously this said 'ok' for a dead engine.
+      checks.engine = getEngineStatus().status;
     } catch {
       checks.engine = 'error';
     }
@@ -248,6 +266,17 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       checks.redis = 'error';
     }
 
+    // Positions stranded mid-exit. CLOSING is matched by neither the OPEN nor
+    // the CLOSED queries, so without surfacing it here such a position is
+    // invisible to risk, NAV and the stop-loss monitor alike.
+    let stuckClosing = 0;
+    try {
+      stuckClosing = await getPrisma().position.count({ where: { status: 'CLOSING' } });
+      checks.positions_stuck_closing = stuckClosing === 0 ? 'ok' : `${stuckClosing}`;
+    } catch {
+      checks.positions_stuck_closing = 'error';
+    }
+
     try {
       const mlResp = await fetch(`${env.ML_SERVICE_URL}/health`, { signal: AbortSignal.timeout(3000) });
       checks.ml_service = mlResp.ok ? 'ok' : 'unhealthy';
@@ -255,8 +284,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       checks.ml_service = 'unreachable';
     }
 
-    const engineOk = checks.engine === 'ok' || checks.engine === 'not_installed';
-    const overall = checks.database === 'ok' && engineOk && checks.redis !== 'error' ? 'ok'
+    // 'unusable' is NOT ok — the binary is installed but cannot run, so the
+    // primary signal source is dead. 'not_installed' is a deliberate
+    // configuration (AI/manual only) and does not degrade the service.
+    const engineOk = checks.engine === 'ok' || checks.engine === 'not_installed' || checks.engine === 'unverified';
+    // A position stranded mid-exit means our books and the broker disagree —
+    // never report a clean bill of health while that is outstanding.
+    const overall = checks.database === 'ok' && engineOk && checks.redis !== 'error' && stuckClosing === 0 ? 'ok'
       : checks.database === 'ok' && checks.redis !== 'error' ? 'degraded' : 'error';
 
     const uptimeStatus = uptimeMonitor.getStatus();
@@ -480,13 +514,55 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
   });
 
-  // Start SL monitor, price feed, intraday manager, and fill reconciliation at market open
-  orchestrator.scheduleMarketDay('45 3 * * 1-5', async () => {
-    console.log('[MarketOpen] Starting stop-loss monitor, price feed, intraday manager, and fill reconciliation');
+  /**
+   * Arm the live safety services. All four `start()` methods are idempotent,
+   * so this is safe to call from both the market-open cron and startup.
+   */
+  const startMarketServices = async (reason: string): Promise<void> => {
+    // These loops place and cancel real orders. On a follower they would run a
+    // second copy of every stop-loss exit and square-off.
+    if (!leaderElection.isLeader()) {
+      app.log.info(`[MarketServices] Not leader — skipping arming (${reason})`);
+      return;
+    }
+    console.log(`[MarketServices] Starting stop-loss monitor, price feed, intraday manager, fill reconciliation (${reason})`);
     await stopLossMonitor.start();
     priceFeedService.start();
     intradayManager.startAutoSquareOff();
     fillReconciliation.start();
+  };
+
+  // Start SL monitor, price feed, intraday manager, and fill reconciliation at market open
+  orchestrator.scheduleMarketDay('45 3 * * 1-5', async () => {
+    await startMarketServices('market open');
+  });
+
+  // Re-arm on startup if the market is already open.
+  //
+  // Without this, these services are only ever started by the 09:15 IST cron,
+  // so ANY restart during the session — deploy, crash, OOM, pm2 reload — leaves
+  // open positions with no stop-loss enforcement and no 15:15 square-off for the
+  // rest of the day. It also silently blinds the drawdown circuit breaker, since
+  // position.unrealizedPnl is written only by these same services.
+  app.addHook('onReady', async () => {
+    try {
+      if (orchestrator.calendar.isMarketOpen('NSE')) {
+        await startMarketServices('startup — market already open');
+        return;
+      }
+
+      // Market closed: if intraday positions are still open past the square-off
+      // deadline, nobody is going to close them today. Say so loudly.
+      const openCount = await getPrisma().position.count({ where: { status: 'OPEN' } });
+      if (openCount > 0) {
+        app.log.warn(
+          `[MarketServices] Market closed at startup with ${openCount} open position(s) — ` +
+          'safety monitors not armed until next market open. Review these positions manually.',
+        );
+      }
+    } catch (err) {
+      app.log.error({ err }, '[MarketServices] Startup arming check failed');
+    }
   });
 
   // Stop all at market close
@@ -499,6 +575,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.addHook('onClose', async () => {
+    // Release the lease promptly so a replacement instance can take over
+    // without waiting out the TTL.
+    try { await leaderElection.stop(); } catch { /* lease expires on its own */ }
     try {
       await omsRecovery.gracefulShutdown();
       app.log.info('[shutdown] OMS graceful shutdown complete');

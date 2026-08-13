@@ -7,6 +7,7 @@ import { env } from '../config.js';
 import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
 import { istDateStr, istDaysAgo } from '../lib/ist.js';
+import { parseInstrumentSymbol } from '../lib/instrument.js';
 
 const log = createChildLogger('MarketData');
 
@@ -51,33 +52,34 @@ function getQuoteCacheTTL(): number {
 }
 const BREEZE_BRIDGE_URL = env.BREEZE_BRIDGE_URL;
 
-const BREEZE_STOCK_CODES: Record<string, string> = {
-  NIFTY: 'NIFTY', BANKNIFTY: 'CNXBAN', FINNIFTY: 'NIFFIN',
-  MIDCPNIFTY: 'NIFSEL', NIFTYNXT50: 'NIFNEX', SENSEX: 'SENSEX',
-  RELIANCE: 'RELIND', HDFCBANK: 'HDFBAN', ICICIBANK: 'ICIBAN',
-  INFY: 'INFTEC', SBIN: 'STABAN', HINDUNILVR: 'HINLEV',
-  BHARTIARTL: 'BHAAIR', KOTAKBANK: 'KOTMAH', LT: 'LARTOU',
-  AXISBANK: 'AXIBAN', BAJFINANCE: 'BAJFI', HCLTECH: 'HCLTEC',
-  TATAMOTORS: 'TATMOT', SUNPHARMA: 'SUNPHA', TITAN: 'TITIND',
-  ASIANPAINT: 'ASIPAI', ADANIENT: 'ADAENT', TATASTEEL: 'TATSTE',
-  POWERGRID: 'POWGRI', JSWSTEEL: 'JSWSTE', 'M&M': 'MAHMAH',
-  BAJAJFINSV: 'BAFINS', ULTRACEMCO: 'ULTCEM', NESTLEIND: 'NESIND',
-  DRREDDY: 'DRREDD', DIVISLAB: 'DIVLAB', HEROMOTOCO: 'HERHON',
-};
+// Moved to lib/breeze-symbols.ts so the ORDER path can use it too — it used to
+// live here unexported, so BreezeAdapter sent raw NSE symbols as stock_code.
+import { BREEZE_STOCK_CODES } from '../lib/breeze-symbols.js';
 
-// Parse F&O option symbol like NIFTY20260310248000CE → { underlying: 'NIFTY', expiry: '2026-03-10', strike: 24800, type: 'CE' }
-const FNO_SYMBOL_REGEX = /^([A-Z]+?)(\d{4})(\d{2})(\d{2})(\d+)(CE|PE)$/;
-
+/**
+ * Parse an F&O option symbol: NIFTY2026031024800CE → underlying NIFTY,
+ * expiry 2026-03-10, strike 24800, type CE.
+ *
+ * Delegates to lib/instrument.ts so the system has exactly one symbol grammar.
+ * Returns null rather than throwing for anything that is not a well-formed
+ * option, because callers here use null to mean "not an option" — including for
+ * malformed dates, which the shared parser rejects outright.
+ */
 function parseOptionSymbol(symbol: string): { underlying: string; expiry: string; strike: number; type: 'CE' | 'PE' } | null {
-  const match = symbol.toUpperCase().match(FNO_SYMBOL_REGEX);
-  if (!match) return null;
-  const [, underlying, year, month, day, strikeStr, type] = match;
-  return {
-    underlying,
-    expiry: `${year}-${month}-${day}`,
-    strike: parseInt(strikeStr, 10),
-    type: type as 'CE' | 'PE',
-  };
+  try {
+    const spec = parseInstrumentSymbol(symbol);
+    if (spec.instrumentType !== 'OPTIONS' || !spec.expiry || spec.strike === null || !spec.optionType) {
+      return null;
+    }
+    return {
+      underlying: spec.underlying,
+      expiry: istDateStr(spec.expiry),
+      strike: spec.strike,
+      type: spec.optionType,
+    };
+  } catch {
+    return null;
+  }
 }
 
 // Cache a live BreezeConnect instance to avoid re-exchanging session on every call
@@ -738,12 +740,11 @@ export class MarketDataService {
       }
     } catch { /* DB not available, continue to live fetch */ }
 
-    if (exchange === 'MCX' || exchange === 'CDS') {
-      const bars = this.generateSimulatedHistory(symbol, exchange, fromDate, toDate);
-      if (this.cache) await this.cache.set(cacheKey, bars, ttl);
-      return bars;
-    }
-
+    // MCX and CDS used to be intercepted here and served a Math.random() random
+    // walk from `generateSimulatedHistory` — so Breeze was never even asked, and
+    // any commodity backtest was fitted to noise. They now take the same path as
+    // everything else. An empty result is the honest answer when there is no
+    // data; fabricated bars are not.
     const bars = await this.fetchFromBreeze(symbol, interval, fromDate, toDate, userId, exchange);
     if (bars.length > 0) {
       if (this.cache) await this.cache.set(cacheKey, bars, ttl);
@@ -1633,23 +1634,17 @@ export class MarketDataService {
   }
 
   async getIndicesForExchange(exchange: string): Promise<{ name: string; value: number; change: number; changePercent: number }[]> {
+    // MCX iCOMDEX index values were generated with Math.random() on every call —
+    // a number that moved when you refreshed and tracked nothing. There is no
+    // index feed wired up, so report none rather than invent four.
     if (exchange === 'MCX') {
-      return [
-        { name: 'MCX iCOMDEX Composite', value: 5890 + Math.random() * 50, change: (Math.random() - 0.45) * 30, changePercent: (Math.random() - 0.45) * 0.5 },
-        { name: 'MCX iCOMDEX Bullion', value: 17200 + Math.random() * 100, change: (Math.random() - 0.45) * 80, changePercent: (Math.random() - 0.45) * 0.4 },
-        { name: 'MCX iCOMDEX Metal', value: 8100 + Math.random() * 40, change: (Math.random() - 0.45) * 35, changePercent: (Math.random() - 0.45) * 0.5 },
-        { name: 'MCX iCOMDEX Energy', value: 4200 + Math.random() * 30, change: (Math.random() - 0.45) * 25, changePercent: (Math.random() - 0.45) * 0.6 },
-      ].map(i => ({ ...i, value: Number(i.value.toFixed(2)), change: Number(i.change.toFixed(2)), changePercent: Number(i.changePercent.toFixed(2)) }));
+      return [];
     }
 
+    // Same as MCX above: these were a hardcoded base price plus Math.random()
+    // jitter, presented as live currency levels. No feed, so report none.
     if (exchange === 'CDS') {
-      return POPULAR_CDS_CURRENCIES.slice(0, 4).map(([code, _name, base]) => {
-        const variation = (Math.random() - 0.48) * base * 0.003;
-        return {
-          name: code, value: Number((base + variation).toFixed(4)),
-          change: Number(variation.toFixed(4)), changePercent: Number(((variation / base) * 100).toFixed(2)),
-        };
-      });
+      return [];
     }
 
     return this.getIndices();
@@ -1898,32 +1893,12 @@ export class MarketDataService {
 
   // ── Helpers ──
 
-  private generateSimulatedHistory(symbol: string, exchange: string, fromDate: string, toDate: string): HistoricalBar[] {
-    const mcxEntry = POPULAR_MCX_COMMODITIES.find(([code]) => code === symbol.toUpperCase());
-    const cdsEntry = POPULAR_CDS_CURRENCIES.find(([code]) => code === symbol.toUpperCase());
-    const basePrice = exchange === 'MCX' ? (mcxEntry?.[2] ?? 1000) : (cdsEntry?.[2] ?? 83);
-
-    const bars: HistoricalBar[] = [];
-    const start = new Date(fromDate);
-    const end = new Date(toDate);
-    let currentPrice = basePrice;
-
-    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-      if (d.getDay() === 0 || (exchange !== 'MCX' && d.getDay() === 6)) continue;
-      const dailyChange = (Math.random() - 0.48) * basePrice * 0.015;
-      const open = currentPrice;
-      const close = Number((open + dailyChange).toFixed(exchange === 'CDS' ? 4 : 2));
-      const high = Number((Math.max(open, close) * (1 + Math.random() * 0.008)).toFixed(exchange === 'CDS' ? 4 : 2));
-      const low = Number((Math.min(open, close) * (1 - Math.random() * 0.008)).toFixed(exchange === 'CDS' ? 4 : 2));
-      bars.push({
-        timestamp: d.toISOString().slice(0, 10),
-        open, high, low, close,
-        volume: Math.floor(Math.random() * (exchange === 'MCX' ? 50000 : 200000)) + 5000,
-      });
-      currentPrice = close;
-    }
-    return bars;
-  }
+  // `generateSimulatedHistory` was removed deliberately. It produced a seeded-less
+  // random walk (open/high/low/close/volume from Math.random()) for MCX and CDS
+  // and returned it as historical data. A strategy backtested against it was
+  // fitted to noise, and every downstream metric — Sharpe, drawdown, win rate —
+  // described that noise. If simulated data is ever needed again it belongs
+  // behind an explicit, clearly-labelled flag, never on the default read path.
 
   async diagnoseBreezeConnection(): Promise<Record<string, any>> {
     const steps: Record<string, any> = {};
@@ -2350,60 +2325,88 @@ export class MarketDataService {
     };
   }
 
+  /**
+   * Live MCX quote, from Breeze via the bridge.
+   *
+   * This previously mapped MCX commodities to Yahoo COMEX/NYMEX tickers (GOLD →
+   * GC=F, CRUDEOIL → CL=F) and returned those, labelled `exchange: 'MCX'`. Those
+   * are different instruments in a different currency: COMEX gold is ~$2,600 per
+   * troy ounce, MCX GOLD is ~₹73,000 per 10 grams. Anything downstream — a
+   * strategy, a backtest, a stop-loss — was reading a number with no relationship
+   * to the contract it claimed to price. When Yahoo failed it returned a
+   * hardcoded constant from a lookup table, still labelled as a live quote.
+   *
+   * A commodity quote is per CONTRACT, so an expiry is required. The canonical
+   * symbol carries one (CRUDEOIL20260819FUT); a bare underlying does not identify
+   * anything tradeable and now throws instead of inventing a price. Resolving a
+   * bare underlying to its near-month contract needs an MCX expiry calendar,
+   * which does not exist here yet.
+   */
   private async getMCXQuote(symbol: string): Promise<MarketQuote> {
-    const YAHOO_MCX_MAP: Record<string, string> = {
-      GOLD: 'GC=F', GOLDM: 'GC=F', GOLDPETAL: 'GC=F',
-      SILVER: 'SI=F', SILVERM: 'SI=F',
-      CRUDEOIL: 'CL=F', NATURALGAS: 'NG=F',
-      COPPER: 'HG=F', ZINC: 'ZN=F', LEAD: 'PB=F',
-      ALUMINIUM: 'ALI=F', NICKEL: 'NI=F',
-    };
+    const spec = parseInstrumentSymbol(symbol, 'MCX');
 
-    const entry = POPULAR_MCX_COMMODITIES.find(([code]) => code === symbol.toUpperCase());
-    const fallbackPrice = entry?.[2] ?? 1000;
-    const yahooTicker = YAHOO_MCX_MAP[symbol.toUpperCase()];
-
-    if (yahooTicker) {
-      try {
-        const cacheKey = `mcx_yahoo_${yahooTicker}`;
-        if (this.cache) {
-          const cached = await this.cache.get<MarketQuote>(cacheKey);
-          if (cached) return cached;
-        }
-
-        const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooTicker}?interval=1d&range=2d`;
-        const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(8000) });
-        if (res.ok) {
-          const json = await res.json() as any;
-          const result = json?.chart?.result?.[0];
-          const meta = result?.meta;
-          if (meta?.regularMarketPrice) {
-            const ltp = Number(meta.regularMarketPrice.toFixed(2));
-            const prevClose = Number(meta.previousClose?.toFixed(2) ?? ltp);
-            const change = Number((ltp - prevClose).toFixed(2));
-            const changePercent = prevClose > 0 ? Number(((change / prevClose) * 100).toFixed(2)) : 0;
-            const quote: MarketQuote = {
-              symbol, exchange: 'MCX', ltp, change, changePercent,
-              open: Number((meta.regularMarketOpen ?? ltp).toFixed(2)),
-              high: Number((meta.regularMarketDayHigh ?? ltp).toFixed(2)),
-              low: Number((meta.regularMarketDayLow ?? ltp).toFixed(2)),
-              close: prevClose, volume: meta.regularMarketVolume ?? 0,
-              bidPrice: Number((ltp - 0.5).toFixed(2)), askPrice: Number((ltp + 0.5).toFixed(2)),
-              bidQty: 0, askQty: 0, timestamp: new Date().toISOString(),
-            };
-            this.cache?.set(cacheKey, quote, 30);
-            return quote;
-          }
-        }
-      } catch {}
+    if (spec.instrumentType === 'EQUITY' || !spec.expiry) {
+      throw new Error(
+        `Cannot quote "${symbol}" on MCX: no contract expiry. A commodity quote is ` +
+        `per contract — use a canonical futures symbol such as ` +
+        `${spec.underlying}YYYYMMDDFUT. Resolving a bare underlying to the ` +
+        `near-month contract requires an MCX expiry calendar, which is not implemented.`,
+      );
     }
 
-    return {
-      symbol, exchange: 'MCX', ltp: fallbackPrice, change: 0, changePercent: 0,
-      open: fallbackPrice, high: fallbackPrice, low: fallbackPrice, close: fallbackPrice,
-      volume: 0, bidPrice: fallbackPrice, askPrice: fallbackPrice, bidQty: 0, askQty: 0,
+    const expiryIso = istDateStr(spec.expiry);
+    const cacheKey = `mcx_quote_${spec.underlying}_${expiryIso}`;
+    if (this.cache) {
+      const cached = await this.cache.get<MarketQuote>(cacheKey);
+      if (cached) return cached;
+    }
+
+    const bridgeActive = await this.ensureBreezeBridgeSession();
+    if (!bridgeActive) {
+      throw new Error(`Cannot quote ${symbol}: Breeze bridge session is not active.`);
+    }
+
+    const url =
+      `${BREEZE_BRIDGE_URL}/quote/${encodeURIComponent(spec.underlying)}` +
+      `?exchange=MCX&product_type=futures&expiry=${encodeURIComponent(expiryIso)}`;
+
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) {
+      throw new Error(`Cannot quote ${symbol}: bridge returned ${res.status}.`);
+    }
+
+    const data = await res.json() as any;
+    const ltp = Number(data?.ltp);
+    if (!Number.isFinite(ltp) || ltp <= 0) {
+      // No synthetic fallback. A missing commodity price is reported as missing.
+      throw new Error(
+        `Cannot quote ${symbol}: bridge returned no valid LTP` +
+        `${data?.error ? ` (${data.error})` : ''}.`,
+      );
+    }
+
+    const change = Number(data.change ?? 0);
+    const prevClose = ltp - change;
+    const quote: MarketQuote = {
+      symbol,
+      exchange: 'MCX',
+      ltp,
+      change,
+      changePercent: Number(data.changePercent ?? (prevClose > 0 ? (change / prevClose) * 100 : 0)),
+      open: Number(data.open ?? ltp),
+      high: Number(data.high ?? ltp),
+      low: Number(data.low ?? ltp),
+      close: prevClose,
+      volume: Number(data.volume ?? 0),
+      bidPrice: Number(data.bidPrice ?? 0),
+      askPrice: Number(data.askPrice ?? 0),
+      bidQty: 0,
+      askQty: 0,
       timestamp: new Date().toISOString(),
     };
+
+    this.cache?.set(cacheKey, quote, 30);
+    return quote;
   }
 
   private async getCDSQuote(symbol: string): Promise<MarketQuote> {
@@ -2453,12 +2456,13 @@ export class MarketDataService {
       } catch {}
     }
 
-    return {
-      symbol, exchange: 'CDS', ltp: fallbackPrice, change: 0, changePercent: 0,
-      open: fallbackPrice, high: fallbackPrice, low: fallbackPrice, close: fallbackPrice,
-      volume: 0, bidPrice: fallbackPrice, askPrice: fallbackPrice, bidQty: 0, askQty: 0,
-      timestamp: new Date().toISOString(),
-    };
+    // Previously returned `fallbackPrice` — a hardcoded constant from a lookup
+    // table (83 for USDINR) — dressed up as a live quote with open/high/low/close
+    // all equal to it. A caller could not distinguish that from a real quote.
+    throw new Error(
+      `Cannot quote ${symbol} on CDS: no live price available. ` +
+      `(Previously a hardcoded placeholder was returned here as if it were live.)`,
+    );
   }
 
   private async fetchFnOQuote(

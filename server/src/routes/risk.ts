@@ -176,7 +176,8 @@ export async function riskRoutes(app: FastifyInstance): Promise<void> {
   app.get('/stop-loss/status', async (request, reply) => {
     const userId = getUserId(request);
     const monitor = (app as any).stopLossMonitor;
-    const positions = monitor ? monitor.getMonitoredPositions() : [];
+    // Scoped to this user — the monitor's map spans all accounts
+    const positions = monitor ? monitor.getMonitoredPositions(userId) : [];
 
     const dailySummary = await riskService.getDailyRiskSummary(userId);
     const pauseState = await riskService.checkConsecutiveLossPause(userId);
@@ -229,7 +230,9 @@ export async function riskRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(503).send({ error: 'Bot engine not available' });
     }
 
-    botEngine.activateKillSwitch();
+    // Scoped to the calling user — a global halt would let any account stop
+    // every other account's trading.
+    botEngine.activateKillSwitch(userId);
 
     const squaredOff = await intradayManager.squareOffAllIntraday(userId);
 
@@ -243,7 +246,7 @@ export async function riskRoutes(app: FastifyInstance): Promise<void> {
       killSwitchActive: true,
       botsStoppedAll: true,
       positionsSquaredOff: squaredOff.length,
-      message: 'KILL SWITCH ACTIVATED: All bots stopped, all positions squared off.',
+      message: 'KILL SWITCH ACTIVATED: Your bots stopped, your positions squared off.',
     });
   });
 
@@ -252,15 +255,19 @@ export async function riskRoutes(app: FastifyInstance): Promise<void> {
     const botEngine = (app as any).botEngine;
     if (!botEngine) return reply.code(503).send({ error: 'Bot engine not available' });
 
-    botEngine.deactivateKillSwitch();
+    botEngine.deactivateKillSwitch(userId);
     await audit.log('KILL_SWITCH_DEACTIVATED', 'System', undefined, userId);
 
     return reply.send({ killSwitchActive: false, message: 'Kill switch deactivated. Trading re-enabled.' });
   });
 
-  app.get('/kill-switch/status', async (_request, reply) => {
+  app.get('/kill-switch/status', async (request, reply) => {
+    const userId = getUserId(request);
     const botEngine = (app as any).botEngine;
-    return reply.send({ killSwitchActive: botEngine?.killSwitchActive ?? false });
+    return reply.send({
+      killSwitchActive: botEngine?.isKilledForUser?.(userId) ?? false,
+      globalHalt: botEngine?.killSwitchActive ?? false,
+    });
   });
 
   // ── Detailed System Health ──

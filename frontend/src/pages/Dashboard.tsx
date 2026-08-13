@@ -160,7 +160,7 @@ export default function Dashboard() {
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="bg-slate-50 rounded-xl p-2.5">
-                  <p className="text-xs text-slate-500">Day P&L</p>
+                  <p className="text-xs text-slate-500">Day P&L (realized)</p>
                   <p className={`text-lg font-semibold font-mono ${(summary?.dayPnl ?? 0) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                     {(summary?.dayPnl ?? 0) >= 0 ? '+' : ''}{formatINR(summary?.dayPnl ?? 0)}
                   </p>

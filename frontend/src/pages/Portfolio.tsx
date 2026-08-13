@@ -182,7 +182,7 @@ export default function PortfolioPage() {
               </p>
             </div>
             <div>
-              <p className="text-xs text-indigo-200 uppercase">Today's P&L</p>
+              <p className="text-xs text-indigo-200 uppercase">Today's P&L (realized)</p>
               <p className={`text-lg font-bold font-mono ${dayPnl >= 0 ? '' : 'text-red-200'}`}>
                 {dayPnl >= 0 ? '+' : ''}₹{formatINR(dayPnl)}
                 <span className="text-xs ml-1">({dayPnlPct >= 0 ? '+' : ''}{dayPnlPct.toFixed(2)}%)</span>

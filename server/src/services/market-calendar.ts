@@ -89,7 +89,25 @@ export class MarketCalendar {
     const key = this.toDateKey(d);
     const entry = this.holidaySet.get(key);
     if (!entry) return false;
-    return entry.exchanges.includes(exchange);
+
+    const ex = exchange.toUpperCase();
+    if (entry.exchanges.includes(ex)) return true;
+
+    // MCX and CDS inherit the equity holiday list.
+    //
+    // Every entry above is tagged ['NSE','BSE'], so `isHoliday(d, 'MCX')`
+    // previously returned FALSE for all of them — the calendar reported MCX as
+    // OPEN on Republic Day and every other national holiday.
+    //
+    // Inheriting is the conservative direction: it is correct for full-day
+    // national holidays, and errs toward "do not trade" on the handful of days
+    // where MCX runs an evening session only. Encoding those exceptions needs
+    // MCX's own annual circular, which is not in this repo — do not guess them.
+    if (ex === 'MCX' || ex === 'CDS') {
+      return entry.exchanges.includes('NSE');
+    }
+
+    return false;
   }
 
   getHolidayName(date?: Date): string | null {
@@ -113,6 +131,30 @@ export class MarketCalendar {
     return mins >= session.start && mins <= session.end;
   }
 
+  /**
+   * Trading session for an exchange, in minutes since IST midnight.
+   *
+   * MCX's evening close moves with US daylight saving (23:30 vs 23:55). 23:30 is
+   * used year-round here, matching what this file already assumed — it is the
+   * conservative end of the range, so the only cost is not trading the last 25
+   * minutes during part of the year. Sourcing the DST switch dates properly is a
+   * separate job; do not guess them.
+   */
+  private getSession(exchange: string): {
+    open: number; close: number; preOpen: number; postCloseMins: number;
+  } {
+    switch (exchange.toUpperCase()) {
+      // No post-close window: the commodity evening session runs to the close,
+      // and a POST_MARKET phase after 23:30 would just be the middle of the night.
+      case 'MCX':
+        return { open: 540, close: 1410, preOpen: 480, postCloseMins: 0 };  // 9:00 - 23:30
+      case 'CDS':
+        return { open: 540, close: 1020, preOpen: 480, postCloseMins: 0 };  // 9:00 - 17:00
+      default:
+        return { open: 555, close: 930, preOpen: 480, postCloseMins: 90 };  // 9:15 - 15:30, post to 17:00
+    }
+  }
+
   isMarketOpen(exchange: string = 'NSE'): boolean {
     const ist = this.getIST();
 
@@ -121,29 +163,36 @@ export class MarketCalendar {
     if (this.isHoliday(ist, exchange)) return false;
 
     const mins = this.getTotalMinutes(ist);
-
-    switch (exchange) {
-      case 'MCX':
-        return mins >= 540 && mins <= 1410; // 9:00 AM - 11:30 PM
-      case 'CDS':
-        return mins >= 540 && mins <= 1020; // 9:00 AM - 5:00 PM
-      default: // NSE/BSE
-        return mins >= 555 && mins <= 930;  // 9:15 AM - 3:30 PM
-    }
+    const { open, close } = this.getSession(exchange);
+    return mins >= open && mins <= close;
   }
 
-  getMarketPhase(): MarketPhase {
+  /**
+   * Phase for an exchange. Defaults to NSE so existing callers are unchanged.
+   *
+   * This was NSE-only and took no argument, which mattered for commodities: the
+   * whole MCX evening session (15:30–23:30 — when crude and the metals actually
+   * move on US data) was classified POST_MARKET then AFTER_HOURS, and
+   * `getPhaseConfig` throttles bots to a 5–10 minute tick and a 10–30 minute scan
+   * in those phases. The most active part of the commodity day ran at idle speed.
+   *
+   * NOTE: ServerOrchestrator still drives one GLOBAL phase off the NSE default,
+   * so passing 'MCX' here gives the right answer but does not by itself re-time
+   * the schedulers. Per-exchange scheduling is a separate change.
+   */
+  getMarketPhase(exchange: string = 'NSE'): MarketPhase {
     const ist = this.getIST();
 
     if (this.isWeekend(ist)) return 'WEEKEND';
-    if (this.isHoliday(ist)) return 'HOLIDAY';
+    if (this.isHoliday(ist, exchange)) return 'HOLIDAY';
     if (this.isMuhuratSession(ist)) return 'MARKET_HOURS';
 
     const mins = this.getTotalMinutes(ist);
+    const { open, close, preOpen, postCloseMins } = this.getSession(exchange);
 
-    if (mins >= 480 && mins < 555) return 'PRE_MARKET';   // 8:00 - 9:15
-    if (mins >= 555 && mins <= 930) return 'MARKET_HOURS'; // 9:15 - 15:30
-    if (mins > 930 && mins <= 1020) return 'POST_MARKET';  // 15:30 - 17:00
+    if (mins >= preOpen && mins < open) return 'PRE_MARKET';
+    if (mins >= open && mins <= close) return 'MARKET_HOURS';
+    if (postCloseMins > 0 && mins > close && mins <= close + postCloseMins) return 'POST_MARKET';
     return 'AFTER_HOURS';
   }
 
@@ -170,26 +219,29 @@ export class MarketCalendar {
     }
   }
 
-  getNextMarketOpen(): { date: string; label: string } {
+  getNextMarketOpen(exchange: string = 'NSE'): { date: string; label: string } {
     const ist = this.getIST();
     const check = new Date(ist);
+    const { open } = this.getSession(exchange);
+    // The open time was hardcoded to 09:15, which is wrong for MCX and CDS (9:00).
+    const openLabel = `${String(Math.floor(open / 60)).padStart(2, '0')}:${String(open % 60).padStart(2, '0')}`;
 
     for (let i = 0; i < 14; i++) {
       check.setDate(check.getDate() + (i === 0 ? 0 : 1));
       const day = check.getDay();
       if (day === 0 || day === 6) continue;
-      if (this.isHoliday(check)) continue;
+      if (this.isHoliday(check, exchange)) continue;
 
       const key = this.toDateKey(check);
       if (i === 0) {
         const mins = this.getTotalMinutes(ist);
-        if (mins < 555) {
-          return { date: `${key} 09:15 IST`, label: 'Today' };
+        if (mins < open) {
+          return { date: `${key} ${openLabel} IST`, label: 'Today' };
         }
         continue;
       }
 
-      return { date: `${key} 09:15 IST`, label: this.getDayLabel(check) };
+      return { date: `${key} ${openLabel} IST`, label: this.getDayLabel(check) };
     }
     return { date: 'Unknown', label: 'Check calendar' };
   }

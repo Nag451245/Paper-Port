@@ -20,11 +20,17 @@ import { POVExecutorService } from './pov-executor.service.js';
 import { SniperExecutorService } from './sniper-executor.service.js';
 import { ISExecutorService } from './is-executor.service.js';
 import { IcebergExecutor } from './iceberg-executor.service.js';
+import { BrokerStopLossService } from './broker-stop-loss.service.js';
 type OrderSide = string;
 type OrderType = string;
 type Exchange = string;
 
 const log = createChildLogger('TradeService');
+
+/** Prisma raises P2002 when a unique constraint (here, clientOrderId) is violated. */
+function isUniqueConstraintError(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: string }).code === 'P2002';
+}
 
 const TWAP_AUTO_ROUTE_QTY_THRESHOLD = Number(process.env.TWAP_QTY_THRESHOLD ?? 500);
 const TWAP_DEFAULT_SLICES = 5;
@@ -47,11 +53,27 @@ export interface PlaceOrderInput {
   expiry?: string;
   strike?: number;
   optionType?: 'CE' | 'PE';
+  /** Units per lot. `qty` is always in UNITS; this is recorded, never multiplied in. */
+  lotSize?: number;
+  product?: 'INTRADAY' | 'DELIVERY' | 'MARGIN';
   stopLoss?: number;
   target?: number;
+  /**
+   * Idempotency key. Two calls carrying the same value place ONE order; the
+   * second returns the first one's result. Enforced by a unique constraint on
+   * orders.client_order_id, so it holds under concurrency too.
+   */
+  clientOrderId?: string;
 }
 
-import { calculateCosts, type CostBreakdown } from '../lib/costs.js';
+import { calculateCosts, resolveInstrumentKind, type CostBreakdown } from '../lib/costs.js';
+import {
+  parseInstrumentSymbol,
+  segmentForExchange,
+  expiryToDate,
+  type InstrumentSpec,
+} from '../lib/instrument.js';
+import { checkMarginSupported } from '../lib/margin-guard.js';
 
 interface ExecutionSimulation {
   idealPrice: number;
@@ -112,6 +134,7 @@ export class TradeService {
   private fillSimulator = new FillSimulatorService();
   private smartRouter: SmartOrderRouterService;
   private executionEngine: ExecutionEngineService;
+  private brokerStops: BrokerStopLossService;
 
   constructor(private prisma: PrismaClient, oms?: OrderManagementService) {
     this.marketData = new MarketDataService();
@@ -120,6 +143,7 @@ export class TradeService {
     this.oms = oms ?? new OrderManagementService(prisma);
     this.smartRouter = new SmartOrderRouterService(new OrderBookService());
     this.executionEngine = new ExecutionEngineService(this.fillSimulator);
+    this.brokerStops = new BrokerStopLossService(prisma);
 
     if (TRADING_MODE === 'LIVE') {
       this.broker = getBrokerAdapter('breeze');
@@ -150,6 +174,8 @@ export class TradeService {
   async executeLiveOrder(input: PlaceOrderInput): Promise<{ orderId: string; status: string; brokerOrderId?: string }> {
     if (!this.broker) throw new TradeError('Live broker not configured', 500);
 
+    const brokerContract = this.contractFields(input);
+
     const brokerInput: BrokerInput = {
       symbol: input.symbol,
       exchange: input.exchange ?? 'NSE',
@@ -162,6 +188,11 @@ export class TradeService {
       expiry: input.expiry,
       strike: input.strike,
       optionType: input.optionType,
+      // Breeze keys derivatives on the underlying plus expiry/right/strike, and
+      // picks its `product` from the segment. Without these the adapter cannot
+      // build a valid F&O payload.
+      underlying: brokerContract.underlying,
+      instrumentType: brokerContract.instrumentType as 'EQUITY' | 'FUTURES' | 'OPTIONS',
     };
 
     const result = await this.broker.placeOrder(brokerInput);
@@ -169,6 +200,72 @@ export class TradeService {
       throw new TradeError(`Broker rejected order: ${result.message}`, 400);
     }
     return { orderId: result.orderId, status: result.status, brokerOrderId: result.brokerOrderId };
+  }
+
+  /**
+   * Send a market exit to the broker and wait for a terminal state.
+   *
+   * Throws 502 for a definite rejection (nothing executed — the caller can
+   * safely restore the position) and 504 when the outcome is unknown after the
+   * poll budget. The distinction matters: 502 is recoverable, 504 means an
+   * order may be live and the position must not be re-entered or re-booked.
+   */
+  private async executeLiveExit(position: {
+    id: string; symbol: string; exchange: string; side: string; qty: number;
+  }): Promise<{ avgPrice: number; filledQty: number }> {
+    if (!this.broker) throw new TradeError('Live broker not configured', 500);
+
+    const exitSide = position.side === 'LONG' ? 'SELL' : 'BUY';
+    const placed = await this.broker.placeOrder({
+      symbol: position.symbol,
+      exchange: position.exchange,
+      side: exitSide,
+      orderType: 'MARKET',
+      qty: position.qty,
+      product: position.exchange === 'NFO' ? 'INTRADAY' : 'DELIVERY',
+    } as any);
+
+    if (placed.status === 'FAILED' || !placed.orderId) {
+      throw new TradeError(`Broker rejected exit order: ${placed.message ?? 'unknown reason'}`, 502);
+    }
+
+    const TERMINAL = new Set(['FILLED', 'REJECTED', 'CANCELLED', 'EXPIRED', 'FAILED']);
+    const POLL_INTERVAL_MS = 2000;
+    const MAX_POLLS = 30; // 60s — an exit is worth waiting longer for than an entry
+
+    let avgPrice = 0;
+    let filledQty = 0;
+
+    for (let poll = 0; poll < MAX_POLLS; poll++) {
+      const status = await this.broker.getOrderStatus(placed.orderId).catch(() => null);
+
+      if (status) {
+        if (status.avgPrice > 0) avgPrice = status.avgPrice;
+        if (status.filledQty > 0) filledQty = status.filledQty;
+
+        if (TERMINAL.has(status.status)) {
+          if (status.status === 'FILLED') return { avgPrice, filledQty };
+          // Rejected/cancelled/expired with nothing filled is a clean failure.
+          if (filledQty === 0) {
+            throw new TradeError(`Broker ${status.status.toLowerCase()} the exit order: ${status.message ?? 'no reason given'}`, 502);
+          }
+          // Partially filled then terminated: neither clean success nor clean
+          // failure, so treat it as indeterminate rather than guessing.
+          throw new TradeError(
+            `Exit order ${status.status.toLowerCase()} after a partial fill of ${filledQty}/${position.qty} — manual reconciliation required`,
+            504,
+          );
+        }
+      }
+
+      if (poll < MAX_POLLS - 1) await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+    }
+
+    // Budget exhausted with the order still live. Do NOT assume it filled.
+    throw new TradeError(
+      `Exit order ${placed.orderId} did not reach a terminal state within ${(MAX_POLLS * POLL_INTERVAL_MS) / 1000}s — state unknown`,
+      504,
+    );
   }
 
   async getBrokerPositions() {
@@ -273,7 +370,38 @@ export class TradeService {
     return { recovered, closedPositions };
   }
 
+  /**
+   * Look up a previously placed order by its idempotency key, scoped to the
+   * caller so one user cannot probe another's order ids.
+   */
+  private async findByClientOrderId(clientOrderId: string, userId: string) {
+    const existing = await this.prisma.order.findUnique({
+      where: { clientOrderId },
+      include: { portfolio: { select: { userId: true } } },
+    });
+    if (!existing) return null;
+    if (existing.portfolio?.userId !== userId) {
+      throw new TradeError('Idempotency key belongs to another account', 409);
+    }
+    const { portfolio: _portfolio, ...order } = existing as any;
+    return order;
+  }
+
   async placeOrder(userId: string, input: PlaceOrderInput, skipMarketCheck = false) {
+    // ── Idempotency ────────────────────────────────────────────────────────
+    // A retry — client timeout, proxy replay, bot re-tick after a slow cycle —
+    // must not become a second live order. Callers that pass a clientOrderId
+    // get the original order back instead. Checked first so a replay costs
+    // nothing and never reaches the broker.
+    if (input.clientOrderId) {
+      const existing = await this.findByClientOrderId(input.clientOrderId, userId);
+      if (existing) {
+        log.info({ clientOrderId: input.clientOrderId, orderId: existing.id },
+          'Idempotent replay — returning the original order, no new order placed');
+        return { ...existing, idempotentReplay: true };
+      }
+    }
+
     try {
       const killed = await isKillSwitchActive();
       if (killed) {
@@ -315,6 +443,39 @@ export class TradeService {
       );
     }
 
+    // ── Margin guard ───────────────────────────────────────────────────────
+    // Checked before any broker interaction, order row, or capital reservation.
+    // This system cannot yet compute SPAN + exposure, and the flat-percentage
+    // fallback understates short-option margin by roughly sixty times, so a
+    // paper equity curve built on it would be fiction. See lib/margin-guard.ts.
+    const contract = this.contractFields({ ...input, exchange });
+
+    // How much of this contract is held LONG, so the guard can tell a closing
+    // SELL from a new short. Without this, buying a call — which IS allowed —
+    // would leave no way to sell it again through the normal order path.
+    let heldLongQty = 0;
+    if (input.side === 'SELL') {
+      const existingLongForGuard = await this.prisma.position.findFirst({
+        where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'LONG', status: 'OPEN' },
+        select: { qty: true },
+      });
+      heldLongQty = existingLongForGuard?.qty ?? 0;
+    }
+
+    const marginVerdict = checkMarginSupported({
+      instrumentType: contract.instrumentType,
+      side: input.side,
+      symbol: input.symbol,
+      exchange,
+      qty: input.qty,
+      reducingQty: heldLongQty,
+    });
+    if (!marginVerdict.allowed) {
+      log.warn({ symbol: input.symbol, side: input.side, instrumentType: contract.instrumentType },
+        'Order blocked — margin not modelled for this instrument');
+      throw new TradeError(marginVerdict.reason!, 400);
+    }
+
     // Even with skipMarketCheck (manual AMO), bots must NEVER trade after hours
     if (!marketOpen && (input.strategyTag?.startsWith('AI-BOT') || input.strategyTag?.startsWith('BOT:'))) {
       throw new TradeError(
@@ -341,26 +502,113 @@ export class TradeService {
       }
     }
 
+    // ── Reserve the idempotency key BEFORE any broker interaction ──────────
+    // The lookup at the top of this method only catches a retry that arrives
+    // after the first one finished. Two simultaneous calls would both pass it
+    // and, in LIVE mode, both reach the broker. Claiming the unique key here
+    // means exactly one proceeds; the loser returns the winner's order.
+    let reservedOrderId: string | null = null;
+    if (input.clientOrderId) {
+      try {
+        const reservation = await this.prisma.order.create({
+          data: {
+            clientOrderId: input.clientOrderId,
+            portfolioId: input.portfolioId,
+            instrumentToken: input.instrumentToken,
+            symbol: input.symbol,
+            exchange,
+            orderType: input.orderType,
+            side: input.side,
+            qty: input.qty,
+            status: 'PENDING',
+            filledQty: 0,
+          },
+        });
+        reservedOrderId = reservation.id;
+      } catch (err) {
+        if (isUniqueConstraintError(err)) {
+          if (redis) await redis.del(lockKey).catch(() => {});
+          const winner = await this.findByClientOrderId(input.clientOrderId, userId);
+          if (winner) {
+            log.info({ clientOrderId: input.clientOrderId, orderId: winner.id },
+              'Concurrent duplicate lost the idempotency race — returning the winning order');
+            return { ...winner, idempotentReplay: true };
+          }
+        }
+        if (redis) await redis.del(lockKey).catch(() => {});
+        throw err;
+      }
+    }
+
     try {
-    // Risk gate: enforce target-aware and position limits before any order (now atomic with lock)
+    // ── Reference price ───────────────────────────────────────────────────
+    // Resolved BEFORE the risk gate. Every position limit is denominated in
+    // rupees, so without a price they cannot be evaluated at all.
+    //
+    // This used to run *after* the gate, and the gate used `input.price ?? 0`.
+    // Bots place MARKET orders with no price (bot-engine passes `undefined`),
+    // so estPrice was 0, and `if (estPrice > 0)` skipped preTradeCheck — the
+    // max-open-positions, 5%-concentration and Rs 500k fat-finger limits were
+    // silently bypassed for precisely the orders placed with nobody watching.
+    let fillPrice = input.price ?? 0;
+
+    if (fillPrice <= 0) {
+      let quote: { ltp?: number; timestamp?: string } | null = null;
+      try {
+        quote = await this.marketData.getQuote(input.symbol, exchange);
+      } catch (err) {
+        throw new TradeError(
+          `Cannot price ${input.symbol}: market data unavailable (${(err as Error).message}). ` +
+          'Retry, or place a limit order with an explicit price.',
+          503,
+        );
+      }
+
+      fillPrice = Number(quote?.ltp ?? 0);
+      if (!(fillPrice > 0)) {
+        throw new TradeError(
+          `Cannot place market order: unable to fetch current price for ${input.symbol}. ` +
+          'Ensure Breeze API session is active or try a limit order with a specific price.',
+          400,
+        );
+      }
+
+      // Price staleness detection: reject trades on stale quotes
+      if (quote?.timestamp) {
+        const quoteAge = Date.now() - new Date(quote.timestamp).getTime();
+        const MAX_QUOTE_AGE_MS = 5 * 60 * 1000; // 5 minutes
+        if (quoteAge > MAX_QUOTE_AGE_MS) {
+          throw new TradeError(
+            `Price for ${input.symbol} is stale (${Math.round(quoteAge / 1000)}s old). ` +
+            'Cannot place market order with outdated price data. Retry or use a limit order.',
+            400,
+          );
+        }
+      }
+    }
+
+    // ── Risk gate — FAILS CLOSED ──────────────────────────────────────────
     try {
-      const estPrice = input.price ?? 0;
-      const orderValue = estPrice > 0 ? estPrice * input.qty : 0;
+      const orderValue = fillPrice * input.qty;
 
       const targetRisk = await this.riskService.enforceTargetRisk(userId, orderValue, input.symbol, input.side);
       if (!targetRisk.allowed) {
         throw new TradeError(`Risk gate blocked: ${targetRisk.violations.join('; ')}`, 400);
       }
 
-      if (estPrice > 0) {
-        const positionRisk = await this.riskService.preTradeCheck(userId, input.symbol, input.side, input.qty, estPrice);
-        if (!positionRisk.allowed) {
-          throw new TradeError(`Risk check failed: ${positionRisk.violations.join('; ')}`, 400);
-        }
+      const positionRisk = await this.riskService.preTradeCheck(userId, input.symbol, input.side, input.qty, fillPrice);
+      if (!positionRisk.allowed) {
+        throw new TradeError(`Risk check failed: ${positionRisk.violations.join('; ')}`, 400);
       }
     } catch (err) {
       if (err instanceof TradeError) throw err;
-      log.warn({ err }, 'Risk check error (non-blocking)');
+      // Fail CLOSED. This previously logged 'Risk check error (non-blocking)'
+      // and let the order through, so a transient DB or Redis fault disabled
+      // every position, concentration and drawdown limit at once — silently.
+      // An order we cannot risk-assess is an order we must not place.
+      log.error({ err, userId, symbol: input.symbol, qty: input.qty, side: input.side },
+        'Risk gate could not be evaluated — REJECTING order');
+      throw new TradeError('Risk checks could not be evaluated — order rejected for safety.', 503);
     }
 
     // Auto-route large orders through TWAP to minimize market impact
@@ -475,34 +723,7 @@ export class TradeService {
       }
     }
 
-    let fillPrice = input.price ?? 0;
-
-    // Market is open -- execute normally
-    if (input.orderType === 'MARKET' && fillPrice <= 0) {
-      const quote = await this.marketData.getQuote(input.symbol, exchange);
-      fillPrice = quote.ltp;
-      if (fillPrice <= 0) {
-        throw new TradeError(
-          `Cannot place market order: unable to fetch current price for ${input.symbol}. ` +
-          'Ensure Breeze API session is active or try a limit order with a specific price.',
-          400,
-        );
-      }
-
-      // Price staleness detection: reject trades on stale quotes
-      if (quote.timestamp) {
-        const quoteAge = Date.now() - new Date(quote.timestamp).getTime();
-        const MAX_QUOTE_AGE_MS = 5 * 60 * 1000; // 5 minutes
-        if (quoteAge > MAX_QUOTE_AGE_MS) {
-          throw new TradeError(
-            `Price for ${input.symbol} is stale (${Math.round(quoteAge / 1000)}s old). ` +
-            'Cannot place market order with outdated price data. Retry or use a limit order.',
-            400,
-          );
-        }
-      }
-    }
-
+    // fillPrice was resolved above, before the risk gate.
     let brokerOrderId: string | undefined;
     let effectiveQty = input.qty;
     let execSimResult: ExecutionSimulation | undefined;
@@ -543,9 +764,12 @@ export class TradeService {
       effectiveQty = execSim.filledQty;
     }
 
-    const costs = calculateCosts(effectiveQty, fillPrice, input.side, exchange);
+    const instrumentKind = resolveInstrumentKind(exchange, input.symbol, input.optionType);
+    const costs = calculateCosts(effectiveQty, fillPrice, input.side, exchange, instrumentKind);
 
-    const totalValue = fillPrice * input.qty + costs.totalCost;
+    // Capital checks must use the quantity we will actually be charged for
+    // (effectiveQty), not the requested qty — see handleFill below.
+    const totalValue = fillPrice * effectiveQty + costs.totalCost;
     const availableCash = Number(portfolio.currentNav);
 
     // STRICT: Total invested + new order must never exceed declared capital
@@ -573,7 +797,7 @@ export class TradeService {
         where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'LONG', status: 'OPEN' },
       });
       if (!existingLong) {
-        const marginRequired = this.shortMarginRequired(fillPrice, input.qty, exchange) + costs.totalCost;
+        const marginRequired = this.shortMarginRequired(fillPrice, effectiveQty, exchange) + costs.totalCost;
         if (marginRequired > availableCash) {
           throw new TradeError(
             `Insufficient margin for short. Need ₹${marginRequired.toFixed(0)} but only ₹${availableCash.toFixed(0)} available.`,
@@ -591,8 +815,10 @@ export class TradeService {
     }
 
     // Always create as PENDING — OMS drives the lifecycle
-    const order = await this.prisma.order.create({
-      data: {
+    // Fill in the reservation made above, or create the row outright when no
+    // idempotency key was supplied.
+    const orderData = {
+        clientOrderId: input.clientOrderId ?? null,
         portfolioId: input.portfolioId,
         instrumentToken: input.instrumentToken,
         symbol: input.symbol,
@@ -606,6 +832,7 @@ export class TradeService {
         filledQty: 0,
         avgFillPrice: null,
         ...costs,
+        ...contract,
         idealPrice: execSimResult?.idealPrice,
         slippageBps: execSimResult?.slippageBps,
         fillLatencyMs: execSimResult ? Math.round(execSimResult.latencyMs) : null,
@@ -613,8 +840,11 @@ export class TradeService {
         impactCost: execSimResult?.impactCost,
         brokerOrderId: brokerOrderId ?? null,
         filledAt: null,
-      },
-    });
+    };
+
+    const order = reservedOrderId
+      ? await this.prisma.order.update({ where: { id: reservedOrderId }, data: orderData })
+      : await this.prisma.order.create({ data: orderData });
 
     MetricsService.getInstance().recordOrderPlaced(input.side, input.orderType, TRADING_MODE);
 
@@ -630,7 +860,7 @@ export class TradeService {
       await this.prisma.order.update({ where: { id: order.id }, data: { status: 'SUBMITTED' } });
     }
 
-    if (input.orderType === 'MARKET' && fillPrice > 0) {
+    if (input.orderType === 'MARKET' && fillPrice > 0 && effectiveQty > 0) {
       // Transition SUBMITTED → FILLED via OMS
       if (this.oms) {
         await this.oms.recordFill(order.id, effectiveQty, fillPrice);
@@ -641,7 +871,7 @@ export class TradeService {
         });
       }
 
-      await this.handleFill(order.id, input, fillPrice, costs);
+      await this.handleFill(order.id, input, fillPrice, costs, effectiveQty);
 
       emit('execution', {
         type: 'ORDER_FILLED', userId, orderId: order.id,
@@ -668,9 +898,107 @@ export class TradeService {
     const finalOrder = await this.prisma.order.findUnique({ where: { id: order.id } });
     return { ...(finalOrder ?? order), brokerOrderId, tradingMode: TRADING_MODE };
 
+    } catch (err) {
+      // An abandoned reservation must not be left PENDING: matchPendingOrders
+      // sweeps every PENDING order and would fill an order this call rejected.
+      // REJECTED is terminal, so the matcher ignores it while the idempotency
+      // record survives — a retry with the same key sees the same outcome.
+      if (reservedOrderId) {
+        await this.prisma.order.update({
+          where: { id: reservedOrderId },
+          data: { status: 'REJECTED' },
+        }).catch(e => log.error({ err: e, reservedOrderId },
+          'Failed to release order reservation — it may be left PENDING and picked up by the matcher'));
+      }
+      throw err;
     } finally {
       if (redis) await redis.del(lockKey).catch(() => {});
     }
+  }
+
+  /**
+   * Contract identity columns for an order, position or trade row.
+   *
+   * Explicit input wins over the symbol: order placement knows the contract and
+   * passes expiry/strike/optionType directly. The symbol is the fallback for
+   * callers carrying nothing else, and it is trustworthy only because every
+   * writer now builds it through lib/instrument.ts.
+   *
+   * Two vocabularies are deliberately kept apart here. `instrumentType` is
+   * contract IDENTITY (EQUITY | FUTURES | OPTIONS). `resolveInstrumentKind` in
+   * lib/costs.ts is a COST classification that intentionally reports MCX as
+   * 'EQUITY' because commodities have their own charge branch. Merging the two
+   * would silently apply NFO option STT to a commodity trade.
+   */
+  private contractFields(input: {
+    symbol: string;
+    exchange?: string;
+    expiry?: string;
+    strike?: number;
+    optionType?: 'CE' | 'PE';
+    lotSize?: number;
+    product?: string;
+  }) {
+    let spec: InstrumentSpec | null = null;
+    try {
+      spec = parseInstrumentSymbol(input.symbol, input.exchange);
+    } catch {
+      // Unparseable symbol: fall back to whatever the caller supplied rather
+      // than failing the order. Equity symbols never reach the throw path.
+      spec = null;
+    }
+
+    const exchange = (input.exchange ?? spec?.exchange ?? 'NSE').toUpperCase();
+    const optionType = input.optionType ?? spec?.optionType ?? null;
+    const instrumentType = optionType ? 'OPTIONS' : (spec?.instrumentType ?? 'EQUITY');
+
+    let expiry: Date | null = spec?.expiry ?? null;
+    if (input.expiry) {
+      try {
+        expiry = expiryToDate(input.expiry);
+      } catch (err) {
+        throw new TradeError(`Invalid expiry "${input.expiry}": ${(err as Error).message}`, 400);
+      }
+    }
+
+    return {
+      segment: segmentForExchange(exchange),
+      instrumentType,
+      underlying: spec?.underlying ?? input.symbol.trim().toUpperCase(),
+      expiry,
+      strike: input.strike ?? spec?.strike ?? null,
+      optionType,
+      lotSize: input.lotSize ?? null,
+      product: input.product ?? null,
+    };
+  }
+
+  /**
+   * Contract identity copied from the position being closed, so a Trade row can
+   * never disagree with the Position it came from. Positions opened before the
+   * derivative columns existed yield nulls — which is the honest answer, and the
+   * backfill script is what fills those in.
+   */
+  private contractFieldsFromPosition(position: {
+    segment?: string | null;
+    instrumentType?: string | null;
+    underlying?: string | null;
+    expiry?: Date | null;
+    strike?: unknown;
+    optionType?: string | null;
+    lotSize?: number | null;
+    product?: string | null;
+  }) {
+    return {
+      segment: position.segment ?? null,
+      instrumentType: position.instrumentType ?? null,
+      underlying: position.underlying ?? null,
+      expiry: position.expiry ?? null,
+      strike: (position.strike ?? null) as never,
+      optionType: position.optionType ?? null,
+      lotSize: position.lotSize ?? null,
+      product: position.product ?? null,
+    };
   }
 
   private shortMarginRequired(price: number, qty: number, exchange: string): number {
@@ -678,33 +1006,59 @@ export class TradeService {
     return price * qty * rate;
   }
 
+  /**
+   * Apply a cash delta to portfolio NAV.
+   *
+   * The write is an atomic `increment`, not a read-modify-write: two fills
+   * settling concurrently (e.g. the bot engine and a manual order, or two
+   * different symbols — the Redis order lock is per portfolio+symbol) would
+   * otherwise both read the same NAV and the second would silently discard
+   * the first one's delta.
+   *
+   * `currentNav` is used only for validation and logging; it is not written.
+   */
   private async safeUpdateNav(portfolioId: string, currentNav: number, delta: number, db?: any): Promise<void> {
     const prisma = db ?? this.prisma;
-    const newNav = currentNav + delta;
-    if (!isFinite(newNav) || isNaN(newNav)) {
-      log.error({ currentNav, delta, newNav }, 'CRITICAL: NAV update would produce invalid value');
+    if (!isFinite(delta) || isNaN(delta)) {
+      log.error({ currentNav, delta, portfolioId }, 'CRITICAL: NAV delta is not a finite number');
       throw new TradeError(`P&L calculation produced invalid NAV. Trade aborted.`, 500);
     }
-    if (newNav < 0) {
-      log.warn({ currentNav, delta, newNav, portfolioId }, 'NAV going negative — margin overdraft in paper trading, allowing it');
+    const projectedNav = currentNav + delta;
+    if (!isFinite(projectedNav) || isNaN(projectedNav)) {
+      log.error({ currentNav, delta, projectedNav }, 'CRITICAL: NAV update would produce invalid value');
+      throw new TradeError(`P&L calculation produced invalid NAV. Trade aborted.`, 500);
+    }
+    if (projectedNav < 0) {
+      log.warn({ currentNav, delta, projectedNav, portfolioId }, 'NAV going negative — margin overdraft in paper trading, allowing it');
     }
     await prisma.portfolio.update({
       where: { id: portfolioId },
-      data: { currentNav: newNav },
+      data: { currentNav: { increment: delta } },
     });
   }
 
+  /**
+   * Apply a fill to positions and cash.
+   *
+   * `filledQty` is the quantity actually filled, which may be less than
+   * `input.qty` on a partial fill (broker partial in LIVE mode, or the fill
+   * simulator in PAPER mode). Positions and NAV must move by the filled
+   * quantity, never the requested one, or the order row and the position
+   * disagree and cash is debited for shares that were never bought.
+   */
   private async handleFill(
     orderId: string,
     input: PlaceOrderInput,
     fillPrice: number,
     costs: CostBreakdown,
+    filledQty: number,
   ) {
+    if (filledQty <= 0) return;
     await this.prisma.$transaction(async (tx) => {
       if (input.side === 'BUY') {
-        await this.handleBuyFill(orderId, input, fillPrice, costs, tx);
+        await this.handleBuyFill(orderId, input, fillPrice, costs, filledQty, tx);
       } else {
-        await this.handleSellFill(orderId, input, fillPrice, costs, tx);
+        await this.handleSellFill(orderId, input, fillPrice, costs, filledQty, tx);
       }
     });
   }
@@ -714,6 +1068,7 @@ export class TradeService {
     input: PlaceOrderInput,
     fillPrice: number,
     costs: CostBreakdown,
+    filledQty: number,
     db?: Parameters<Parameters<PrismaClient['$transaction']>[0]>[0],
   ) {
     const prisma = db ?? this.prisma;
@@ -724,10 +1079,13 @@ export class TradeService {
 
     if (existingShort) {
       const entryPrice = Number(existingShort.avgEntryPrice);
-      const coverQty = Math.min(input.qty, existingShort.qty);
-      const coverRatio = coverQty / input.qty;
+      const coverQty = Math.min(filledQty, existingShort.qty);
+      const coverRatio = coverQty / filledQty;
       const exitCost = costs.totalCost * coverRatio;
-      const entryCost = calculateCosts(coverQty, entryPrice, 'SELL', input.exchange ?? 'NSE').totalCost;
+      const entryCost = calculateCosts(
+        coverQty, entryPrice, 'SELL', input.exchange ?? 'NSE',
+        resolveInstrumentKind(input.exchange ?? 'NSE', input.symbol, input.optionType),
+      ).totalCost;
       const grossPnl = (entryPrice - fillPrice) * coverQty;
       const roundTripCosts = exitCost + entryCost;
       const exitOnlyPnl = grossPnl - exitCost;
@@ -749,6 +1107,7 @@ export class TradeService {
           entryTime: existingShort.openedAt,
           exitTime: new Date(),
           strategyTag: input.strategyTag,
+          ...this.contractFieldsFromPosition(existingShort),
         },
       });
 
@@ -776,16 +1135,16 @@ export class TradeService {
 
       await prisma.order.update({ where: { id: orderId }, data: { positionId: existingShort.id } });
 
-      const excessQty = input.qty - coverQty;
+      const excessQty = filledQty - coverQty;
       if (excessQty > 0) {
-        const excessRatio = excessQty / input.qty;
+        const excessRatio = excessQty / filledQty;
         const excessCosts = { ...costs, totalCost: costs.totalCost * excessRatio };
         await this.openLongPosition(orderId, input, fillPrice, excessCosts, excessQty, prisma);
       }
       return;
     }
 
-    await this.openLongPosition(orderId, input, fillPrice, costs, input.qty, prisma);
+    await this.openLongPosition(orderId, input, fillPrice, costs, filledQty, prisma);
   }
 
   private async openLongPosition(
@@ -825,6 +1184,7 @@ export class TradeService {
           strategyTag: input.strategyTag,
           stopLoss: input.stopLoss ?? null,
           target: input.target ?? null,
+          ...this.contractFields(input),
         },
       });
       await prisma.order.update({ where: { id: orderId }, data: { positionId: position.id } });
@@ -842,6 +1202,7 @@ export class TradeService {
     input: PlaceOrderInput,
     fillPrice: number,
     costs: CostBreakdown,
+    filledQty: number,
     db?: any,
   ) {
     const prisma = db ?? this.prisma;
@@ -851,10 +1212,13 @@ export class TradeService {
 
     if (existingLong) {
       const entryPrice = Number(existingLong.avgEntryPrice);
-      const closeQty = Math.min(input.qty, existingLong.qty);
-      const closeRatio = closeQty / input.qty;
+      const closeQty = Math.min(filledQty, existingLong.qty);
+      const closeRatio = closeQty / filledQty;
       const exitCost = costs.totalCost * closeRatio;
-      const entryCost = calculateCosts(closeQty, entryPrice, 'BUY', input.exchange ?? 'NSE').totalCost;
+      const entryCost = calculateCosts(
+        closeQty, entryPrice, 'BUY', input.exchange ?? 'NSE',
+        resolveInstrumentKind(input.exchange ?? 'NSE', input.symbol, input.optionType),
+      ).totalCost;
       const grossPnl = (fillPrice - entryPrice) * closeQty;
       const roundTripCosts = exitCost + entryCost;
       const netPnl = grossPnl - roundTripCosts;
@@ -875,6 +1239,7 @@ export class TradeService {
           entryTime: existingLong.openedAt,
           exitTime: new Date(),
           strategyTag: input.strategyTag,
+          ...this.contractFieldsFromPosition(existingLong),
         },
       });
 
@@ -901,16 +1266,16 @@ export class TradeService {
 
       await prisma.order.update({ where: { id: orderId }, data: { positionId: existingLong.id } });
 
-      const excessQty = input.qty - closeQty;
+      const excessQty = filledQty - closeQty;
       if (excessQty > 0) {
-        const excessRatio = excessQty / input.qty;
+        const excessRatio = excessQty / filledQty;
         const excessCosts = { ...costs, totalCost: costs.totalCost * excessRatio };
         await this.openShortPosition(orderId, input, fillPrice, excessCosts, excessQty, prisma);
       }
       return;
     }
 
-    await this.openShortPosition(orderId, input, fillPrice, costs, input.qty, prisma);
+    await this.openShortPosition(orderId, input, fillPrice, costs, filledQty, prisma);
   }
 
   private async openShortPosition(
@@ -964,6 +1329,7 @@ export class TradeService {
           strategyTag: input.strategyTag,
           stopLoss: input.stopLoss ?? null,
           target: input.target ?? null,
+          ...this.contractFields(input),
         },
       });
       await prisma.order.update({ where: { id: orderId }, data: { positionId: position.id } });
@@ -1182,14 +1548,54 @@ export class TradeService {
       throw new TradeError('Position is already being closed by another process', 409);
     }
 
+    // ── LIVE: the exit must happen at the broker BEFORE the books move ──────
+    //
+    // Everything below this point is pure bookkeeping — it creates an Order row
+    // and marks it FILLED locally. Without this block, closing a position in
+    // LIVE mode updated our records and left the position wide open at the
+    // broker, with the divergence invisible until EOD reconciliation.
+    if (this.isLiveMode()) {
+      // Pull the resting protective stop first. If it fires on the same move we
+      // would exit twice and end up inverted.
+      try {
+        await this.brokerStops.cancelStop(positionId);
+      } catch (err) {
+        log.error({ err, positionId }, 'Could not cancel protective stop before exit — proceeding, watch for a double exit');
+      }
+
+      try {
+        const fill = await this.executeLiveExit(position);
+        if (fill.avgPrice > 0) exitPrice = fill.avgPrice;
+      } catch (err) {
+        const indeterminate = err instanceof TradeError && err.statusCode === 504;
+        if (indeterminate) {
+          // The order may still be live at the broker. Leaving the position in
+          // CLOSING keeps it out of both OPEN and CLOSED queries so nothing
+          // re-enters or double-books it, but it needs a human.
+          log.fatal({ positionId, symbol: position.symbol },
+            'EXIT STATE UNKNOWN at broker — position left in CLOSING. Reconcile manually before trading this symbol.');
+          throw err;
+        }
+        // Definite failure: nothing was executed. Put the position back so it
+        // stays visible, protected and counted by risk.
+        await this.prisma.position.updateMany({
+          where: { id: positionId, status: 'CLOSING' as any },
+          data: { status: 'OPEN' },
+        });
+        log.error({ err, positionId }, 'Broker rejected the exit — position restored to OPEN, books unchanged');
+        throw err;
+      }
+    }
+
     const entryPrice = Number(position.avgEntryPrice);
     const exitSide = position.side === 'LONG' ? 'SELL' : 'BUY';
     const entrySide = position.side === 'LONG' ? 'BUY' : 'SELL';
     const grossPnl = position.side === 'LONG'
       ? (exitPrice - entryPrice) * position.qty
       : (entryPrice - exitPrice) * position.qty;
-    const exitCosts = calculateCosts(position.qty, exitPrice, exitSide, position.exchange);
-    const entryCosts = calculateCosts(position.qty, entryPrice, entrySide, position.exchange);
+    const posKind = resolveInstrumentKind(position.exchange, position.symbol);
+    const exitCosts = calculateCosts(position.qty, exitPrice, exitSide, position.exchange, posKind);
+    const entryCosts = calculateCosts(position.qty, entryPrice, entrySide, position.exchange, posKind);
     const roundTripCosts = exitCosts.totalCost + entryCosts.totalCost;
     const exitOnlyPnl = grossPnl - exitCosts.totalCost;
     const netPnl = grossPnl - roundTripCosts;
@@ -1239,6 +1645,7 @@ export class TradeService {
         entryTime: position.openedAt,
         exitTime: new Date(),
         strategyTag: position.strategyTag,
+        ...this.contractFieldsFromPosition(position),
       },
     });
 
@@ -1260,15 +1667,7 @@ export class TradeService {
         cashChange = marginReleased + exitOnlyPnl;
       }
 
-      const newNav = Number(portfolio.currentNav) + cashChange;
-      if (!isFinite(newNav)) {
-        throw new TradeError(`P&L calculation produced invalid NAV (${newNav}). Trade aborted.`, 500);
-      }
-
-      await this.prisma.portfolio.update({
-        where: { id: position.portfolioId },
-        data: { currentNav: newNav },
-      });
+      await this.safeUpdateNav(position.portfolioId, Number(portfolio.currentNav), cashChange);
     }
 
     emit('execution', {
@@ -1371,7 +1770,10 @@ export class TradeService {
         if (!shouldFill) continue;
 
         const fillPrice = order.orderType === 'MARKET' ? ltp : orderPrice;
-        const costs = calculateCosts(order.qty, fillPrice, order.side, order.exchange);
+        const costs = calculateCosts(
+          order.qty, fillPrice, order.side, order.exchange,
+          resolveInstrumentKind(order.exchange, order.symbol),
+        );
 
         // Re-validate capital
         const portfolio = await this.prisma.portfolio.findUnique({ where: { id: order.portfolioId } });
@@ -1432,7 +1834,7 @@ export class TradeService {
           exchange: order.exchange,
         };
 
-        await this.handleFill(order.id, input, fillPrice, costs);
+        await this.handleFill(order.id, input, fillPrice, costs, order.qty);
         matched++;
       } catch {
         failed++;

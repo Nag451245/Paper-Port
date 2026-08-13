@@ -1,4 +1,15 @@
 import { env } from '../config.js';
+import { createChildLogger } from './logger.js';
+import { parseInstrumentSymbol, type InstrumentSpec } from './instrument.js';
+import {
+  toBreezeStockCode,
+  toBreezeProduct,
+  toBreezeRight,
+  toBreezeExpiry,
+  isUnmappedBreezeCode,
+} from './breeze-symbols.js';
+
+const log = createChildLogger('BrokerAdapter');
 
 const BREEZE_BRIDGE_URL = env.BREEZE_BRIDGE_URL;
 const FETCH_TIMEOUT = 15_000;
@@ -105,6 +116,15 @@ export interface BrokerOrderInput {
   expiry?: string;
   strike?: number;
   optionType?: 'CE' | 'PE';
+  /**
+   * The underlying, e.g. NIFTY for NIFTY2026082824000CE.
+   *
+   * Required for derivatives: Breeze keys on the underlying as `stock_code` and
+   * takes expiry/right/strike separately. Derived from the symbol when omitted.
+   */
+  underlying?: string;
+  /** EQUITY | FUTURES | OPTIONS. Selects the Breeze `product`. */
+  instrumentType?: 'EQUITY' | 'FUTURES' | 'OPTIONS';
 }
 
 export interface BrokerOrderResult {
@@ -213,10 +233,25 @@ class BreezeAdapter implements BrokerAdapter {
     const orderTypeMap: Record<string, string> = {
       'MARKET': 'market', 'LIMIT': 'limit', 'SL_M': 'stop_loss_market', 'SL_LIMIT': 'stop_loss_limit',
     };
-    const payload = {
-      stock_code: input.symbol,
+    // Contract identity, from the caller or recovered from the symbol.
+    let spec: InstrumentSpec | null = null;
+    try {
+      spec = parseInstrumentSymbol(input.symbol, input.exchange);
+    } catch {
+      spec = null;
+    }
+
+    const instrumentType = input.instrumentType ?? spec?.instrumentType ?? 'EQUITY';
+    const isDerivative = instrumentType === 'OPTIONS' || instrumentType === 'FUTURES';
+    const underlying = input.underlying ?? spec?.underlying ?? input.symbol;
+
+    // Breeze keys on the UNDERLYING plus separate expiry/right/strike. Sending
+    // the option tradingsymbol as stock_code — which this adapter used to do —
+    // names nothing Breeze recognises, so no F&O order could ever be placed.
+    const payload: Record<string, unknown> = {
+      stock_code: toBreezeStockCode(isDerivative ? underlying : input.symbol),
       exchange_code: input.exchange === 'NSE' ? 'NSE' : input.exchange,
-      product: input.product === 'INTRADAY' ? 'intraday' : 'cash',
+      product: toBreezeProduct(instrumentType, input.product),
       action: input.side.toLowerCase(),
       order_type: orderTypeMap[input.orderType] || 'market',
       quantity: input.qty,
@@ -224,6 +259,50 @@ class BreezeAdapter implements BrokerAdapter {
       stoploss: input.triggerPrice ?? 0,
       validity: input.validity ?? 'day',
     };
+
+    if (isDerivative) {
+      const expiry = input.expiry ?? (spec?.expiry ?? null);
+      if (!expiry) {
+        return {
+          orderId: '', status: 'FAILED',
+          message: `Cannot place ${instrumentType} order for ${input.symbol}: no expiry. ` +
+            `Breeze requires expiry_date for every derivative order.`,
+        };
+      }
+      try {
+        payload.expiry_date = toBreezeExpiry(expiry);
+      } catch (err) {
+        return { orderId: '', status: 'FAILED', message: (err as Error).message };
+      }
+
+      if (instrumentType === 'OPTIONS') {
+        const optionType = input.optionType ?? spec?.optionType ?? null;
+        const strike = input.strike ?? spec?.strike ?? null;
+        if (!optionType || !strike) {
+          return {
+            orderId: '', status: 'FAILED',
+            message: `Cannot place OPTIONS order for ${input.symbol}: ` +
+              `missing ${!optionType ? 'option type' : 'strike'}. Breeze requires both.`,
+          };
+        }
+        try {
+          payload.right = toBreezeRight(optionType);
+        } catch (err) {
+          return { orderId: '', status: 'FAILED', message: (err as Error).message };
+        }
+        payload.strike_price = String(strike);
+      }
+
+      // A short code we do not have is a likely rejection, and Breeze's error
+      // for it is opaque. Say so up front rather than after the fact.
+      if (isUnmappedBreezeCode(underlying)) {
+        log.warn(
+          { symbol: input.symbol, underlying, stockCode: payload.stock_code },
+          'Underlying has no explicit Breeze stock code — passing it through unchanged. ' +
+          'If Breeze rejects this order, an unmapped short code is the first thing to check.',
+        );
+      }
+    }
 
     try {
       const res = await this.bridgePost('/order/place', payload);

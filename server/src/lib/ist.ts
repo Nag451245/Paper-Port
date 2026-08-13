@@ -25,3 +25,34 @@ export function istMidnight(d: Date = new Date()): Date {
 export function istDaysAgo(days: number): string {
   return istDateStr(new Date(Date.now() - days * 86_400_000));
 }
+
+/**
+ * Minutes elapsed since IST midnight (0-1439).
+ *
+ * Use this rather than hand-rolling `(getUTCHours() + 5) % 24`, which both
+ * mishandles the minute carry (producing hour 24) and forces callers into
+ * exact "HH:MM" string comparisons that silently miss if a timer tick drifts
+ * past the target minute.
+ */
+export function istMinutesSinceMidnight(d: Date = new Date()): number {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: TZ,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(d);
+
+  const h = Number(parts.find(p => p.type === 'hour')!.value);
+  const m = Number(parts.find(p => p.type === 'minute')!.value);
+  return h * 60 + m;
+}
+
+/** Parses "HH:MM" into minutes since midnight. Returns null if malformed. */
+export function parseHHMM(time: string): number | null {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
+  if (!match) return null;
+  const h = Number(match[1]);
+  const m = Number(match[2]);
+  if (h > 23 || m > 59) return null;
+  return h * 60 + m;
+}

@@ -135,8 +135,9 @@ describe('PortfolioService', () => {
       // totalPnl = totalNav - initialCapital = 1108000 - 1000000 = 108000
       expect(summary.totalPnl).toBe(108000);
       expect(summary.totalPnlPercent).toBeCloseTo(10.8, 1);
-      // dayPnl = todayRealizedPnl(0) + unrealizedPnl(3000) = 3000
-      expect(summary.dayPnl).toBe(3000);
+      // dayPnl is realized-only: no trades closed today => 0. The 3,000 of
+      // open-position gain is reported as unrealizedPnl, not as today's P&L.
+      expect(summary.dayPnl).toBe(0);
     });
 
     it('should reflect actual NAV state in totalPnl regardless of trade history', async () => {
@@ -155,9 +156,9 @@ describe('PortfolioService', () => {
 
       const summary = await service.getSummary('p1', 'user1');
 
-      // totalPnl = totalNav(950000) - initialCapital(1000000) = -50000
+      // totalPnl is mark-to-market: totalNav(950000) - initialCapital(1000000)
       expect(summary.totalPnl).toBe(-50000);
-      // dayPnl = todayRealizedPnl(11000) + unrealizedPnl(0) = 11000
+      // dayPnl is realized-only: 5000 - 2000 + 8000 = 11000 closed today
       expect(summary.dayPnl).toBe(11000);
       expect(summary.unrealizedPnl).toBe(0);
     });

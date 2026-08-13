@@ -120,18 +120,31 @@ describe('REG-001: P&L Timezone — IST midnight boundary', () => {
 
   it('should NOT count a trade from yesterday 23:59 IST as today', async () => {
     const portfolio = makePortfolio({ id: portfolioId, userId });
-    const now = new Date();
-    const yesterdayLate = istDate(now.getFullYear(), now.getMonth() + 1, now.getDate() - 1, 23, 59);
-    const allTrades = [makeTrade({ portfolioId, exitTime: yesterdayLate, netPnl: 5000 })];
 
     prisma.portfolio.findUnique.mockResolvedValue({ ...portfolio, positions: [] });
-    prisma.trade.findMany
-      .mockResolvedValueOnce(allTrades)
-      .mockResolvedValueOnce([]);
+    // getSummary issues ONE trade.findMany, already filtered to
+    // `exitTime >= istMidnight()`. A trade from yesterday 23:59 IST is outside
+    // that window, so the query returns nothing — which is precisely the
+    // guard: the boundary must be IST midnight, not the server's local
+    // midnight. (This mock previously queued two responses for an older
+    // two-query implementation, so the "all trades" array was being handed to
+    // the today-only query and the assertion could never pass.)
+    prisma.trade.findMany.mockResolvedValue([]);
 
     const summary = await service.getSummary(portfolioId, userId);
     expect(summary.dayPnl).toBe(0);
-    expect(summary.totalPnl).toBe(5000);
+  });
+
+  it('istMidnight boundary excludes 23:59 IST yesterday and includes 00:01 IST today', () => {
+    const boundary = todayStartIST();
+    const now = new Date();
+    const yesterdayLate = istDate(now.getFullYear(), now.getMonth() + 1, now.getDate() - 1, 23, 59);
+    const todayEarly = istDate(now.getFullYear(), now.getMonth() + 1, now.getDate(), 0, 1);
+
+    // The real regression: on a UTC server, a naive setHours(0,0,0,0) boundary
+    // would place 00:01 IST *before* "today" and pull 23:59 IST yesterday in.
+    expect(yesterdayLate.getTime()).toBeLessThan(boundary.getTime());
+    expect(todayEarly.getTime()).toBeGreaterThanOrEqual(boundary.getTime());
   });
 });
 
@@ -147,8 +160,20 @@ describe('REG-001: P&L Timezone — IST midnight boundary', () => {
 //   quotes caused unrealizedPnl to vary between page loads, making the
 //   Day P&L appear to "fluctuate" even though no trades happened.
 //
-// GUARD: dayPnl and totalPnl must ONLY include realized (closed) trades.
-//   Unrealized P&L is a separate display field.
+// GUARD: dayPnl must ONLY include trades closed today. It must never add
+//   `unrealizedPnl`, which is the *lifetime* gain on open positions rather
+//   than today's movement — that made a months-old winner contribute to
+//   "today" every day forever. Realized-only also keeps this number equal to
+//   RiskService.getDailyRiskSummary / TargetTracker.computeTodayPnl, which
+//   enforce the daily loss limit and circuit breaker.
+//
+//   totalPnl is DIFFERENT and is deliberately mark-to-market
+//   (totalNav - initialCapital): a portfolio holding a large unrealized
+//   winner must not report zero total P&L. An earlier revision of this file
+//   asserted realized-only for totalPnl too; that was wrong and contradicted
+//   REG-005 below, which demonstrates the correct mark-to-market arithmetic.
+//
+//   Unrealized P&L remains a separate display field in both cases.
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('REG-002: P&L Holiday Fluctuation', () => {
@@ -169,40 +194,57 @@ describe('REG-002: P&L Holiday Fluctuation', () => {
       makePosition({ portfolioId, symbol: 'RELIANCE', side: 'LONG', qty: 100, avgEntryPrice: 2500 }),
     ];
 
+    // Open position marked at 2600 (mocked LTP) => 10,000 unrealized.
+    // No trades closed today.
     prisma.portfolio.findUnique.mockResolvedValue({ ...portfolio, positions });
-    prisma.trade.findMany
-      .mockResolvedValueOnce([])  // allTrades
-      .mockResolvedValueOnce([]); // todayTrades
+    prisma.trade.findMany.mockResolvedValue([]);
 
     const summary = await service.getSummary(portfolioId, userId);
 
     // dayPnl must be 0 — no closed trades today, regardless of unrealized movement
     expect(summary.dayPnl).toBe(0);
-    // unrealizedPnl can be non-zero (open positions have LTP)
-    expect(typeof summary.unrealizedPnl).toBe('number');
+    // unrealizedPnl is reported separately and IS non-zero here
+    expect(summary.unrealizedPnl).toBe(10_000);
     // dayPnl must NOT include unrealized
     expect(summary.dayPnl).not.toBe(summary.unrealizedPnl);
   });
 
-  it('totalPnl must only count realized trades, not unrealized', async () => {
+  it('dayPnl counts only trades closed today, not lifetime unrealized', async () => {
     const portfolio = makePortfolio({ id: portfolioId, userId, initialCapital: 1_000_000 });
-    const closedTrades = [
-      makeTrade({ portfolioId, netPnl: 5000 }),
-      makeTrade({ portfolioId, netPnl: -2000 }),
+    const positions = [
+      makePosition({ portfolioId, symbol: 'RELIANCE', side: 'LONG', qty: 100, avgEntryPrice: 2500 }),
     ];
+    prisma.portfolio.findUnique.mockResolvedValue({ ...portfolio, positions });
+    prisma.trade.findMany.mockResolvedValue([
+      makeTrade({ portfolioId, netPnl: 1200 }),
+      makeTrade({ portfolioId, netPnl: -200 }),
+    ]);
+
+    const summary = await service.getSummary(portfolioId, userId);
+
+    // 1200 - 200 = 1000 realized today. The 10,000 of open-position gain is
+    // NOT today's movement and must not leak in.
+    expect(summary.dayPnl).toBe(1000);
+    expect(summary.unrealizedPnl).toBe(10_000);
+  });
+
+  it('totalPnl is mark-to-market: realized plus open-position movement', async () => {
+    const portfolio = makePortfolio({ id: portfolioId, userId, initialCapital: 1_000_000 });
     const positions = [
       makePosition({ portfolioId, symbol: 'INFY', side: 'LONG', qty: 50, avgEntryPrice: 1800 }),
     ];
 
     prisma.portfolio.findUnique.mockResolvedValue({ ...portfolio, positions });
-    prisma.trade.findMany
-      .mockResolvedValueOnce(closedTrades)
-      .mockResolvedValueOnce([]);
+    prisma.trade.findMany.mockResolvedValue([]);
 
     const summary = await service.getSummary(portfolioId, userId);
 
-    // totalPnl = sum of realized only = 5000 + (-2000) = 3000
-    expect(summary.totalPnl).toBe(3000);
+    // Unlike dayPnl, totalPnl DOES include open positions — a portfolio sitting
+    // on a large unrealized winner must not report zero total P&L.
+    // cash 1,000,000 + invested 90,000 + unrealized 40,000 - capital 1,000,000
+    expect(summary.unrealizedPnl).toBe(40_000);
+    expect(summary.totalPnl).toBe(130_000);
+    expect(summary.totalNav).toBe(1_130_000);
   });
 });
 
