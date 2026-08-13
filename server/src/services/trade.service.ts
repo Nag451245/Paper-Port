@@ -74,6 +74,7 @@ import {
   type InstrumentSpec,
 } from '../lib/instrument.js';
 import { checkMarginSupported } from '../lib/margin-guard.js';
+import { FailureRegistryService } from './failure-registry.service.js';
 
 interface ExecutionSimulation {
   idealPrice: number;
@@ -128,6 +129,7 @@ export class TradeService {
   private marketData: MarketDataService;
   private calendar: MarketCalendar;
   private riskService: RiskService;
+  private failureRegistry: FailureRegistryService;
   private broker: BrokerAdapter | null = null;
   private oms: OrderManagementService | null = null;
   private _twapExecutor: any = null;
@@ -140,6 +142,7 @@ export class TradeService {
     this.marketData = new MarketDataService();
     this.calendar = new MarketCalendar();
     this.riskService = new RiskService(prisma);
+    this.failureRegistry = new FailureRegistryService(prisma);
     this.oms = oms ?? new OrderManagementService(prisma);
     this.smartRouter = new SmartOrderRouterService(new OrderBookService());
     this.executionEngine = new ExecutionEngineService(this.fillSimulator);
@@ -474,6 +477,28 @@ export class TradeService {
       log.warn({ symbol: input.symbol, side: input.side, instrumentType: contract.instrumentType },
         'Order blocked — margin not modelled for this instrument');
       throw new TradeError(marginVerdict.reason!, 400);
+    }
+
+    // ── Known-failure check ────────────────────────────────────────────────
+    // Refuse an order whose shape has already failed in a way that cannot
+    // succeed. Matching is on shape, not the exact contract, so the NEXT weekly
+    // expiry of a broken pattern is caught too. Only failures already marked
+    // `blocked` are consulted, and a registry error never blocks a trade — an
+    // unavailable registry must not become an outage.
+    try {
+      const known = await this.failureRegistry.checkBlocked({
+        segment: contract.segment,
+        instrumentType: contract.instrumentType,
+        underlying: contract.underlying,
+      });
+      if (known.blocked) {
+        log.error({ symbol: input.symbol, fingerprint: known.fingerprint, failureClass: known.failureClass },
+          'Order refused — matches a known execution failure');
+        throw new TradeError(known.reason!, 409);
+      }
+    } catch (err) {
+      if (err instanceof TradeError) throw err;
+      log.warn({ err }, 'Known-failure check unavailable — proceeding');
     }
 
     // Even with skipMarketCheck (manual AMO), bots must NEVER trade after hours

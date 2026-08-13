@@ -793,6 +793,42 @@ model RegimeHistory {
 
 // ─── System 2: Market Data Infrastructure ───────────────────────────
 
+/// Known execution failures — the deterministic half of "learn from failure".
+///
+/// Strategy losses are mostly noise and belong to the statistical layer: a
+/// profitable system loses 40-50% of the time, and suppressing those setups would
+/// destroy the edge. EXECUTION failures are the opposite — a malformed payload, a
+/// missing expiry, an unbalanced spread. One identifiable cause, recurs
+/// identically, and "never do this again" is literally correct.
+///
+/// `fingerprint` deliberately excludes strike, expiry, order id and amounts, or
+/// the same defect would never match itself. Whether a recorded failure BLOCKS is
+/// decided by its class, not by a count: a malformed order can never succeed and
+/// is blocked on the first occurrence, while a broker timeout must never block
+/// however often it happens.
+model FailureMode {
+  fingerprint     String   @id
+  failureClass    String   @map("failure_class")
+  segment         String
+  instrumentType  String   @map("instrument_type")
+  underlying      String
+  /// Cause with ids, timestamps and amounts stripped, so repeats collapse.
+  normalizedCause String   @map("normalized_cause")
+  /// One verbatim example, kept for diagnosis.
+  sampleCause     String   @map("sample_cause")
+  occurrences     Int      @default(1)
+  /// When true, a matching order is refused before it reaches the broker.
+  blocked         Boolean  @default(false)
+  /// Operator note, e.g. why a block was lifted.
+  notes           String?
+  firstSeenAt     DateTime @map("first_seen_at")
+  lastSeenAt      DateTime @map("last_seen_at")
+
+  @@index([blocked])
+  @@index([failureClass, lastSeenAt])
+  @@map("failure_modes")
+}
+
 /// Persistent Bayesian posterior per strategy — the bandit's memory.
 ///
 /// This lived in Redis under `cg:thompson:{userId}:{strategyTag}` with
