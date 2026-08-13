@@ -182,6 +182,78 @@ export class OptionChainStoreService {
     };
   }
 
+  /**
+   * Capture one end-of-day snapshot per underlying.
+   *
+   * The chain fetcher is injected rather than the whole MarketDataService so this
+   * stays testable without standing up a market-data stack, and so the caller
+   * decides which expiry is fetched (no argument means the nearest, which is the
+   * one that matters for an IV series).
+   *
+   * One underlying failing must not stop the rest: a day of IV history missed is
+   * a day that cannot be recovered later.
+   */
+  async captureEodChains(
+    underlyings: string[],
+    fetchChain: (underlying: string) => Promise<(ChainLike & { expiry?: string }) | null>,
+    capturedAt: Date = new Date(),
+  ): Promise<{ captured: number; rows: number; failed: string[] }> {
+    let captured = 0;
+    let rows = 0;
+    const failed: string[] = [];
+
+    for (const underlying of underlyings) {
+      try {
+        const chain = await fetchChain(underlying);
+        if (!chain?.expiry) {
+          failed.push(`${underlying} (no expiry in chain)`);
+          continue;
+        }
+        const res = await this.saveSnapshot(underlying, chain.expiry, chain, capturedAt);
+        if (res.rows > 0) {
+          captured++;
+          rows += res.rows;
+        } else {
+          failed.push(`${underlying} (no usable strikes)`);
+        }
+      } catch (err) {
+        failed.push(`${underlying} (${(err as Error).message})`);
+      }
+    }
+
+    if (failed.length > 0) {
+      log.warn({ failed, captured }, 'EOD chain capture completed with failures');
+    } else {
+      log.info({ captured, rows }, 'EOD chain capture complete');
+    }
+    return { captured, rows, failed };
+  }
+
+  /**
+   * Drop snapshots older than the retention window.
+   *
+   * 400 days by default: IV rank is conventionally measured over 52 weeks, and
+   * the extra fortnight keeps a full year available after a few missed captures.
+   *
+   * This matters for storage, not tidiness. A full NIFTY chain is roughly 100
+   * strikes across two rights, so a single daily capture is ~200 rows per
+   * underlying per day — fine — but an intraday cadence is ~72k rows/day/
+   * underlying, which fills a hosted Postgres instance quickly.
+   */
+  async pruneOlderThan(days = 400): Promise<{ deleted: number }> {
+    if (!Number.isFinite(days) || days < 1) {
+      throw new Error(`Retention window must be at least 1 day, got ${days}`);
+    }
+    const cutoff = new Date(Date.now() - days * 86_400_000);
+    const res = await this.prisma.optionChainSnapshot.deleteMany({
+      where: { capturedAt: { lt: cutoff } },
+    });
+    if (res.count > 0) {
+      log.info({ deleted: res.count, cutoff: cutoff.toISOString() }, 'Pruned old option-chain snapshots');
+    }
+    return { deleted: res.count };
+  }
+
   /** Distinct captures held for an underlying — used to report data coverage. */
   async getCoverage(underlying: string): Promise<{ captures: number; oldest: Date | null; newest: Date | null }> {
     const [oldest, newest] = await Promise.all([

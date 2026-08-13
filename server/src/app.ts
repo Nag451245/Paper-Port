@@ -433,6 +433,43 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     console.log(`[Learning Cron] Processed ${result.usersProcessed} users, ${result.insights} insights generated`);
   });
 
+  // End-of-day option-chain capture — 15:50 IST = 10:20 UTC
+  //
+  // This is the only source of option-chain history: premium, IV and OI over
+  // time. Without it there is nothing for an options backtest to replay, and no
+  // time series behind an IV percentile. A missed day cannot be recovered later,
+  // which is why one underlying failing does not abort the rest.
+  //
+  // Daily cadence is deliberate. One capture is ~200 rows per underlying (about
+  // 100 strikes x 2 rights); an intraday cadence would be ~72k rows/day/
+  // underlying and would fill the database. Pruning runs in the same job so
+  // retention cannot silently drift.
+  orchestrator.scheduleMarketDay('20 10 * * 1-5', async () => {
+    try {
+      const { MarketDataService } = await import('./services/market-data.service.js');
+      const { OptionChainStoreService } = await import('./services/option-chain-store.service.js');
+      const marketData = new MarketDataService();
+      const chainStore = new OptionChainStoreService(getPrisma());
+
+      // Index underlyings only: they are the liquid chains, and they are what an
+      // IV series is actually useful for.
+      const underlyings = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'];
+
+      const result = await chainStore.captureEodChains(
+        underlyings,
+        // No expiry argument: the nearest expiry is the one an IV series needs.
+        (u) => marketData.getOptionsChain(u),
+      );
+      console.log(`[ChainCapture] ${result.captured}/${underlyings.length} underlyings, ${result.rows} rows` +
+        (result.failed.length ? ` | failed: ${result.failed.join('; ')}` : ''));
+
+      const pruned = await chainStore.pruneOlderThan();
+      if (pruned.deleted > 0) console.log(`[ChainCapture] Pruned ${pruned.deleted} rows past retention`);
+    } catch (err) {
+      console.error('[ChainCapture] Error:', (err as Error).message);
+    }
+  });
+
   // Morning target reset — 08:30 IST = 03:00 UTC
   orchestrator.scheduleMarketDay('0 3 * * 1-5', async () => {
     try {

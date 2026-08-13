@@ -158,3 +158,71 @@ describe('getIvPercentile', () => {
     expect(high.percentile).toBe(100);
   });
 });
+
+describe('captureEodChains', () => {
+  it('captures every underlying and reports row counts', async () => {
+    const prisma = makePrisma();
+    const store = new OptionChainStoreService(prisma);
+    const fetch = vi.fn().mockResolvedValue({ ...CHAIN, expiry: '2026-08-28' });
+
+    const res = await store.captureEodChains(['NIFTY', 'BANKNIFTY'], fetch);
+
+    expect(res.captured).toBe(2);
+    expect(res.rows).toBe(12); // 6 rows each
+    expect(res.failed).toEqual([]);
+  });
+
+  it('keeps going when one underlying fails — a missed day is unrecoverable', async () => {
+    const store = new OptionChainStoreService(makePrisma());
+    const fetch = vi.fn()
+      .mockRejectedValueOnce(new Error('bridge timeout'))
+      .mockResolvedValueOnce({ ...CHAIN, expiry: '2026-08-28' });
+
+    const res = await store.captureEodChains(['NIFTY', 'BANKNIFTY'], fetch);
+
+    expect(res.captured).toBe(1);
+    expect(res.failed).toHaveLength(1);
+    expect(res.failed[0]).toMatch(/NIFTY.*bridge timeout/);
+  });
+
+  it('records a chain with no expiry as failed rather than guessing one', async () => {
+    const store = new OptionChainStoreService(makePrisma());
+    const res = await store.captureEodChains(['NIFTY'], vi.fn().mockResolvedValue({ ...CHAIN }));
+
+    expect(res.captured).toBe(0);
+    expect(res.failed[0]).toMatch(/no expiry/);
+  });
+});
+
+describe('pruneOlderThan', () => {
+  it('deletes only rows past the retention window', async () => {
+    const prisma = makePrisma();
+    prisma.optionChainSnapshot.deleteMany = vi.fn().mockResolvedValue({ count: 7 });
+    const store = new OptionChainStoreService(prisma);
+
+    const res = await store.pruneOlderThan(400);
+
+    expect(res.deleted).toBe(7);
+    const cutoff = prisma.optionChainSnapshot.deleteMany.mock.calls[0][0].where.capturedAt.lt as Date;
+    const days = (Date.now() - cutoff.getTime()) / 86_400_000;
+    expect(days).toBeGreaterThan(399);
+    expect(days).toBeLessThan(401);
+  });
+
+  it('defaults to 400 days, covering the 52 weeks an IV rank needs', async () => {
+    const prisma = makePrisma();
+    prisma.optionChainSnapshot.deleteMany = vi.fn().mockResolvedValue({ count: 0 });
+    const store = new OptionChainStoreService(prisma);
+
+    await store.pruneOlderThan();
+
+    const cutoff = prisma.optionChainSnapshot.deleteMany.mock.calls[0][0].where.capturedAt.lt as Date;
+    expect((Date.now() - cutoff.getTime()) / 86_400_000).toBeGreaterThan(399);
+  });
+
+  it('refuses a nonsensical window instead of deleting everything', async () => {
+    const store = new OptionChainStoreService(makePrisma());
+    await expect(store.pruneOlderThan(0)).rejects.toThrow(/at least 1 day/);
+    await expect(store.pruneOlderThan(-5)).rejects.toThrow();
+  });
+});
