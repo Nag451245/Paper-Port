@@ -38,6 +38,101 @@
 
 export const BLOCK_UNTIL_REAL_SPAN = true;
 
+export type MarginSource = 'SPAN_FILE' | 'BROKER_API' | 'USER_SUPPLIED' | 'NONE';
+
+/**
+ * Margin rates for derivative positions.
+ *
+ * Rates are expressed as a percentage of **NOTIONAL**, never of premium, and that
+ * is the whole point of the type. The bug this replaces charged 25% of TRADE
+ * VALUE, and an option's trade value is its premium — so a short NIFTY 24000CE at
+ * ₹120 with lot 75 was margined on ₹9,000 instead of on ₹18,00,000 of exposure.
+ * Expressing the rate against notional makes that error structurally impossible
+ * to reproduce, whatever number is supplied.
+ *
+ * Where to get real numbers: your broker's own margin calculator, or a basket
+ * margin API, will tell you what a specific position actually costs. Entering an
+ * observed figure is not guesswork. Inventing a comfortable one is.
+ */
+export interface MarginPolicy {
+  source: MarginSource;
+  /** Margin as a fraction of notional for a SHORT option, e.g. 0.12 for 12%. */
+  shortOptionNotionalPct?: number;
+  /** Margin as a fraction of notional for a futures position. */
+  futuresNotionalPct?: number;
+}
+
+export const NO_MARGIN_POLICY: MarginPolicy = { source: 'NONE' };
+
+export interface DerivativeMargin {
+  margin: number;
+  notional: number;
+  source: MarginSource;
+  /**
+   * notional / margin. Surfaced on every result so the consequence of the chosen
+   * rate is legible rather than buried: 2% of notional reads as a small number
+   * until it is shown as 50x leverage.
+   */
+  impliedLeverage: number;
+}
+
+/**
+ * Notional exposure of a derivative position.
+ *
+ * For an option this is strike x quantity — the value that actually moves against
+ * a short — NOT premium x quantity. For a future it is price x quantity.
+ */
+export function derivativeNotional(input: {
+  instrumentType: string;
+  qty: number;
+  price: number;
+  strike?: number | null;
+}): number {
+  const type = String(input.instrumentType ?? '').toUpperCase();
+  if (type === 'OPTIONS') {
+    const strike = Number(input.strike);
+    if (!Number.isFinite(strike) || strike <= 0) {
+      throw new Error('Cannot compute option notional without a strike');
+    }
+    return strike * input.qty;
+  }
+  return input.price * input.qty;
+}
+
+/**
+ * Margin required under the supplied policy, or null when the policy does not
+ * cover this instrument class — in which case the position stays blocked.
+ */
+export function computeDerivativeMargin(input: {
+  instrumentType: string;
+  side: string;
+  qty: number;
+  price: number;
+  strike?: number | null;
+  policy: MarginPolicy;
+}): DerivativeMargin | null {
+  const type = String(input.instrumentType ?? '').toUpperCase();
+  const side = String(input.side ?? '').toUpperCase();
+  const { policy } = input;
+  if (policy.source === 'NONE') return null;
+
+  let pct: number | undefined;
+  if (type === 'OPTIONS' && side === 'SELL') pct = policy.shortOptionNotionalPct;
+  else if (type === 'FUTURES') pct = policy.futuresNotionalPct;
+  else return null;
+
+  if (!Number.isFinite(pct as number) || (pct as number) <= 0) return null;
+
+  const notional = derivativeNotional(input);
+  const margin = notional * (pct as number);
+  return {
+    margin,
+    notional,
+    source: policy.source,
+    impliedLeverage: margin > 0 ? Number((notional / margin).toFixed(2)) : Infinity,
+  };
+}
+
 export interface MarginGuardVerdict {
   allowed: boolean;
   reason?: string;
@@ -60,6 +155,15 @@ export interface MarginGuardInput {
    * exit through the normal order path.
    */
   reducingQty?: number;
+  /** Strike, needed to compute option notional when a policy is supplied. */
+  strike?: number | null;
+  /** Price/premium, used for futures notional. */
+  price?: number;
+  /**
+   * Margin rates to apply. Supplying a rate for an instrument class UNBLOCKS it —
+   * the block exists because no margin model existed, not to forbid derivatives.
+   */
+  policy?: MarginPolicy;
 }
 
 const ALLOWED: MarginGuardVerdict = { allowed: true };
@@ -81,6 +185,28 @@ export function checkMarginSupported(input: MarginGuardInput): MarginGuardVerdic
 
   // Exits are always permitted. Blocking them would strand open positions.
   if (side === 'SELL' && isReducingTrade(input)) return ALLOWED;
+
+  // A margin policy covering this instrument class lifts the block. The guard
+  // exists because no margin model existed, not to forbid derivatives outright.
+  // Whether the supplied rate is REALISTIC is the operator's responsibility; the
+  // system's job is to compute against notional rather than premium, and to
+  // report the implied leverage so the choice is visible.
+  if (input.policy && input.policy.source !== 'NONE') {
+    try {
+      const computed = computeDerivativeMargin({
+        instrumentType: type,
+        side,
+        qty: input.qty ?? 0,
+        price: input.price ?? 0,
+        strike: input.strike ?? null,
+        policy: input.policy,
+      });
+      if (computed) return ALLOWED;
+    } catch {
+      // A policy that cannot be applied (e.g. an option with no strike) leaves
+      // the block in place rather than silently passing the order through.
+    }
+  }
 
   if (type === 'OPTIONS' && side === 'SELL') {
     return {

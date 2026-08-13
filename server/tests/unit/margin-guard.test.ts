@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { checkMarginSupported, BLOCK_UNTIL_REAL_SPAN } from '../../src/lib/margin-guard.js';
+import { checkMarginSupported, BLOCK_UNTIL_REAL_SPAN, derivativeNotional, computeDerivativeMargin, NO_MARGIN_POLICY } from '../../src/lib/margin-guard.js';
 import { parseInstrumentSymbol, buildOptionSymbol, buildFuturesSymbol } from '../../src/lib/instrument.js';
 
 /**
@@ -137,5 +137,105 @@ describe('checkMarginSupported — driven by real parsed symbols', () => {
     expect(checkMarginSupported({
       instrumentType: spec.instrumentType, side: 'SELL', symbol: 'RELIANCE',
     }).allowed).toBe(true);
+  });
+});
+
+describe('derivativeNotional', () => {
+  it('uses STRIKE x qty for options, not premium x qty', () => {
+    // The original bug in one assertion: a short NIFTY 24000CE at Rs120 premium,
+    // lot 75, has Rs18,00,000 of exposure — not Rs9,000 of "trade value".
+    expect(derivativeNotional({ instrumentType: 'OPTIONS', qty: 75, price: 120, strike: 24000 }))
+      .toBe(1_800_000);
+  });
+
+  it('uses price x qty for futures', () => {
+    expect(derivativeNotional({ instrumentType: 'FUTURES', qty: 75, price: 24000 })).toBe(1_800_000);
+  });
+
+  it('refuses an option with no strike rather than falling back to premium', () => {
+    expect(() => derivativeNotional({ instrumentType: 'OPTIONS', qty: 75, price: 120 })).toThrow(/strike/i);
+  });
+});
+
+describe('computeDerivativeMargin', () => {
+  const policy = { source: 'USER_SUPPLIED' as const, shortOptionNotionalPct: 0.12, futuresNotionalPct: 0.15 };
+
+  it('charges the rate against notional and reports implied leverage', () => {
+    const m = computeDerivativeMargin({
+      instrumentType: 'OPTIONS', side: 'SELL', qty: 75, price: 120, strike: 24000, policy,
+    })!;
+    expect(m.notional).toBe(1_800_000);
+    expect(m.margin).toBeCloseTo(216_000, 0);
+    expect(m.impliedLeverage).toBeCloseTo(8.33, 1);
+    expect(m.source).toBe('USER_SUPPLIED');
+  });
+
+  it('makes an aggressive rate visible as leverage rather than hiding it', () => {
+    const thin = { source: 'USER_SUPPLIED' as const, shortOptionNotionalPct: 0.005 };
+    const m = computeDerivativeMargin({
+      instrumentType: 'OPTIONS', side: 'SELL', qty: 75, price: 120, strike: 24000, policy: thin,
+    })!;
+    // 0.5% of notional reads as a small number until it is shown as 200x.
+    expect(m.impliedLeverage).toBe(200);
+  });
+
+  it('returns null with no policy, leaving the position blocked', () => {
+    expect(computeDerivativeMargin({
+      instrumentType: 'OPTIONS', side: 'SELL', qty: 75, price: 120, strike: 24000,
+      policy: NO_MARGIN_POLICY,
+    })).toBeNull();
+  });
+
+  it('returns null for a class the policy does not cover', () => {
+    const optionsOnly = { source: 'USER_SUPPLIED' as const, shortOptionNotionalPct: 0.12 };
+    expect(computeDerivativeMargin({
+      instrumentType: 'FUTURES', side: 'BUY', qty: 75, price: 24000, policy: optionsOnly,
+    })).toBeNull();
+  });
+
+  it('does not apply a short-option rate to a long option', () => {
+    expect(computeDerivativeMargin({
+      instrumentType: 'OPTIONS', side: 'BUY', qty: 75, price: 120, strike: 24000, policy,
+    })).toBeNull();
+  });
+});
+
+describe('checkMarginSupported with a policy', () => {
+  const policy = { source: 'USER_SUPPLIED' as const, shortOptionNotionalPct: 0.12, futuresNotionalPct: 0.15 };
+
+  it('unblocks a short option once a margin rate is supplied', () => {
+    const v = checkMarginSupported({
+      instrumentType: 'OPTIONS', side: 'SELL', symbol: 'NIFTY2026082824000CE',
+      exchange: 'NFO', qty: 75, price: 120, strike: 24000, policy,
+    });
+    expect(v.allowed).toBe(true);
+  });
+
+  it('unblocks futures once a rate is supplied', () => {
+    expect(checkMarginSupported({
+      instrumentType: 'FUTURES', side: 'BUY', symbol: 'NIFTY20260828FUT',
+      exchange: 'NFO', qty: 75, price: 24000, policy,
+    }).allowed).toBe(true);
+  });
+
+  it('stays blocked when the policy omits that class', () => {
+    expect(checkMarginSupported({
+      instrumentType: 'FUTURES', side: 'BUY', symbol: 'NIFTY20260828FUT', exchange: 'NFO',
+      qty: 75, price: 24000, policy: { source: 'USER_SUPPLIED', shortOptionNotionalPct: 0.12 },
+    }).allowed).toBe(false);
+  });
+
+  it('stays blocked when an option policy cannot be applied for want of a strike', () => {
+    expect(checkMarginSupported({
+      instrumentType: 'OPTIONS', side: 'SELL', symbol: 'NIFTYWEEKLY', exchange: 'NFO',
+      qty: 75, price: 120, policy,
+    }).allowed).toBe(false);
+  });
+
+  it('still blocks with an explicit NONE policy', () => {
+    expect(checkMarginSupported({
+      instrumentType: 'OPTIONS', side: 'SELL', symbol: 'NIFTY2026082824000CE',
+      exchange: 'NFO', qty: 75, price: 120, strike: 24000, policy: NO_MARGIN_POLICY,
+    }).allowed).toBe(false);
   });
 });
