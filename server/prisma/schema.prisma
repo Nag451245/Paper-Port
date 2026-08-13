@@ -779,6 +779,38 @@ model RegimeHistory {
 
 // ─── System 2: Market Data Infrastructure ───────────────────────────
 
+/// Persistent Bayesian posterior per strategy — the bandit's memory.
+///
+/// This lived in Redis under `cg:thompson:{userId}:{strategyTag}` with
+/// `EX 24*3600`, which meant the posterior EXPIRED DAILY. After one quiet day it
+/// reset to {alpha:1, beta:1, emaWinRate:0.5, totalTrades:0} — a uniform prior,
+/// i.e. total ignorance — so a strategy with two hundred trades of history became
+/// indistinguishable from one that had never traded. The write also began with
+/// `if (!redis) return`, silently discarding the update when Redis was absent.
+///
+/// A reset bandit does not look broken, it looks cautious: it explores and
+/// allocates evenly, which reads as sensible risk behaviour rather than amnesia.
+/// That is why a one-day half-life on the learning went unnoticed.
+///
+/// Postgres is the system of record now; Redis may cache reads.
+model StrategyPosterior {
+  userId      String   @map("user_id")
+  strategyTag String   @map("strategy_tag")
+  /// Beta distribution shape parameters: wins + 1 and losses + 1.
+  alpha       Int      @default(1)
+  beta        Int      @default(1)
+  /// Recency-weighted win rate. Distinct from alpha/(alpha+beta), which weights
+  /// the whole history equally — this is what detects a strategy going stale.
+  emaWinRate  Float    @default(0.5) @map("ema_win_rate")
+  totalTrades Int      @default(0) @map("total_trades")
+  /// Set explicitly rather than via @updatedAt, because the writer is a single
+  /// atomic upsert statement rather than a Prisma client mutation.
+  updatedAt   DateTime @map("updated_at")
+
+  @@id([userId, strategyTag])
+  @@map("strategy_posteriors")
+}
+
 /// Historical option-chain snapshots.
 ///
 /// Nothing persisted option-chain data before this, which had two consequences.

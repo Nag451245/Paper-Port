@@ -3218,12 +3218,18 @@ INSTRUCTIONS:
         orderBy: { date: 'desc' },
       });
 
-      const redis = (await import('../lib/redis.js')).getRedis();
-      let thompsonState = { alpha: 1, beta: 1 };
-      if (redis) {
-        const raw = await redis.get(`cg:thompson:${userId}:${strategyTag}`);
-        if (raw) thompsonState = JSON.parse(raw);
-      }
+      // Posterior comes from Postgres, not Redis. It used to be read from a
+      // 24-hour-TTL cache key, so every strategy looked brand new the day after
+      // it was last updated: alpha=1, beta=1 is a uniform prior, and this method
+      // feeds position sizing and the decision-fusion confidence. A strategy with
+      // a long losing record read as unproven rather than as failing.
+      const posterior = await this.prisma.strategyPosterior.findUnique({
+        where: { userId_strategyTag: { userId, strategyTag } },
+      });
+      const thompsonState = {
+        alpha: posterior?.alpha ?? 1,
+        beta: posterior?.beta ?? 1,
+      };
 
       const recentTrades = await this.prisma.trade.findMany({
         where: { portfolio: { userId }, strategyTag, exitTime: { gte: new Date(Date.now() - 7 * 86400000) } },

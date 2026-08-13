@@ -1650,24 +1650,59 @@ Top losers: ${JSON.stringify(topLosers)}`,
     }
   }
 
+  /**
+   * Record one outcome against a strategy's Bayesian posterior.
+   *
+   * Postgres is the system of record. This previously wrote ONLY to Redis with
+   * `EX 24*3600`, so the posterior expired daily and reset to a uniform prior —
+   * two hundred trades of history became indistinguishable from none. It also
+   * began `if (!redis) return`, silently dropping the outcome when Redis was
+   * absent. Learning cannot stick to a cache with a one-day TTL.
+   *
+   * The update is ONE atomic upsert rather than read-modify-write, so two
+   * outcomes settling concurrently cannot lose an increment. The EMA is folded
+   * into the same statement and computed from the stored value, so it stays
+   * consistent with the counters.
+   *
+   * `INSERT ... ON CONFLICT DO UPDATE` with bare column names on the right-hand
+   * side (referring to the existing row) is supported by both PostgreSQL and
+   * SQLite, so the same statement serves production and local dev.
+   */
   private async persistThompsonState(userId: string, strategyTag: string, won: boolean): Promise<void> {
+    const decay = 0.05;
+    const winValue = won ? 1 : 0;
+    const now = new Date();
+
+    try {
+      await this.prisma.$executeRaw`
+        INSERT INTO strategy_posteriors
+          (user_id, strategy_tag, alpha, beta, ema_win_rate, total_trades, updated_at)
+        VALUES
+          (${userId}, ${strategyTag}, ${1 + winValue}, ${2 - winValue},
+           ${0.5 * (1 - decay) + winValue * decay}, 1, ${now})
+        ON CONFLICT (user_id, strategy_tag) DO UPDATE SET
+          alpha         = alpha + ${winValue},
+          beta          = beta + ${1 - winValue},
+          ema_win_rate  = ema_win_rate * ${1 - decay} + ${winValue * decay},
+          total_trades  = total_trades + 1,
+          updated_at    = ${now}
+      `;
+    } catch (err) {
+      // Loud, not silent: a dropped outcome is lost learning, and the previous
+      // implementation's quiet `return` is exactly how that went unnoticed.
+      log.error({ err, userId, strategyTag, won },
+        'Failed to persist strategy posterior — this outcome has NOT been learned');
+      return;
+    }
+
+    // Redis is a cache from here on. Its absence or failure must never lose the
+    // outcome, so it is written after the durable store and never gates it.
     try {
       const redis = getRedis();
       if (!redis) return;
-
-      const key = `cg:thompson:${userId}:${strategyTag}`;
-      const raw = await redis.get(key);
-      const state = raw ? JSON.parse(raw) : { alpha: 1, beta: 1, emaWinRate: 0.5, totalTrades: 0 };
-
-      if (won) { state.alpha += 1; } else { state.beta += 1; }
-      state.totalTrades += 1;
-      const decay = 0.05;
-      state.emaWinRate = state.emaWinRate * (1 - decay) + (won ? 1.0 : 0.0) * decay;
-      state.lastUpdate = new Date().toISOString();
-
-      await redis.set(key, JSON.stringify(state), 'EX', 24 * 3600);
+      await redis.del(`cg:thompson:${userId}:${strategyTag}`);
     } catch (err) {
-      log.warn({ err, userId, strategyTag }, 'Failed to persist Thompson state');
+      log.warn({ err, userId, strategyTag }, 'Failed to invalidate cached posterior — cache may be stale');
     }
   }
 
