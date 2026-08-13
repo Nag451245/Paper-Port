@@ -74,6 +74,45 @@ const CDS_UNDERLYINGS = new Set([
   'SGDINR', 'HKDINR', 'CNHINR', 'EURUSD', 'GBPUSD', 'USDJPY',
 ]);
 
+/**
+ * Index underlyings. Everything else is treated as a single stock.
+ *
+ * This distinction decides SETTLEMENT, which is the difference between a
+ * position expiring worthless and a delivery obligation:
+ *
+ *   index derivatives  → CASH settled
+ *   stock derivatives  → PHYSICALLY settled (SEBI mandate, Oct 2019)
+ *
+ * An in-the-money stock option left open through expiry becomes an obligation to
+ * take or give delivery of the underlying shares, with the margin call that
+ * implies. Unknown underlyings deliberately fall through to PHYSICAL: assuming
+ * delivery risk where there is none costs a square-off, whereas assuming cash
+ * settlement where there is delivery costs an unfunded delivery obligation.
+ */
+const INDEX_UNDERLYINGS = new Set([
+  'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50',
+  'SENSEX', 'BANKEX', 'SENSEX50',
+]);
+
+export type SettlementType = 'CASH' | 'PHYSICAL';
+
+export function isIndexUnderlying(underlying: string): boolean {
+  return INDEX_UNDERLYINGS.has(underlying.trim().toUpperCase());
+}
+
+/**
+ * How this contract settles at expiry.
+ *
+ * Commodities are physically settled too — MCX contracts are deliverable, and
+ * some (CRUDEOIL, NATURALGAS) are compulsory-delivery for anyone holding into
+ * the tender period.
+ */
+export function settlementType(spec: Pick<InstrumentSpec, 'instrumentType' | 'underlying' | 'segment'>): SettlementType {
+  if (spec.instrumentType === 'EQUITY') return 'CASH';
+  if (spec.segment === 'COM') return 'PHYSICAL';
+  return isIndexUnderlying(spec.underlying) ? 'CASH' : 'PHYSICAL';
+}
+
 /** Exchange for an underlying when the caller did not specify one. */
 export function detectExchange(underlying: string, instrumentType: InstrumentType = 'EQUITY'): string {
   const u = underlying.toUpperCase();

@@ -8,6 +8,7 @@ import { wsHub } from '../lib/websocket.js';
 import { DecisionAuditService } from './decision-audit.service.js';
 import { createChildLogger } from '../lib/logger.js';
 import { istDateStr, istMidnight, istMinutesSinceMidnight, parseHHMM } from '../lib/ist.js';
+import { parseInstrumentSymbol, settlementType, type SettlementType } from '../lib/instrument.js';
 
 const log = createChildLogger('IntradayManager');
 
@@ -139,7 +140,146 @@ export class IntradayManager {
     this.lastSquareOffDate = today;
     log.warn({ squareOffTime: this.squareOffTime }, 'Auto square-off deadline reached — closing intraday positions');
     await this.squareOffAllIntraday();
+
+    // Expiring derivatives are swept at the SAME deadline, deliberately reusing
+    // it rather than introducing a second configurable time. They need their own
+    // pass because `squareOffAllIntraday` excludes product = 'DELIVERY' — so an
+    // expiring stock option held for delivery survived that sweep and went to
+    // physical settlement.
+    //
+    // Isolated: a failure here must not propagate. The intraday square-off above
+    // has already run, and reporting it as failed would misrepresent the state of
+    // the book. The error is logged loudly instead.
+    try {
+      await this.squareOffExpiringDerivatives();
+    } catch (err) {
+      log.error({ err }, 'Expiry square-off sweep failed — check for open positions on expiring contracts');
+    }
     return true;
+  }
+
+  /**
+   * Close derivative positions expiring today, regardless of product.
+   *
+   * Expiry overrides product: a contract that ceases to exist tonight cannot be
+   * "held for delivery" in any meaningful sense, and for a stock derivative that
+   * is precisely the problem — SEBI has mandated physical settlement of stock
+   * derivatives since October 2019, so an in-the-money stock option left open
+   * through expiry becomes an obligation to take or give delivery of the shares,
+   * with the margin call that implies. Index derivatives are cash settled and
+   * carry no delivery risk, but are still closed so the outcome is a known fill
+   * rather than an exchange settlement price.
+   *
+   * PHYSICAL settlement is squared off FIRST, because if the sweep is interrupted
+   * — a restart, a broker outage, a rate limit — the positions left open should
+   * be the ones that merely settle in cash.
+   */
+  async squareOffExpiringDerivatives(userId?: string): Promise<SquareOffResult[]> {
+    const portfolioFilter = userId ? { portfolio: { userId } } : {};
+
+    // End of the IST day: a contract expiring today is normalized to IST
+    // midnight, so "expiry <= todayEnd" catches today's and anything overdue.
+    const todayEnd = new Date(istMidnight().getTime() + 86_400_000 - 1);
+
+    const openPositions = await this.prisma.position.findMany({
+      where: { status: 'OPEN', ...portfolioFilter },
+      include: { portfolio: { select: { userId: true } } },
+    });
+
+    // Loud rather than silent: returning [] here would read as "nothing is
+    // expiring" when in fact the query did not answer. The caller isolates this
+    // throw so it cannot take down the intraday square-off.
+    if (!Array.isArray(openPositions)) {
+      throw new Error('Expiry sweep aborted: position query did not return a list');
+    }
+
+    interface Expiring {
+      id: string;
+      symbol: string;
+      settlement: SettlementType;
+      expiry: Date;
+      overdue: boolean;
+    }
+    const expiring: Expiring[] = [];
+
+    for (const pos of openPositions) {
+      const p = pos as any;
+      let expiry: Date | null = p.expiry ?? null;
+      let underlying: string = p.underlying ?? '';
+      let instrumentType: string = p.instrumentType ?? '';
+      let segment: string = p.segment ?? '';
+
+      // Rows predating the derivative columns fall back to the symbol.
+      if (!expiry || !instrumentType) {
+        try {
+          const spec = parseInstrumentSymbol(pos.symbol, pos.exchange);
+          expiry = expiry ?? spec.expiry;
+          underlying = underlying || spec.underlying;
+          instrumentType = instrumentType || spec.instrumentType;
+          segment = segment || spec.segment;
+        } catch { /* not identifiable — skipped below */ }
+      }
+
+      if (!expiry || instrumentType === 'EQUITY' || instrumentType === '') continue;
+      if (expiry.getTime() > todayEnd.getTime()) continue;
+
+      expiring.push({
+        id: pos.id,
+        symbol: pos.symbol,
+        settlement: settlementType({ instrumentType, underlying, segment } as any),
+        expiry,
+        overdue: expiry.getTime() < istMidnight().getTime(),
+      });
+    }
+
+    if (expiring.length === 0) return [];
+
+    // An already-expired contract that is still OPEN means a previous sweep did
+    // not run or did not complete. It is reported rather than quietly closed at
+    // today's price, because the contract no longer trades and any "exit price"
+    // for it is fiction.
+    const overdue = expiring.filter(e => e.overdue);
+    if (overdue.length > 0) {
+      log.error(
+        { count: overdue.length, positions: overdue.map(o => ({ symbol: o.symbol, expiry: istDateStr(o.expiry) })) },
+        'Positions are OPEN on contracts that have ALREADY EXPIRED — these cannot be squared off at a real price and need manual reconciliation',
+      );
+    }
+
+    const closable = expiring
+      .filter(e => !e.overdue)
+      .sort((a, b) => (a.settlement === 'PHYSICAL' ? 0 : 1) - (b.settlement === 'PHYSICAL' ? 0 : 1));
+
+    log.warn(
+      {
+        total: closable.length,
+        physical: closable.filter(e => e.settlement === 'PHYSICAL').length,
+        cash: closable.filter(e => e.settlement === 'CASH').length,
+      },
+      'Squaring off derivatives expiring today',
+    );
+
+    const results: SquareOffResult[] = [];
+    for (const e of closable) {
+      const reason = e.settlement === 'PHYSICAL'
+        ? `Expiry square-off (${istDateStr(e.expiry)}) — PHYSICALLY settled, delivery risk if held`
+        : `Expiry square-off (${istDateStr(e.expiry)}) — cash settled`;
+      try {
+        const result = await this.squareOffPosition(e.id, reason);
+        if (result) results.push(result);
+      } catch (err) {
+        // Do not abort the sweep: a failure on one contract must not leave the
+        // remaining physically-settled positions untouched.
+        log.error(
+          { err, symbol: e.symbol, settlement: e.settlement },
+          e.settlement === 'PHYSICAL'
+            ? 'FAILED to square off a physically-settled expiring position — DELIVERY RISK, close manually'
+            : 'Failed to square off an expiring position',
+        );
+      }
+    }
+
+    return results;
   }
 
   /**
