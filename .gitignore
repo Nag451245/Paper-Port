@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Environment files
+.env
+.env.local
+.env.production
+
+# Database
+*.db
+*.db-journal
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# Sensitive files
+cookies.txt
+credentials.json
+*.pem
+*.key
+
+# Rust build artifacts
+engine/target/
+
+# Engine binary
+server/bin/
+
+# Local Netlify folder
+.netlify
+
+# Learning data (runtime)
+learning/

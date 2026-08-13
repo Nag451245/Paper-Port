@@ -1,0 +1,482 @@
+import axios from 'axios';
+import type {
+  User,
+  BreezeCredentialStatus,
+  Portfolio,
+  PortfolioSummary,
+  RiskMetrics,
+  Order,
+  PnLSummary,
+  Watchlist,
+  MarketQuote,
+  HistoricalData,
+  OptionsChain,
+  MarketDepth,
+  IndexData,
+  FIIDIIData,
+  AIAgentConfig,
+  AISignal,
+  PreMarketBriefing,
+  PostTradeBriefing,
+  BacktestRequest,
+  BacktestResult,
+} from '@/types';
+
+const api = axios.create({
+  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api',
+  headers: { 'Content-Type': 'application/json' },
+  timeout: 15_000,
+});
+
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('token');
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      const url = error.config?.url || '';
+      const isAuthEndpoint = url.includes('/auth/login') || url.includes('/auth/register');
+      if (!isAuthEndpoint) {
+        localStorage.removeItem('token');
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
+// ─── Auth ─────────────────────────────────────────────────────────
+export const authApi = {
+  login: (email: string, password: string) =>
+    api.post<{ user: User; access_token: string; token_type: string }>('/auth/login', { email, password }),
+
+  register: (data: { fullName: string; email: string; password: string; riskAppetite: string; virtualCapital: number }) =>
+    api.post<{ user: User; access_token: string; token_type: string }>('/auth/register', data),
+
+  me: () => api.get<User>('/auth/me'),
+
+  updateProfile: (data: Partial<User>) =>
+    api.put<User>('/auth/me', data),
+};
+
+// ─── Portfolio ────────────────────────────────────────────────────
+export const portfolioApi = {
+  list: () => api.get<Portfolio[]>('/portfolio'),
+
+  get: (id: string) => api.get<Portfolio>(`/portfolio/${id}`),
+
+  summary: (id: string) =>
+    api.get<PortfolioSummary>(`/portfolio/${id}/summary`),
+
+  riskMetrics: (id: string) =>
+    api.get<RiskMetrics>(`/portfolio/${id}/risk-metrics`),
+
+  pnlHistory: (id: string, days?: number) =>
+    api.get<PnLSummary[]>(`/portfolio/${id}/pnl-history`, { params: { days } }),
+
+  equityCurve: (id: string) =>
+    api.get<{ date: string; value: number }[]>(`/portfolio/${id}/equity-curve`),
+
+  updateCapital: (id: string, virtualCapital: number) =>
+    api.put(`/portfolio/${id}/capital`, { virtual_capital: virtualCapital }),
+};
+
+// ─── Orders & Trades ─────────────────────────────────────────────
+export const tradingApi = {
+  placeOrder: (order: {
+    portfolio_id: string;
+    symbol: string;
+    side: 'BUY' | 'SELL';
+    order_type: string;
+    qty: number;
+    price?: number;
+    trigger_price?: number;
+    instrument_token: string;
+    exchange?: string;
+    strategy_tag?: string;
+  }) =>
+    api.post('/trades/orders', order),
+
+  cancelOrder: (id: string) =>
+    api.delete<void>(`/trades/orders/${id}`),
+
+  listOrders: (params?: { status?: string; page?: number; limit?: number }) =>
+    api.get('/trades/orders', { params }),
+
+  positions: () =>
+    api.get('/trades/positions'),
+
+  closePosition: (positionId: string, exitPrice: number) =>
+    api.post(`/trades/positions/${positionId}/close`, { exit_price: exitPrice }),
+
+  executeStrategy: (data: {
+    portfolio_id: string;
+    symbol: string;
+    expiry: string;
+    strategy_name?: string;
+    legs: { type: 'CE' | 'PE'; strike: number; action: 'BUY' | 'SELL'; qty: number; premium?: number }[];
+  }) =>
+    api.post('/trades/execute-strategy', data),
+
+  listStrategies: () =>
+    api.get('/trades/strategies'),
+
+  exitLegs: (positionIds: string[]) =>
+    api.post('/trades/strategies/exit-legs', { position_ids: positionIds }),
+
+  exitAllLegs: (strategyTag: string) =>
+    api.post('/trades/strategies/exit-all', { strategy_tag: strategyTag }),
+
+  listTrades: (params?: { page?: number; limit?: number; from_date?: string; to_date?: string; symbol?: string }) =>
+    api.get('/trades/trades', { params }),
+};
+
+// ─── Watchlist ────────────────────────────────────────────────────
+export const watchlistApi = {
+  list: () => api.get<Watchlist[]>('/watchlist'),
+
+  create: (name: string) =>
+    api.post<Watchlist>('/watchlist', { name }),
+
+  addItem: (id: string, symbol: string, exchange: string) =>
+    api.post<void>(`/watchlist/${id}/items`, { symbol, exchange }),
+
+  removeItem: (id: string, itemId: string) =>
+    api.delete<void>(`/watchlist/${id}/items/${itemId}`),
+
+  delete: (id: string) =>
+    api.delete<void>(`/watchlist/${id}`),
+};
+
+// ─── Market Data ──────────────────────────────────────────────────
+export const marketApi = {
+  quote: (symbol: string, exchange?: string) =>
+    api.get<MarketQuote>(`/market/quote/${encodeURIComponent(symbol)}`, { params: { exchange } }),
+
+  historical: (symbol: string, interval: string, from: string, to: string, exchange?: string) =>
+    api.get<HistoricalData[]>(`/market/history/${encodeURIComponent(symbol)}`, { params: { interval, from_date: from, to_date: to, exchange } }),
+
+  optionsChain: (symbol: string, expiry?: string) =>
+    api.get<OptionsChain>(`/market/options-chain/${encodeURIComponent(symbol)}`, { params: expiry ? { expiry } : undefined }),
+
+  optionsExpiries: (symbol: string) =>
+    api.get<{ symbol: string; expiries: string[]; sessionError?: boolean; message?: string }>(`/market/options-chain/${encodeURIComponent(symbol)}/expiries`),
+
+  marketDepth: (symbol: string, exchange?: string) =>
+    api.get<MarketDepth>(`/market/market-depth/${encodeURIComponent(symbol)}`, { params: { exchange } }),
+
+  indices: (exchange?: string) => api.get<IndexData[]>('/market/indices', { params: exchange ? { exchange } : undefined }),
+
+  vix: () => api.get<{ value: number; change: number; changePercent: number }>('/market/vix'),
+
+  fiiDii: () => api.get<FIIDIIData>('/market/fii-dii'),
+
+  search: (query: string, exchange?: string) =>
+    api.get<{ symbol: string; name: string; exchange: string; segment?: string }[]>('/market/search', { params: { q: query, exchange, limit: 20 } }),
+
+  lotSizes: () =>
+    api.get<{ lotSizes: Record<string, number>; source: string }>('/market/lot-sizes'),
+
+  globalIntelligence: () =>
+    api.get<any>('/market/global-intelligence'),
+
+  refreshGlobalIntelligence: () =>
+    api.post<any>('/market/global-intelligence/refresh'),
+};
+
+// ─── Options Strategy ─────────────────────────────────────────────
+export const optionsApi = {
+  templates: () => api.get('/options/templates'),
+
+  payoffEngine: (legs: any[], spotPrice: number, riskFreeRate?: number) =>
+    api.post('/options/payoff-engine', { legs, spotPrice, riskFreeRate }),
+
+  optimize: (symbol: string, expiry?: string, view?: string) =>
+    api.post('/options/optimize', { symbol, expiry, view }),
+
+  explain: (strategyName: string, legs: any[], spotPrice: number) =>
+    api.post('/options/explain', { strategyName, legs, spotPrice }),
+
+  scenario: (legs: any[], spotPrice: number, scenarios: any[]) =>
+    api.post('/options/scenario', { legs, spotPrice, scenarios }),
+};
+
+// ─── AI Agent ─────────────────────────────────────────────────────
+export const aiAgentApi = {
+  getConfig: () => api.get<AIAgentConfig>('/ai/config'),
+
+  updateConfig: (config: Partial<AIAgentConfig>) =>
+    api.put<AIAgentConfig>('/ai/config', config),
+
+  start: () => api.post<{ status: string }>('/ai/start'),
+
+  stop: () => api.post<{ status: string }>('/ai/stop'),
+
+  status: () => api.get<{ isActive: boolean; mode: string; uptime: number }>('/ai/status'),
+
+  signals: (params?: { page?: number; limit?: number; status?: string }) =>
+    api.get<AISignal[]>('/ai/signals', { params }),
+
+  executeSignal: (signalId: string) =>
+    api.post<Order>(`/ai/signals/${signalId}/execute`),
+
+  rejectSignal: (signalId: string) =>
+    api.post<void>(`/ai/signals/${signalId}/reject`),
+
+  preMarketBriefing: () =>
+    api.get<PreMarketBriefing>('/ai/briefing/pre-market'),
+
+  postTradeBriefing: () =>
+    api.get<PostTradeBriefing>('/ai/briefing/post-trade'),
+
+  strategies: () =>
+    api.get<{ id: string; name: string; description: string; isActive: boolean }[]>('/ai/strategies'),
+
+  capitalRules: () =>
+    api.get<{ id: string; name: string; status: 'green' | 'amber' | 'red'; detail: string }[]>('/ai/capital-rules'),
+
+  getMarketScan: () =>
+    api.get<{ scanning: boolean; result: any }>('/ai/market-scan'),
+
+  startMarketScan: () =>
+    api.post<{ scanning: boolean; message: string }>('/ai/market-scan/start'),
+
+  stopMarketScan: () =>
+    api.post<{ scanning: boolean; message: string }>('/ai/market-scan/stop'),
+};
+
+// ─── Intelligence ─────────────────────────────────────────────────
+export const intelligenceApi = {
+  fiiDii: () => api.get('/intelligence/fii-dii'),
+  fiiDiiTrend: (days = 30) => api.get('/intelligence/fii-dii/trend', { params: { days } }),
+
+  pcr: (symbol: string) => api.get(`/intelligence/options/pcr/${encodeURIComponent(symbol)}`),
+  oiHeatmap: (symbol: string) => api.get(`/intelligence/options/oi-heatmap/${encodeURIComponent(symbol)}`),
+  maxPain: (symbol: string) => api.get(`/intelligence/options/max-pain/${encodeURIComponent(symbol)}`),
+  ivPercentile: (symbol: string) => api.get(`/intelligence/options/iv-percentile/${encodeURIComponent(symbol)}`),
+  greeks: (symbol: string) => api.get(`/intelligence/options/greeks/${encodeURIComponent(symbol)}`),
+
+  sectorPerformance: () => api.get('/intelligence/sectors/performance'),
+  sectorHeatmap: () => api.get('/intelligence/sectors/heatmap'),
+  sectorRRG: () => api.get('/intelligence/sectors/rrg'),
+
+  globalIndices: () => api.get('/intelligence/global/indices'),
+  fxRates: () => api.get('/intelligence/global/fx'),
+  commodities: () => api.get('/intelligence/global/commodities'),
+
+  earningsCalendar: () => api.get('/intelligence/earnings/calendar'),
+  macroEvents: () => api.get('/intelligence/earnings/macro-events'),
+
+  blockDeals: () => api.get('/intelligence/block-deals'),
+  insiderTransactions: () => api.get('/intelligence/insider-transactions'),
+};
+
+// ─── Backtest ─────────────────────────────────────────────────────
+export const backtestApi = {
+  run: (request: BacktestRequest) =>
+    api.post<BacktestResult>('/backtest/run', {
+      strategyId: request.strategyId,
+      symbol: request.symbol,
+      startDate: request.startDate,
+      endDate: request.endDate,
+      initialCapital: request.initialCapital,
+      parameters: request.parameters,
+    }),
+
+  results: () =>
+    api.get<BacktestResult[]>('/backtest/results'),
+
+  result: (id: string) =>
+    api.get<BacktestResult>(`/backtest/results/${id}`),
+};
+
+// ─── Breeze API Credentials ──────────────────────────────────────
+export const breezeApi = {
+  status: () =>
+    api.get<{
+      configured: boolean; has_totp: boolean; has_session: boolean;
+      has_login_credentials: boolean; can_auto_login: boolean;
+      session_expiry: string | null; last_auto_login_at: string | null;
+      auto_login_error: string | null; updated_at: string | null;
+    }>('/auth/breeze-credentials/status')
+      .then(res => ({
+        ...res,
+        data: {
+          isConnected: res.data.configured,
+          hasSession: res.data.has_session,
+          hasLoginCredentials: res.data.has_login_credentials,
+          canAutoLogin: res.data.can_auto_login,
+          sessionExpiry: res.data.session_expiry,
+          lastConnected: res.data.updated_at,
+          lastAutoLoginAt: res.data.last_auto_login_at,
+          autoLoginError: res.data.auto_login_error,
+        } as BreezeCredentialStatus,
+      })),
+
+  connect: (
+    apiKey: string, secretKey: string,
+    totpSecret?: string, sessionToken?: string,
+    loginId?: string, loginPassword?: string,
+  ) =>
+    api.post<{ configured: boolean; has_totp: boolean; has_session: boolean; has_login_credentials: boolean; updated_at: string | null }>('/auth/breeze-credentials', {
+      ...(apiKey ? { api_key: apiKey } : {}),
+      ...(secretKey ? { secret_key: secretKey } : {}),
+      ...(totpSecret ? { totp_secret: totpSecret } : {}),
+      ...(sessionToken ? { session_token: sessionToken } : {}),
+      ...(loginId ? { login_id: loginId } : {}),
+      ...(loginPassword ? { login_password: loginPassword } : {}),
+    })
+      .then(res => ({
+        ...res,
+        data: {
+          isConnected: res.data.configured,
+          hasSession: res.data.has_session,
+          hasLoginCredentials: res.data.has_login_credentials,
+          lastConnected: res.data.updated_at,
+        } as BreezeCredentialStatus,
+      })),
+
+  saveSession: (sessionToken: string) =>
+    api.post<{ success: boolean }>('/auth/breeze-session', { session_token: sessionToken }),
+
+  autoSession: () =>
+    api.post<{ success: boolean; sessionExpiry: string; method: string }>('/auth/breeze-session/auto', {}),
+
+  loginUrl: () =>
+    api.get<{ login_url: string; callback_url: string }>('/auth/breeze-session/login-url'),
+
+  disconnect: () => api.delete<{ success: boolean }>('/auth/breeze-credentials'),
+};
+
+// ─── Bots ─────────────────────────────────────────────────────────
+export const botsApi = {
+  list: () => api.get('/bots/'),
+  create: (data: { name: string; role: string; avatarEmoji: string; description: string; maxCapital: number; assignedSymbols?: string; assignedStrategy?: string }) =>
+    api.post('/bots/', data),
+  get: (id: string) => api.get(`/bots/${id}`),
+  update: (id: string, data: Record<string, unknown>) =>
+    api.put(`/bots/${id}`, data),
+  delete: (id: string) => api.delete(`/bots/${id}`),
+  start: (id: string) => api.post(`/bots/${id}/start`),
+  stop: (id: string) => api.post(`/bots/${id}/stop`),
+  assignTask: (botId: string, data: { taskType: string; description: string; parameters?: Record<string, unknown> }) => api.post(`/bots/${botId}/tasks`, data),
+  listTasks: (botId: string) => api.get(`/bots/${botId}/tasks`),
+  sendMessage: (botId: string, data: { content: string; toBotId?: string; messageType?: string }) => api.post(`/bots/${botId}/messages`, data),
+  listMessages: (botId: string) => api.get(`/bots/${botId}/messages`),
+  allMessages: () => api.get('/bots/messages/all'),
+};
+
+// ─── Learning Intelligence ──────────────────────────────────────────
+export const learningApi = {
+  getInsights: (limit = 30) => api.get(`/learning/insights?limit=${limit}`),
+  getLatestInsight: () => api.get('/learning/insights/latest'),
+  getLedger: (days = 30, strategy?: string) => {
+    let url = `/learning/ledger?days=${days}`;
+    if (strategy) url += `&strategy=${strategy}`;
+    return api.get(url);
+  },
+  getHeatmap: (days = 60) => api.get(`/learning/ledger/heatmap?days=${days}`),
+  getParams: (strategy?: string) => {
+    let url = '/learning/params';
+    if (strategy) url += `?strategy=${strategy}`;
+    return api.get(url);
+  },
+  getActiveParams: () => api.get('/learning/params/active'),
+  getRegimeTimeline: (days = 30) => api.get(`/learning/regime-timeline?days=${days}`),
+  getCalibration: () => api.get('/learning/calibration'),
+  triggerNightly: () => api.post('/learning/trigger-nightly'),
+  exportData: () => api.get('/learning/export', { responseType: 'blob' }),
+  importData: (file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    return api.post('/learning/import', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+};
+
+// ─── Telegram Notifications ─────────────────────────────────────────
+export const telegramApi = {
+  getStatus: () => api.get('/notifications/telegram/status'),
+  connect: (chatId: string) => api.post('/notifications/telegram/connect', { chatId }),
+  disconnect: () => api.post('/notifications/telegram/disconnect'),
+  updatePreferences: (data: { notifyTelegram?: boolean; notifyEmail?: boolean; phoneNumber?: string }) =>
+    api.put('/notifications/telegram/preferences', data),
+  sendTest: () => api.post('/notifications/telegram/test'),
+};
+
+// ─── Edge Features ──────────────────────────────────────────────────
+export const edgeApi = {
+  getComposition: () => api.get('/edge/composition'),
+  getKelly: (strategy: string) => api.get(`/edge/composition/kelly/${strategy}`),
+  walkForward: (data: { strategy: string; symbol: string; candles: unknown[]; param_grid?: Record<string, number[]>; num_folds?: number }) =>
+    api.post('/edge/walk-forward', data),
+  getSentiment: () => api.get('/edge/sentiment'),
+  analyzeSentiment: (symbols: string[]) => api.post('/edge/sentiment/analyze', { symbols }),
+  advancedSignals: (data: { candles: unknown[]; compute?: string[] }) =>
+    api.post('/edge/advanced-signals', data),
+  ivSurface: (data: { spot: number; strikes: unknown[] }) =>
+    api.post('/edge/iv-surface', data),
+  getTrackRecord: () => api.get('/edge/track-record'),
+};
+
+// ─── Command Center ──────────────────────────────────────────────
+export const commandApi = {
+  chat: (message: string) =>
+    api.post<{ role: string; content: string; intent: string }>('/command/chat', { message }),
+  getTarget: () =>
+    api.get<{ target: any }>('/command/target'),
+  getDashboard: () =>
+    api.get<{ target: any; risk: any; bots: any[]; recentPnl: any[]; todaySignals: any[] }>('/command/dashboard'),
+  getReports: (limit = 30) =>
+    api.get<any[]>('/command/reports', { params: { limit } }),
+  getReport: (date: string) =>
+    api.get<any>(`/command/reports/${date}`),
+  getMessages: (limit = 50) =>
+    api.get<any[]>('/command/messages', { params: { limit } }),
+  getActivity: (limit = 50) =>
+    api.get<any[]>('/command/activity', { params: { limit } }),
+};
+
+// ─── Risk & Position Management ────────────────────────────────────
+export const riskApi = {
+  comprehensive: () => api.get('/risk/comprehensive'),
+  dailySummary: () => api.get('/risk/daily-summary'),
+  var: (confidence = 0.95, days = 1) => api.get('/risk/var', { params: { confidence, days } }),
+  sectors: () => api.get('/risk/sectors'),
+  margin: () => api.get('/risk/margin'),
+  optionsGreeks: (spotPrice?: number) => api.get('/risk/options/greeks', { params: { spotPrice } }),
+  expiringPositions: (days = 3) => api.get('/risk/options/expiring', { params: { days } }),
+  rollOption: (positionId: string, newStrike: number, newExpiry: string) =>
+    api.post('/risk/options/roll', { positionId, newStrike, newExpiry }),
+  squareOffAll: () => api.post('/risk/intraday/square-off-all'),
+  squareOffPosition: (positionId: string) => api.post(`/risk/intraday/square-off/${positionId}`),
+  partialExit: (positionId: string, qty: number) =>
+    api.post('/risk/intraday/partial-exit', { positionId, qty }),
+  scaleIn: (positionId: string, qty: number, price: number) =>
+    api.post('/risk/intraday/scale-in', { positionId, qty, price }),
+  convertToDelivery: (positionId: string) =>
+    api.post('/risk/intraday/convert-delivery', { positionId }),
+  decisions: (params?: Record<string, unknown>) => api.get('/risk/decisions', { params }),
+  decisionAnalytics: (days = 30) => api.get('/risk/decisions/analytics', { params: { days } }),
+  stopLossStatus: () => api.get('/risk/stop-loss/status'),
+  updateStopLoss: (positionId: string, newStopPrice: number) =>
+    api.post('/risk/stop-loss/update', { positionId, newStopPrice }),
+  killSwitchStatus: () => api.get('/risk/kill-switch/status'),
+  killSwitchActivate: () => api.post('/risk/kill-switch'),
+  killSwitchDeactivate: () => api.post('/risk/kill-switch/deactivate'),
+  healthDetailed: () => api.get('/risk/health/detailed'),
+  executionQuality: () => api.get('/risk/execution-quality'),
+  metricsDaily: () => api.get('/risk/metrics/daily'),
+  metricsSummary: () => api.get('/risk/metrics/summary'),
+  targetProgress: () => api.get('/risk/metrics/target-progress'),
+  positionSizing: (params?: Record<string, unknown>) => api.get('/risk/position-sizing', { params }),
+  systemStatus: () => api.get('/risk/system/status'),
+};
+
+export default api;

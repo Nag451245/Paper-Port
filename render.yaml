@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: paperport-api
+    runtime: node
+    region: oregon
+    plan: free
+    rootDir: server
+    buildCommand: "node scripts/download-engine.mjs || echo 'Engine download failed, using JS fallbacks' ; NODE_ENV=development npm ci && npx prisma generate && npm run build"
+    startCommand: npx prisma db push --skip-generate --accept-data-loss && node --max-old-space-size=512 dist/index.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: DIRECT_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ENCRYPTION_KEY
+        generateValue: true
+      - key: CORS_ORIGINS
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: BREEZE_API_KEY
+        sync: false
+      - key: BREEZE_SECRET_KEY
+        sync: false
+      - key: HOST
+        value: "0.0.0.0"
+      - key: PORT
+        value: "8000"

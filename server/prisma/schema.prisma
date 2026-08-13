@@ -1,0 +1,964 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // For production (Supabase): use "postgresql"
+  // For local dev (SQLite): use "sqlite"
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+// NOTE: When running locally with SQLite, change provider to "sqlite",
+// remove directUrl, and set DATABASE_URL="file:./dev.db" in .env
+
+// ─── Models ────────────────────────────────────────────────────────
+
+model User {
+  id             String   @id @default(uuid())
+  email          String   @unique
+  passwordHash   String   @map("password_hash")
+  fullName       String   @map("full_name")
+  riskAppetite   String   @default("MODERATE") @map("risk_appetite")
+  virtualCapital Decimal  @default(1000000) @map("virtual_capital")
+  role           String   @default("LEARNER")
+  phoneNumber    String?  @map("phone_number")
+  telegramChatId String?  @map("telegram_chat_id")
+  notifyTelegram Boolean  @default(false) @map("notify_telegram")
+  notifyEmail    Boolean  @default(false) @map("notify_email")
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  breezeCredential BreezeCredential?
+  portfolios       Portfolio[]
+  watchlists       Watchlist[]
+  aiAgentConfig    AIAgentConfig?
+  aiTradeSignals   AITradeSignal[]
+  tradeJournals    TradeJournal[]
+  backtestResults  BacktestResult[]
+  tradingBots      TradingBot[]
+  botMessages      BotMessage[]     @relation("UserMessages")
+  botTasks         BotTask[]
+  priceAlerts      PriceAlert[]
+  notifications    Notification[]
+  riskEvents       RiskEvent[]
+  perfSnapshots    PerformanceSnapshot[]
+  strategyLedgers  StrategyLedger[]
+  learningInsights LearningInsight[]
+  strategyParams   StrategyParam[]
+  tradingTargets   TradingTarget[]
+  dailyPnlRecords  DailyPnlRecord[]
+  eodReports       EODReport[]
+  commandMessages  CommandMessage[]
+  guardianState    GuardianState?
+  guardianMemories GuardianMemory[]
+
+  @@map("users")
+}
+
+model BreezeCredential {
+  id                     String    @id @default(uuid())
+  userId                 String    @unique @map("user_id")
+  encryptedApiKey        String    @map("encrypted_api_key")
+  encryptedSecret        String    @map("encrypted_secret_key")
+  encryptedLoginId       String?   @map("encrypted_login_id")
+  encryptedLoginPassword String?   @map("encrypted_login_password")
+  sessionToken           String?   @map("session_token")
+  sessionExpiresAt       DateTime? @map("session_expires_at")
+  totpSecret             String?   @map("totp_secret")
+  lastAutoLoginAt        DateTime? @map("last_auto_login_at")
+  autoLoginError         String?   @map("auto_login_error")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("breeze_credentials")
+}
+
+model Portfolio {
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  name           String
+  initialCapital Decimal  @default(1000000) @map("initial_capital")
+  currentNav     Decimal  @default(1000000) @map("current_nav")
+  isDefault      Boolean  @default(false) @map("is_default")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  positions Position[]
+  orders    Order[]
+  trades    Trade[]
+  bots      TradingBot[]
+
+  @@map("portfolios")
+}
+
+model Position {
+  id              String  @id @default(uuid())
+  portfolioId     String  @map("portfolio_id")
+  instrumentToken String  @map("instrument_token")
+  symbol          String
+  exchange        String  @default("NSE")
+  qty             Int
+  avgEntryPrice   Decimal @map("avg_entry_price")
+  side            String
+  positionType    String  @default("DELIVERY") @map("position_type")
+  status          String  @default("OPEN")
+  unrealizedPnl   Decimal? @map("unrealized_pnl")
+  realizedPnl     Decimal? @map("realized_pnl")
+  stopLoss        Decimal? @map("stop_loss")
+  target          Decimal?
+  strategyTag     String?  @map("strategy_tag")
+  openedAt        DateTime @default(now()) @map("opened_at")
+  closedAt        DateTime? @map("closed_at")
+
+  // Protective stop resting AT THE BROKER (LIVE mode only). Tracked here rather
+  // than as an Order row because TradeService.matchPendingOrders fills every
+  // PENDING/SUBMITTED order it finds, which would spuriously trigger the stop.
+  brokerStopOrderId     String?  @map("broker_stop_order_id")
+  brokerStopTriggerPrice Decimal? @map("broker_stop_trigger_price")
+  brokerStopQty         Int?     @map("broker_stop_qty")
+  brokerStopPlacedAt    DateTime? @map("broker_stop_placed_at")
+
+  // ── Derivative identity ──
+  // Contract identity for F&O and commodity positions. This used to be encoded
+  // in `strategyTag` as "OPT:CE:24000:2026-08-28", competing for a column that
+  // is also the strategy-attribution key for the learning engine (Thompson
+  // sampling, alpha decay, allocation caps) — so a position could carry contract
+  // metadata OR a strategy name, never both, and every option trade was
+  // invisible to attribution. `product` likewise replaces encoding INTRADAY vs
+  // DELIVERY in the same string.
+  //
+  // Every column is nullable: equity rows leave them unset, and existing
+  // fixtures/rows predate them. `qty` remains in UNITS (contracts), never lots —
+  // `lotSize` records units-per-lot so lots stay a display/input concern and the
+  // cost, P&L, NAV and sizing math is untouched.
+  segment         String?   // EQ | FO | CD | COM
+  instrumentType  String?   @map("instrument_type") // EQUITY | FUTURES | OPTIONS (costs.ts InstrumentKind)
+  underlying      String?   // NIFTY, CRUDEOIL, RELIANCE — the spot this is priced against
+  expiry          DateTime? // contract expiry, normalized to IST midnight for identity
+  strike          Decimal?
+  optionType      String?   @map("option_type")     // CE | PE (matches TradeService input naming)
+  lotSize         Int?      @map("lot_size")
+  product         String?   // INTRADAY | DELIVERY | MARGIN (matches BrokerOrderInput.product)
+
+  // Set by the strategyTag backfill when a legacy "OPT:" tag could not be parsed
+  // into the columns above. A strike or expiry is never guessed — it is flagged.
+  metaNeedsReview Boolean   @default(false) @map("meta_needs_review")
+
+  portfolio Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  orders    Order[]
+  trades    Trade[]
+
+  @@index([status, openedAt])
+  @@index([symbol])
+  @@index([brokerStopOrderId])
+  // Position netting. The lookup was {portfolioId, symbol, side, status} against
+  // a bare symbol, so two expiries at the same strike merged into one row with a
+  // blended average price; expiry/strike/optionType now discriminate them.
+  @@index([portfolioId, symbol, side, status])
+  @@map("positions")
+}
+
+model Order {
+  id              String   @id @default(uuid())
+  portfolioId     String   @map("portfolio_id")
+  positionId      String?  @map("position_id")
+  instrumentToken String   @map("instrument_token")
+  symbol          String
+  exchange        String   @default("NSE")
+  orderType       String   @default("MARKET") @map("order_type")
+  side            String
+  qty             Int
+  price           Decimal?
+  triggerPrice    Decimal? @map("trigger_price")
+  status          String   @default("PENDING")
+  filledQty       Int      @default(0) @map("filled_qty")
+  avgFillPrice    Decimal? @map("avg_fill_price")
+  brokerage       Decimal  @default(0)
+  stt             Decimal  @default(0)
+  exchangeCharges Decimal  @default(0) @map("exchange_charges")
+  gst             Decimal  @default(0)
+  sebiCharges     Decimal  @default(0) @map("sebi_charges")
+  stampDuty       Decimal  @default(0) @map("stamp_duty")
+  totalCost       Decimal  @default(0) @map("total_cost")
+  strategyTag     String?  @map("strategy_tag")
+  idealPrice      Decimal? @map("ideal_price")
+  slippageBps     Decimal? @map("slippage_bps")
+  fillLatencyMs   Int?     @map("fill_latency_ms")
+  spreadCostBps   Decimal? @map("spread_cost_bps")
+  impactCost      Decimal? @map("impact_cost")
+  brokerOrderId   String?  @map("broker_order_id")
+  // Caller-supplied idempotency key. The UNIQUE constraint is what actually
+  // prevents a duplicate order — a retry (client timeout, bot re-tick, proxy
+  // replay) reuses the key and gets the original order back instead of placing
+  // a second one at the broker.
+  clientOrderId   String?  @unique @map("client_order_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  filledAt        DateTime? @map("filled_at")
+
+  // ── Derivative identity ── see the Position model for the rationale.
+  // These are what the broker adapter needs in order to place an F&O order at
+  // all: Breeze requires expiry_date, right and strike_price alongside a
+  // product of "options"/"futures", none of which the adapter currently sends.
+  segment         String?
+  instrumentType  String?   @map("instrument_type")
+  underlying      String?
+  expiry          DateTime?
+  strike          Decimal?
+  optionType      String?   @map("option_type")
+  lotSize         Int?      @map("lot_size")
+  product         String?
+
+  portfolio Portfolio  @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  position  Position?  @relation(fields: [positionId], references: [id])
+
+  @@index([portfolioId, status])
+  @@index([brokerOrderId])
+  @@index([symbol, createdAt])
+  @@map("orders")
+}
+
+model Trade {
+  id          String   @id @default(uuid())
+  portfolioId String   @map("portfolio_id")
+  positionId  String   @map("position_id")
+  symbol      String
+  exchange    String   @default("NSE")
+  side        String
+  entryPrice  Decimal  @map("entry_price")
+  exitPrice   Decimal  @map("exit_price")
+  qty         Int
+  grossPnl    Decimal  @map("gross_pnl")
+  totalCosts  Decimal  @map("total_costs")
+  netPnl      Decimal  @map("net_pnl")
+  entryTime   DateTime @map("entry_time")
+  exitTime    DateTime @map("exit_time")
+  holdDuration String? @map("hold_duration")
+  strategyTag  String? @map("strategy_tag")
+  aiRationale  String? @map("ai_rationale")
+
+  // ── Derivative identity ── see the Position model for the rationale.
+  // Recorded on the closed trade too, so realised F&O P&L can be attributed by
+  // segment and expiry after the position row is gone. Without this, an options
+  // performance review cannot separate a weekly from a monthly contract.
+  segment        String?
+  instrumentType String?   @map("instrument_type")
+  underlying     String?
+  expiry         DateTime?
+  strike         Decimal?
+  optionType     String?   @map("option_type")
+  lotSize        Int?      @map("lot_size")
+  product        String?
+
+  portfolio    Portfolio      @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  position     Position       @relation(fields: [positionId], references: [id])
+  tradeJournal TradeJournal?
+
+  @@index([symbol, exitTime])
+  @@index([portfolioId, exitTime])
+  @@map("trades")
+}
+
+model Watchlist {
+  id        String          @id @default(uuid())
+  userId    String          @map("user_id")
+  name      String
+  isDefault Boolean         @default(false) @map("is_default")
+  createdAt DateTime        @default(now()) @map("created_at")
+
+  user  User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items WatchlistItem[]
+
+  @@map("watchlists")
+}
+
+model WatchlistItem {
+  id              String   @id @default(uuid())
+  watchlistId     String   @map("watchlist_id")
+  symbol          String
+  exchange        String   @default("NSE")
+  instrumentToken String?  @map("instrument_token")
+  addedAt         DateTime @default(now()) @map("added_at")
+
+  watchlist Watchlist @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
+
+  @@map("watchlist_items")
+}
+
+model TradingBot {
+  id               String    @id @default(uuid())
+  userId           String    @map("user_id")
+  name             String
+  avatarEmoji      String    @default("🤖") @map("avatar_emoji")
+  role             String    @default("SCANNER")
+  description      String?
+  status           String    @default("IDLE")
+  assignedSymbols  String?   @map("assigned_symbols")
+  assignedStrategy String?   @map("assigned_strategy")
+  portfolioId      String?   @map("portfolio_id")
+  apiKeyRef        String?   @map("api_key_ref")
+  maxCapital       Decimal   @default(100000) @map("max_capital")
+  usedCapital      Decimal   @default(0) @map("used_capital")
+  totalTrades      Int       @default(0) @map("total_trades")
+  totalPnl         Decimal   @default(0) @map("total_pnl")
+  winRate          Decimal   @default(0) @map("win_rate")
+  isActive         Boolean   @default(true) @map("is_active")
+  lastAction       String?   @map("last_action")
+  lastActionAt     DateTime? @map("last_action_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  portfolio Portfolio?   @relation(fields: [portfolioId], references: [id])
+  messages  BotMessage[] @relation("FromBot")
+  received  BotMessage[] @relation("ToBot")
+  tasks     BotTask[]
+
+  @@map("trading_bots")
+}
+
+model BotMessage {
+  id           String   @id @default(uuid())
+  fromBotId    String   @map("from_bot_id")
+  toBotId      String?  @map("to_bot_id")
+  userId       String   @map("user_id")
+  messageType  String   @map("message_type")
+  content      String
+  metadataJson String?  @map("metadata_json")
+  isRead       Boolean  @default(false) @map("is_read")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  fromBot TradingBot  @relation("FromBot", fields: [fromBotId], references: [id], onDelete: Cascade)
+  toBot   TradingBot? @relation("ToBot", fields: [toBotId], references: [id])
+  user    User        @relation("UserMessages", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([fromBotId, messageType])
+  @@map("bot_messages")
+}
+
+model BotTask {
+  id             String    @id @default(uuid())
+  botId          String    @map("bot_id")
+  userId         String    @map("user_id")
+  taskType       String    @map("task_type")
+  description    String
+  parametersJson String?   @map("parameters_json")
+  status         String    @default("pending")
+  resultJson     String?   @map("result_json")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  completedAt    DateTime? @map("completed_at")
+
+  bot  TradingBot @relation(fields: [botId], references: [id], onDelete: Cascade)
+  user User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([botId, createdAt])
+  @@map("bot_tasks")
+}
+
+model AIAgentConfig {
+  id                          String    @id @default(uuid())
+  userId                      String    @unique @map("user_id")
+  mode                        String    @default("ADVISORY")
+  isActive                    Boolean   @default(false) @map("is_active")
+  minSignalScore              Float     @default(0.7) @map("min_signal_score")
+  maxDailyTrades              Int       @default(5) @map("max_daily_trades")
+  strategies                  String    @default("[]")
+  capitalPreservationOverrides String   @default("{}") @map("capital_preservation_overrides")
+  createdAt                   DateTime  @default(now()) @map("created_at")
+  updatedAt                   DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("ai_agent_configs")
+}
+
+model AITradeSignal {
+  id             String    @id @default(uuid())
+  userId         String    @map("user_id")
+  symbol         String
+  exchange       String    @default("NSE")
+  signalType     String    @map("signal_type")
+  compositeScore Float     @map("composite_score")
+  gateScores     String    @map("gate_scores")
+  strategyId     String?   @map("strategy_id")
+  rationale      String?
+  status         String    @default("PENDING")
+  outcomeTag     String?   @map("outcome_tag")
+  outcomeNotes   String?   @map("outcome_notes")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  executedAt     DateTime? @map("executed_at")
+  expiresAt      DateTime? @map("expires_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status, createdAt])
+  @@index([symbol, createdAt])
+  @@map("ai_trade_signals")
+}
+
+model TradeJournal {
+  id                    String   @id @default(uuid())
+  tradeId               String   @unique @map("trade_id")
+  userId                String   @map("user_id")
+  aiBriefing            String?  @map("ai_briefing")
+  signalQualityReview   String?  @map("signal_quality_review")
+  marketContext         String?  @map("market_context")
+  exitAnalysis          String?  @map("exit_analysis")
+  improvementSuggestion String?  @map("improvement_suggestion")
+  createdAt             DateTime @default(now()) @map("created_at")
+
+  trade Trade @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("trade_journals")
+}
+
+model BacktestResult {
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  strategyId     String   @map("strategy_id")
+  strategyParams String   @map("strategy_params")
+  dateFrom       DateTime @map("date_from")
+  dateTo         DateTime @map("date_to")
+  cagr           Float
+  maxDrawdown    Float    @map("max_drawdown")
+  sharpeRatio    Float    @map("sharpe_ratio")
+  sortinoRatio   Float    @map("sortino_ratio")
+  winRate        Float    @map("win_rate")
+  profitFactor   Float    @map("profit_factor")
+  totalTrades    Int      @map("total_trades")
+  avgWin         Float    @map("avg_win")
+  avgLoss        Float    @map("avg_loss")
+  equityCurve    String   @map("equity_curve")
+  tradeLog       String   @map("trade_log")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("backtest_results")
+}
+
+// ─── Phase 2 Models ─────────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?  @map("user_id")
+  action     String
+  entity     String
+  entityId   String?  @map("entity_id")
+  details    String?
+  ipAddress  String?  @map("ip_address")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@index([entity, entityId])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}
+
+model PriceAlert {
+  id             String    @id @default(uuid())
+  userId         String    @map("user_id")
+  symbol         String
+  exchange       String    @default("NSE")
+  condition      String
+  targetPrice    Decimal   @map("target_price")
+  currentPrice   Decimal?  @map("current_price")
+  isTriggered    Boolean   @default(false) @map("is_triggered")
+  isActive       Boolean   @default(true) @map("is_active")
+  triggeredAt    DateTime? @map("triggered_at")
+  notifyEmail    Boolean   @default(false) @map("notify_email")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isActive])
+  @@index([symbol, isActive])
+  @@map("price_alerts")
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  title     String
+  message   String
+  type      String   @default("info")
+  channel   String   @default("in_app")
+  isRead    Boolean  @default(false) @map("is_read")
+  metadata  String?
+  createdAt DateTime @default(now()) @map("created_at")
+  readAt    DateTime? @map("read_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead, createdAt])
+  @@map("notifications")
+}
+
+model RiskEvent {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  ruleType    String   @map("rule_type")
+  severity    String   @default("warning")
+  symbol      String?
+  details     String
+  resolved    Boolean  @default(false)
+  createdAt   DateTime @default(now()) @map("created_at")
+  resolvedAt  DateTime? @map("resolved_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("risk_events")
+}
+
+model PerformanceSnapshot {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  portfolioId String   @map("portfolio_id")
+  date        DateTime
+  nav         Decimal
+  dayPnl      Decimal  @map("day_pnl")
+  dayReturn   Float    @map("day_return")
+  totalReturn Float    @map("total_return")
+  drawdown    Float    @default(0)
+  positions   Int      @default(0)
+  winRate     Float    @default(0) @map("win_rate")
+  sharpeRatio Float?   @map("sharpe_ratio")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([portfolioId, date])
+  @@index([userId, date])
+  @@map("performance_snapshots")
+}
+
+// ─── Self-Improving Learning Models ────────────────────────────────
+
+model StrategyLedger {
+  id                  String   @id @default(uuid())
+  userId              String   @map("user_id")
+  strategyId          String   @map("strategy_id")
+  date                DateTime
+  tradesCount         Int      @default(0) @map("trades_count")
+  wins                Int      @default(0)
+  losses              Int      @default(0)
+  grossPnl            Decimal  @default(0) @map("gross_pnl")
+  netPnl              Decimal  @default(0) @map("net_pnl")
+  winRate             Float    @default(0) @map("win_rate")
+  avgWin              Float    @default(0) @map("avg_win")
+  avgLoss             Float    @default(0) @map("avg_loss")
+  sharpeRatio         Float    @default(0) @map("sharpe_ratio")
+  maxDrawdown         Float    @default(0) @map("max_drawdown")
+  confidenceThreshold Float    @default(0.7) @map("confidence_threshold")
+  paramSnapshot       String   @default("{}") @map("param_snapshot")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, strategyId, date])
+  @@index([userId, date])
+  @@map("strategy_ledgers")
+}
+
+model LearningInsight {
+  id                   String    @id @default(uuid())
+  userId               String    @map("user_id")
+  date                 DateTime
+  marketRegime         String    @default("unknown") @map("market_regime")
+  topWinningStrategies String    @default("[]") @map("top_winning_strategies")
+  topLosingStrategies  String    @default("[]") @map("top_losing_strategies")
+  paramAdjustments     String    @default("{}") @map("param_adjustments")
+  narrative            String    @default("")
+  appliedAt            DateTime? @map("applied_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@index([userId, date])
+  @@map("learning_insights")
+}
+
+model StrategyParam {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  strategyId      String   @map("strategy_id")
+  version         Int      @default(1)
+  params          String   @default("{}")
+  source          String   @default("default")
+  backtestMetrics String   @default("{}") @map("backtest_metrics")
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, strategyId, isActive])
+  @@map("strategy_params")
+}
+
+model TradingTarget {
+  id                  String    @id @default(uuid())
+  userId              String    @map("user_id")
+  type                String    @default("DAILY")
+  capitalBase         Float     @map("capital_base")
+  profitTargetPct     Float     @map("profit_target_pct")
+  maxLossPct          Float     @default(0.3) @map("max_loss_pct")
+  instruments         String    @default("ALL")
+  status              String    @default("ACTIVE")
+  currentPnl          Float     @default(0) @map("current_pnl")
+  consecutiveLossDays Int       @default(0) @map("consecutive_loss_days")
+  lastReviewDate      DateTime? @map("last_review_date")
+  startDate           DateTime  @default(now()) @map("start_date")
+  endDate             DateTime? @map("end_date")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@map("trading_targets")
+}
+
+model DailyPnlRecord {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  date       DateTime
+  grossPnl   Float    @map("gross_pnl")
+  netPnl     Float    @map("net_pnl")
+  tradeCount Int      @map("trade_count")
+  winCount   Int      @map("win_count")
+  lossCount  Int      @map("loss_count")
+  status     String
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@map("daily_pnl_records")
+}
+
+model EODReport {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  date            DateTime
+  totalPnl        Float    @map("total_pnl")
+  targetPnl       Float    @map("target_pnl")
+  targetAchieved  Boolean  @map("target_achieved")
+  tradesSummary   String   @default("[]") @map("trades_summary")
+  falsePositives  String   @default("[]") @map("false_positives")
+  decisionsReview String   @default("{}") @map("decisions_review")
+  improvements    String   @default("{}") @map("improvements")
+  marketContext   String   @default("{}") @map("market_context")
+  riskEvents      String   @default("[]") @map("risk_events")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@map("eod_reports")
+}
+
+model CommandMessage {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  role      String
+  content   String
+  metadata  String   @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("command_messages")
+}
+
+model DecisionAudit {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  botId           String?  @map("bot_id")
+  symbol          String
+  decisionType    String   @map("decision_type")
+  direction       String?
+  confidence      Float    @default(0)
+  signalSource    String   @map("signal_source")
+  marketDataSnapshot String @map("market_data_snapshot")
+  riskChecks      String   @default("{}") @map("risk_checks")
+  reasoning       String
+  outcome         String?
+  entryPrice      Float?   @map("entry_price")
+  exitPrice       Float?   @map("exit_price")
+  pnl             Float?
+  predictionAccuracy Float? @map("prediction_accuracy")
+  createdAt       DateTime @default(now()) @map("created_at")
+  resolvedAt      DateTime? @map("resolved_at")
+
+  @@index([userId, createdAt])
+  @@index([symbol, createdAt])
+  @@index([botId, createdAt])
+  @@index([decisionType])
+  @@map("decision_audits")
+}
+
+model CandleStore {
+  id        String   @id @default(uuid())
+  symbol    String
+  exchange  String   @default("NSE")
+  interval  String
+  timestamp DateTime
+  open      Decimal
+  high      Decimal
+  low       Decimal
+  close     Decimal
+  volume    Decimal  @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([symbol, exchange, interval, timestamp])
+  @@index([symbol, interval, timestamp])
+  @@map("candle_store")
+}
+
+model TradingUniverse {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  symbol    String
+  exchange  String   @default("NSE")
+  sector    String?
+  reason    String?
+  avgVolume Decimal? @map("avg_volume")
+  addedAt   DateTime @default(now()) @map("added_at")
+
+  @@unique([userId, symbol])
+  @@index([userId])
+  @@map("trading_universe")
+}
+
+model AlphaDecay {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  strategyId      String   @map("strategy_id")
+  date            DateTime @db.Date
+  sharpe30d       Float?   @map("sharpe_30d")
+  sharpe60d       Float?   @map("sharpe_60d")
+  sharpe90d       Float?   @map("sharpe_90d")
+  hitRate30d      Float?   @map("hit_rate_30d")
+  signalCount     Int      @default(0) @map("signal_count")
+  avgTimeToProft  Float?   @map("avg_time_to_profit")
+  isDecaying      Boolean  @default(false) @map("is_decaying")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, strategyId, date])
+  @@index([userId, strategyId])
+  @@map("alpha_decay")
+}
+
+model RegimeHistory {
+  id            String   @id @default(uuid())
+  date          DateTime @db.Date
+  regime        String
+  confidence    Float    @default(0)
+  durationDays  Int      @default(1) @map("duration_days")
+  niftyChange   Float?   @map("nifty_change")
+  vix           Float?
+  transitionFrom String? @map("transition_from")
+  metadata      String   @default("{}")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@unique([date])
+  @@index([regime])
+  @@index([date])
+  @@map("regime_history")
+}
+
+// ─── System 2: Market Data Infrastructure ───────────────────────────
+
+model Tick {
+  id        BigInt   @id @default(autoincrement())
+  symbol    String
+  exchange  String   @default("NSE")
+  ltp       Float
+  bid       Float?
+  ask       Float?
+  bidQty    Int?
+  askQty    Int?
+  volume    BigInt
+  timestamp DateTime
+
+  @@index([symbol, timestamp])
+  @@map("ticks")
+}
+
+model HistoricalBar {
+  id        String   @id @default(uuid())
+  symbol    String
+  exchange  String   @default("NSE")
+  timeframe String   @default("1d")
+  open      Float
+  high      Float
+  low       Float
+  close     Float
+  volume    BigInt
+  adjClose  Float?   @map("adj_close")
+  timestamp DateTime
+
+  @@unique([symbol, exchange, timeframe, timestamp])
+  @@index([symbol, timestamp])
+  @@map("historical_bars")
+}
+
+model CorporateAction {
+  id         String   @id @default(uuid())
+  symbol     String
+  actionType String   @map("action_type")
+  ratio      Float?
+  exDate     DateTime @map("ex_date")
+  details    Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([symbol, exDate])
+  @@map("corporate_actions")
+}
+
+// ─── System 5: Observability ────────────────────────────────────────
+
+model AuditEntry {
+  id         BigInt   @id @default(autoincrement())
+  orderId    String?  @map("order_id")
+  positionId String?  @map("position_id")
+  userId     String   @map("user_id")
+  action     String
+  actor      String
+  beforeState Json?   @map("before_state")
+  afterState  Json?   @map("after_state")
+  reason     String?
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@index([orderId])
+  @@map("audit_trail")
+}
+
+// ─── System 7: Regulatory Compliance ────────────────────────────────
+
+model MarginRecord {
+  id            String   @id @default(uuid())
+  userId        String   @map("user_id")
+  symbol        String
+  exchange      String   @default("NSE")
+  segment       String   @default("EQ")
+  varMargin     Float    @map("var_margin")
+  elmMargin     Float    @map("elm_margin")
+  spanMargin    Float    @default(0) @map("span_margin")
+  totalRequired Float    @map("total_required")
+  peakUtilPct   Float    @default(0) @map("peak_util_pct")
+  snapshotAt    DateTime @default(now()) @map("snapshot_at")
+
+  @@index([userId, snapshotAt])
+  @@index([symbol])
+  @@map("margin_records")
+}
+
+model ContractNote {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  orderId      String   @map("order_id")
+  tradeDate    DateTime @map("trade_date")
+  symbol       String
+  exchange     String
+  side         String
+  qty          Int
+  price        Float
+  brokerage    Float
+  stt          Float
+  exchangeChg  Float    @map("exchange_charges")
+  gst          Float
+  sebiChg      Float    @map("sebi_charges")
+  stampDuty    Float    @map("stamp_duty")
+  totalCost    Float    @map("total_cost")
+  netAmount    Float    @map("net_amount")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([userId, tradeDate])
+  @@index([orderId])
+  @@map("contract_notes")
+}
+
+// ─── Guardian AI Personality ────────────────────────────────────────
+
+model GuardianState {
+  id              String    @id @default(uuid())
+  userId          String    @unique @map("user_id")
+  mood            String    @default("COMPOSED")
+  moodIntensity   Float     @default(0.5) @map("mood_intensity")
+  awareness       Json      @default("{}")
+  currentFocus    String?   @map("current_focus")
+  marketStance    String?   @map("market_stance")
+  personalityData Json      @default("{}") @map("personality_data")
+  lastThought     String?   @map("last_thought")
+  lastThoughtAt   DateTime? @map("last_thought_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("guardian_state")
+}
+
+model GuardianMemory {
+  id         String    @id @default(uuid())
+  userId     String    @map("user_id")
+  memoryType String    @map("memory_type")
+  subject    String
+  content    String
+  sentiment  Float     @default(0)
+  importance Float     @default(0.5)
+  expiresAt  DateTime? @map("expires_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, memoryType])
+  @@index([userId, subject])
+  @@index([userId, createdAt])
+  @@map("guardian_memories")
+}
+
+// ─── Intelligent Trading Brain ──────────────────────────────────────
+
+model MarketMemory {
+  id              String    @id @default(uuid())
+  userId          String    @map("user_id")
+  symbol          String
+  timestamp       DateTime
+  niftyLevel      Float     @map("nifty_level")
+  niftyBand       String    @map("nifty_band")
+  vixLevel        Float     @map("vix_level")
+  regime          String
+  dayOfWeek       Int       @map("day_of_week")
+  hourOfDay       Int       @map("hour_of_day")
+  gapPct          Float     @default(0) @map("gap_pct")
+  signalStrategy  String    @map("signal_strategy")
+  signalDirection String    @map("signal_direction")
+  signalConfidence Float    @map("signal_confidence")
+  outcome         String?
+  pnlPct          Float?    @map("pnl_pct")
+  holdingMinutes  Int?      @map("holding_minutes")
+  fingerprint     String
+  keyLevels       Json?     @map("key_levels")
+  marketSnapshot  Json?     @map("market_snapshot")
+  lessonsLearned  String?   @map("lessons_learned")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  resolvedAt      DateTime? @map("resolved_at")
+
+  @@index([userId, regime, niftyBand])
+  @@index([symbol, outcome])
+  @@index([userId, createdAt])
+  @@map("market_memory")
+}

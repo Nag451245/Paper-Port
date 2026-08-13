@@ -1,0 +1,167 @@
+# Capital Guard Engine Configuration
+# All values have sane defaults - only override what you need.
+
+[server]
+host = "127.0.0.1"
+port = 8400
+mode = "http"              # "http", "daemon" (stdin/stdout), or "single"
+
+[market]
+risk_free_rate = 0.065     # Annual risk-free rate (6.5% for India)
+trading_days_per_year = 252.0
+default_iv = 0.20          # Default implied volatility
+market_type = "equity"     # "equity", "futures", "options", "crypto"
+
+[risk]
+max_position_size_pct = 20.0    # Max single position as % of NAV
+max_single_loss_pct = 2.0       # Max risk per trade as % of NAV
+max_drawdown_pct = 25.0         # Circuit breaker drawdown threshold
+max_daily_trades = 20
+max_open_positions = 10
+max_portfolio_heat_pct = 6.0    # Total open risk as % of NAV
+var_confidence = 0.95
+
+[costs]
+commission_per_trade = 20.0     # INR flat brokerage per order
+slippage_bps = 5.0              # Basis points of slippage per trade
+stt_pct = 0.025                 # Securities Transaction Tax (sell side)
+stamp_duty_pct = 0.003          # Stamp duty
+exchange_fee_pct = 0.00345      # NSE/BSE transaction charges
+gst_pct = 18.0                  # GST on brokerage + exchange fees
+
+[backtest]
+default_position_size_pct = 15.0
+rsi_oversold = 30.0
+rsi_overbought = 70.0
+ema_short_period = 9
+ema_long_period = 21
+sma_short_period = 10
+sma_long_period = 30
+orb_target_pct = 1.5
+orb_stop_loss_pct = 0.75
+momentum_lookback = 20
+momentum_hold_days = 10
+mean_reversion_period = 20
+mean_reversion_threshold = 2.0
+
+[scan]
+min_candles = 26
+ema_weight = 0.15
+rsi_weight = 0.10
+macd_weight = 0.10
+supertrend_weight = 0.10
+bollinger_weight = 0.05
+vwap_weight = 0.05
+momentum_weight = 0.25
+volume_weight = 0.20
+
+[options]
+span_margin_index_pct = 15.0
+span_margin_stock_pct = 20.0
+default_expiry_days = 30.0
+feed_enabled = true            # Options chain polling active
+feed_symbols = [
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
+    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
+    "SBIN", "BHARTIARTL", "KOTAKBANK", "ITC", "LT",
+    "AXISBANK", "BAJFINANCE", "TATAMOTORS", "MARUTI",
+    "SUNPHARMA", "TITAN", "HINDUNILVR", "WIPRO",
+    "HCLTECH", "TATASTEEL", "M&M", "ADANIENT",
+]
+poll_delay_ms = 600            # Delay between individual symbol polls (~100 calls/min)
+poll_cycle_pause_secs = 60     # Pause between full scan cycles
+pcr_high_threshold = 1.5       # PCR above this = contrarian bullish
+pcr_low_threshold = 0.5        # PCR below this = contrarian bearish
+oi_change_threshold_pct = 10.0 # OI change % to trigger buildup signal
+iv_crush_threshold_pct = 20.0  # IV change % to trigger crush/expansion signal
+max_pain_proximity_pct = 2.0   # Spot within this % of max pain triggers signal
+
+[broker]
+adapter = "icici_breeze"
+
+[broker.icici]
+bridge_url = "http://127.0.0.1:8001"
+base_url = "https://api.icicidirect.com/breezeapi/api/v2"
+ws_url = "wss://breezeapi.icicidirect.com"
+
+[market_data]
+enabled = true
+reconnect_delay_secs = 3
+feed_mode = "auto"             # "bridge", "websocket", or "auto"
+tick_aggregation_secs = 5      # Micro-candle aggregation interval
+tick_symbols = [
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
+    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
+    "HINDUNILVR", "SBIN", "BHARTIARTL", "KOTAKBANK", "ITC",
+    "LT", "AXISBANK", "BAJFINANCE", "TATAMOTORS", "MARUTI",
+    "SUNPHARMA", "TITAN", "NTPC", "WIPRO", "ASIANPAINT",
+    "HCLTECH", "ULTRACEMCO", "POWERGRID", "NESTLEIND",
+    "TATASTEEL", "JSWSTEEL", "ADANIENT", "ADANIPORTS",
+    "BAJAJFINSV", "GRASIM", "TECHM", "DRREDDY", "CIPLA",
+    "BRITANNIA", "HINDALCO", "M&M", "EICHERMOT", "DIVISLAB",
+    "COALINDIA", "TATACONSUM", "HEROMOTOCO", "SBILIFE",
+    "HDFCLIFE", "INDUSINDBK", "APOLLOHOSP", "BAJAJ-AUTO",
+    "ONGC", "BPCL",
+]
+symbols = [
+    # Indices
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
+    # NIFTY 50
+    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
+    "HINDUNILVR", "SBIN", "BHARTIARTL", "KOTAKBANK", "ITC",
+    "LT", "AXISBANK", "BAJFINANCE", "TATAMOTORS", "MARUTI",
+    "SUNPHARMA", "TITAN", "NTPC", "WIPRO", "ASIANPAINT",
+    "HCLTECH", "ULTRACEMCO", "POWERGRID", "NESTLEIND",
+    "TATASTEEL", "JSWSTEEL", "ADANIENT", "ADANIPORTS",
+    "BAJAJFINSV", "GRASIM", "TECHM", "DRREDDY", "CIPLA",
+    "BRITANNIA", "HINDALCO", "M&M", "EICHERMOT", "DIVISLAB",
+    "COALINDIA", "TATACONSUM", "HEROMOTOCO", "SBILIFE",
+    "HDFCLIFE", "INDUSINDBK", "APOLLOHOSP", "BAJAJ-AUTO",
+    "ONGC", "BPCL", "TATAPOWER", "HAL", "BEL", "ZOMATO",
+    "DLF", "TRENT", "SHRIRAMFIN", "VEDL", "PNB",
+    # Extended F&O stocks
+    "ADANIGREEN", "AMBUJACEM", "AUROPHARMA", "ASHOKLEY",
+    "BANKBARODA", "BANKINDIA", "BANDHANBNK", "BHARATFORG",
+    "CANBK", "CHOLAFIN", "CROMPTON", "CUMMINSIND",
+    "DABUR", "DELHIVERY", "DIXON", "EXIDEIND",
+    "FEDERALBNK", "GLENMARK", "GMRAIRPORT", "GODREJCP",
+    "GODREJPROP", "HDFCAMC", "ICICIPRULI", "IDFCFIRSTB",
+    "INDHOTEL", "IOC", "JINDALSTEL", "JIOFIN",
+    "JSWENERGY", "JUBLFOOD", "KALYANKJIL", "KPITTECH",
+    "LICHSGFIN", "LTIM", "MANAPPURAM", "MAXHEALTH",
+    "MUTHOOTFIN", "NATIONALUM", "NMDC", "OBEROIRLTY",
+    "OFSS", "PAGEIND", "PERSISTENT", "PETRONET",
+    "PFC", "PIDILITIND", "POLYCAB", "RBLBANK",
+    "RECLTD", "SBICARD", "SHREECEM", "SIEMENS",
+    "SONACOMS", "TATAELXSI", "TATATECH", "TORNTPHARM",
+    "TORNTPOWER", "TVSMOTOR", "UPL", "YESBANK",
+    "ETERNAL", "BDL", "FORTIS", "HINDPETRO",
+    "KAYNES", "BHEL", "MCX", "GAIL", "SAIL", "SRF",
+    "BSE", "CDSL", "NBCC", "NHPC", "LUPIN", "ABB",
+    "BIOCON", "COLPAL", "CONCOR", "PIIND", "HUDCO",
+    "VOLTAS", "HINDZINC", "LICI",
+    # Additional high-activity F&O stocks
+    "IRFC", "IRCTC", "IDEA", "INDUSTOWER", "MRF",
+    "NAUKRI", "PAYTM", "SOLARINDS", "SUPREMEIND", "ZYDUSLIFE",
+    "IPCALAB", "LAURUSLABS", "METROPOLIS", "MPHASIS", "NAVINFLUOR",
+    "COFORGE", "DEEPAKNTR", "ESCORTS", "HAVELLS", "MARICO",
+    "ATUL", "BALKRISIND", "CANFINHOME", "CUB", "GRANULES",
+    "GNFC", "INDIACEM", "IGL", "MGL", "PVRINOX",
+    "RAMCOCEM", "SYNGENE", "TATACHEM", "UBL", "ALKEM",
+]
+
+[continuous_scan]
+enabled = true
+sector_rotation_interval_secs = 300   # Every 5 minutes
+futures_scan_interval_secs = 900      # Every 15 minutes
+news_fetch_interval_secs = 600        # Every 10 minutes
+signal_ttl_secs = 14400               # 4 hours
+
+[persistence]
+enabled = true
+snapshot_path = "engine_state.json"
+snapshot_interval_secs = 60
+
+[logging]
+level = "info"             # "trace", "debug", "info", "warn", "error"
+format = "pretty"          # "pretty", "json", "compact"

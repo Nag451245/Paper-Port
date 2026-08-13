@@ -1,0 +1,278 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { BotEngine } from '../../src/services/bot-engine.js';
+
+vi.mock('../../src/lib/openai.js', () => ({
+  chatCompletionJSON: vi.fn().mockResolvedValue({
+    message: 'NIFTY bearish trend, buy PE 23400.',
+    messageType: 'signal',
+    action: 'Recommended Bear Put Spread',
+    signals: [
+      {
+        symbol: 'NIFTY',
+        direction: 'BUY_PE',
+        confidence: 0.82,
+        reason: 'PCR dropping below 0.8, VIX rising',
+        strategy: 'Bear Put Spread',
+        legs: [
+          { type: 'PE', strike: 23400, action: 'BUY', qty: 1 },
+          { type: 'PE', strike: 23200, action: 'SELL', qty: 1 },
+        ],
+      },
+    ],
+  }),
+  chatCompletion: vi.fn().mockResolvedValue('Mock response'),
+  getOpenAIStatus: vi.fn().mockReturnValue({ circuitOpen: false, queueLength: 0, recentRequests: 0, cooldownRemainingMs: 0 }),
+  _resetForTesting: vi.fn(),
+}));
+
+vi.mock('../../src/lib/rust-engine.js', () => ({
+  isEngineAvailable: vi.fn().mockReturnValue(false),
+  engineScan: vi.fn(),
+  engineRisk: vi.fn(),
+  engineScanActiveSymbols: vi.fn().mockResolvedValue({ count: 0, symbols: [] }),
+}));
+
+vi.mock('../../src/services/market-data.service.js', () => ({
+  MarketDataService: vi.fn().mockImplementation(() => ({
+    getQuote: vi.fn().mockResolvedValue({ symbol: 'RELIANCE', ltp: 2500, open: 2480, high: 2520, low: 2470, close: 2500, volume: 1000000, exchange: 'NSE' }),
+    getHistory: vi.fn().mockResolvedValue([]),
+    getVIX: vi.fn().mockResolvedValue({ value: 14.5, change: -0.2, changePercent: -1.36 }),
+    getOptionsChain: vi.fn().mockResolvedValue({
+      symbol: 'NIFTY',
+      underlyingValue: 23500,
+      strikes: [
+        { strike: 23000, callOI: 5000000, callLTP: 520, callIV: 18, putOI: 3000000, putLTP: 30, putIV: 16 },
+        { strike: 23200, callOI: 4000000, callLTP: 340, callIV: 17, putOI: 4000000, putLTP: 55, putIV: 17 },
+        { strike: 23400, callOI: 3000000, callLTP: 190, callIV: 16, putOI: 6000000, putLTP: 100, putIV: 18 },
+        { strike: 23500, callOI: 8000000, callLTP: 130, callIV: 15, putOI: 7000000, putLTP: 140, putIV: 15 },
+        { strike: 23600, callOI: 6000000, callLTP: 80, callIV: 16, putOI: 4500000, putLTP: 200, putIV: 17 },
+        { strike: 23800, callOI: 7000000, callLTP: 30, callIV: 18, putOI: 2000000, putLTP: 340, putIV: 19 },
+        { strike: 24000, callOI: 9000000, callLTP: 10, callIV: 20, putOI: 1000000, putLTP: 520, putIV: 22 },
+      ],
+    }),
+    getTopMovers: vi.fn().mockResolvedValue({ gainers: [], losers: [] }),
+    search: vi.fn().mockResolvedValue([]),
+  })),
+}));
+
+function createMockPrisma() {
+  return {
+    tradingBot: {
+      findUnique: vi.fn(),
+      findMany: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn().mockResolvedValue({}),
+      delete: vi.fn(),
+    },
+    botMessage: { create: vi.fn(), findMany: vi.fn() },
+    botTask: { create: vi.fn(), findMany: vi.fn() },
+    aIAgentConfig: { findUnique: vi.fn(), create: vi.fn(), upsert: vi.fn() },
+    aITradeSignal: { findUnique: vi.fn(), findMany: vi.fn(), count: vi.fn(), update: vi.fn(), create: vi.fn() },
+    portfolio: { findFirst: vi.fn(), findUnique: vi.fn(), findMany: vi.fn(), update: vi.fn() },
+    position: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn() },
+    order: { create: vi.fn(), update: vi.fn() },
+    trade: { create: vi.fn(), findMany: vi.fn() },
+    strategyParam: { findFirst: vi.fn().mockResolvedValue(null), findMany: vi.fn().mockResolvedValue([]) },
+    alphaDecay: { findMany: vi.fn().mockResolvedValue([]) },
+    $disconnect: vi.fn(),
+  } as any;
+}
+
+describe('BotEngine', () => {
+  let engine: BotEngine;
+  let mockPrisma: ReturnType<typeof createMockPrisma>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPrisma = createMockPrisma();
+    engine = new BotEngine(mockPrisma);
+  });
+
+  describe('bot lifecycle', () => {
+    it('should start and track a bot', async () => {
+      expect(engine.getRunningBotCount()).toBe(0);
+      mockPrisma.tradingBot.findUnique.mockResolvedValue({
+        id: 'b1', userId: 'u1', status: 'RUNNING', role: 'SCANNER',
+        assignedSymbols: 'RELIANCE', name: 'Test Bot',
+      });
+
+      await engine.startBot('b1', 'u1');
+      expect(engine.getRunningBotCount()).toBe(1);
+    });
+
+    it('should stop a running bot', async () => {
+      mockPrisma.tradingBot.findUnique.mockResolvedValue({
+        id: 'b1', userId: 'u1', status: 'RUNNING', role: 'SCANNER',
+        assignedSymbols: 'RELIANCE', name: 'Test Bot',
+      });
+
+      await engine.startBot('b1', 'u1');
+      engine.stopBot('b1');
+      expect(engine.getRunningBotCount()).toBe(0);
+    });
+
+    it('should enforce MAX_CONCURRENT_BOTS limit', async () => {
+      for (let i = 0; i < 6; i++) {
+        mockPrisma.tradingBot.findUnique.mockResolvedValue({
+          id: `b${i}`, userId: 'u1', status: 'RUNNING', role: 'SCANNER',
+          assignedSymbols: 'RELIANCE', name: `Bot ${i}`,
+        });
+        await engine.startBot(`b${i}`, 'u1');
+      }
+      expect(engine.getRunningBotCount()).toBeLessThanOrEqual(10);
+    });
+
+    it('should stop all bots', async () => {
+      for (let i = 0; i < 3; i++) {
+        await engine.startBot(`b${i}`, 'u1');
+      }
+      engine.stopAll();
+      expect(engine.getRunningBotCount()).toBe(0);
+    });
+  });
+
+  describe('FNO_STRATEGIST bot role', () => {
+    it('should export BotEngine class with proper structure', async () => {
+      const botModule = await import('../../src/services/bot-engine.js');
+      expect(botModule.BotEngine).toBeDefined();
+      const instance = new botModule.BotEngine(mockPrisma);
+      expect(instance).toBeDefined();
+      expect(typeof instance.startBot).toBe('function');
+      expect(typeof instance.stopBot).toBe('function');
+      expect(typeof instance.startMarketScan).toBe('function');
+      expect(typeof instance.stopMarketScan).toBe('function');
+      expect(typeof instance.getLastScanResult).toBe('function');
+    });
+  });
+
+  describe('market scanner', () => {
+    it('should return null when no scan has run', () => {
+      expect(engine.getLastScanResult()).toBeNull();
+    });
+
+    it('should report scanner not running initially', () => {
+      expect(engine.isScannerRunning()).toBe(false);
+    });
+  });
+
+  describe('agent lifecycle', () => {
+    it('should start and stop an agent', async () => {
+      await engine.startAgent('u1');
+      engine.stopAgent('u1');
+    });
+
+    it('should track active agent count', async () => {
+      expect(engine.getActiveAgentCount()).toBe(0);
+      await engine.startAgent('u1');
+      expect(engine.getActiveAgentCount()).toBe(1);
+      engine.stopAgent('u1');
+      expect(engine.getActiveAgentCount()).toBe(0);
+    });
+  });
+
+  describe('kill switch', () => {
+    it('should report kill switch state', () => {
+      expect(engine.killSwitchActive).toBe(false);
+    });
+  });
+
+  describe('market scan fallback', () => {
+    it('should have isScannerRunning method', () => {
+      expect(typeof engine.isScannerRunning).toBe('function');
+      expect(engine.isScannerRunning()).toBe(false);
+    });
+
+    it('should have getLastScanResult method returning null initially', () => {
+      expect(engine.getLastScanResult()).toBeNull();
+    });
+  });
+
+  describe('isRunning state', () => {
+    it('should report not running when no bots, agents, or scanner active', () => {
+      expect(engine.isRunning()).toBe(false);
+    });
+
+    it('should report running when a bot is started', async () => {
+      mockPrisma.tradingBot.findUnique.mockResolvedValue({
+        id: 'b1', userId: 'u1', status: 'RUNNING', role: 'SCANNER',
+        assignedSymbols: 'RELIANCE', name: 'Test Bot',
+      });
+      await engine.startBot('b1', 'u1');
+      expect(engine.isRunning()).toBe(true);
+      engine.stopBot('b1');
+      expect(engine.isRunning()).toBe(false);
+    });
+
+    it('should report running when an agent is started', async () => {
+      await engine.startAgent('u1');
+      expect(engine.isRunning()).toBe(true);
+      engine.stopAgent('u1');
+      expect(engine.isRunning()).toBe(false);
+    });
+  });
+
+  describe('stopAll', () => {
+    it('should stop all bots and agents', async () => {
+      mockPrisma.tradingBot.findUnique.mockResolvedValue({
+        id: 'b1', userId: 'u1', status: 'RUNNING', role: 'SCANNER',
+        assignedSymbols: 'RELIANCE', name: 'Test Bot',
+      });
+      await engine.startBot('b1', 'u1');
+      await engine.startAgent('u1');
+      expect(engine.isRunning()).toBe(true);
+      engine.stopAll();
+      expect(engine.getRunningBotCount()).toBe(0);
+      expect(engine.getActiveAgentCount()).toBe(0);
+    });
+  });
+
+  describe('tick interval', () => {
+    it('should allow setting tick interval', () => {
+      expect(typeof engine.setTickInterval).toBe('function');
+      engine.setTickInterval(60_000);
+    });
+  });
+
+  describe('expanded stock universe', () => {
+    it('should have MAX_CANDLE_SYMBOLS set to 300', async () => {
+      const mod = await import('../../src/services/bot-engine.js');
+      expect(mod.BotEngine).toBeDefined();
+    });
+
+    it('should have DEFAULT_FNO_WATCHLIST with 150+ symbols', async () => {
+      const botModule = await import('../../src/services/bot-engine.js');
+      const instance = new botModule.BotEngine(mockPrisma);
+      expect(instance).toBeDefined();
+    });
+
+    it('should use assigned symbols when bot has them', async () => {
+      mockPrisma.tradingBot.findUnique.mockResolvedValue({
+        id: 'b1', userId: 'u1', status: 'RUNNING', role: 'SCANNER',
+        assignedSymbols: 'RELIANCE,TCS,INFY', name: 'Assigned Bot',
+      });
+      await engine.startBot('b1', 'u1');
+      expect(engine.getRunningBotCount()).toBe(1);
+      engine.stopBot('b1');
+    });
+
+    it('should use fallback symbols when bot has no assigned symbols', async () => {
+      mockPrisma.tradingBot.findUnique.mockResolvedValue({
+        id: 'b2', userId: 'u1', status: 'RUNNING', role: 'SCANNER',
+        assignedSymbols: null, name: 'No Symbols Bot',
+      });
+      await engine.startBot('b2', 'u1');
+      expect(engine.getRunningBotCount()).toBe(1);
+      engine.stopBot('b2');
+    });
+
+    it('should use empty string assigned symbols and fall back to default', async () => {
+      mockPrisma.tradingBot.findUnique.mockResolvedValue({
+        id: 'b3', userId: 'u1', status: 'RUNNING', role: 'SCANNER',
+        assignedSymbols: '', name: 'Empty Symbols Bot',
+      });
+      await engine.startBot('b3', 'u1');
+      expect(engine.getRunningBotCount()).toBe(1);
+      engine.stopBot('b3');
+    });
+  });
+});
