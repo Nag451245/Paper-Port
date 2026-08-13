@@ -779,6 +779,42 @@ model RegimeHistory {
 
 // ─── System 2: Market Data Infrastructure ───────────────────────────
 
+/// Historical option-chain snapshots.
+///
+/// Nothing persisted option-chain data before this, which had two consequences.
+/// An options backtest was impossible — there was no premium, IV or OI history to
+/// replay. And `calculateIVPercentile` was being handed the IVs across strikes in
+/// the CURRENT chain, so it measured where ATM IV sat within today's volatility
+/// smile rather than within its own history. Since the wings of a smile always
+/// carry higher IV than ATM, that reports a systematically low percentile
+/// whatever the vol regime — and it fed both bot decisions and LLM prompts.
+model OptionChainSnapshot {
+  id              BigInt   @id @default(autoincrement())
+  underlying      String
+  expiry          DateTime
+  strike          Decimal
+  optionType      String   @map("option_type") // CE | PE
+  /// Spot the exchange priced these premiums against, kept so IV and spot stay
+  /// consistent when replayed.
+  underlyingValue Decimal? @map("underlying_value")
+  ltp             Decimal?
+  /// As reported by the exchange, in PERCENT — the same unit the live chain uses.
+  iv              Decimal?
+  oi              BigInt?
+  oiChange        BigInt?  @map("oi_change")
+  volume          BigInt?
+  bidPrice        Decimal? @map("bid_price")
+  askPrice        Decimal? @map("ask_price")
+  capturedAt      DateTime @map("captured_at")
+
+  /// One row per contract per capture. Makes the writer idempotent, so a retried
+  /// or overlapping snapshot job cannot double-count a strike.
+  @@unique([underlying, expiry, strike, optionType, capturedAt])
+  @@index([underlying, expiry, capturedAt])
+  @@index([underlying, capturedAt])
+  @@map("option_chain_snapshots")
+}
+
 model Tick {
   id        BigInt   @id @default(autoincrement())
   symbol    String

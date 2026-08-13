@@ -66,7 +66,12 @@ export class AIAgentService {
 
       const ivValues = strikes.map((s: any) => s.callIV || s.putIV || 0).filter((v: number) => v > 0);
       const currentIV = ivValues.length > 0 ? ivValues[Math.floor(ivValues.length / 2)] : 20;
-      const ivPercentile = calculateIVPercentile(currentIV, ivValues);
+      // ATM IV itself, not a percentile. See the note in bot-engine.ts: passing
+      // this chain's own cross-strike IVs to calculateIVPercentile measures
+      // position within today's volatility smile, which is biased low and is not
+      // an IV percentile. OptionChainStoreService.getIvPercentile computes the
+      // real thing from stored history, and returns null when history is thin.
+      const ivPercentile = currentIV;
 
       let vix = 0;
       try {
@@ -81,7 +86,7 @@ Analyze the following options data and recommend a strategy:
 
 Symbol: ${symbol} | Spot: ₹${spot}
 Max Pain: ₹${maxPainResult.maxPainStrike}
-PCR: ${pcr.toFixed(2)} | IV Percentile: ${ivPercentile}% | VIX: ${vix}
+PCR: ${pcr.toFixed(2)} | ATM IV: ${ivPercentile}% | VIX: ${vix}
 Top 5 Call OI: ${strikeValues.slice(0, 5).map((s: number) => `${s}:${callOI[s]}`).join(', ')}
 Top 5 Put OI: ${strikeValues.slice(0, 5).map((s: number) => `${s}:${putOI[s]}`).join(', ')}
 

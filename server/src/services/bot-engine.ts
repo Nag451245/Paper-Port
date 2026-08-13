@@ -2585,12 +2585,22 @@ Approve or reject?` },
 
         const ivValues = chain.strikes.map((s: any) => s.callIV || s.putIV || 0).filter((v: number) => v > 0);
         const currentIV = ivValues.length > 0 ? ivValues[Math.floor(ivValues.length / 2)] : 0;
-        const ivPct = calculateIVPercentile(currentIV, ivValues);
+        // Reports ATM IV itself, not a percentile.
+        //
+        // This used to be `calculateIVPercentile(currentIV, ivValues)` where
+        // ivValues are the IVs across strikes in THIS chain — which measures
+        // where ATM IV sits within today's volatility smile, not within its own
+        // history. A smile's wings carry higher IV than ATM, so it returned a
+        // systematically low number whatever the vol regime, and it was labelled
+        // "IV%" in the prompt. A real percentile needs a time series and is
+        // available from OptionChainStoreService.getIvPercentile once snapshots
+        // have accumulated.
+        const atmIv = currentIV;
 
         const topCallStrikes = [...strikeVals].sort((a, b) => (callOI[b] || 0) - (callOI[a] || 0)).slice(0, 3);
         const topPutStrikes = [...strikeVals].sort((a, b) => (putOI[b] || 0) - (putOI[a] || 0)).slice(0, 3);
 
-        parts.push(`${sym}: MaxPain=${maxPain.maxPainStrike} PCR=${pcr} IV%=${ivPct} Spot=${chain.underlyingValue || '?'}`);
+        parts.push(`${sym}: MaxPain=${maxPain.maxPainStrike} PCR=${pcr} ATM-IV=${atmIv}% Spot=${chain.underlyingValue || '?'}`);
         parts.push(`  Resistance(Call OI): ${topCallStrikes.join(',')} | Support(Put OI): ${topPutStrikes.join(',')}`);
       } catch { /* skip symbol */ }
     }
