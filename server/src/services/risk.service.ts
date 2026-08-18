@@ -7,6 +7,7 @@ import { MarginCalculatorService } from './margin-calculator.service.js';
 import { PositionLimitsService } from './position-limits.service.js';
 import { MetricsService } from './metrics.service.js';
 import { parseInstrumentSymbol } from '../lib/instrument.js';
+import { istMidnight } from '../lib/ist.js';
 
 const log = createChildLogger('RiskService');
 
@@ -596,8 +597,9 @@ export class RiskService {
     const capital = portfolios.reduce((s, p) => s + Number(p.initialCapital), 0);
     const portfolioIds = portfolios.map(p => p.id);
 
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    // S4: local midnight drifts off IST on any non-IST host (Render runs UTC),
+    // so the day boundary moved and the breaker measured the wrong window.
+    const todayStart = istMidnight();
 
     const todayTrades = await this.prisma.trade.findMany({
       where: { portfolioId: { in: portfolioIds }, exitTime: { gte: todayStart } },
@@ -1025,14 +1027,46 @@ export class RiskService {
       select: { id: true, symbol: true, avgEntryPrice: true },
     });
 
+    // S3: exit at the LIVE price, never at the entry price.
+    //
+    // This passed avgEntryPrice, so every force-closed position booked exactly
+    // zero P&L. The breaker fires BECAUSE the day is down, then recorded that its
+    // own liquidation cost nothing — the loss it exists to stop was erased from
+    // the books at the moment it acted, and the next day opened from an inflated
+    // NAV.
+    //
+    // A position with no obtainable quote is NOT closed at a made-up price. It is
+    // reported for manual action: a close booked at a fabricated price is not a
+    // close, it is a false record, and this is the one path where the numbers
+    // most need to be trustworthy.
+    const { MarketDataService } = await import('./market-data.service.js');
+    const marketData = new MarketDataService();
+
     let closedCount = 0;
+    const unpriced: string[] = [];
     for (const pos of openPositions) {
+      let exitPrice = 0;
       try {
-        await closePositionFn(pos.id, userId, Number(pos.avgEntryPrice));
+        const quote = await marketData.getQuote(pos.symbol, (pos as any).exchange ?? 'NSE');
+        if (Number(quote?.ltp) > 0) exitPrice = Number(quote.ltp);
+      } catch { /* fall through to the unpriced path */ }
+
+      if (exitPrice <= 0) {
+        unpriced.push(pos.symbol);
+        log.error({ positionId: pos.id, symbol: pos.symbol },
+          'CIRCUIT BREAKER: no live price — position NOT closed, needs manual action');
+        continue;
+      }
+
+      try {
+        await closePositionFn(pos.id, userId, exitPrice);
         closedCount++;
       } catch (err) {
         log.error({ positionId: pos.id, symbol: pos.symbol, err }, 'Failed to force-close position');
       }
+    }
+    if (unpriced.length > 0) {
+      log.error({ unpriced }, 'CIRCUIT BREAKER: positions left OPEN — no live price available');
     }
 
     log.warn({

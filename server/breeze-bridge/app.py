@@ -441,11 +441,22 @@ def implied_vol_bs(spot, strike, tte_days, price, right="call"):
 
 
 def save_session_to_disk(api_key, api_secret, user_id, session_key):
+    # The API SECRET is deliberately not written here.
+    #
+    # This file previously stored api_secret in plaintext next to the source. It
+    # is a long-lived credential that can mint new sessions, so on any shared or
+    # backed-up filesystem a readable copy is a standing account compromise —
+    # unlike session_key, which expires.
+    #
+    # On restore the secret is taken from the BREEZE_SECRET_KEY environment
+    # variable. If that is unset, restore fails loudly and the session is
+    # re-initialised through /session/init rather than silently reusing a
+    # secret from disk.
     try:
-        with open(SESSION_FILE, "w") as f:
+        fd = os.open(SESSION_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump({
                 "api_key": api_key,
-                "api_secret": api_secret,
                 "user_id": user_id,
                 "session_key": session_key,
                 "saved_at": datetime.now().isoformat(),
@@ -473,7 +484,14 @@ def restore_session_from_disk():
         b = BreezeConnect(api_key=data["api_key"])
         b.user_id = data["user_id"]
         b.session_key = data["session_key"]
-        b.secret_key = data["api_secret"]
+        # Secret comes from the environment, never from the session file. A missing
+        # secret aborts the restore so the caller re-initialises through
+        # /session/init, rather than continuing with a half-built client.
+        restored_secret = os.environ.get("BREEZE_SECRET_KEY") or data.get("api_secret")
+        if not restored_secret:
+            print("[Breeze Bridge] No BREEZE_SECRET_KEY in environment — cannot restore session")
+            return False
+        b.secret_key = restored_secret
         b.get_stock_script_list()
         b.api_handler = ApificationBreeze(b)
 
