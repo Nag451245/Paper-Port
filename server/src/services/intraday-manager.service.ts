@@ -9,6 +9,7 @@ import { DecisionAuditService } from './decision-audit.service.js';
 import { createChildLogger } from '../lib/logger.js';
 import { istDateStr, istMidnight, istMinutesSinceMidnight, parseHHMM } from '../lib/ist.js';
 import { parseInstrumentSymbol, settlementType, type SettlementType } from '../lib/instrument.js';
+import { calculateCosts, resolveInstrumentKind } from '../lib/costs.js';
 
 const log = createChildLogger('IntradayManager');
 
@@ -536,11 +537,22 @@ export class IntradayManager {
     }
 
     const entryPrice = Number(position.avgEntryPrice);
-    let exitPrice = entryPrice;
+    let exitPrice = 0;
     try {
       const quote = await this.marketData.getQuote(position.symbol, position.exchange);
       if (quote.ltp > 0) exitPrice = quote.ltp;
-    } catch { /* use entry price as fallback */ }
+    } catch { /* handled below */ }
+
+    // No entry-price fallback. Exiting a slice at its own entry price books
+    // exactly zero P&L on that slice — the same defect the daily-loss circuit
+    // breaker had. Refusing is correct: a partial exit at a fabricated price
+    // silently rewrites the position's average and the day's P&L.
+    if (exitPrice <= 0) {
+      throw new Error(
+        `Cannot partially exit ${position.symbol}: no live price available. ` +
+        `Exiting at the entry price would book zero P&L on the exited quantity.`,
+      );
+    }
 
     const grossPnl = position.side === 'LONG'
       ? (exitPrice - entryPrice) * exitQty
@@ -550,7 +562,14 @@ export class IntradayManager {
     const totalCost = Math.min(turnover * 0.0003, 20) + turnover * 0.001;
     const netPnl = grossPnl - totalCost;
 
-    await this.prisma.trade.create({
+    const remainingQty = position.qty - exitQty;
+
+    // All three writes in ONE transaction. They were separate, so a failure
+    // between them left the books inconsistent: a trade booked with the position
+    // quantity unreduced (double-counting the exited slice), or the position
+    // reduced with the proceeds never credited to NAV.
+    await this.prisma.$transaction(async (tx) => {
+    await tx.trade.create({
       data: {
         portfolioId: position.portfolioId,
         positionId: position.id,
@@ -569,16 +588,17 @@ export class IntradayManager {
       },
     });
 
-    const remainingQty = position.qty - exitQty;
-    await this.prisma.position.update({
+      await tx.position.update({
       where: { id: positionId },
       data: { qty: remainingQty },
     });
 
     // Atomic increment — a read-modify-write here loses concurrent fills' deltas
-    await this.prisma.portfolio.update({
+      await tx.portfolio.update({
       where: { id: position.portfolioId },
       data: { currentNav: { increment: exitPrice * exitQty - totalCost } },
+    });
+
     });
 
     return {
@@ -606,18 +626,37 @@ export class IntradayManager {
     const newQty = position.qty + additionalQty;
     const newAvg = totalCost / newQty;
 
-    await this.prisma.position.update({
-      where: { id: positionId },
-      data: { qty: newQty, avgEntryPrice: newAvg },
-    });
+    // Costs were omitted entirely: NAV was decremented by bare price x qty, so
+    // every scale-in silently overstated the account by the brokerage, STT,
+    // exchange charges, GST and stamp duty actually incurred. Small per trade,
+    // cumulative across a session, and it biases every downstream figure that
+    // reads NAV — drawdown, position sizing, the daily-loss breaker.
+    const costs = calculateCosts(
+      additionalQty, price, 'BUY', position.exchange,
+      resolveInstrumentKind(position.exchange, position.symbol, (position as any).optionType ?? undefined),
+    );
 
-    if (position.side === 'LONG') {
-      // Atomic increment — see squareOffPosition above
-      await this.prisma.portfolio.update({
-        where: { id: position.portfolioId },
-        data: { currentNav: { decrement: price * additionalQty } },
+    // Both writes in one transaction: a failure between them previously left the
+    // position enlarged with NAV never debited.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.position.update({
+        where: { id: positionId },
+        data: { qty: newQty, avgEntryPrice: newAvg },
       });
-    }
+
+      if (position.side === 'LONG') {
+        await tx.portfolio.update({
+          where: { id: position.portfolioId },
+          data: { currentNav: { decrement: price * additionalQty + costs.totalCost } },
+        });
+      } else {
+        // A short scale-in still incurs costs even though no premium is paid out.
+        await tx.portfolio.update({
+          where: { id: position.portfolioId },
+          data: { currentNav: { decrement: costs.totalCost } },
+        });
+      }
+    });
 
     return {
       newQty,
