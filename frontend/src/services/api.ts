@@ -43,7 +43,17 @@ api.interceptors.response.use(
       const url = error.config?.url || '';
       const isAuthEndpoint = url.includes('/auth/login') || url.includes('/auth/register');
       if (!isAuthEndpoint) {
+        // Clearing the token alone left the app looking signed in with no
+        // session: every subsequent request 401d silently, so the UI showed
+        // stale data and empty panels rather than a login screen. Send the user
+        // to /login and drop the in-memory auth state with it.
         localStorage.removeItem('token');
+        // A full-page replace resets all in-memory state, so there is no need
+        // to reach into the auth store — and importing it here would create a
+        // cycle, since the store imports this module.
+        if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+          window.location.replace('/login');
+        }
       }
     }
     return Promise.reject(error);

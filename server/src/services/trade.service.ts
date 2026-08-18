@@ -1761,6 +1761,22 @@ export class TradeService {
   async matchPendingOrders(): Promise<{ matched: number; failed: number }> {
     if (!this.calendar.isMarketOpen()) return { matched: 0, failed: 0 };
 
+    // The kill switch must stop fills, not just new orders.
+    //
+    // This sweep filled every resting PENDING/SUBMITTED order without consulting
+    // it, so tripping the kill switch (or the daily-loss circuit breaker, which
+    // fires on the same condition) stopped placement while the existing queue
+    // kept converting into positions — exactly when the system had decided it
+    // should not be trading.
+    try {
+      if (await isKillSwitchActive()) {
+        log.warn({}, 'Kill switch active — pending-order matching skipped');
+        return { matched: 0, failed: 0 };
+      }
+    } catch (err) {
+      log.warn({ err }, 'Kill switch check failed during pending-order matching — proceeding');
+    }
+
     const pendingOrders = await this.prisma.order.findMany({
       where: { status: { in: ['PENDING', 'SUBMITTED'] } },
       include: { portfolio: true },
