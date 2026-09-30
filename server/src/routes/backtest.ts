@@ -9,6 +9,7 @@ import { MonteCarloSimulator } from '../services/monte-carlo.service.js';
 import { StrategyRegistry } from '../services/strategy-sdk.js';
 import { HistoricalDataService } from '../services/historical-data.service.js';
 import { isDerivativeSymbol, parseInstrumentSymbol } from '../lib/instrument.js';
+import { ReplayService, ReplayError } from '../services/replay.service.js';
 
 const runSchema = z.object({
   strategyId: z.string().min(1, 'strategyId is required'),
@@ -27,6 +28,47 @@ const runSchema = z.object({
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['symbol'], message: (err as Error).message });
     }
   }
+});
+
+const replayIntervals = z.enum(['1day', '30minute', '5minute', '1minute']);
+
+const replayCandlesSchema = z.object({
+  symbol: z.string().min(1).max(40),
+  interval: replayIntervals,
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD'),
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD'),
+});
+
+const replayChargesSchema = z.object({
+  fills: z.array(z.object({
+    symbol: z.string().min(1).max(40),
+    qty: z.number().positive(),
+    price: z.number().positive(),
+    side: z.enum(['BUY', 'SELL']),
+  })).min(1).max(50),
+});
+
+const replaySessionSchema = z.object({
+  mode: z.enum(['stock', 'fno']),
+  symbol: z.string().min(1).max(40),
+  interval: replayIntervals,
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD'),
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD'),
+  initialCapital: z.number().positive(),
+  notes: z.string().max(2000).optional(),
+  trades: z.array(z.object({
+    symbol: z.string().min(1).max(40),
+    side: z.enum(['LONG', 'SHORT']),
+    qty: z.number().positive(),
+    entryTime: z.string().min(1),
+    exitTime: z.string().min(1),
+    entryPrice: z.number().positive(),
+    exitPrice: z.number().nonnegative(),
+    charges: z.number().nonnegative(),
+    netPnl: z.number(),
+    reason: z.string().max(20),
+  })).max(5000),
+  equityCurve: z.array(z.object({ time: z.string(), value: z.number() })).max(20000),
 });
 
 const compareSchema = z.object({
@@ -221,5 +263,53 @@ export async function backtestRoutes(app: FastifyInstance): Promise<void> {
       if (err instanceof BacktestError) return reply.code(err.statusCode).send({ error: err.message });
       throw err;
     }
+  });
+
+  // ── Replay Lab: manual backtesting ──
+  const replay = new ReplayService(getPrisma());
+  const replayFail = (reply: any, err: unknown) => {
+    if (err instanceof ReplayError) return reply.code(err.statusCode).send({ error: err.message });
+    throw err;
+  };
+
+  app.get('/replay/candles', async (request, reply) => {
+    const parsed = replayCandlesSchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
+    }
+    const { symbol, interval, from, to } = parsed.data;
+    try {
+      const bars = await replay.candles(getUserId(request), symbol.toUpperCase(), interval, from, to);
+      return reply.send({ symbol: symbol.toUpperCase(), interval, bars });
+    } catch (err) { return replayFail(reply, err); }
+  });
+
+  app.post('/replay/charges', async (request, reply) => {
+    const parsed = replayChargesSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
+    }
+    try {
+      return reply.send({ charges: replay.charges(parsed.data.fills) });
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+
+  app.get('/replay/lot-size', async (request, reply) => {
+    const underlying = String((request.query as { underlying?: string }).underlying ?? '');
+    if (!/^[A-Za-z&]{1,20}$/.test(underlying)) return reply.code(400).send({ error: 'underlying is required' });
+    return reply.send(await replay.lotSize(underlying));
+  });
+
+  app.post('/replay/sessions', async (request, reply) => {
+    const parsed = replaySessionSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
+    }
+    try {
+      const saved = await replay.saveSession(getUserId(request), parsed.data);
+      return reply.code(201).send(saved);
+    } catch (err) { return replayFail(reply, err); }
   });
 }

@@ -351,7 +351,7 @@ function runRSIReversal(bars: HistoricalBar[], params: Record<string, unknown>, 
   return { trades, equityCurve };
 }
 
-function computeMetrics(trades: TradeEntry[], initialCapital: number, equityCurve: { date: string; value: number }[]) {
+export function computeMetrics(trades: TradeEntry[], initialCapital: number, equityCurve: { date: string; value: number }[]) {
   const totalTrades = trades.length;
   if (totalTrades === 0) {
     return { cagr: 0, maxDrawdown: 0, sharpeRatio: 0, sortinoRatio: 0, winRate: 0, profitFactor: 0, totalTrades: 0, avgWin: 0, avgLoss: 0 };

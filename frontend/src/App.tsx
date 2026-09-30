@@ -19,6 +19,7 @@ const PortfolioPage = lazy(() => import('@/pages/Portfolio'));
 const Settings = lazy(() => import('@/pages/Settings'));
 const BotManagement = lazy(() => import('@/pages/BotManagement'));
 const Backtest = lazy(() => import('@/pages/Backtest'));
+const ReplayLab = lazy(() => import('@/pages/ReplayLab'));
 const TradeJournal = lazy(() => import('@/pages/TradeJournal'));
 const IntelligenceDashboard = lazy(() => import('@/pages/IntelligenceDashboard'));
 const StrategyBuilder = lazy(() => import('@/pages/StrategyBuilder'));
@@ -128,6 +129,7 @@ export default function App() {
             <Route path="/bots" element={<Suspense fallback={<PageLoader />}><BotManagement /></Suspense>} />
             <Route path="/settings" element={<Suspense fallback={<PageLoader />}><Settings /></Suspense>} />
             <Route path="/backtest" element={<Suspense fallback={<PageLoader />}><Backtest /></Suspense>} />
+            <Route path="/replay" element={<Suspense fallback={<PageLoader />}><ReplayLab /></Suspense>} />
             <Route path="/journal" element={<Suspense fallback={<PageLoader />}><TradeJournal /></Suspense>} />
             <Route path="/intelligence" element={<Suspense fallback={<PageLoader />}><IntelligenceDashboard /></Suspense>} />
             <Route path="/strategy-builder" element={<Suspense fallback={<PageLoader />}><StrategyBuilder /></Suspense>} />

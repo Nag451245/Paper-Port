@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, Component } from 'react';
+import { buildContractSymbol, type ContractKind } from '@/lib/replay-engine';
 import type { ReactNode, ErrorInfo } from 'react';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
@@ -201,19 +202,6 @@ const INTERVALS = [
   { value: '1minute', label: '1 min' },
 ] as const;
 type Interval = typeof INTERVALS[number]['value'];
-
-type ContractKind = 'FUT' | 'CE' | 'PE';
-
-/** Canonical contract symbol, the same grammar the server parses: NIFTY20261029FUT, NIFTY2026102924000CE. */
-function buildContractSymbol(underlying: string, kind: ContractKind, expiry: string, strike: string): string | null {
-  const u = underlying.trim().toUpperCase();
-  if (!/^[A-Z&]+$/.test(u) || !/^\d{4}-\d{2}-\d{2}$/.test(expiry)) return null;
-  const date = expiry.replace(/-/g, '');
-  if (kind === 'FUT') return `${u}${date}FUT`;
-  const k = Number(strike);
-  if (!Number.isInteger(k) || k <= 0) return null;
-  return `${u}${date}${k}${kind}`;
-}
 
 // ─── Main Component ──────────────────────────────────────────────
 
@@ -805,7 +793,7 @@ function BacktestInner() {
               <button key={r.id ?? i} onClick={() => { setResult(r); setStep(3); setShowPast(false); }}
                 className="w-full flex items-center justify-between px-4 py-3 rounded-xl bg-slate-50 hover:bg-slate-100 text-left transition-colors">
                 <div>
-                  <span className="text-xs font-semibold text-slate-700">{r.strategyId ?? 'Strategy'}</span>
+                  <span className="text-xs font-semibold text-slate-700">{r.strategyId === 'manual_replay' ? 'Replay Lab (manual)' : r.strategyId ?? 'Strategy'}</span>
                   <span className="text-[10px] text-slate-400 ml-2">{r.symbol}</span>
                 </div>
                 <div className="flex items-center gap-4 text-xs">

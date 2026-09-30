@@ -292,6 +292,25 @@ export const intelligenceApi = {
   insiderTransactions: () => api.get('/intelligence/insider-transactions'),
 };
 
+// ─── Replay Lab (manual backtesting) ──────────────────────────────
+export interface ReplayBar { timestamp: string; open: number; high: number; low: number; close: number; volume: number }
+
+export const replayApi = {
+  candles: (symbol: string, interval: string, from: string, to: string) =>
+    api.get<{ symbol: string; interval: string; bars: ReplayBar[] }>('/backtest/replay/candles', {
+      params: { symbol, interval, from, to },
+      timeout: 10 * 60_000,                        // a long intraday pull is fetched in many windows
+    }),
+
+  charges: (fills: { symbol: string; qty: number; price: number; side: 'BUY' | 'SELL' }[]) =>
+    api.post<{ charges: number[] }>('/backtest/replay/charges', { fills }),
+
+  lotSize: (underlying: string) =>
+    api.get<{ lotSize: number | null; source: string }>('/backtest/replay/lot-size', { params: { underlying } }),
+
+  saveSession: (session: unknown) => api.post('/backtest/replay/sessions', session),
+};
+
 // ─── Backtest ─────────────────────────────────────────────────────
 export const backtestApi = {
   run: (request: BacktestRequest) =>

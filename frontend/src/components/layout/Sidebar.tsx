@@ -6,6 +6,7 @@ import {
   Brain,
   Briefcase,
   FlaskConical,
+  History,
   BookOpen,
   Settings,
   ChevronLeft,
@@ -37,6 +38,7 @@ const navItems = [
   { to: '/learning', icon: GraduationCap, label: 'Learning AI', color: 'from-fuchsia-500 to-pink-500' },
   { to: '/edge-lab', icon: Rocket, label: 'Edge Lab', color: 'from-orange-500 to-red-500' },
   { to: '/backtest', icon: FlaskConical, label: 'Backtest', color: 'from-cyan-500 to-blue-500' },
+  { to: '/replay', icon: History, label: 'Replay Lab', color: 'from-sky-500 to-indigo-500' },
   { to: '/journal', icon: BookOpen, label: 'Trade Journal', color: 'from-teal-500 to-emerald-500' },
   { to: '/settings', icon: Settings, label: 'Settings', color: 'from-slate-500 to-slate-600' },
 ];
