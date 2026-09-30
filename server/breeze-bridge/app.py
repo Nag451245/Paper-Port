@@ -8,6 +8,7 @@ import os
 import json
 import sys
 import signal
+import time
 from datetime import datetime, timedelta
 from math import log, sqrt, exp, erf
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1279,72 +1280,148 @@ def get_nse_stock_list():
     }
 
 
-def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None, exchange="NSE"):
-    """Fetch historical candle data via Breeze API."""
+# Breeze returns at most ~1000 candles per call and drops the rest without an
+# error, so one call over a long range comes back silently truncated. Ranges are
+# fetched in windows sized to stay under that cap and stitched together.
+_HIST_BARS_PER_CALL = 900
+_HIST_INTERVALS = {
+    "1minute": "1minute", "1m": "1minute", "minute": "1minute",
+    "5minute": "5minute", "5m": "5minute",
+    "15minute": "15minute", "15m": "15minute",
+    "30minute": "30minute", "30m": "30minute",
+    "1hour": "1hour", "1h": "1hour",
+    # "day" is what the server has always sent for daily bars. It used to be
+    # missing here, so every daily request fell through to 5-minute bars.
+    "1day": "1day", "1d": "1day", "day": "1day", "daily": "1day",
+}
+# Candles in one trading session, per exchange (NSE 09:15-15:30, MCX 09:00-23:30).
+_BARS_PER_SESSION = {
+    "NSE": {"1minute": 375, "5minute": 75, "15minute": 25, "30minute": 13, "1hour": 7, "1day": 1},
+    "MCX": {"1minute": 870, "5minute": 174, "15minute": 58, "30minute": 29, "1hour": 15, "1day": 1},
+}
+
+
+def _hist_windows(from_date, to_date, window_days):
+    """Split [from_date, to_date] (inclusive, YYYY-MM-DD) into date windows."""
+    start = datetime.strptime(from_date, "%Y-%m-%d")
+    end = datetime.strptime(to_date, "%Y-%m-%d")
+    windows = []
+    while start <= end:
+        w_end = min(start + timedelta(days=window_days - 1), end)
+        windows.append((start.strftime("%Y-%m-%d"), w_end.strftime("%Y-%m-%d")))
+        start = w_end + timedelta(days=1)
+    return windows
+
+
+def _is_no_data(result):
+    """Breeze reports an empty window as an error; that is not a failure."""
+    err = str(result.get("Error") or "").lower() if result else ""
+    return "no data" in err
+
+
+def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None, exchange="NSE",
+                        product=None, expiry=None, strike=None, right=None):
+    """Fetch historical candles via Breeze, for cash, futures or an option contract.
+
+    `symbol` is the underlying (NIFTY, RELIANCE, CRUDEOIL). A derivative is named
+    by product ("futures" / "options") plus expiry (YYYY-MM-DD), and for options
+    strike and right ("call" / "put").
+    """
     if not breeze_instance:
         return {"error": "Breeze session not initialized", "bars": []}
 
-    cache_key = f"hist:{symbol}:{interval}:{from_date}:{to_date}"
-    cached = _cache_get(cache_key)
-    if cached:
-        return cached
+    breeze_interval = _HIST_INTERVALS.get(str(interval).lower())
+    if not breeze_interval:
+        return {"symbol": symbol, "bars": [], "error": f"Unsupported interval '{interval}'"}
+
+    exchange = (exchange or "NSE").upper()
+    product = (product or ("futures" if exchange == "MCX" else "cash")).lower()
+    if product not in ("cash", "futures", "options"):
+        return {"symbol": symbol, "bars": [], "error": f"Unsupported product '{product}'"}
+    if product != "cash" and not expiry:
+        return {"symbol": symbol, "bars": [], "error": f"{product} history needs an expiry (YYYY-MM-DD)"}
+    if product == "options":
+        right = (right or "").lower()
+        if right not in ("call", "put") or not strike:
+            return {"symbol": symbol, "bars": [], "error": "options history needs strike and right (call/put)"}
 
     if not from_date:
         from_date = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
     if not to_date:
         to_date = datetime.now().strftime("%Y-%m-%d")
 
-    interval_map = {
-        "1minute": "1minute", "1m": "1minute",
-        "5minute": "5minute", "5m": "5minute",
-        "15minute": "15minute", "15m": "15minute",
-        "30minute": "30minute", "30m": "30minute",
-        "1hour": "1hour", "1h": "1hour",
-        "1day": "1day", "1d": "1day",
+    cache_key = f"hist:{symbol}:{exchange}:{product}:{expiry}:{strike}:{right}:{breeze_interval}:{from_date}:{to_date}"
+    cached = _cache_get(cache_key)
+    if cached:
+        return cached
+
+    if exchange == "MCX":
+        exchange_code = "MCX"
+    elif product == "cash":
+        exchange_code = "NSE"
+    else:
+        exchange_code = "NFO"
+
+    kwargs = {
+        "interval": breeze_interval,
+        "stock_code": _resolve_stock_code(symbol),
+        "exchange_code": exchange_code,
+        "product_type": product,
     }
-    breeze_interval = interval_map.get(interval, "5minute")
+    if product != "cash":
+        kwargs["expiry_date"] = f"{expiry}T07:00:00.000Z"
+        kwargs["right"] = right if product == "options" else "others"
+        kwargs["strike_price"] = str(strike) if product == "options" else "0"
 
-    exchange_code = "MCX" if exchange == "MCX" else "NSE"
-    product_type = "futures" if exchange == "MCX" else "cash"
+    per_session = _BARS_PER_SESSION["MCX" if exchange == "MCX" else "NSE"][breeze_interval]
+    window_days = max(1, _HIST_BARS_PER_CALL // per_session)
+    windows = _hist_windows(from_date, to_date, window_days)
+    label = symbol + (f" {product} {expiry}" if expiry else "") + (f" {strike} {right}" if product == "options" else "")
 
-    breeze_code = _resolve_stock_code(symbol)
+    seen = {}
     try:
-        result = breeze_instance.get_historical_data_v2(
-            interval=breeze_interval,
-            from_date=f"{from_date}T07:00:00.000Z",
-            to_date=f"{to_date}T07:00:00.000Z",
-            stock_code=breeze_code,
-            exchange_code=exchange_code,
-            product_type=product_type,
-        )
+        for i, (w_from, w_to) in enumerate(windows):
+            if i:
+                time.sleep(0.3)  # Breeze allows ~100 calls a minute
+            result = _call_with_timeout(
+                breeze_instance.get_historical_data_v2,
+                from_date=f"{w_from}T00:00:00.000Z",
+                to_date=f"{w_to}T23:59:59.000Z",
+                **kwargs,
+            )
+            if not result or result.get("Status") != 200:
+                if result and _is_no_data(result):
+                    continue
+                err = result.get("Error", "Unknown") if result else "No response (timeout)"
+                print(f"[Breeze Bridge] Historical {label} {breeze_interval} {w_from}->{w_to}: {err}")
+                # A hole in the middle of a series is worse than no series: a
+                # backtest would run on it without knowing. Fail the whole request.
+                return {"symbol": symbol, "bars": [], "error": f"window {w_from}->{w_to} failed: {err}"}
 
-        if not result or result.get("Status") != 200:
-            err = result.get("Error", "Unknown") if result else "No response"
-            print(f"[Breeze Bridge] Historical {symbol} {interval}: Status={result.get('Status') if result else None}, Error={err}")
-            return {"symbol": symbol, "bars": [], "error": str(err)}
+            records = result.get("Success") or []
+            if not isinstance(records, list):
+                continue
+            if len(records) >= 1000:
+                print(f"[Breeze Bridge] WARNING: {label} {w_from}->{w_to} returned {len(records)} rows, may be truncated")
+            for rec in records:
+                o = _safe_float(rec.get("open"))
+                h = _safe_float(rec.get("high"))
+                l = _safe_float(rec.get("low"))
+                c = _safe_float(rec.get("close"))
+                v = _safe_int(rec.get("volume", rec.get("total_quantity_traded", 0)))
+                ts = str(rec.get("datetime", rec.get("date", rec.get("timestamp", ""))))[:19]
+                if o > 0 and ts:
+                    seen[ts] = {"timestamp": ts, "open": o, "high": h, "low": l, "close": c, "volume": v}
 
-        records = result.get("Success", [])
-        if not isinstance(records, list):
-            return {"symbol": symbol, "bars": []}
-
-        bars = []
-        for rec in records:
-            o = _safe_float(rec.get("open"))
-            h = _safe_float(rec.get("high"))
-            l = _safe_float(rec.get("low"))
-            c = _safe_float(rec.get("close"))
-            v = _safe_int(rec.get("volume", rec.get("total_quantity_traded", 0)))
-            ts = rec.get("datetime", rec.get("date", rec.get("timestamp", "")))
-            if o > 0:
-                bars.append({"timestamp": str(ts)[:19], "open": o, "high": h, "low": l, "close": c, "volume": v})
-
-        print(f"[Breeze Bridge] Historical {symbol} {interval} {from_date}→{to_date}: {len(bars)} bars")
-        result_data = {"symbol": symbol, "bars": bars, "count": len(bars)}
-        if len(bars) > 0:
+        bars = [seen[k] for k in sorted(seen)]
+        print(f"[Breeze Bridge] Historical {label} {breeze_interval} {from_date}->{to_date}: "
+              f"{len(bars)} bars in {len(windows)} window(s)")
+        result_data = {"symbol": symbol, "bars": bars, "count": len(bars), "windows": len(windows)}
+        if bars:
             _cache_set(cache_key, result_data)
         return result_data
     except Exception as e:
-        print(f"[Breeze Bridge] Historical {symbol} error: {e}")
+        print(f"[Breeze Bridge] Historical {label} error: {e}")
         return {"symbol": symbol, "bars": [], "error": str(e)}
 
 
@@ -1684,7 +1761,13 @@ class BreezeHandler(BaseHTTPRequestHandler):
                 if breeze_instance is None:
                     self.send_json({"error": "Breeze session not active", "bars": []}, 503)
                     return
-                data = get_historical_data(symbol, interval, from_date, to_date, exchange)
+                data = get_historical_data(
+                    symbol, interval, from_date, to_date, exchange,
+                    product=params.get("product", [None])[0],
+                    expiry=params.get("expiry", [None])[0],
+                    strike=params.get("strike", [None])[0],
+                    right=params.get("right", [None])[0],
+                )
                 self.send_json(data)
 
             else:

@@ -7,7 +7,7 @@ import { env } from '../config.js';
 import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
 import { istDateStr, istDaysAgo } from '../lib/ist.js';
-import { parseInstrumentSymbol } from '../lib/instrument.js';
+import { parseInstrumentSymbol, isDerivativeSymbol, type InstrumentSpec } from '../lib/instrument.js';
 
 const log = createChildLogger('MarketData');
 
@@ -332,6 +332,39 @@ export interface HistoricalBar {
   low: number;
   close: number;
   volume: number;
+}
+
+export function isDailyInterval(interval: string): boolean {
+  const i = interval.toLowerCase();
+  return i.includes('day') || i === 'daily' || i === '1d' || i === 'd';
+}
+
+/**
+ * Candles in one trading session: NSE/NFO 09:15-15:30, MCX 09:00-23:30.
+ * The Rust backtest needs this to annualise intraday returns correctly.
+ */
+export function barsPerSession(interval: string, exchange = 'NSE'): number {
+  const i = interval.toLowerCase();
+  const mcx = exchange.toUpperCase() === 'MCX';
+  if (isDailyInterval(i)) return 1;
+  if (i.startsWith('30')) return mcx ? 29 : 13;
+  if (i.startsWith('15')) return mcx ? 58 : 25;
+  if (i.startsWith('5')) return mcx ? 174 : 75;
+  if (i.startsWith('1h') || i.startsWith('60')) return mcx ? 15 : 7;
+  if (i.startsWith('1m') || i === 'minute') return mcx ? 870 : 375;
+  return 1;
+}
+
+/**
+ * True when bars reach both ends of [fromDate, lastDay], allowing for weekends
+ * and holidays at the edges. A series that starts late or stops early is partial.
+ */
+export function coversRange(bars: HistoricalBar[], fromDate: string, lastDay: string, slackDays = 5): boolean {
+  if (bars.length === 0) return false;
+  const day = (s: string) => new Date(s.slice(0, 10) + 'T00:00:00Z').getTime();
+  const slack = slackDays * 86400000;
+  return day(bars[0].timestamp) <= day(fromDate) + slack
+    && day(bars[bars.length - 1].timestamp) >= day(lastDay) - slack;
 }
 
 export class MarketDataService {
@@ -711,7 +744,22 @@ export class MarketDataService {
     userId?: string,
     exchange: string = 'NSE',
   ): Promise<HistoricalBar[]> {
-    const ttl = interval.includes('day') || interval.includes('1d') ? CACHE_TTL_HISTORY : CACHE_TTL_HISTORY_INTRADAY;
+    // A futures or option contract is named by its canonical symbol
+    // (NIFTY20261029FUT, NIFTY2026102924000CE). Its bars live under that symbol
+    // and its own exchange, so they never mix with the underlying's cash bars.
+    let contract: InstrumentSpec | null = null;
+    if (isDerivativeSymbol(symbol)) {
+      try {
+        contract = parseInstrumentSymbol(symbol, exchange === 'NSE' ? undefined : exchange);
+      } catch (err) {
+        log.warn({ symbol, err: (err as Error).message }, 'Unreadable contract symbol, no history');
+        return [];
+      }
+      exchange = contract.exchange;
+    }
+
+    const daily = isDailyInterval(interval);
+    const ttl = daily ? CACHE_TTL_HISTORY : CACHE_TTL_HISTORY_INTRADAY;
     const cacheKey = `history:${exchange}:${symbol}:${interval}:${fromDate}:${toDate}`;
 
     if (this.cache) {
@@ -719,111 +767,103 @@ export class MarketDataService {
       if (cached) return cached;
     }
 
-    // Check persistent candle store first
-    try {
-      const prisma = getPrisma();
-      const stored = await prisma.candleStore.findMany({
-        where: {
-          symbol, exchange, interval,
-          timestamp: { gte: new Date(fromDate), lte: new Date(toDate) },
-        },
-        orderBy: { timestamp: 'asc' },
-      });
-      if (stored.length >= 5) {
+    // The last day that can have data: not after today, and not after expiry.
+    const today = istDateStr();
+    const lastDay = [toDate.slice(0, 10), today, contract?.expiry ? istDateStr(contract.expiry) : '9999-12-31']
+      .sort()[0];
+
+    // The candle store is only trusted when it covers the whole range. It used
+    // to be served whenever it held 5 or more bars, so a 3-year backtest could
+    // silently run on the 10 days some earlier request happened to save — and
+    // intraday bars saved an hour ago were served as today's latest.
+    if (daily || lastDay < today) {
+      try {
+        const prisma = getPrisma();
+        const stored = await prisma.candleStore.findMany({
+          where: {
+            symbol, exchange, interval,
+            timestamp: { gte: new Date(fromDate), lte: new Date(`${lastDay}T23:59:59`) },
+          },
+          orderBy: { timestamp: 'asc' },
+        });
         const bars: HistoricalBar[] = stored.map((c: any) => ({
           timestamp: c.timestamp.toISOString(),
           open: Number(c.open), high: Number(c.high),
           low: Number(c.low), close: Number(c.close), volume: Number(c.volume),
         }));
-        if (this.cache) await this.cache.set(cacheKey, bars, ttl);
-        return bars;
-      }
-    } catch { /* DB not available, continue to live fetch */ }
+        if (coversRange(bars, fromDate, lastDay)) {
+          if (this.cache) await this.cache.set(cacheKey, bars, ttl);
+          return bars;
+        }
+      } catch { /* DB not available, continue to live fetch */ }
+    }
 
     // MCX and CDS used to be intercepted here and served a Math.random() random
     // walk from `generateSimulatedHistory` — so Breeze was never even asked, and
     // any commodity backtest was fitted to noise. They now take the same path as
     // everything else. An empty result is the honest answer when there is no
     // data; fabricated bars are not.
-    const bars = await this.fetchFromBreeze(symbol, interval, fromDate, toDate, userId, exchange);
+    const bars = await this.fetchFromBreeze(symbol, interval, fromDate, toDate, userId, exchange, contract);
     if (bars.length > 0) {
-      if (this.cache) await this.cache.set(cacheKey, bars, ttl);
-      this.backfillCandleStore(symbol, exchange, interval, bars).catch(err => log.warn({ err, symbol }, 'Failed to backfill candle store'));
-      return this.validateCandles(bars, symbol, interval);
+      const clean = this.validateCandles(bars, symbol, interval, !!contract);
+      if (this.cache) await this.cache.set(cacheKey, clean, ttl);
+      this.backfillCandleStore(symbol, exchange, interval, clean).catch(err => log.warn({ err, symbol }, 'Failed to backfill candle store'));
+      return clean;
     }
+
+    // Yahoo has no Indian futures or options. Asked for a contract it would
+    // answer with something else, so a contract with no Breeze data has none.
+    if (contract) return [];
 
     const yahooBars = await this.fetchHistoryFromYahoo(symbol, interval, fromDate, toDate, exchange);
     if (yahooBars.length > 0) {
-      if (this.cache) await this.cache.set(cacheKey, yahooBars, ttl);
-      this.backfillCandleStore(symbol, exchange, interval, yahooBars).catch(err => log.warn({ err, symbol }, 'Failed to backfill candle store'));
-      return this.validateCandles(yahooBars, symbol, interval);
+      const clean = this.validateCandles(yahooBars, symbol, interval, false);
+      if (this.cache) await this.cache.set(cacheKey, clean, ttl);
+      this.backfillCandleStore(symbol, exchange, interval, clean).catch(err => log.warn({ err, symbol }, 'Failed to backfill candle store'));
+      return clean;
     }
     return [];
   }
 
-  private validateCandles(bars: HistoricalBar[], symbol: string, interval: string): HistoricalBar[] {
+  private validateCandles(bars: HistoricalBar[], symbol: string, interval: string, isContract: boolean): HistoricalBar[] {
     if (bars.length < 2) return bars;
 
     const issues: string[] = [];
-    const closes = bars.map(b => b.close);
-    const mean = closes.reduce((a, b) => a + b, 0) / closes.length;
-    const stdDev = Math.sqrt(closes.reduce((s, c) => s + (c - mean) ** 2, 0) / closes.length);
 
-    // Step 1: Remove outliers (>3 sigma from mean)
-    let filtered = bars;
-    if (stdDev > 0) {
-      const before = filtered.length;
-      filtered = filtered.filter(b => Math.abs(b.close - mean) <= 3 * stdDev);
-      if (before - filtered.length > 0) {
-        issues.push(`removed ${before - filtered.length} outlier bars (>3σ)`);
+    // Two earlier steps are gone, because both changed the data a backtest runs on:
+    //  - Dropping closes more than 3σ from the series MEAN deleted real bars from
+    //    any stock that trended (a doubling puts the late bars past 3σ) and most
+    //    of an option's life. Price levels are not stationary; that test assumes
+    //    they are.
+    //  - "Interpolating" 1-2 missing bars invented a Saturday and a Sunday bar in
+    //    every week of daily data (Fri->Mon looks like two missing days), and two
+    //    fake bars between every real 15-minute bar. Weekends, holidays and nights
+    //    are not missing data.
+    // What remains removes only an isolated bad print: one bar far from BOTH
+    // neighbours while the neighbours agree. Options can genuinely jump like
+    // that, so contracts are left untouched.
+    let cleaned = bars;
+    if (!isContract && bars.length >= 3) {
+      cleaned = bars.filter((b, i) => {
+        if (i === 0 || i === bars.length - 1) return true;
+        const prev = bars[i - 1].close, next = bars[i + 1].close;
+        if (!(prev > 0 && next > 0)) return true;
+        const neighboursAgree = Math.abs(next - prev) / prev < 0.05;
+        const spike = Math.abs(b.close - prev) / prev > 0.2 && Math.abs(b.close - next) / next > 0.2;
+        return !(neighboursAgree && spike);
+      });
+      if (cleaned.length < bars.length) {
+        issues.push(`removed ${bars.length - cleaned.length} isolated bad print(s)`);
       }
     }
 
-    // Step 2: Detect and interpolate small gaps (1-2 missing bars)
-    const expectedMs = interval.includes('day') || interval.includes('1d') ? 86400000
-      : interval.includes('1h') || interval.includes('60') ? 3600000
-      : interval.includes('5m') || interval.includes('5min') ? 300000
-      : 60000;
-
-    const interpolated: HistoricalBar[] = [filtered[0]];
-    for (let i = 1; i < filtered.length; i++) {
-      const ts = filtered[i].timestamp;
-      const prevTs = filtered[i - 1].timestamp;
-      if (ts && prevTs) {
-        const gap = new Date(ts).getTime() - new Date(prevTs).getTime();
-        const missingBars = Math.round(gap / expectedMs) - 1;
-
-        if (missingBars >= 1 && missingBars <= 2) {
-          // Interpolate missing bars
-          for (let j = 1; j <= missingBars; j++) {
-            const frac = j / (missingBars + 1);
-            const interpTs = new Date(new Date(prevTs).getTime() + expectedMs * j).toISOString();
-            const prev = filtered[i - 1];
-            const next = filtered[i];
-            interpolated.push({
-              timestamp: interpTs.includes('T') ? interpTs : interpTs.slice(0, 10),
-              open: Number((prev.close + (next.open - prev.close) * frac).toFixed(2)),
-              high: Number((Math.max(prev.high, next.high) * (1 - frac * 0.1)).toFixed(2)),
-              low: Number((Math.min(prev.low, next.low) * (1 + frac * 0.1)).toFixed(2)),
-              close: Number((prev.close + (next.close - prev.close) * frac).toFixed(2)),
-              volume: Math.round((prev.volume + next.volume) / 2),
-            });
-          }
-          issues.push(`interpolated ${missingBars} gap(s) near ${ts}`);
-        } else if (missingBars > 2) {
-          issues.push(`large gap at ${ts} (${missingBars + 1} intervals) — flagged for review`);
-        }
-      }
-      interpolated.push(filtered[i]);
-    }
-
-    // Step 3: Detect overnight gaps >10% for corporate action review
-    for (let i = 1; i < interpolated.length; i++) {
-      const prevClose = interpolated[i - 1].close;
+    // Flag overnight gaps >10% for corporate-action review (flag only, never edit)
+    for (let i = 1; i < cleaned.length; i++) {
+      const prevClose = cleaned[i - 1].close;
       if (prevClose > 0) {
-        const gapPct = Math.abs(interpolated[i].open - prevClose) / prevClose * 100;
+        const gapPct = Math.abs(cleaned[i].open - prevClose) / prevClose * 100;
         if (gapPct > 10) {
-          issues.push(`large overnight gap ${gapPct.toFixed(1)}% at ${interpolated[i].timestamp} — possible corporate action`);
+          issues.push(`large overnight gap ${gapPct.toFixed(1)}% at ${cleaned[i].timestamp} — possible corporate action`);
         }
       }
     }
@@ -833,12 +873,12 @@ export class MarketDataService {
       emit('market-data', {
         type: 'DATA_QUALITY_REPORT', symbol, interval,
         issues: issues.slice(0, 10),
-        barCount: interpolated.length,
-        lastTimestamp: interpolated[interpolated.length - 1]?.timestamp ?? new Date().toISOString(),
+        barCount: cleaned.length,
+        lastTimestamp: cleaned[cleaned.length - 1]?.timestamp ?? new Date().toISOString(),
       }).catch(err => log.warn({ err, symbol }, 'Failed to emit DATA_QUALITY_REPORT'));
     }
 
-    return interpolated;
+    return cleaned;
   }
 
   /**
@@ -1796,21 +1836,42 @@ export class MarketDataService {
     toDate: string,
     _userId?: string,
     exchange: string = 'NSE',
+    contract: InstrumentSpec | null = null,
   ): Promise<HistoricalBar[]> {
     const breezeInterval = this.mapInterval(interval);
     const bridgeActive = await this.ensureBreezeBridgeSession();
     if (!bridgeActive) return [];
 
+    const params = new URLSearchParams({ interval: breezeInterval, from: fromDate, to: toDate, exchange });
+    if (contract && contract.instrumentType !== 'EQUITY' && contract.expiry) {
+      params.set('product', contract.instrumentType === 'OPTIONS' ? 'options' : 'futures');
+      params.set('expiry', istDateStr(contract.expiry));
+      if (contract.instrumentType === 'OPTIONS') {
+        params.set('strike', String(contract.strike));
+        params.set('right', contract.optionType === 'PE' ? 'put' : 'call');
+      }
+    }
+    const name = contract ? contract.underlying : symbol;
+
+    // The bridge pulls long ranges in ~900-bar windows, about one Breeze call a
+    // second. A single 15s budget cut every multi-window pull short.
+    const days = Math.max(1, (new Date(toDate).getTime() - new Date(fromDate).getTime()) / 86400000);
+    const windows = Math.ceil(days / Math.max(1, Math.floor(900 / barsPerSession(interval, exchange))));
+    const timeoutMs = Math.min(15_000 + windows * 2_000, 10 * 60_000);
+
     try {
-      const url = `${BREEZE_BRIDGE_URL}/historical/${encodeURIComponent(symbol)}?interval=${encodeURIComponent(breezeInterval)}&from=${encodeURIComponent(fromDate)}&to=${encodeURIComponent(toDate)}&exchange=${encodeURIComponent(exchange)}`;
+      const url = `${BREEZE_BRIDGE_URL}/historical/${encodeURIComponent(name)}?${params}`;
       const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), 15_000);
+      const timer = setTimeout(() => ac.abort(), timeoutMs);
       const res = await fetch(url, { signal: ac.signal });
       clearTimeout(timer);
       if (!res.ok) return [];
 
       const data = await res.json() as any;
-      if (data.error || !data.bars) return [];
+      if (data.error || !data.bars) {
+        if (data.error) log.warn({ symbol, interval, error: data.error }, 'Breeze history unavailable');
+        return [];
+      }
 
       return (data.bars as any[]).map((bar: any) => ({
         timestamp: (bar.timestamp ?? '').slice(0, 19),
@@ -1880,15 +1941,18 @@ export class MarketDataService {
     }
   }
 
+  // Breeze v2 interval names. This used to return 'day' and 'minute', which the
+  // bridge did not recognise and silently served as 5-minute bars — so every
+  // "daily" request answered by Breeze was really ~13 days of 5-minute candles.
   private mapInterval(interval: string): string {
     const map: Record<string, string> = {
-      '1d': 'day', '1day': 'day', 'day': 'day', 'daily': 'day',
-      '1m': 'minute', '1min': 'minute', 'minute': 'minute',
+      '1d': '1day', '1day': '1day', 'day': '1day', 'daily': '1day',
+      '1m': '1minute', '1min': '1minute', 'minute': '1minute', '1minute': '1minute',
       '5m': '5minute', '5min': '5minute', '5minute': '5minute',
       '15m': '15minute', '15min': '15minute', '15minute': '15minute',
       '30m': '30minute', '30min': '30minute', '30minute': '30minute',
     };
-    return map[interval.toLowerCase()] ?? 'day';
+    return map[interval.toLowerCase()] ?? '1day';
   }
 
   // ── Helpers ──

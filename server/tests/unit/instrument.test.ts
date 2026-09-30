@@ -210,4 +210,12 @@ describe('expiryToDate', () => {
     // 2026-08-28T00:00:00+05:30 is 2026-08-27T18:30:00Z.
     expect(expiryToDate('2026-08-28').toISOString()).toBe('2026-08-27T18:30:00.000Z');
   });
+
+  it('refuses a day the month does not have instead of rolling into the next month', () => {
+    // new Date('2025-02-30...') is 2 March; that would name a different contract.
+    expect(() => expiryToDate('2025-02-30')).toThrow(InstrumentError);
+    expect(() => parseInstrumentSymbol('NIFTY20250230FUT')).toThrow(InstrumentError);
+    expect(() => expiryToDate('2025-04-31')).toThrow(InstrumentError);
+    expect(expiryToDate('2024-02-29').toISOString()).toBe('2024-02-28T18:30:00.000Z');   // leap day is real
+  });
 });

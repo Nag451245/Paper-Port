@@ -158,7 +158,11 @@ function toExpiryDateStr(expiry: Date | string): string {
 export function expiryToDate(expiry: Date | string): Date {
   const dateStr = toExpiryDateStr(expiry);
   const d = new Date(`${dateStr}T00:00:00+05:30`);
-  if (Number.isNaN(d.getTime())) throw new InstrumentError(`Expiry is not a real date: "${dateStr}"`);
+  // JavaScript rolls an impossible day over instead of rejecting it: 2025-02-30
+  // becomes 2 March — a different expiry. Only a date that round-trips is real.
+  if (Number.isNaN(d.getTime()) || istDateStr(d) !== dateStr) {
+    throw new InstrumentError(`Expiry is not a real date: "${dateStr}"`);
+  }
   return d;
 }
 
