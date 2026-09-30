@@ -7,7 +7,7 @@ vi.mock('../../src/lib/prisma.js', () => ({
 }));
 
 import {
-  MarketDataService, coversRange, barsPerSession, isDailyInterval, type HistoricalBar,
+  MarketDataService, coversRange, barsPerSession, isDailyInterval, formatBarTime, barInstant, type HistoricalBar,
 } from '../../src/services/market-data.service.js';
 
 const bar = (timestamp: string, close = 100): HistoricalBar =>
@@ -103,6 +103,33 @@ describe('history for backtests', () => {
     });
   });
 
+  describe('one timestamp format for every source', () => {
+    it('gives Yahoo intraday bars their Indian time, not just the date', async () => {
+      vi.spyOn(service as any, 'ensureBreezeBridgeSession').mockResolvedValue(false);
+      const t0 = Date.parse('2025-01-02T03:45:00Z');           // 09:15 IST
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ chart: { result: [{
+          timestamp: [t0 / 1000, t0 / 1000 + 300],
+          indicators: { quote: [{ open: [1, 2], high: [1, 2], low: [1, 2], close: [1, 2], volume: [5, 5] }] },
+        }] } }),
+      } as any);
+      const bars = await service.getHistory('SBIN', '5m', '2025-01-02', '2025-01-02');
+      expect(bars.map(b => b.timestamp)).toEqual(['2025-01-02 09:15:00', '2025-01-02 09:20:00']);
+    });
+
+    it('does not serve intraday bars an older version saved 5.5 hours late', async () => {
+      // 09:15 IST saved as 09:15 UTC reads back as 14:45 and 15:50 IST - the latter is past the close
+      findMany.mockResolvedValue([
+        { timestamp: new Date('2025-01-02T09:15:00Z'), open: 1, high: 1, low: 1, close: 1, volume: 1 },
+        { timestamp: new Date('2025-01-31T10:20:00Z'), open: 1, high: 1, low: 1, close: 1, volume: 1 },
+      ]);
+      globalThis.fetch = bridgeReply([bar('2025-01-02 09:15:00'), bar('2025-01-31 15:25:00')]);
+      await service.getHistory('SBIN', '5minute', '2025-01-01', '2025-01-31');
+      expect(globalThis.fetch).toHaveBeenCalled();
+    });
+  });
+
   describe('candle cleaning', () => {
     it('invents no weekend bars in daily data', async () => {
       const fri = bar('2025-01-03'), mon = bar('2025-01-06');
@@ -133,6 +160,14 @@ describe('history for backtests', () => {
 });
 
 describe('history helpers', () => {
+  it('reads a zone-less bar time as Indian time and writes it back unchanged', () => {
+    const t = barInstant('2025-01-02 09:15:00');
+    expect(new Date(t).toISOString()).toBe('2025-01-02T03:45:00.000Z');
+    expect(formatBarTime(t, false)).toBe('2025-01-02 09:15:00');
+    expect(formatBarTime(barInstant('2025-01-02'), true)).toBe('2025-01-02');
+    expect(barInstant('2025-01-02T03:45:00.000Z')).toBe(t);
+  });
+
   it('recognises daily intervals', () => {
     expect(['1d', '1day', 'day', 'daily'].every(isDailyInterval)).toBe(true);
     expect(['5minute', '5m', '1minute'].some(isDailyInterval)).toBe(false);

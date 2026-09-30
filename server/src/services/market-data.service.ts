@@ -334,6 +334,25 @@ export interface HistoricalBar {
   volume: number;
 }
 
+const IST_OFFSET_MS = 330 * 60_000;
+
+/**
+ * The one timestamp format every source returns: 'YYYY-MM-DD' for daily bars,
+ * Indian time 'YYYY-MM-DD HH:MM:SS' for intraday (the format Breeze uses).
+ * Mixing formats is what made a leg's candles miss the underlying's.
+ */
+export function formatBarTime(instantMs: number, daily: boolean): string {
+  const ist = new Date(instantMs + IST_OFFSET_MS).toISOString();
+  return daily ? ist.slice(0, 10) : ist.slice(0, 19).replace('T', ' ');
+}
+
+/** A bar timestamp as an instant. A time with no zone is Indian time — never the host's zone. */
+export function barInstant(ts: string): number {
+  if (/[zZ]$|[+-]\d\d:\d\d$/.test(ts)) return Date.parse(ts);
+  if (ts.length <= 10) return Date.parse(`${ts}T00:00:00+05:30`);
+  return Date.parse(`${ts.slice(0, 19).replace(' ', 'T')}+05:30`);
+}
+
 export function isDailyInterval(interval: string): boolean {
   const i = interval.toLowerCase();
   return i.includes('day') || i === 'daily' || i === '1d' || i === 'd';
@@ -520,7 +539,9 @@ export class MarketDataService {
         const v = quote.volume?.[i] ?? 0;
         if (o == null || c == null) continue;
         bars.push({
-          timestamp: new Date(timestamps[i] * 1000).toISOString().slice(0, 10),
+          // Intraday bars used to be cut to their date, so a day's 75 five-minute
+          // bars all carried the same timestamp.
+          timestamp: formatBarTime(timestamps[i] * 1000, isDailyInterval(interval)),
           open: Number(o.toFixed(2)),
           high: Number((h ?? o).toFixed(2)),
           low: Number((l ?? o).toFixed(2)),
@@ -782,16 +803,29 @@ export class MarketDataService {
         const stored = await prisma.candleStore.findMany({
           where: {
             symbol, exchange, interval,
-            timestamp: { gte: new Date(fromDate), lte: new Date(`${lastDay}T23:59:59`) },
+            timestamp: { gte: new Date(barInstant(fromDate)), lte: new Date(barInstant(`${lastDay} 23:59:59`)) },
           },
           orderBy: { timestamp: 'asc' },
         });
-        const bars: HistoricalBar[] = stored.map((c: any) => ({
-          timestamp: c.timestamp.toISOString(),
-          open: Number(c.open), high: Number(c.high),
-          low: Number(c.low), close: Number(c.close), volume: Number(c.volume),
-        }));
-        if (coversRange(bars, fromDate, lastDay)) {
+        // Keyed by the formatted time, so a day saved twice (older versions saved
+        // daily bars at UTC midnight, this one at IST midnight) appears once.
+        const byTime = new Map<string, HistoricalBar>();
+        for (const c of stored as any[]) {
+          const timestamp = formatBarTime(c.timestamp.getTime(), daily);
+          byTime.set(timestamp, {
+            timestamp, open: Number(c.open), high: Number(c.high),
+            low: Number(c.low), close: Number(c.close), volume: Number(c.volume),
+          });
+        }
+        const bars = [...byTime.values()];
+        // Older versions saved Breeze's Indian-time intraday bars as if they were
+        // the host's time; on a UTC server they sit 5.5h late, outside NSE hours.
+        // Such a range is refetched rather than served shifted.
+        const misplaced = !daily && exchange !== 'MCX' && bars.some((b) => {
+          const hhmm = b.timestamp.slice(11, 16);
+          return hhmm < '09:00' || hhmm > '15:35';
+        });
+        if (!misplaced && coversRange(bars, fromDate, lastDay)) {
           if (this.cache) await this.cache.set(cacheKey, bars, ttl);
           return bars;
         }
@@ -911,7 +945,7 @@ export class MarketDataService {
         .filter(b => b.timestamp && b.close > 0)
         .map(b => ({
           symbol, exchange, interval,
-          timestamp: new Date(b.timestamp),
+          timestamp: new Date(barInstant(b.timestamp)),
           open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume ?? 0,
         }));
 
