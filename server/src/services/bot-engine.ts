@@ -30,6 +30,18 @@ import { TelegramService } from './telegram.service.js';
 
 const log = createChildLogger('BotEngine');
 
+/**
+ * Drop the most recent bar, which during market hours is still FORMING.
+ *
+ * Its close, high, low and volume all keep moving until the bar closes, so
+ * every indicator computed on it repaints: a signal raised at 10:01 can be
+ * gone by 10:05. It also makes live behaviour impossible to reproduce in a
+ * backtest, which only ever sees completed bars.
+ */
+function completedBars<T>(bars: T[]): T[] {
+  return bars.length > 0 ? bars.slice(0, -1) : bars;
+}
+
 const DEFAULT_TICK_INTERVAL = 30_000;         // 30 seconds — Rust scan is fast, skip if still running
 const DEFAULT_SIGNAL_INTERVAL = 2 * 60_000;   // 2 minutes
 const DEFAULT_MARKET_SCAN_INTERVAL = 3 * 60_000; // 3 minutes
@@ -870,7 +882,7 @@ export class BotEngine {
         // --- Rust engine path ---
         const candleData: Array<{
           symbol: string;
-          candles: Array<{ open: number; close: number; high: number; low: number; volume: number }>;
+          candles: Array<{ timestamp: string; open: number; close: number; high: number; low: number; volume: number }>;
           mover: typeof uniqueSymbols[0];
         }> = [];
 
@@ -884,10 +896,13 @@ export class BotEngine {
             const bars = await this.marketData.getHistory(
               mover.symbol, '5m', fromDate, toDate, userId,
             );
-            if (bars.length >= 26) {
+            if (completedBars(bars).length >= 26) {
               candleData.push({
                 symbol: mover.symbol,
-                candles: bars.slice(-50).map(b => ({
+                candles: completedBars(bars).slice(-50).map(b => ({
+                  // timestamp drives session-anchored VWAP in the engine; without it
+                  // VWAP silently accumulates across days.
+                  timestamp: b.timestamp,
                   open: b.open, close: b.close, high: b.high, low: b.low, volume: b.volume,
                 })),
                 mover,
@@ -1579,14 +1594,14 @@ export class BotEngine {
   private async fetchCandles(
     symbols: string[],
     userId: string,
-  ): Promise<Array<{ symbol: string; candles: Array<{ open: number; close: number; high: number; low: number; volume: number }> }>> {
+  ): Promise<Array<{ symbol: string; candles: Array<{ timestamp: string; open: number; close: number; high: number; low: number; volume: number }> }>> {
     const toDate = istDateStr();
     const fromDate = istDaysAgo(10);
     const MIN_BARS = 15;
     const BATCH_SIZE = 20;
 
     const symbolsToFetch = symbols.slice(0, MAX_CANDLE_SYMBOLS);
-    const results: Array<{ symbol: string; candles: Array<{ open: number; close: number; high: number; low: number; volume: number }> }> = [];
+    const results: Array<{ symbol: string; candles: Array<{ timestamp: string; open: number; close: number; high: number; low: number; volume: number }> }> = [];
 
     for (let i = 0; i < symbolsToFetch.length; i += BATCH_SIZE) {
       const batch = symbolsToFetch.slice(i, i + BATCH_SIZE);
@@ -1602,10 +1617,13 @@ export class BotEngine {
             bars = await this.marketData.getHistory(sym, '1d', istDaysAgo(60), toDate, userId);
           }
 
-          if (bars.length >= MIN_BARS) {
+          if (completedBars(bars).length >= MIN_BARS) {
             return {
               symbol: sym,
-              candles: bars.slice(-50).map(b => ({
+              candles: completedBars(bars).slice(-50).map(b => ({
+                // timestamp drives session-anchored VWAP in the engine; without it
+                // VWAP silently accumulates across days.
+                timestamp: b.timestamp,
                 open: b.open, close: b.close, high: b.high, low: b.low, volume: b.volume,
               })),
             };

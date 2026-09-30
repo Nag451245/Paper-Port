@@ -16,6 +16,7 @@ pub mod options_data;
 mod risk;
 mod greeks;
 mod scan;
+mod scan_replay;
 mod optimize;
 mod walk_forward;
 mod advanced_signals;
@@ -528,6 +529,7 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
         "risk" => risk::compute(req.data),
         "greeks" => greeks::compute(req.data),
         "scan" => scan::compute(req.data),
+        "scan_replay" => scan_replay::compute(req.data),
 
         "live_scan" => {
             #[derive(Deserialize)]
@@ -1604,5 +1606,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_scan_replay_is_dispatched() {
+        // Reachable through the same dispatcher single-shot, daemon and HTTP use.
+        let candles: Vec<serde_json::Value> = (0..60).map(|i| json!({
+            "timestamp": format!("2026-{:02}-{:02}", 1 + i / 28, 1 + i % 28),
+            "open": 100.0 + i as f64, "high": 102.0 + i as f64,
+            "low": 99.0 + i as f64, "close": 101.0 + i as f64, "volume": 10000.0
+        })).collect();
+        let resp = req("scan_replay", json!({ "symbols": [{ "symbol": "X", "candles": candles }] }));
+        assert!(resp.success, "scan_replay failed: {:?}", resp.error);
+        // 60 bars, production window 50 -> bars 49..=59 evaluated
+        assert_eq!(resp.data.get("evaluated"), Some(&json!(11)));
     }
 }
