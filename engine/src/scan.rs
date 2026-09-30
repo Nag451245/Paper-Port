@@ -1485,7 +1485,14 @@ mod tests {
         let data: Vec<(f64, f64)> = closes.iter().enumerate()
             .map(|(i, &c)| (c, 1000.0 + i as f64 * 500.0))
             .collect();
-        let candles = make_candles_with_volume(&data);
+        // One session of 5-minute bars, as the live bot sends. VWAP is anchored to
+        // the session, so on one-bar-per-day data it collapses to each bar's own
+        // typical price and VWAP reversion rightly cannot fire.
+        let mut candles = make_candles_with_volume(&data);
+        for (i, c) in candles.iter_mut().enumerate() {
+            let minutes = 9 * 60 + 15 + i * 5;
+            c.timestamp = format!("2025-01-02T{:02}:{:02}:00", minutes / 60, minutes % 60);
+        }
         let candles_json = serde_json::to_value(&candles).unwrap();
         let input = json!({
             "symbols": [{ "symbol": "MULTI", "candles": candles_json }],

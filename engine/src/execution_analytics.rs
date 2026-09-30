@@ -335,6 +335,15 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // Every test here drives the one process-wide ANALYTICS_STORE, and cargo runs
+    // tests in parallel, so one test's reset/record could land in the middle of
+    // another's. Holding this lock for the whole test makes them take turns.
+    static STORE_LOCK: Mutex<()> = Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn ts_ist(h: u32, m: u32) -> i64 {
         use chrono::TimeZone;
         let ist_naive = chrono::NaiveDate::from_ymd_opt(2024, 1, 15)
@@ -347,6 +356,7 @@ mod tests {
 
     #[test]
     fn test_record_and_stats() {
+        let _serial = serial();
         compute(json!({ "command": "reset" })).unwrap();
         compute(json!({ "command": "record_order_sent" })).unwrap();
         compute(json!({
@@ -373,6 +383,7 @@ mod tests {
 
     #[test]
     fn test_slippage_calculation() {
+        let _serial = serial();
         compute(json!({ "command": "reset" })).unwrap();
         compute(json!({
             "command": "record",
@@ -394,6 +405,7 @@ mod tests {
 
     #[test]
     fn test_by_symbol_aggregation() {
+        let _serial = serial();
         compute(json!({ "command": "reset" })).unwrap();
         for _ in 0..3 {
             compute(json!({
@@ -431,6 +443,7 @@ mod tests {
 
     #[test]
     fn test_fill_rate() {
+        let _serial = serial();
         compute(json!({ "command": "reset" })).unwrap();
         for _ in 0..2 {
             compute(json!({ "command": "record_order_sent" })).unwrap();
@@ -457,6 +470,7 @@ mod tests {
 
     #[test]
     fn test_by_time_bucket() {
+        let _serial = serial();
         compute(json!({ "command": "reset" })).unwrap();
         compute(json!({
             "command": "record",
