@@ -194,6 +194,27 @@ const SEGMENT_LABELS: Record<Segment, string> = { indices: 'Indices', stocks: 'S
 
 const CAPITAL_PRESETS = [100000, 500000, 1000000, 2500000, 5000000];
 
+const INTERVALS = [
+  { value: '1day', label: 'Daily' },
+  { value: '30minute', label: '30 min' },
+  { value: '5minute', label: '5 min' },
+  { value: '1minute', label: '1 min' },
+] as const;
+type Interval = typeof INTERVALS[number]['value'];
+
+type ContractKind = 'FUT' | 'CE' | 'PE';
+
+/** Canonical contract symbol, the same grammar the server parses: NIFTY20261029FUT, NIFTY2026102924000CE. */
+function buildContractSymbol(underlying: string, kind: ContractKind, expiry: string, strike: string): string | null {
+  const u = underlying.trim().toUpperCase();
+  if (!/^[A-Z&]+$/.test(u) || !/^\d{4}-\d{2}-\d{2}$/.test(expiry)) return null;
+  const date = expiry.replace(/-/g, '');
+  if (kind === 'FUT') return `${u}${date}FUT`;
+  const k = Number(strike);
+  if (!Number.isInteger(k) || k <= 0) return null;
+  return `${u}${date}${k}${kind}`;
+}
+
 // ─── Main Component ──────────────────────────────────────────────
 
 function BacktestInner() {
@@ -208,6 +229,10 @@ function BacktestInner() {
   const [startDate, setStartDate] = useState('2025-01-01');
   const [endDate, setEndDate] = useState('2025-12-31');
   const [initialCapital, setInitialCapital] = useState(1000000);
+  const [interval, setCandleInterval] = useState<Interval>('1day');
+  const [contractKind, setContractKind] = useState<ContractKind>('FUT');
+  const [expiry, setExpiry] = useState('');
+  const [strike, setStrike] = useState('');
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [pastResults, setPastResults] = useState<BacktestResult[]>([]);
   const [running, setRunning] = useState(false);
@@ -235,6 +260,10 @@ function BacktestInner() {
     setError(null);
   };
 
+  const underlying = customSymbol || symbol;
+  // In F&O the test runs on a real contract's own prices, not on the underlying's.
+  const runSymbol = segment === 'fno' ? buildContractSymbol(underlying, contractKind, expiry, strike) : underlying;
+
   const handleSegmentChange = (seg: Segment) => {
     setSegment(seg);
     const available = STRATEGIES.filter(s => s.segments.includes(seg));
@@ -250,11 +279,12 @@ function BacktestInner() {
     try {
       const { data } = await backtestApi.run({
         strategyId: selectedStrategy.id,
-        symbol: customSymbol || symbol,
+        symbol: runSymbol ?? underlying,
         startDate,
         endDate,
         initialCapital,
         parameters: params,
+        interval,
       });
       const normalized = normalizeResult(data);
       setResult(normalized);
@@ -454,6 +484,42 @@ function BacktestInner() {
                   className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-800 outline-none focus:border-indigo-500 placeholder:text-slate-300"
                 />
               </div>
+
+              {segment === 'fno' && (
+                <div className="mt-3 pt-3 border-t border-slate-100">
+                  <label className="text-[10px] text-slate-400 mb-1.5 block">Contract</label>
+                  <div className="flex gap-1.5 mb-2">
+                    {([['FUT', 'Futures'], ['CE', 'Call'], ['PE', 'Put']] as const).map(([k, label]) => (
+                      <button key={k} onClick={() => setContractKind(k)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                          contractKind === k ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                        }`}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[10px] text-slate-400 mb-0.5 block">Expiry</label>
+                      <input type="date" value={expiry} onChange={(e) => setExpiry(e.target.value)}
+                        className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-xs text-slate-800 outline-none focus:border-indigo-500" />
+                    </div>
+                    {contractKind !== 'FUT' && (
+                      <div>
+                        <label className="text-[10px] text-slate-400 mb-0.5 block">Strike</label>
+                        <input type="number" inputMode="numeric" min={1} step={1} value={strike} onChange={(e) => setStrike(e.target.value)}
+                          placeholder="e.g. 24000"
+                          className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-xs text-slate-800 outline-none focus:border-indigo-500 placeholder:text-slate-300" />
+                      </div>
+                    )}
+                  </div>
+                  <p className="mt-2 text-[10px] text-slate-400 leading-relaxed">
+                    {runSymbol
+                      ? <>Tests on <span className="font-mono text-slate-600">{runSymbol}</span>. Its own prices come only from ICICI Breeze, and the test period should end on or before expiry. Lot sizes are not applied yet: quantity is sized from capital.</>
+                      : 'Pick an expiry' + (contractKind !== 'FUT' ? ' and a whole-number strike' : '') + ' to name the contract.'}
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Parameters */}
@@ -501,6 +567,23 @@ function BacktestInner() {
                     className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-xs text-slate-800 outline-none focus:border-indigo-500" />
                 </div>
               </div>
+              <label className="text-[10px] text-slate-400 mb-1.5 block">Candle size</label>
+              <div className="flex flex-wrap gap-1.5 mb-1.5">
+                {INTERVALS.map(iv => (
+                  <button key={iv.value} onClick={() => setCandleInterval(iv.value)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                      interval === iv.value ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}>
+                    {iv.label}
+                  </button>
+                ))}
+              </div>
+              {interval !== '1day' && (
+                <p className="mb-3 text-[10px] text-slate-400 leading-relaxed">
+                  Intraday candles need ICICI Breeze connected. Without it, only about the last 60 days of 5-minute data are available.
+                </p>
+              )}
+              {interval === '1day' && <div className="mb-3" />}
               <label className="text-[10px] text-slate-400 mb-1.5 block">Starting Capital (₹)</label>
               <div className="flex flex-wrap gap-1.5">
                 {CAPITAL_PRESETS.map(c => (
@@ -521,7 +604,7 @@ function BacktestInner() {
               </div>
             )}
 
-            <button onClick={handleRun} disabled={running || !(symbol || customSymbol).trim()}
+            <button onClick={handleRun} disabled={running || !underlying.trim() || !runSymbol}
               className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-500 disabled:opacity-50 transition-colors shadow-md shadow-indigo-200">
               {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
               {running ? 'Running Backtest...' : 'Run Backtest'}
@@ -537,7 +620,7 @@ function BacktestInner() {
               <h3 className="text-lg font-semibold text-slate-700 mb-2">Ready to test</h3>
               <p className="text-sm text-slate-400 max-w-sm mb-6">
                 Click "Run Backtest" to see how <strong className="text-slate-600">{selectedStrategy.name}</strong> would have performed
-                on <strong className="text-slate-600">{customSymbol || symbol}</strong> with ₹{(initialCapital / 100000).toFixed(initialCapital >= 1000000 ? 0 : 1)}L capital
+                on <strong className="text-slate-600">{runSymbol ?? underlying}</strong> with ₹{(initialCapital / 100000).toFixed(initialCapital >= 1000000 ? 0 : 1)}L capital
               </p>
 
               <div className="rounded-xl bg-slate-50 border border-slate-200 p-4 w-full max-w-sm text-left">
@@ -562,7 +645,7 @@ function BacktestInner() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs font-medium text-slate-500 mb-1">
-                  {selectedStrategy.name} on {customSymbol || symbol || result.symbol} &middot; {startDate} to {endDate}
+                  {selectedStrategy.name} on {runSymbol ?? result.symbol} &middot; {startDate} to {endDate}
                 </p>
                 <div className="flex items-baseline gap-3">
                   <p className={`text-3xl font-bold ${totalReturn >= 0 ? 'text-emerald-700' : 'text-red-700'}`}>

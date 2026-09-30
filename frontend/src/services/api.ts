@@ -296,6 +296,7 @@ export const backtestApi = {
       endDate: request.endDate,
       initialCapital: request.initialCapital,
       parameters: request.parameters,
+      interval: request.interval,
     }),
 
   results: () =>

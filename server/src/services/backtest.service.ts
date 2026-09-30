@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import type { BacktestResult } from '@prisma/client';
-import { MarketDataService, type HistoricalBar } from './market-data.service.js';
+import { MarketDataService, barsPerSession, isDailyInterval, type HistoricalBar } from './market-data.service.js';
+import { isDerivativeSymbol, parseInstrumentSymbol } from '../lib/instrument.js';
 import { isEngineAvailable, engineBacktest } from '../lib/rust-engine.js';
 
 export class BacktestError extends Error {
@@ -21,6 +22,8 @@ export interface RunBacktestInput {
   endDate: string;
   initialCapital: number;
   parameters?: Record<string, unknown>;
+  /** Candle size: '1day' (default), '30minute', '5minute' or '1minute'. */
+  interval?: string;
 }
 
 interface TradeEntry {
@@ -409,13 +412,24 @@ export class BacktestService {
   }
 
   async run(userId: string, input: RunBacktestInput): Promise<BacktestResult> {
+    const interval = input.interval ?? '1day';
+    const contract = isDerivativeSymbol(input.symbol) ? parseInstrumentSymbol(input.symbol) : null;
     const bars = await this.marketService.getHistory(
-      input.symbol, '1d', input.startDate, input.endDate, userId,
+      input.symbol, interval, input.startDate, input.endDate, userId,
     );
 
     if (bars.length < 5) {
+      // Say which source was missing, so the fix is obvious.
+      const why = contract
+        ? 'Futures and options history comes only from ICICI Breeze. Check that Breeze is connected ' +
+          'today, and that this contract (underlying, expiry, strike) really traded in that period — ' +
+          'Breeze may not keep data for long-expired contracts.'
+        : !isDailyInterval(interval)
+          ? 'Intraday history comes from ICICI Breeze (the backup source keeps only the last ~60 days ' +
+            'of 5-minute data). Connect Breeze in Settings, or pick a recent period or daily candles.'
+          : 'Please configure your Breeze API key and session token in Settings.';
       throw new BacktestError(
-        `Insufficient historical data for ${input.symbol} (got ${bars.length} bars). Please configure your Breeze API key and session token in Settings.`,
+        `Insufficient historical data for ${input.symbol} (got ${bars.length} bars). ${why}`,
         422,
       );
     }
@@ -439,6 +453,9 @@ export class BacktestService {
             low: b.low, close: b.close, volume: b.volume,
           })),
           params: allParams,
+          // Without this the engine annualises every candle as a trading DAY,
+          // overstating an intraday Sharpe by sqrt(bars per day).
+          bars_per_day: barsPerSession(interval, contract?.exchange ?? 'NSE'),
         }) as any;
 
         metrics = {
@@ -481,6 +498,7 @@ export class BacktestService {
       symbol: input.symbol,
       initialCapital: input.initialCapital,
       barsUsed: bars.length,
+      interval,
       engine: useRust ? 'rust' : 'js',
     };
 

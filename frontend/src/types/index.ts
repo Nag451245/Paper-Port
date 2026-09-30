@@ -300,6 +300,8 @@ export interface BacktestRequest {
   endDate: string;
   initialCapital: number;
   parameters: Record<string, number | string | boolean>;
+  /** Candle size: '1day' (default), '30minute', '5minute' or '1minute'. */
+  interval?: string;
 }
 
 export interface BacktestResult {

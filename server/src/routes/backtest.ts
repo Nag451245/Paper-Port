@@ -8,6 +8,7 @@ import { WalkForwardOptimizer } from '../services/walk-forward.service.js';
 import { MonteCarloSimulator } from '../services/monte-carlo.service.js';
 import { StrategyRegistry } from '../services/strategy-sdk.js';
 import { HistoricalDataService } from '../services/historical-data.service.js';
+import { isDerivativeSymbol, parseInstrumentSymbol } from '../lib/instrument.js';
 
 const runSchema = z.object({
   strategyId: z.string().min(1, 'strategyId is required'),
@@ -16,6 +17,16 @@ const runSchema = z.object({
   endDate: z.string().min(1, 'endDate is required'),
   initialCapital: z.number().positive('initialCapital must be a positive number'),
   parameters: z.record(z.unknown()).optional(),
+  // Breeze v2 serves these; 15-minute and hourly are not among them.
+  interval: z.enum(['1day', '30minute', '5minute', '1minute']).optional(),
+}).superRefine((v, ctx) => {
+  // A contract symbol that names no real contract (bad expiry date, fractional
+  // strike) must be refused here, not become a backtest over nothing.
+  if (isDerivativeSymbol(v.symbol)) {
+    try { parseInstrumentSymbol(v.symbol); } catch (err) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['symbol'], message: (err as Error).message });
+    }
+  }
 });
 
 const compareSchema = z.object({
