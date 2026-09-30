@@ -46,6 +46,15 @@ const breezeCallbackQuerySchema = z.object({
   API_Session: z.string().optional(),
 });
 
+const forgotPasswordSchema = z.object({
+  email: z.string().email(),
+});
+
+const resetPasswordSchema = z.object({
+  token: z.string().min(20).max(200),
+  password: z.string().min(8, 'Password must be at least 8 characters').max(200),
+});
+
 const AUTH_RATE_LIMIT = { max: 20, timeWindow: '1 minute' };
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
@@ -79,6 +88,37 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       const { user, userId } = await authService.login(parsed.data);
       const token = app.jwt.sign({ sub: userId });
       return reply.code(200).send({ user, access_token: token, token_type: 'bearer' });
+    } catch (err) {
+      if (err instanceof AuthError) {
+        return reply.code(err.statusCode).send({ error: err.message });
+      }
+      throw err;
+    }
+  });
+
+  // Tighter than sign-in: each accepted request can send an email.
+  const RESET_RATE_LIMIT = { max: 10, timeWindow: '15 minutes' };
+
+  app.post('/forgot-password', { config: { rateLimit: RESET_RATE_LIMIT } }, async (request, reply) => {
+    const parsed = forgotPasswordSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
+    }
+    await authService.requestPasswordReset(parsed.data.email);
+    // The same answer whether or not the address has an account.
+    return reply.code(200).send({
+      message: 'If an account exists for that email, a password reset link is on its way. It works for 30 minutes.',
+    });
+  });
+
+  app.post('/reset-password', { config: { rateLimit: RESET_RATE_LIMIT } }, async (request, reply) => {
+    const parsed = resetPasswordSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
+    }
+    try {
+      await authService.resetPassword(parsed.data.token, parsed.data.password);
+      return reply.code(200).send({ message: 'Password changed. Please sign in with your new password.' });
     } catch (err) {
       if (err instanceof AuthError) {
         return reply.code(err.statusCode).send({ error: err.message });

@@ -55,7 +55,11 @@ try {
     process.exit(1);
   }
 
-  await prisma.user.update({ where: { id: user.id }, data: { passwordHash: await bcrypt.hash(first, SALT_ROUNDS) } });
+  // passwordChangedAt ends every session signed in with the old password.
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { passwordHash: await bcrypt.hash(first, SALT_ROUNDS), passwordChangedAt: new Date() },
+  });
   console.log('Password updated. Log in with the new one.');
   if (!user.isActive) console.log('Note: this account is deactivated, so login will still be refused.');
 } finally {

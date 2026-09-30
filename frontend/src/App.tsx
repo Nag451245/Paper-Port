@@ -9,6 +9,7 @@ import NotificationToaster from '@/components/ui/NotificationToaster';
 import { liveSocket } from '@/services/websocket';
 
 import Login from '@/pages/Login';
+import { ForgotPassword, ResetPassword } from '@/pages/PasswordReset';
 import Register from '@/pages/Register';
 
 const Dashboard = lazy(() => import('@/pages/Dashboard'));
@@ -100,6 +101,9 @@ export default function App() {
         <Routes>
           <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
           <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />
+          <Route path="/forgot-password" element={<PublicRoute><ForgotPassword /></PublicRoute>} />
+          {/* Not behind PublicRoute: a signed-in user who opens an emailed link must still reach it. */}
+          <Route path="/reset-password" element={<ResetPassword />} />
 
           <Route
             path="/onboarding"

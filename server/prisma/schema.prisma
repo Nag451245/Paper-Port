@@ -27,6 +27,8 @@ model User {
   notifyTelegram Boolean  @default(false) @map("notify_telegram")
   notifyEmail    Boolean  @default(false) @map("notify_email")
   isActive       Boolean  @default(true) @map("is_active")
+  // Sign-in tokens issued before this instant are refused (set on password reset).
+  passwordChangedAt DateTime? @map("password_changed_at")
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
@@ -53,6 +55,7 @@ model User {
   commandMessages  CommandMessage[]
   guardianState    GuardianState?
   guardianMemories GuardianMemory[]
+  passwordResetTokens PasswordResetToken[]
 
   @@map("users")
 }
@@ -1065,4 +1068,20 @@ model MarketMemory {
   @@index([symbol, outcome])
   @@index([userId, createdAt])
   @@map("market_memory")
+}
+
+/// One-time password-reset link. Only a SHA-256 of the token is stored, so a
+/// database leak cannot be turned into working reset links.
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
 }

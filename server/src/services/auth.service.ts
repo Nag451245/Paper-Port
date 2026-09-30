@@ -6,8 +6,23 @@ import https from 'https';
 import * as OTPAuth from 'otpauth';
 import { env } from '../config.js';
 import { getRedis } from '../lib/redis.js';
+import { sendMail } from '../lib/mailer.js';
+import { notePasswordChanged } from '../lib/token-revocation.js';
 
 const SALT_ROUNDS = 12;
+const RESET_TTL_MS = 30 * 60 * 1000;
+const RESET_MAX_PER_HOUR = 3;
+
+const sha256Hex = (value: string) => createHash('sha256').update(value).digest('hex');
+
+const escapeHtml = (s: string) =>
+  s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+
+/** Where emailed links point. From config only, never from the request's Host header. */
+function appBaseUrl(): string {
+  const base = env.APP_BASE_URL || env.CORS_ORIGINS.split(',')[0].trim();
+  return base.replace(/\/+$/, '');
+}
 
 function httpsRequestWithBody(options: https.RequestOptions, body?: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
@@ -344,6 +359,88 @@ export class AuthService {
     await this.clearFailedAttempts(input.email);
 
     return { user: toProfile(user), userId: user.id };
+  }
+
+  // ── Password reset by email ──────────────────────────────────────────
+
+  /**
+   * Start a reset. Always completes the same way whether or not the address has
+   * an account, and the email is sent in the background, so neither the answer
+   * nor the response time tells a caller which emails are registered.
+   */
+  async requestPasswordReset(email: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { email } })
+      ?? (email !== email.toLowerCase()
+        ? await this.prisma.user.findUnique({ where: { email: email.toLowerCase() } })
+        : null);
+    if (!user || !user.isActive) return;
+
+    const since = new Date(Date.now() - 60 * 60 * 1000);
+    const recent = await this.prisma.passwordResetToken.count({ where: { userId: user.id, createdAt: { gt: since } } });
+    if (recent >= RESET_MAX_PER_HOUR) return;
+
+    // A new link supersedes any earlier unused one.
+    const now = new Date();
+    await this.prisma.passwordResetToken.updateMany({ where: { userId: user.id, usedAt: null }, data: { usedAt: now } });
+
+    const token = randomBytes(32).toString('base64url');
+    await this.prisma.passwordResetToken.create({
+      data: { userId: user.id, tokenHash: sha256Hex(token), expiresAt: new Date(now.getTime() + RESET_TTL_MS) },
+    });
+
+    const link = `${appBaseUrl()}/reset-password?token=${token}`;
+    void sendMail({
+      to: user.email,
+      subject: 'Reset your PaperPort password',
+      text:
+        `Hi ${user.fullName},\n\nSomeone asked to reset the password for your PaperPort account.\n` +
+        `To choose a new password, open this link within ${RESET_TTL_MS / 60000} minutes:\n\n${link}\n\n` +
+        `If it wasn't you, ignore this email — your password stays the same.\n`,
+      html:
+        `<p>Hi ${escapeHtml(user.fullName)},</p>` +
+        `<p>Someone asked to reset the password for your PaperPort account.</p>` +
+        `<p><a href="${link}">Choose a new password</a> — the link works for ${RESET_TTL_MS / 60000} minutes, once.</p>` +
+        `<p>If it wasn't you, ignore this email. Your password stays the same.</p>`,
+    }).then((sent) => {
+      // Without SMTP a developer still needs the link; never print it in production.
+      if (!sent && env.NODE_ENV !== 'production') console.log(`[Password reset] link for ${user.email}: ${link}`);
+    });
+  }
+
+  /** Finish a reset: one use, before expiry; ends every existing session. */
+  async resetPassword(token: string, newPassword: string): Promise<void> {
+    if (newPassword.length < 8) throw new AuthError('Password must be at least 8 characters', 400);
+
+    const invalid = new AuthError('This reset link is invalid or has expired. Please request a new one.', 400);
+    const row = await this.prisma.passwordResetToken.findUnique({
+      where: { tokenHash: sha256Hex(token) },
+      include: { user: true },
+    });
+    if (!row || row.usedAt || row.expiresAt <= new Date() || !row.user.isActive) throw invalid;
+
+    // Claim the token first, so two submissions of the same link cannot both win.
+    const now = new Date();
+    const claimed = await this.prisma.passwordResetToken.updateMany({
+      where: { id: row.id, usedAt: null },
+      data: { usedAt: now },
+    });
+    if (claimed.count !== 1) throw invalid;
+
+    await this.prisma.user.update({
+      where: { id: row.userId },
+      data: { passwordHash: await bcrypt.hash(newPassword, SALT_ROUNDS), passwordChangedAt: now },
+    });
+    notePasswordChanged(row.userId, now);
+    await this.clearFailedAttempts(row.user.email);
+
+    void sendMail({
+      to: row.user.email,
+      subject: 'Your PaperPort password was changed',
+      text:
+        `Hi ${row.user.fullName},\n\nThe password for your PaperPort account was just changed, and every ` +
+        `device that was signed in has been signed out.\n\nIf this wasn't you, reset it again now and ` +
+        `check who has access to this email account.\n`,
+    });
   }
 
   async getProfile(userId: string): Promise<UserProfile> {

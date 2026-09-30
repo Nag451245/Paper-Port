@@ -25,6 +25,17 @@ const envSchema = z.object({
   BREEZE_LOGIN_ID: z.string().default(''),
   BREEZE_LOGIN_PASSWORD: z.string().default(''),
   BREEZE_TOTP_SECRET: z.string().default(''),
+  // Public address of the web app, used to build links in emails (password
+  // reset). Never taken from the request's Host header, which a caller controls.
+  // Defaults to the first CORS origin.
+  APP_BASE_URL: z.string().default(''),
+  // Outgoing mail (password-reset links). Any SMTP provider works; for Gmail use
+  // smtp.gmail.com, port 587, and an App Password (not the account password).
+  SMTP_HOST: z.string().default(''),
+  SMTP_PORT: z.coerce.number().default(587),
+  SMTP_USER: z.string().default(''),
+  SMTP_PASS: z.string().default(''),
+  SMTP_FROM: z.string().default(''),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters for security'),
   JWT_ALGORITHM: z.string().default('HS256'),
   JWT_EXPIRES_IN: z.string().default('24h'),
