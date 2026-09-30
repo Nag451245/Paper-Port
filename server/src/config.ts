@@ -17,6 +17,14 @@ const envSchema = z.object({
   BREEZE_API_KEY: z.string().default(''),
   BREEZE_SECRET_KEY: z.string().default(''),
   BREEZE_SESSION_TOKEN: z.string().default(''),
+  // ICICI Direct login used for the automatic daily Breeze session. These live
+  // ONLY in server/.env on the machine that runs the app. No web page collects
+  // them: a form asking for a bank login and 2FA secret on this site is what got
+  // it flagged as phishing, and it put the whole trading account one database
+  // leak away from takeover.
+  BREEZE_LOGIN_ID: z.string().default(''),
+  BREEZE_LOGIN_PASSWORD: z.string().default(''),
+  BREEZE_TOTP_SECRET: z.string().default(''),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters for security'),
   JWT_ALGORITHM: z.string().default('HS256'),
   JWT_EXPIRES_IN: z.string().default('24h'),

@@ -58,32 +58,32 @@ The TOTP secret is the **Base32 key** used to generate 6-digit time-based codes.
 
 ---
 
-## Step 3 — Enter Credentials in PaperPort
+## Step 3 — Enter Credentials
 
-1. Open PaperPort and navigate to **Settings** (left sidebar)
-2. Scroll to the **Breeze API Credentials** section
+### In the app (Settings → Breeze API Credentials)
 
-### First-time setup (all 5 fields required):
+| Field | Value |
+|-------|-------|
+| API Key | Your Breeze API Key |
+| Secret Key | Your Breeze Secret Key |
 
-| Field | Value | Example |
-|-------|-------|---------|
-| API Key | Your Breeze API Key | `43Xk29!bH7...` |
-| Secret Key | Your Breeze Secret Key | `Mn92@pL5z...` |
-| ICICI Login ID | Your ICICI Direct User ID | `nagender4512` |
-| ICICI Login Password | Your ICICI Direct password or PIN | `••••••` |
-| TOTP Secret | Base32 key from Step 2 | `GUZ1ASKWSB1M1ZVX3PMSSJHA` |
+Click **"Connect"**. Leave both empty later to keep the saved values.
 
-3. Click **"Update Credentials"**
-4. You should see: _"Credentials saved! Auto-login is enabled"_
+### On the server only (for automatic daily login)
 
-### Updating only login credentials (API already connected):
+The ICICI login ID, password and TOTP secret are **never entered in the web app**. A page that
+asks for a bank login and 2FA secret is exactly what phishing looks like (the site was flagged as
+"Dangerous" by Google for this), and storing them from a web form put the trading account one
+leak away from takeover. They go in `server/.env` on the machine that runs the app:
 
-If your API Key and Secret Key are already saved, you only need to fill in:
-- ICICI Login ID
-- ICICI Login Password
-- TOTP Secret
+```
+BREEZE_LOGIN_ID=<your ICICI Direct user ID>
+BREEZE_LOGIN_PASSWORD=<your ICICI Direct password or PIN>
+BREEZE_TOTP_SECRET=<Base32 key from Step 2>
+```
 
-Leave the API Key and Secret Key fields empty — the existing values are preserved.
+Then restart the API (`pm2 restart capital-guard-api`). Settings will show **Auto-Login Enabled**.
+Without them, use the ICICI popup or paste the day's session token (Step 4, options B and C).
 
 ---
 
@@ -191,7 +191,7 @@ All sensitive credentials are encrypted at rest:
 
 **Cause**: Login credentials were not saved to the database.
 
-**Fix**: Go to Settings, fill in Login ID, Password, and TOTP Secret, then click **"Update Credentials"** before clicking "Auto Generate Session".
+**Fix**: Set BREEZE_LOGIN_ID, BREEZE_LOGIN_PASSWORD and BREEZE_TOTP_SECRET in `server/.env` and restart the API, then click "Auto Generate Session".
 
 ### "Auto session failed. Browser flow: TOTP submitted but no session returned"
 
@@ -232,12 +232,12 @@ All sensitive credentials are encrypted at rest:
 
 | Action | How |
 |--------|-----|
-| First-time setup | Fill all 5 fields → Update Credentials → Auto Generate Session |
+| First-time setup | API Key + Secret in Settings → the 3 login values in server/.env → restart API → Auto Generate Session |
 | Daily (automatic) | Nothing — server auto-renews at 8:00 AM |
 | Daily (manual fallback) | Click "Auto Generate Session" or "Generate Session Popup" |
 | Check status | Settings page → look at status indicators |
-| Update TOTP secret | Fill TOTP Secret field → Update Credentials |
-| Change password/PIN | Fill Login Password field → Update Credentials |
+| Update TOTP secret | Edit BREEZE_TOTP_SECRET in server/.env → restart API |
+| Change password/PIN | Edit BREEZE_LOGIN_PASSWORD in server/.env → restart API |
 
 ---
 

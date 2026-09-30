@@ -45,10 +45,7 @@ export default function Settings() {
   const [breezeSuccess, setBreezeSuccess] = useState('');
   const [breezeConnecting, setBreezeConnecting] = useState(false);
   const [autoGeneratingSession, setAutoGeneratingSession] = useState(false);
-  const [totpSecret, setTotpSecret] = useState('');
   const [sessionToken, setSessionToken] = useState('');
-  const [loginId, setLoginId] = useState('');
-  const [loginPassword, setLoginPassword] = useState('');
 
   // Telegram state
   const [telegramChatId, setTelegramChatId] = useState('');
@@ -99,26 +96,12 @@ export default function Settings() {
     setBreezeError('');
     setBreezeSuccess('');
     try {
-      const { data } = await breezeApi.connect(
-        apiKey, secretKey,
-        totpSecret.trim() || undefined,
-        sessionToken.trim() || undefined,
-        loginId.trim() || undefined,
-        loginPassword.trim() || undefined,
-      );
+      const { data } = await breezeApi.connect(apiKey, secretKey, sessionToken.trim() || undefined);
       setBreezeStatus(data);
-      const hasLogin = !!(loginId.trim() && loginPassword.trim() && totpSecret.trim());
-      setBreezeSuccess(
-        hasLogin
-          ? 'Credentials saved! Auto-login is enabled — sessions will renew automatically every day.'
-          : 'Breeze API credentials saved successfully!'
-      );
+      setBreezeSuccess('Breeze API credentials saved successfully!');
       setApiKey('');
       setSecretKey('');
-      setTotpSecret('');
       setSessionToken('');
-      setLoginId('');
-      setLoginPassword('');
       setTimeout(() => setBreezeSuccess(''), 4000);
     } catch (err: any) {
       const msg = err?.response?.data?.error || err?.response?.data?.detail || 'Failed to save credentials';
@@ -374,7 +357,7 @@ export default function Settings() {
               ) : breezeStatus?.isConnected ? (
                 <>
                   <AlertCircle className="w-4 h-4 text-slate-400" />
-                  <span className="text-sm text-slate-500">Auto-Login Disabled — add Login ID, Password & TOTP below</span>
+                  <span className="text-sm text-slate-500">Auto-Login Disabled — configured on the server, see below</span>
                 </>
               ) : null}
               {breezeStatus?.autoLoginError && (
@@ -416,42 +399,14 @@ export default function Settings() {
               </div>
               <div className="pt-3 border-t border-slate-100">
                 <p className="text-xs font-semibold text-slate-600 mb-2 uppercase tracking-wide flex items-center gap-1">
-                  <Shield className="w-3 h-3" /> Auto-Login Credentials (Login Once & Forget)
+                  <Shield className="w-3 h-3" /> Automatic daily login
                 </p>
                 <p className="text-xs text-slate-400 mb-3">
-                  Enter your ICICI Direct login credentials and TOTP secret to enable fully automatic daily session generation. The server will log in on your behalf every morning — no manual steps needed.
+                  This app never asks for your ICICI Direct password or 2FA code in the browser. To have the server
+                  renew the Breeze session every morning, the account owner sets BREEZE_LOGIN_ID, BREEZE_LOGIN_PASSWORD
+                  and BREEZE_TOTP_SECRET in server/.env on the machine that runs the app. Otherwise use the ICICI login
+                  popup below, or paste the day's session token.
                 </p>
-              </div>
-              <div>
-                <label className="text-xs text-slate-500 mb-1 block">ICICI Login ID (User ID)</label>
-                <input
-                  type="text"
-                  value={loginId}
-                  onChange={(e) => setLoginId(e.target.value)}
-                  placeholder="Your ICICI Direct trading account user ID"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-500 mb-1 block">ICICI Login Password</label>
-                <input
-                  type="password"
-                  value={loginPassword}
-                  onChange={(e) => setLoginPassword(e.target.value)}
-                  placeholder="Your ICICI Direct trading account password"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-500 mb-1 block">TOTP Secret</label>
-                <input
-                  type="text"
-                  value={totpSecret}
-                  onChange={(e) => setTotpSecret(e.target.value)}
-                  placeholder="Base32 TOTP secret from your authenticator app setup"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-                />
-                <p className="text-xs text-slate-400 mt-1">Same secret used to set up Google Authenticator / Authy for ICICI Direct</p>
               </div>
               <button
                 onClick={handleBreezeConnect}
@@ -871,8 +826,8 @@ function SetupGuide() {
                 The session token is valid for <strong>24 hours</strong> from the time you save it.
                 ICICI Direct generates a new session each time you log in. You need to update this
                 token <strong>once per trading day</strong> (typically at market open, 9:00 AM). The app first
-                tries server-side auto-generation using your TOTP secret; if the broker rejects it, fallback
-                is popup login or manual token paste.
+                tries server-side auto-generation (when the server is configured for it); if the broker rejects
+                it, fallback is popup login or manual token paste.
                 The token persists across app logout/login within the same day — you do not need to
                 re-enter it if you log out and back in.
               </p>
@@ -884,11 +839,11 @@ function SetupGuide() {
               <BookOpen className="w-4 h-4 text-slate-600" />
             </div>
             <div>
-              <p className="text-sm font-semibold text-slate-800">TOTP Secret (Optional)</p>
+              <p className="text-sm font-semibold text-slate-800">Automatic login (server setting)</p>
               <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                If you provide your TOTP secret, the system can attempt server-side session generation
-                automatically. This is the same secret used by your authenticator app and is required for
-                auto mode. You can still use popup/manual fallback at any time.
+                Automatic daily login is set up by whoever runs the server, in its configuration file. This
+                site never asks you to type your ICICI Direct password or 2FA secret into a web page, and you
+                should not enter them on any site other than ICICI's own.
               </p>
             </div>
           </div>
@@ -937,15 +892,14 @@ function SetupGuide() {
           <div className="flex gap-4">
             <div className="w-7 h-7 rounded-full bg-indigo-600 text-white flex items-center justify-center text-xs font-bold shrink-0">2</div>
             <div className="flex-1">
-              <p className="text-sm font-semibold text-slate-800">Enable Auto-Login (Login Once & Forget)</p>
+              <p className="text-sm font-semibold text-slate-800">Enable Auto-Login (server owner only)</p>
               <ol className="mt-2 space-y-1.5 text-xs text-slate-600 list-decimal list-inside leading-relaxed">
-                <li>In the Configuration tab, fill in your <strong>ICICI Login ID</strong>, <strong>Login Password</strong>, and <strong>TOTP Secret</strong></li>
-                <li>Click <strong>Connect</strong> to save all credentials</li>
-                <li>The server will automatically log in every morning at 8:00 AM IST and generate a fresh session token</li>
-                <li>You never need to manually enter session tokens again</li>
+                <li>On the machine that runs the app, open <strong>server/.env</strong></li>
+                <li>Set <strong>BREEZE_LOGIN_ID</strong>, <strong>BREEZE_LOGIN_PASSWORD</strong> and <strong>BREEZE_TOTP_SECRET</strong>, then restart the API</li>
+                <li>The server will log in every morning at 8:00 AM IST and generate a fresh session token</li>
               </ol>
               <div className="mt-2 p-2 bg-emerald-50 rounded text-[11px] text-emerald-700">
-                <strong>Fully automatic!</strong> The server handles daily login using your saved credentials. All data is AES-256 encrypted.
+                These stay on the server. They are never typed into, or sent through, a web page.
               </div>
               <div className="mt-2 p-2 bg-amber-50 rounded text-[11px] text-amber-700">
                 <strong>Fallback:</strong> If auto-login fails (e.g., ICICI changes login flow), click <strong>Auto Generate Session</strong>, use <strong>Popup</strong>, or paste the token manually.
@@ -998,7 +952,7 @@ function SetupGuide() {
           />
           <FaqItem
             q="What is the TOTP secret?"
-            a="It's the same secret your authenticator app (Google Authenticator, Authy, etc.) uses to generate 6-digit codes. If you provide it here, the platform can auto-generate sessions in the future. This field is completely optional."
+            a="It's the secret your authenticator app (Google Authenticator, Authy, etc.) uses to generate 6-digit codes. It gives full access to your 2FA, so it is never entered on this site. Automatic login reads it from the server's configuration file instead. It is optional: without it, use the ICICI popup or paste the day's session token."
           />
         </div>
       </section>

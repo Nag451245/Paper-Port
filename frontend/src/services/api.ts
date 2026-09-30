@@ -329,18 +329,12 @@ export const breezeApi = {
         } as BreezeCredentialStatus,
       })),
 
-  connect: (
-    apiKey: string, secretKey: string,
-    totpSecret?: string, sessionToken?: string,
-    loginId?: string, loginPassword?: string,
-  ) =>
+  // ICICI login ID, password and TOTP secret are server configuration only (server/.env).
+  connect: (apiKey: string, secretKey: string, sessionToken?: string) =>
     api.post<{ configured: boolean; has_totp: boolean; has_session: boolean; has_login_credentials: boolean; updated_at: string | null }>('/auth/breeze-credentials', {
       ...(apiKey ? { api_key: apiKey } : {}),
       ...(secretKey ? { secret_key: secretKey } : {}),
-      ...(totpSecret ? { totp_secret: totpSecret } : {}),
       ...(sessionToken ? { session_token: sessionToken } : {}),
-      ...(loginId ? { login_id: loginId } : {}),
-      ...(loginPassword ? { login_password: loginPassword } : {}),
     })
       .then(res => ({
         ...res,

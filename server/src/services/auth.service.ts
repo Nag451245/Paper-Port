@@ -95,13 +95,12 @@ export interface LoginInput {
   password: string;
 }
 
+// No ICICI login ID, password or TOTP secret here: those are server config
+// (BREEZE_LOGIN_ID / BREEZE_LOGIN_PASSWORD / BREEZE_TOTP_SECRET), never request data.
 export interface BreezeCredentialInput {
   apiKey: string;
   secretKey: string;
-  totpSecret?: string;
   sessionToken?: string;
-  loginId?: string;
-  loginPassword?: string;
 }
 
 export interface UserProfile {
@@ -371,10 +370,7 @@ export class AuthService {
 
     const encryptedApiKey = input.apiKey ? encrypt(input.apiKey, this.encKey) : undefined;
     const encryptedSecret = input.secretKey ? encrypt(input.secretKey, this.encKey) : undefined;
-    const encTotp = input.totpSecret ? encrypt(input.totpSecret, this.encKey) : undefined;
     const encSession = input.sessionToken ? encrypt(input.sessionToken, this.encKey) : undefined;
-    const encLoginId = input.loginId ? encrypt(input.loginId, this.encKey) : undefined;
-    const encLoginPwd = input.loginPassword ? encrypt(input.loginPassword, this.encKey) : undefined;
 
     if (!existing && (!encryptedApiKey || !encryptedSecret)) {
       throw new AuthError('API Key and Secret Key are required for first-time setup.', 400);
@@ -383,13 +379,10 @@ export class AuthService {
     const updateData: Record<string, unknown> = {};
     if (encryptedApiKey) updateData.encryptedApiKey = encryptedApiKey;
     if (encryptedSecret) updateData.encryptedSecret = encryptedSecret;
-    if (encTotp) updateData.totpSecret = encTotp;
     if (encSession) {
       updateData.sessionToken = encSession;
       updateData.sessionExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     }
-    if (encLoginId) updateData.encryptedLoginId = encLoginId;
-    if (encLoginPwd) updateData.encryptedLoginPassword = encLoginPwd;
 
     const credential = await this.prisma.breezeCredential.upsert({
       where: { userId },
@@ -397,11 +390,8 @@ export class AuthService {
         userId,
         encryptedApiKey: encryptedApiKey!,
         encryptedSecret: encryptedSecret!,
-        totpSecret: encTotp ?? null,
         sessionToken: encSession ?? null,
         sessionExpiresAt: encSession ? new Date(Date.now() + 24 * 60 * 60 * 1000) : null,
-        ...(encLoginId ? { encryptedLoginId: encLoginId } : {}),
-        ...(encLoginPwd ? { encryptedLoginPassword: encLoginPwd } : {}),
       },
       update: updateData,
     });
@@ -513,11 +503,13 @@ export class AuthService {
     const hasSession = !!credential.sessionToken && (
       !credential.sessionExpiresAt || credential.sessionExpiresAt > new Date()
     );
-    const hasLoginCredentials = !!credential.encryptedLoginId && !!credential.encryptedLoginPassword;
-    const canAutoLogin = hasLoginCredentials && !!credential.totpSecret;
+    const hasLoginCredentials = (!!env.BREEZE_LOGIN_ID && !!env.BREEZE_LOGIN_PASSWORD)
+      || (!!credential.encryptedLoginId && !!credential.encryptedLoginPassword);
+    const hasTotp = !!env.BREEZE_TOTP_SECRET || !!credential.totpSecret;
+    const canAutoLogin = hasLoginCredentials && hasTotp;
     return {
       configured: true,
-      hasTotp: !!credential.totpSecret,
+      hasTotp,
       hasSession,
       hasLoginCredentials,
       canAutoLogin,
@@ -580,26 +572,28 @@ export class AuthService {
     if (!credential) {
       throw new AuthError('Breeze credentials not configured. Save API key and secret first.', 400);
     }
-    if (!credential.totpSecret) {
-      throw new AuthError('TOTP secret not configured. Add it in Settings before using auto session.', 400);
+    // server/.env is the place for these now (see config.ts). Values saved in the
+    // database by older versions are still honoured until they are cleared.
+    if (!credential.totpSecret && !env.BREEZE_TOTP_SECRET) {
+      throw new AuthError('TOTP secret not configured. Set BREEZE_TOTP_SECRET in server/.env on the server.', 400);
     }
 
     const apiKey = decrypt(credential.encryptedApiKey, this.encKey);
     const secretKey = decrypt(credential.encryptedSecret, this.encKey);
     let rawTotp: string;
     try {
-      rawTotp = decrypt(credential.totpSecret, this.encKey);
+      rawTotp = env.BREEZE_TOTP_SECRET || decrypt(credential.totpSecret!, this.encKey);
     } catch (err) {
       throw new AuthError(
         `Stored TOTP secret could not be decrypted (${(err as Error).message}). ` +
-        'Re-enter it in Settings — this usually means ENCRYPTION_KEY changed.',
+        'Set BREEZE_TOTP_SECRET in server/.env instead — this usually means ENCRYPTION_KEY changed.',
         500,
       );
     }
 
-    let loginId: string | null = null;
-    let loginPassword: string | null = null;
-    if (credential.encryptedLoginId && credential.encryptedLoginPassword) {
+    let loginId: string | null = env.BREEZE_LOGIN_ID || null;
+    let loginPassword: string | null = env.BREEZE_LOGIN_PASSWORD || null;
+    if (!(loginId && loginPassword) && credential.encryptedLoginId && credential.encryptedLoginPassword) {
       try {
         loginId = decrypt(credential.encryptedLoginId, this.encKey);
         loginPassword = decrypt(credential.encryptedLoginPassword, this.encKey);
@@ -676,7 +670,7 @@ export class AuthService {
     const soon = new Date(Date.now() + 2 * 60 * 60 * 1000);
     const credentials = await this.prisma.breezeCredential.findMany({
       where: {
-        totpSecret: { not: null },
+        ...(env.BREEZE_TOTP_SECRET ? {} : { totpSecret: { not: null } }),
         OR: [
           { sessionExpiresAt: null },
           { sessionExpiresAt: { lte: soon } },

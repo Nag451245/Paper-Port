@@ -25,13 +25,13 @@ const updateProfileSchema = z.object({
   virtualCapital: z.number().positive().optional(),
 });
 
+// The ICICI login ID, password and TOTP secret are deliberately NOT accepted
+// here; they are server configuration (BREEZE_LOGIN_ID etc. in server/.env).
+// Unknown keys are stripped, so an old client that still sends them is ignored.
 const breezeCredentialSchema = z.object({
   api_key: z.string().optional(),
   secret_key: z.string().optional(),
-  totp_secret: z.string().optional(),
   session_token: z.string().optional(),
-  login_id: z.string().optional(),
-  login_password: z.string().optional(),
 });
 
 const sessionTokenSchema = z.object({
@@ -133,16 +133,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       const result = await authService.saveBreezeCredentials(userId, {
         apiKey: parsed.data.api_key || '',
         secretKey: parsed.data.secret_key || '',
-        totpSecret: parsed.data.totp_secret,
         sessionToken: parsed.data.session_token,
-        loginId: parsed.data.login_id,
-        loginPassword: parsed.data.login_password,
       });
       return reply.send({
         configured: result.configured,
-        has_totp: !!parsed.data.totp_secret,
         has_session: !!parsed.data.session_token,
-        has_login_credentials: !!parsed.data.login_id && !!parsed.data.login_password,
         updated_at: result.updatedAt.toISOString(),
       });
     } catch (err) {

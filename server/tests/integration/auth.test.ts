@@ -424,6 +424,28 @@ describe('Auth Routes Integration', () => {
       expect(body.updated_at).toBeTruthy();
     });
 
+    it('never stores an ICICI login password or TOTP secret sent from a browser', async () => {
+      const token = app.jwt.sign({ sub: 'user-id-breeze' });
+      mockPrisma.breezeCredential.findUnique.mockResolvedValue(null);
+      mockPrisma.breezeCredential.upsert.mockResolvedValue({
+        id: 'cred-id', userId: 'user-id-breeze', updatedAt: new Date('2025-06-01'),
+      });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/auth/breeze-credentials',
+        headers: { authorization: `Bearer ${token}` },
+        payload: {
+          api_key: 'my-breeze-key', secret_key: 'my-breeze-secret',
+          login_id: 'someone', login_password: 'their-bank-password', totp_secret: 'JBSWY3DPEHPK3PXP',
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const written = JSON.stringify(mockPrisma.breezeCredential.upsert.mock.calls);
+      expect(written).not.toMatch(/encryptedLoginId|encryptedLoginPassword|totpSecret"?:\s*"/);
+    });
+
     it('should return 400 for missing api_key', async () => {
       const token = app.jwt.sign({ sub: 'user-id-breeze' });
 
