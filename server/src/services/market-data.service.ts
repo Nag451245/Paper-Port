@@ -9,6 +9,7 @@ import { emit } from '../lib/event-bus.js';
 import { istDateStr, istDaysAgo } from '../lib/ist.js';
 import { parseInstrumentSymbol, isDerivativeSymbol, type InstrumentSpec } from '../lib/instrument.js';
 import { getUpstox } from './upstox.service.js';
+import { getMarketMovers } from './market-movers.service.js';
 import { activeUpstoxToken } from '../lib/upstox-session.js';
 
 const log = createChildLogger('MarketData');
@@ -974,7 +975,19 @@ export class MarketDataService {
       if (cached) return cached;
     }
 
-    // Primary: Yahoo Finance batch quote for NIFTY 50 constituents
+    // Primary: the exchange's own gainer / loser / volume-gainer lists (or the
+    // same computed from Upstox quotes when NSE refuses this server).
+    try {
+      const lists = await getMarketMovers(this).scannerMovers(count);
+      if (lists.gainers.length > 0 || lists.losers.length > 0) {
+        if (this.cache) await this.cache.set(cacheKey, lists, 60);
+        return lists;
+      }
+    } catch (err) {
+      log.warn({ err: (err as Error).message }, 'Exchange movers unavailable; falling back to Yahoo');
+    }
+
+    // Next: Yahoo Finance batch quote for NIFTY 50 constituents
     const yahooResult = await this.fetchTopMoversFromYahoo(count);
     if (yahooResult.gainers.length > 0 || yahooResult.losers.length > 0) {
       if (this.cache) await this.cache.set(cacheKey, yahooResult, 60);
@@ -1781,6 +1794,20 @@ export class MarketDataService {
       finally { this.cookieFetchPromise = null; }
     })();
     await this.cookieFetchPromise;
+  }
+
+  /** GET one of NSE's JSON APIs with the site's cookies; null when NSE refuses or fails. */
+  async nseJson(url: string): Promise<any | null> {
+    try {
+      const res = await this.nseFetch(url);
+      if (!res.ok) {
+        await res.text().catch(() => { /* drain */ });
+        return null;
+      }
+      return await res.json();
+    } catch {
+      return null;
+    }
   }
 
   private async nseFetch(url: string): Promise<Response> {

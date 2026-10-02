@@ -170,6 +170,17 @@ export const watchlistApi = {
 };
 
 // ─── Market Data ──────────────────────────────────────────────────
+export type MoverKind = 'gainers' | 'losers' | 'volume';
+export interface MoverRow {
+  symbol: string; name: string; ltp: number; change: number; changePercent: number; volume: number;
+  avgVolume?: number; volumeRatio?: number; previousClose: number;
+}
+export interface MoversResponse {
+  exchange: 'NSE' | 'BSE'; kind: MoverKind; group: string;
+  source: 'nse' | 'upstox' | 'none'; asOf: string | null; rows: MoverRow[]; note?: string;
+  groups: { id: string; label: string }[];
+}
+
 export const marketApi = {
   quote: (symbol: string, exchange?: string) =>
     api.get<MarketQuote>(`/market/quote/${encodeURIComponent(symbol)}`, { params: { exchange } }),
@@ -197,6 +208,9 @@ export const marketApi = {
 
   lotSizes: () =>
     api.get<{ lotSizes: Record<string, number>; source: string }>('/market/lot-sizes'),
+
+  movers: (params: { exchange: 'NSE' | 'BSE'; kind: MoverKind; group?: string; count?: number }) =>
+    api.get<MoversResponse>('/market/movers', { params }),
 
   globalIntelligence: () =>
     api.get<any>('/market/global-intelligence'),

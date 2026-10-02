@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Search,
   RefreshCw,
@@ -66,6 +67,7 @@ export default function TradingTerminal() {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const pickedQuery = useRef('');
   const [showDropdown, setShowDropdown] = useState(false);
   const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -241,6 +243,7 @@ export default function TradingTerminal() {
       setShowDropdown(false);
       return;
     }
+    if (searchQuery === pickedQuery.current) return;   // filled in by picking a result
     searchTimeout.current = setTimeout(async () => {
       try {
         const { data } = await marketApi.search(searchQuery, searchExchangeFilter || undefined);
@@ -286,6 +289,7 @@ export default function TradingTerminal() {
     const exch = exchange || selectedExchange || 'NSE';
     setSymbol(sym);
     setSelectedExchange(exch);
+    pickedQuery.current = sym;
     setSearchQuery(sym);
     setShowDropdown(false);
     setQuoteLoading(true);
@@ -296,6 +300,17 @@ export default function TradingTerminal() {
 
     void loadChart(sym, exch);
   }, [selectedExchange, loadChart]);
+
+  // Opened from a link such as Market Movers: /terminal?symbol=TCS&exchange=BSE
+  const [params, setParams] = useSearchParams();
+  const linkedSymbol = useRef(false);
+  useEffect(() => {
+    const sym = params.get('symbol')?.toUpperCase();
+    if (linkedSymbol.current || !sym || !/^[A-Z0-9&_-]{1,30}$/.test(sym)) return;
+    linkedSymbol.current = true;
+    void selectSymbol(sym, params.get('exchange')?.toUpperCase() || 'NSE');
+    setParams({}, { replace: true });
+  }, [params, setParams, selectSymbol]);
 
   // Initialize chart
   useEffect(() => {
@@ -311,6 +326,8 @@ export default function TradingTerminal() {
       timeScale: { borderColor: '#e2e8f0', timeVisible: false },
       width: chartContainerRef.current.clientWidth,
       height: 360,
+      // Up/down swipes over the chart scroll the page on phones; sideways ones pan the chart.
+      handleScroll: { vertTouchDrag: false },
     });
     const series = chart.addSeries(CandlestickSeries, {
       upColor: '#22c55e', downColor: '#ef4444', borderUpColor: '#16a34a', borderDownColor: '#dc2626', wickUpColor: '#16a34a', wickDownColor: '#dc2626',
@@ -453,12 +470,12 @@ export default function TradingTerminal() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Chart area */}
         <div className="lg:col-span-2 bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
-            <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-2 px-4 py-3 border-b border-slate-200">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0">
               <h2 className="font-semibold text-slate-900">{symbol || 'Select a Symbol'}</h2>
               {symbol && <ExchangeBadge exchange={selectedExchange} />}
               {symbol && ltp > 0 && (
-                <div className="flex items-center gap-2 ml-3">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 md:ml-3">
                   <span className="text-lg font-bold font-mono text-slate-900">₹{ltp.toFixed(2)}</span>
                   <span className={`text-sm font-mono ${change >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                     {change >= 0 ? '+' : ''}{change.toFixed(2)} ({changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%)
@@ -475,10 +492,11 @@ export default function TradingTerminal() {
               )}
               {quoteLoading && <Loader2 className="w-4 h-4 animate-spin text-slate-400" />}
             </div>
-            <div className="flex items-center gap-1 ml-auto mr-2 overflow-x-auto" role="group" aria-label="Chart timeframe">
+            {/* On phones the timeframes get their own swipeable row below the price. */}
+            <div className="order-last basis-full md:order-none md:basis-auto flex items-center gap-1 md:ml-auto md:mr-2 overflow-x-auto touch-pan-x" role="group" aria-label="Chart timeframe">
               {TIMEFRAMES.map((t) => (
                 <button key={t.value} onClick={() => setTimeframe(t.value)}
-                  className={`px-2 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                  className={`shrink-0 px-2.5 py-1.5 md:px-2 md:py-1 rounded-md text-[11px] font-semibold transition-colors ${
                     timeframe === t.value ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-100'
                   }`}>
                   {t.label}
@@ -486,7 +504,7 @@ export default function TradingTerminal() {
               ))}
               {chartLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-400 ml-1" />}
             </div>
-            <button onClick={fetchAll} className="p-1.5 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors" title="Refresh data">
+            <button onClick={fetchAll} className="ml-auto md:ml-0 p-1.5 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors" title="Refresh data">
               <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
             </button>
           </div>

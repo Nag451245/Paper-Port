@@ -38,6 +38,7 @@ interface MasterRecord {
   instrument_type?: string;
   instrument_key?: string;
   trading_symbol?: string;
+  name?: string;
   underlying_symbol?: string;
   expiry?: number;
   strike_price?: number;
@@ -49,7 +50,20 @@ export interface InstrumentMaps {
   derivatives: Map<string, string>;            // "NIFTY|CE|2026-10-29|24000" -> key
   optionExpiries: Map<string, Set<string>>;    // "NIFTY" -> {"2026-10-29", ...}
   lotSizes: Map<string, number>;               // "NIFTY" -> 75
+  /** Ordinary listed shares per exchange, the universe market movers are ranked from. */
+  listed: Record<'NSE' | 'BSE', ListedShare[]>;
 }
+
+export interface ListedShare { key: string; symbol: string; name: string; group: string }
+
+/**
+ * Which series/groups count as ordinary shares. NSE: EQ and BE (trade-to-trade).
+ * BSE groups A, B, T, X, XT, M, MT, Z; leaves out F (debt), G (govt securities) and the like.
+ */
+const LISTED_TYPES: Record<'NSE' | 'BSE', Set<string>> = {
+  NSE: new Set(['EQ', 'BE']),
+  BSE: new Set(['A', 'B', 'T', 'X', 'XT', 'M', 'MT', 'Z']),
+};
 
 /** Build lookup maps from master records. Exported for tests. */
 export function buildMaps(records: MasterRecord[]): InstrumentMaps {
@@ -57,10 +71,15 @@ export function buildMaps(records: MasterRecord[]): InstrumentMaps {
   const derivatives = new Map<string, string>();
   const optionExpiries = new Map<string, Set<string>>();
   const lotSizes = new Map<string, number>();
+  const listed: InstrumentMaps['listed'] = { NSE: [], BSE: [] };
   for (const r of records) {
     if (!r.instrument_key || !r.segment) continue;
     if ((r.segment === 'NSE_EQ' || r.segment === 'BSE_EQ') && r.trading_symbol) {
-      equity.set(`${r.segment.slice(0, 3)}:${r.trading_symbol.toUpperCase()}`, r.instrument_key);
+      const ex = r.segment.slice(0, 3) as 'NSE' | 'BSE';
+      equity.set(`${ex}:${r.trading_symbol.toUpperCase()}`, r.instrument_key);
+      if (r.instrument_type && LISTED_TYPES[ex].has(r.instrument_type)) {
+        listed[ex].push({ key: r.instrument_key, symbol: r.trading_symbol.toUpperCase(), name: r.name ?? r.trading_symbol, group: r.instrument_type });
+      }
     } else if (r.segment === 'NSE_FO' && r.underlying_symbol && r.expiry && r.instrument_type) {
       const kind = r.instrument_type === 'FUT' ? 'FUT' : r.instrument_type;    // CE / PE / FUT
       const strike = kind === 'FUT' ? '-' : String(Number(r.strike_price));
@@ -74,7 +93,7 @@ export function buildMaps(records: MasterRecord[]): InstrumentMaps {
       if (r.lot_size && r.lot_size > 0) lotSizes.set(u, r.lot_size);
     }
   }
-  return { equity, derivatives, optionExpiries, lotSizes };
+  return { equity, derivatives, optionExpiries, lotSizes, listed };
 }
 
 /** The Upstox key for an app symbol, or null when Upstox cannot serve it (MCX, unknown). */
@@ -106,6 +125,11 @@ export function upstoxInterval(interval: string): { unit: string; n: number; win
 
 /** Upstox refused the access token: expired, revoked, or used from an unlisted IP. */
 export class UpstoxAuthError extends Error {}
+
+export interface BatchQuote {
+  ltp: number; change: number; previousClose: number;
+  open: number; high: number; low: number; volume: number; timestamp: string | null;
+}
 
 const addDays = (date: string, days: number) =>
   new Date(Date.parse(`${date}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
@@ -295,6 +319,36 @@ export class UpstoxService {
       this.authFailed(token, err);
       return null;
     }
+  }
+
+  /**
+   * Last price, day change and volume for many instruments at once (Upstox
+   * allows 500 keys per request). Keyed by instrument key; missing keys had no quote.
+   */
+  async quotes(token: string, keys: string[]): Promise<Map<string, BatchQuote>> {
+    const out = new Map<string, BatchQuote>();
+    for (let i = 0; i < keys.length; i += 500) {
+      const chunk = keys.slice(i, i + 500);
+      try {
+        const data = await this.get(`/v2/market-quote/quotes?instrument_key=${encodeURIComponent(chunk.join(','))}`, token);
+        for (const q of Object.values(data ?? {}) as any[]) {
+          const ltp = Number(q?.last_price);
+          if (!q?.instrument_token || !(ltp > 0)) continue;
+          const change = Number(q.net_change) || 0;
+          out.set(q.instrument_token, {
+            ltp, change, previousClose: ltp - change,
+            open: Number(q.ohlc?.open) || 0, high: Number(q.ohlc?.high) || 0, low: Number(q.ohlc?.low) || 0,
+            volume: Number(q.volume) || 0,
+            timestamp: q.timestamp ?? null,
+          });
+        }
+      } catch (err) {
+        this.authFailed(token, err);
+        if (err instanceof UpstoxAuthError) throw err;
+        log.warn({ err: (err as Error).message }, 'Upstox batch quote failed');
+      }
+    }
+    return out;
   }
 
   async quote(token: string, symbol: string, exchange = 'NSE'): Promise<MarketQuote | null> {

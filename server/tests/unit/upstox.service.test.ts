@@ -85,6 +85,32 @@ describe('quote', () => {
   });
 });
 
+describe('batch quotes (market movers)', () => {
+  it('lists ordinary shares per exchange, leaving out debt and other series', () => {
+    const maps = buildMaps([
+      ...MASTER,
+      { segment: 'BSE_EQ', instrument_type: 'A', trading_symbol: 'TCS', name: 'TCS LTD', instrument_key: 'BSE_EQ|TCS' },
+      { segment: 'BSE_EQ', instrument_type: 'F', trading_symbol: '8BOND', instrument_key: 'BSE_EQ|BOND' },
+      { segment: 'NSE_EQ', instrument_type: 'GS', trading_symbol: 'GSEC', instrument_key: 'NSE_EQ|GSEC' },
+    ] as any);
+    expect(maps.listed.NSE.map((s) => s.symbol)).toEqual(['RELIANCE']);
+    expect(maps.listed.BSE).toEqual([{ key: 'BSE_EQ|TCS', symbol: 'TCS', name: 'TCS LTD', group: 'A' }]);
+  });
+
+  it('asks for up to 500 instruments per request and keys answers by instrument', async () => {
+    const urls: string[] = [];
+    const f = fakeFetch((u) => {
+      urls.push(u);
+      return json({ status: 'success', data: { 'NSE_EQ:X': { instrument_token: 'K1', last_price: 110, net_change: 10, volume: 7, ohlc: {} } } });
+    });
+    const keys = Array.from({ length: 501 }, (_, i) => `K${i}`);
+    const quotes = await new UpstoxService(f).quotes('tok', keys);
+    expect(urls).toHaveLength(2);
+    expect(decodeURIComponent(urls[0]).split(',')).toHaveLength(500);
+    expect(quotes.get('K1')).toMatchObject({ ltp: 110, change: 10, previousClose: 100, volume: 7 });
+  });
+});
+
 describe('rejected login', () => {
   it('reports a token Upstox refuses, once per failed call, and serves nothing from it', async () => {
     const f = fakeFetch(() => json({ status: 'error', errors: [{ message: 'Invalid token used to access API' }] }, false, 401));

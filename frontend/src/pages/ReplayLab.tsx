@@ -7,6 +7,7 @@ import {
   History, Play, Pause, SkipForward, ChevronsRight, RotateCcw, Square, Loader2, AlertCircle, Save, CheckCircle, Info,
 } from 'lucide-react';
 import { replayApi } from '@/services/api';
+import SymbolSearchInput from '@/components/trading/SymbolSearchInput';
 import {
   barTime, barAsOf, barsBetween, checkExit, validateLevels, closePosition, equity, summarize, netPnl, tradeCharges,
   buildContractSymbol, strikeStep, grossPnl,
@@ -188,6 +189,8 @@ function ReplayChart({ bars, daily, markers, levels }: {
       rightPriceScale: { borderColor: '#e2e8f0' },
       timeScale: { borderColor: '#e2e8f0', timeVisible: !daily, secondsVisible: false, rightOffset: 6 },
       autoSize: true,
+      // Up/down swipes over the chart scroll the page on phones; sideways ones pan the chart.
+      handleScroll: { vertTouchDrag: false },
     });
     const s = c.addSeries(CandlestickSeries, {
       upColor: '#22c55e', downColor: '#ef4444', borderUpColor: '#16a34a', borderDownColor: '#dc2626',
@@ -227,6 +230,14 @@ function ReplayChart({ bars, daily, markers, levels }: {
 // ─── Page ────────────────────────────────────────────────────────
 
 const inputCls = 'w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-xs text-slate-800 outline-none focus:border-indigo-500';
+/** Index underlyings for F&O replay; stock search does not list indices. */
+const FNO_INDICES = [
+  { symbol: 'NIFTY', name: 'Nifty 50 index', exchange: 'NFO' },
+  { symbol: 'BANKNIFTY', name: 'Nifty Bank index', exchange: 'NFO' },
+  { symbol: 'FINNIFTY', name: 'Nifty Financial Services index', exchange: 'NFO' },
+  { symbol: 'MIDCPNIFTY', name: 'Nifty Midcap Select index', exchange: 'NFO' },
+];
+
 const chip = (active: boolean) =>
   `px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${active ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`;
 
@@ -400,10 +411,14 @@ export default function ReplayLab() {
           <button className={chip(form.mode === 'fno')} onClick={() => setForm((f) => ({ ...f, mode: 'fno', symbol: f.mode === 'fno' ? f.symbol : 'NIFTY', interval: f.interval === '1day' ? '5minute' : f.interval }))}>F&amp;O</button>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-6 gap-3 items-end">
-          <label className="col-span-2 md:col-span-1 text-[10px] text-slate-400">
+          <div className="col-span-2 md:col-span-1 text-[10px] text-slate-400">
             {form.mode === 'fno' ? 'Underlying' : 'Symbol'}
-            <input value={form.symbol} onChange={(e) => setForm({ ...form, symbol: e.target.value.toUpperCase() })} className={`${inputCls} mt-0.5`} />
-          </label>
+            <div className="mt-0.5">
+              <SymbolSearchInput value={form.symbol} onChange={(symbol) => setForm((f) => ({ ...f, symbol }))}
+                placeholder={form.mode === 'fno' ? 'e.g. NIFTY, BANKNIFTY, RELI' : 'e.g. RELI, TCS, INFY'} className={inputCls}
+                extra={form.mode === 'fno' ? FNO_INDICES : undefined} />
+            </div>
+          </div>
           <label className="text-[10px] text-slate-400">From
             <input type="date" value={form.from} onChange={(e) => setForm({ ...form, from: e.target.value })} className={`${inputCls} mt-0.5`} />
           </label>

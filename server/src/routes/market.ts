@@ -4,6 +4,7 @@ import { MarketDataService } from '../services/market-data.service.js';
 import { GlobalMarketService } from '../services/global-market.service.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 import { istDateStr, istDaysAgo } from '../lib/ist.js';
+import { getMarketMovers, MOVER_GROUPS } from '../services/market-movers.service.js';
 
 const symbolParam = z.string().min(1).max(30).regex(/^[A-Z0-9&_-]+$/i, 'Invalid symbol');
 const intervalParam = z.string().regex(/^(1d|1day|day|daily|1h|1hour|hour|5m|5min|5minute|15m|15min|15minute|30m|30min|30minute|1m|1min|1minute|minute)$/i).default('1day');
@@ -50,6 +51,21 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
     const limit = Math.min(Math.max(Number(query.limit) || 10, 1), 50);
     const results = await service.search(q, limit, query.exchange);
     return reply.send(results);
+  });
+
+  const moversQuery = z.object({
+    exchange: z.enum(['NSE', 'BSE']).default('NSE'),
+    kind: z.enum(['gainers', 'losers', 'volume']).default('gainers'),
+    group: z.string().max(20).optional(),
+    count: z.coerce.number().int().min(1).max(50).default(25),
+  });
+
+  /** Price gainers, price losers and volume gainers for NSE or BSE. */
+  app.get('/movers', { preHandler: [authenticate] }, async (request, reply) => {
+    const q = moversQuery.safeParse(request.query);
+    if (!q.success) return reply.code(400).send({ error: 'Invalid movers query' });
+    const result = await getMarketMovers().get(q.data.exchange, q.data.kind, q.data.group, q.data.count);
+    return reply.send({ ...result, groups: MOVER_GROUPS[q.data.exchange] });
   });
 
   app.get('/indices', async (request, reply) => {
