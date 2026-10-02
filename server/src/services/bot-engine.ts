@@ -1,6 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { chatCompletionJSON, getOpenAIStatus } from '../lib/openai.js';
-import { MarketDataService, type MarketMover } from './market-data.service.js';
+import { MarketDataService, type MarketMover, type HistoricalBar } from './market-data.service.js';
 import { TradeService } from './trade.service.js';
 import { OrderManagementService } from './oms.service.js';
 import { engineScan, engineRisk, engineSignals, isEngineAvailable, engineScanActiveSymbols, engineOptionsSignals, engineRecordOutcome, engineCalibrateConfidence, engineExecutionPlan, enginePerformanceSummary, type ScanSignal, type OptionsSignalResult, type ExecutionPlan } from '../lib/rust-engine.js';
@@ -27,6 +27,7 @@ import { StrategyRegistry, type Bar as StrategyBar, type Signal as StrategySigna
 import { RegimeDetectorService } from './regime-detector.service.js';
 import { PortfolioOptimizerService } from './portfolio-optimizer.service.js';
 import { getShadowBook, gateMode, strategyOf, type ShadowBook } from './shadow-book.service.js';
+import { MtfShadowScan } from './mtf-shadow.service.js';
 
 const log = createChildLogger('BotEngine');
 
@@ -263,6 +264,7 @@ export class BotEngine {
 
   constructor(private prisma: PrismaClient, oms?: OrderManagementService) {
     this.shadowBook = getShadowBook(prisma);
+    this.mtfShadow = new MtfShadowScan(this.marketData, this.shadowBook);
     this.tradeService = new TradeService(prisma, oms);
     this.targetTracker = new TargetTracker(prisma);
     this.globalMarket = new GlobalMarketService();
@@ -311,6 +313,8 @@ export class BotEngine {
   private alphaDecayCache = new Map<string, { isDecaying: boolean; ts: number }>();
   /** Records every automated scan signal as a shadow trade; its verdicts drive the evidence gate. */
   private shadowBook: ShadowBook;
+  /** The engine's multi-timeframe scan, measured in the shadow book only. */
+  private mtfShadow: MtfShadowScan;
 
   /**
    * Thompson sampling: select strategy by sampling from Beta(alpha, beta) posteriors.
@@ -885,6 +889,8 @@ export class BotEngine {
           symbol: string;
           candles: Array<{ timestamp: string; open: number; close: number; high: number; low: number; volume: number }>;
           mover: typeof uniqueSymbols[0];
+          /** Every completed candle fetched (the scan only gets the last 50). */
+          full: HistoricalBar[];
         }> = [];
 
         const now = new Date();
@@ -907,6 +913,7 @@ export class BotEngine {
                   open: b.open, close: b.close, high: b.high, low: b.low, volume: b.volume,
                 })),
                 mover,
+                full: completedBars(bars),
               });
             }
           } catch { /* skip */ }
@@ -921,6 +928,7 @@ export class BotEngine {
             rustSignals = result.signals ?? [];
             this.shadowBook.record(rustSignals).catch(() => {});
           } catch { /* scan failed */ }
+          this.mtfShadow.run(candleData.map(d => ({ symbol: d.symbol, bars5m: d.full }))).catch(() => {});
 
           signals = rustSignals.map(sig => {
             const mover = moverMap.get(sig.symbol);

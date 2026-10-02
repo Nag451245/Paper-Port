@@ -1319,6 +1319,41 @@ def _is_no_data(result):
     return "no data" in err
 
 
+# Breeze's history API serves 1second, 1minute, 5minute, 30minute and 1day
+# candles only. 15-minute and 1-hour candles are built from 5-minute ones.
+_AGGREGATE_MINUTES = {"15minute": 15, "1hour": 60}
+
+
+def _aggregate_bars(bars, minutes, session_start=(9, 15)):
+    """Combine 5-minute candles into `minutes`-long ones aligned to the session open.
+
+    NSE: 15m at 09:15, 09:30 ...; 1h at 09:15, 10:15 ... 15:15. Input oldest first.
+    """
+    start = session_start[0] * 60 + session_start[1]
+    out, cur, cur_key = [], None, None
+    for b in bars:
+        ts = b["timestamp"]
+        try:
+            m = int(ts[11:13]) * 60 + int(ts[14:16])
+        except ValueError:
+            continue
+        bucket = start + ((m - start) // minutes) * minutes
+        key = f"{ts[:10]} {bucket // 60:02d}:{bucket % 60:02d}:00"
+        if key != cur_key:
+            if cur:
+                out.append(cur)
+            cur = dict(b, timestamp=key)
+            cur_key = key
+        else:
+            cur["high"] = max(cur["high"], b["high"])
+            cur["low"] = min(cur["low"], b["low"])
+            cur["close"] = b["close"]
+            cur["volume"] += b["volume"]
+    if cur:
+        out.append(cur)
+    return out
+
+
 def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None, exchange="NSE",
                         product=None, expiry=None, strike=None, right=None):
     """Fetch historical candles via Breeze, for cash, futures or an option contract.
@@ -1330,9 +1365,11 @@ def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None
     if not breeze_instance:
         return {"error": "Breeze session not initialized", "bars": []}
 
-    breeze_interval = _HIST_INTERVALS.get(str(interval).lower())
-    if not breeze_interval:
+    wanted_interval = _HIST_INTERVALS.get(str(interval).lower())
+    if not wanted_interval:
         return {"symbol": symbol, "bars": [], "error": f"Unsupported interval '{interval}'"}
+    aggregate_to = _AGGREGATE_MINUTES.get(wanted_interval)
+    breeze_interval = "5minute" if aggregate_to else wanted_interval
 
     exchange = (exchange or "NSE").upper()
     product = (product or ("futures" if exchange == "MCX" else "cash")).lower()
@@ -1350,7 +1387,7 @@ def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None
     if not to_date:
         to_date = datetime.now().strftime("%Y-%m-%d")
 
-    cache_key = f"hist:{symbol}:{exchange}:{product}:{expiry}:{strike}:{right}:{breeze_interval}:{from_date}:{to_date}"
+    cache_key = f"hist:{symbol}:{exchange}:{product}:{expiry}:{strike}:{right}:{wanted_interval}:{from_date}:{to_date}"
     cached = _cache_get(cache_key)
     if cached:
         return cached
@@ -1414,6 +1451,8 @@ def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None
                     seen[ts] = {"timestamp": ts, "open": o, "high": h, "low": l, "close": c, "volume": v}
 
         bars = [seen[k] for k in sorted(seen)]
+        if aggregate_to:
+            bars = _aggregate_bars(bars, aggregate_to, (9, 0) if exchange == "MCX" else (9, 15))
         print(f"[Breeze Bridge] Historical {label} {breeze_interval} {from_date}->{to_date}: "
               f"{len(bars)} bars in {len(windows)} window(s)")
         result_data = {"symbol": symbol, "bars": bars, "count": len(bars), "windows": len(windows)}

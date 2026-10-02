@@ -503,8 +503,14 @@ export interface ShadowResponse {
   recent: { strategy: string; symbol: string; side: string; day: string; entry: number | null; exitPrice: number | null; exitReason: string | null; rMultiple: number | null; netReturn: number | null }[];
 }
 
+export interface LakeStatus {
+  stocks: number; withIntraday: number; intradayComplete: number; dailyComplete: number;
+  earliestIntraday: string | null; sizeBytes: number; callsToday: number;
+}
+
 export const edgeApi = {
   getShadow: () => api.get<ShadowResponse>('/edge/shadow'),
+  getLake: () => api.get<LakeStatus>('/edge/lake'),
   getComposition: () => api.get('/edge/composition'),
   getKelly: (strategy: string) => api.get(`/edge/composition/kelly/${strategy}`),
   walkForward: (data: { strategy: string; symbol: string; candles: unknown[]; param_grid?: Record<string, number[]>; num_folds?: number }) =>

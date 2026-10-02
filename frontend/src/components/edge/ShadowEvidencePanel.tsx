@@ -21,6 +21,8 @@ export default function ShadowEvidencePanel() {
     refetchInterval: 5 * 60_000,
   });
 
+  const lake = useQuery({ queryKey: ['edge-lake'], queryFn: async () => (await edgeApi.getLake()).data, refetchInterval: 10 * 60_000 }).data;
+
   if (isLoading) return <div className="flex justify-center py-16"><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>;
   if (!data) return <p className="text-sm text-slate-400 py-16 text-center">Could not load the live evidence.</p>;
 
@@ -36,6 +38,13 @@ export default function ShadowEvidencePanel() {
           (t ≥ {data.rule.minT}). Gate: <b>{data.gateMode === 'enforce' ? 'unproven strategies cannot auto-trade' : 'unproven strategies are labelled, not blocked'}</b>.
           {data.open > 0 && <> {data.open} trade{data.open === 1 ? '' : 's'} still open.</>}
         </p>
+        {lake && (
+          <p className="text-xs text-slate-500">
+            Candle history for research: {lake.withIntraday} of {lake.stocks} stocks
+            {lake.earliestIntraday ? ` back to ${lake.earliestIntraday}` : ''} ({lake.intradayComplete} complete),
+            {' '}{(lake.sizeBytes / 1e6).toFixed(1)} MB on disk. Filled after each close and overnight.
+          </p>
+        )}
       </div>
 
       <div className="rounded-xl border border-slate-200/60 bg-white shadow-sm overflow-hidden">

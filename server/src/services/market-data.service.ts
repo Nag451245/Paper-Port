@@ -10,6 +10,7 @@ import { istDateStr, istDaysAgo } from '../lib/ist.js';
 import { parseInstrumentSymbol, isDerivativeSymbol, type InstrumentSpec } from '../lib/instrument.js';
 import { getUpstox } from './upstox.service.js';
 import { getMarketMovers } from './market-movers.service.js';
+import { lakeInterval, readBars as readLakeBars } from '../lib/candle-lake.js';
 import { activeUpstoxToken } from '../lib/upstox-session.js';
 
 const log = createChildLogger('MarketData');
@@ -791,6 +792,20 @@ export class MarketDataService {
     const lastDay = [toDate.slice(0, 10), today, contract?.expiry ? istDateStr(contract.expiry) : '9999-12-31']
       .sort()[0];
 
+    // The candle lake (lib/candle-lake.ts) keeps years of NSE stock candles as
+    // files, filled nightly. Past ranges it covers are served from disk, with
+    // no database or broker call.
+    const fromLake = !contract && exchange === 'NSE' && lastDay < today ? lakeInterval(interval) : null;
+    if (fromLake) {
+      try {
+        const bars = readLakeBars(symbol, fromLake, fromDate.slice(0, 10), lastDay);
+        if (coversRange(bars, fromDate, lastDay)) {
+          if (this.cache) await this.cache.set(cacheKey, bars, ttl);
+          return bars;
+        }
+      } catch { /* lake missing or unreadable: fall through */ }
+    }
+
     // The candle store is only trusted when it covers the whole range. It used
     // to be served whenever it held 5 or more bars, so a 3-year backtest could
     // silently run on the 10 days some earlier request happened to save — and
@@ -937,35 +952,55 @@ export class MarketDataService {
     return true;
   }
 
+  /**
+   * Keep completed daily candles in Postgres for quick reuse. Intraday candles
+   * are NOT stored here any more: writing each one as its own upsert, on every
+   * fetch the bots make, hammered the database. Intraday history lives in the
+   * candle lake (files) instead. One batched insert per call; existing rows are
+   * left alone.
+   */
   private async backfillCandleStore(symbol: string, exchange: string, interval: string, bars: HistoricalBar[]): Promise<void> {
+    if (!isDailyInterval(interval)) return;
+    const today = istDateStr();
+    const records = bars
+      .filter(b => b.timestamp && b.close > 0 && b.timestamp.slice(0, 10) < today)
+      .map(b => ({
+        symbol, exchange, interval,
+        timestamp: new Date(barInstant(b.timestamp)),
+        open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume ?? 0,
+      }));
+    if (records.length === 0) return;
     try {
-      const prisma = getPrisma();
-      const records = bars
-        .filter(b => b.timestamp && b.close > 0)
-        .map(b => ({
-          symbol, exchange, interval,
-          timestamp: new Date(barInstant(b.timestamp)),
-          open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume ?? 0,
-        }));
-
-      if (records.length === 0) return;
-
-      // Upsert in batches to avoid unique constraint violations
-      for (const rec of records) {
-        await prisma.candleStore.upsert({
-          where: {
-            symbol_exchange_interval_timestamp: {
-              symbol: rec.symbol, exchange: rec.exchange,
-              interval: rec.interval, timestamp: rec.timestamp,
-            },
-          },
-          update: { open: rec.open, high: rec.high, low: rec.low, close: rec.close, volume: rec.volume },
-          create: rec,
-        }).catch(err => log.warn({ err, symbol: rec.symbol }, 'Failed to upsert candle store record'));
-      }
-    } catch {
-      // Non-critical — don't block the main data flow
+      await getPrisma().candleStore.createMany({ data: records, skipDuplicates: true });
+    } catch (err) {
+      log.debug({ err: (err as Error).message, symbol }, 'Candle store write skipped');
     }
+  }
+
+  /**
+   * Candles straight from a broker (Upstox, then ICICI Breeze; Yahoo only for
+   * daily), bypassing every cache and the candle store. Used by the candle lake
+   * sync. `brokerConnected` says whether a broker could have answered, so an
+   * empty result can be told apart from "nobody logged in".
+   */
+  async rawHistory(symbol: string, interval: string, fromDate: string, toDate: string, exchange = 'NSE'): Promise<{
+    bars: HistoricalBar[]; source: 'upstox' | 'breeze' | 'yahoo' | null; brokerConnected: boolean;
+  }> {
+    const upstox = !!(await this.upstoxToken());
+    if (upstox) {
+      const bars = await this.fetchHistoryFromUpstox(symbol, interval, fromDate, toDate, undefined, exchange).catch(() => []);
+      if (bars.length) return { bars, source: 'upstox', brokerConnected: true };
+    }
+    const breeze = await this.ensureBreezeBridgeSession().catch(() => false);
+    if (breeze) {
+      const bars = await this.fetchFromBreeze(symbol, interval, fromDate, toDate, undefined, exchange).catch(() => []);
+      if (bars.length) return { bars, source: 'breeze', brokerConnected: true };
+    }
+    if (isDailyInterval(interval)) {
+      const bars = await this.fetchHistoryFromYahoo(symbol, interval, fromDate, toDate, exchange).catch(() => []);
+      if (bars.length) return { bars, source: 'yahoo', brokerConnected: upstox || breeze };
+    }
+    return { bars: [], source: null, brokerConnected: upstox || breeze };
   }
 
   async getTopMovers(count = 20): Promise<{ gainers: MarketMover[]; losers: MarketMover[] }> {
@@ -2058,6 +2093,8 @@ export class MarketDataService {
       '5m': '5minute', '5min': '5minute', '5minute': '5minute',
       '15m': '15minute', '15min': '15minute', '15minute': '15minute',
       '30m': '30minute', '30min': '30minute', '30minute': '30minute',
+      // Used to be missing, so 1-hour requests were sent as daily and came back as daily bars.
+      '1h': '1hour', '1hour': '1hour', '60m': '1hour', '60min': '1hour', 'hour': '1hour',
     };
     return map[interval.toLowerCase()] ?? '1day';
   }

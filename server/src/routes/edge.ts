@@ -6,6 +6,7 @@ import { engineAdvancedSignals, engineIVSurface, engineWalkForward } from '../li
 import { istDateStr } from '../lib/ist.js';
 import type { ServerOrchestrator } from '../services/server-orchestrator.js';
 import { getShadowBook, gateMode } from '../services/shadow-book.service.js';
+import { getCandleLakeSync } from '../services/candle-lake-sync.service.js';
 import { EVIDENCE_RULE, INTRADAY_COST } from '../lib/shadow-math.js';
 
 export async function edgeRoutes(app: FastifyInstance) {
@@ -136,6 +137,9 @@ export async function edgeRoutes(app: FastifyInstance) {
     ]);
     return { gateMode: gateMode(), rule: { ...EVIDENCE_RULE, costPct: INTRADAY_COST * 100 }, open, strategies, recent };
   });
+
+  // ── Candle lake: how much history is stored for analysis ──
+  app.get('/lake', async () => getCandleLakeSync().status());
 
   // ── Track Record / Performance ──
   app.get('/track-record', async (req) => {

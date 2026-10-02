@@ -35,6 +35,11 @@ import { TargetTracker } from './services/target-tracker.service.js';
 import { EODReviewService } from './services/eod-review.service.js';
 import { getStockAlerts } from './services/stock-alerts.service.js';
 import { getShadowBook } from './services/shadow-book.service.js';
+import { getCandleLakeSync } from './services/candle-lake-sync.service.js';
+import { PatternScanner } from './services/pattern-scanner.service.js';
+import { spawn } from 'child_process';
+import { existsSync } from 'fs';
+import { fileURLToPath } from 'url';
 import { GlobalMarketService } from './services/global-market.service.js';
 import { StopLossMonitor } from './services/stop-loss-monitor.service.js';
 import { PriceFeedService } from './services/price-feed.service.js';
@@ -405,6 +410,40 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
   orchestrator.scheduleMarketDay('40 10 * * 1-5', async () => {
     try { await getShadowBook(getPrisma()).settleOpen(true); } catch (err) { app.log.warn(`[ShadowBook] ${(err as Error).message}`); }
+  });
+
+  // Candle lake — today's candles for every stock after the close (16:15 IST), then
+  // older history overnight, last run 02:45 IST (Upstox logins expire at 03:30).
+  orchestrator.scheduleMarketDay('45 10 * * 1-5', async () => {
+    try { await getCandleLakeSync().sync(); } catch (err) { app.log.warn(`[CandleLake] ${(err as Error).message}`); }
+  });
+  orchestrator.scheduleAlways('15,45 11-20 * * *', async () => {
+    try { await getCandleLakeSync().backfill(1_400); } catch (err) { app.log.warn(`[CandleLake] ${(err as Error).message}`); }
+  });
+
+  // Promoted intraday patterns, checked at their checkpoints and sent to the shadow book only.
+  let patternScanner: PatternScanner | null = null;
+  const scanPatterns = (cp: '09:30' | '10:15' | '11:15' | '13:15') => async () => {
+    try {
+      if (!patternScanner) {
+        const { MarketDataService } = await import('./services/market-data.service.js');
+        patternScanner = new PatternScanner(new MarketDataService(), getShadowBook(getPrisma()));
+      }
+      await patternScanner.run(cp);
+    } catch (err) { app.log.warn(`[PatternScanner] ${(err as Error).message}`); }
+  };
+  orchestrator.scheduleMarketDay('1 4 * * 1-5', scanPatterns('09:30'));     // 09:31 IST
+  orchestrator.scheduleMarketDay('46 4 * * 1-5', scanPatterns('10:15'));    // 10:16 IST
+  orchestrator.scheduleMarketDay('46 5 * * 1-5', scanPatterns('11:15'));    // 11:16 IST
+  orchestrator.scheduleMarketDay('46 7 * * 1-5', scanPatterns('13:15'));    // 13:16 IST
+
+  // Re-run the pattern search every Saturday 07:00 IST, in its own process so
+  // the API never stalls while it crunches years of candles.
+  orchestrator.scheduleAlways('30 1 * * 6', () => {
+    const cli = fileURLToPath(new URL('./cli/mine-patterns.js', import.meta.url));
+    if (!existsSync(cli)) return;
+    const child = spawn(process.execPath, ['--max-old-space-size=6144', cli], { stdio: 'ignore' });
+    child.on('exit', (code) => app.log.info(`[PatternSearch] finished with code ${code}`));
   });
 
   // EOD Review — 15:35 IST = 10:05 UTC

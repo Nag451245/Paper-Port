@@ -102,6 +102,21 @@ class HistoricalTests(unittest.TestCase):
         self.assertNotIn("error", r)
         self.assertTrue(all(b["timestamp"] >= "2025-01-13" for b in r["bars"]))
 
+    def test_15minute_and_1hour_are_built_from_5minute(self):
+        self.fetch("RELIANCE", "15minute", "2025-01-01", "2025-01-02")
+        self.assertEqual(self.fake.calls[0]["interval"], "5minute")
+
+    def test_aggregation_aligns_to_the_session_open(self):
+        five = [{"timestamp": f"2025-01-01 {h:02d}:{m:02d}:00", "open": 100 + i, "high": 101 + i,
+                 "low": 99 + i, "close": 100.5 + i, "volume": 10}
+                for i, (h, m) in enumerate([(9, 15), (9, 20), (9, 25), (9, 30), (10, 10), (10, 15)])]
+        q = app._aggregate_bars(five, 15)
+        self.assertEqual([b["timestamp"][11:16] for b in q], ["09:15", "09:30", "10:00", "10:15"])
+        self.assertEqual((q[0]["open"], q[0]["high"], q[0]["low"], q[0]["close"], q[0]["volume"]), (100, 103, 99, 102.5, 30))
+        h = app._aggregate_bars(five, 60)
+        self.assertEqual([b["timestamp"][11:16] for b in h], ["09:15", "10:15"])
+        self.assertEqual(h[0]["volume"], 50)
+
     def test_unknown_interval_is_refused(self):
         r = self.fetch("TCS", "7minute", "2025-01-01", "2025-01-05")
         self.assertIn("Unsupported interval", r["error"])
