@@ -9,7 +9,7 @@ import { emit } from '../lib/event-bus.js';
 import { istDateStr, istDaysAgo } from '../lib/ist.js';
 import { parseInstrumentSymbol, isDerivativeSymbol, type InstrumentSpec } from '../lib/instrument.js';
 import { getUpstox } from './upstox.service.js';
-import { BrokerAccountsService } from './broker-accounts.service.js';
+import { activeUpstoxToken } from '../lib/upstox-session.js';
 
 const log = createChildLogger('MarketData');
 
@@ -1319,6 +1319,16 @@ export class MarketDataService {
       if (cached) return { expiries: cached };
     }
 
+    // The user's chosen broker first, when it is Upstox: its instrument file
+    // lists every listed contract, so no extra API call is needed.
+    if (await this.upstoxToken()) {
+      const upstoxExpiries = await getUpstox().expiries(symbol);
+      if (upstoxExpiries.length > 0) {
+        if (this.cache) await this.cache.set(cacheKey, upstoxExpiries, 3600);
+        return { expiries: upstoxExpiries };
+      }
+    }
+
     // Source 1: Python Breeze Bridge (official SDK — most reliable)
     const bridgeActive = await this.ensureBreezeBridgeSession();
     if (bridgeActive) {
@@ -1386,8 +1396,15 @@ export class MarketDataService {
       }
     } catch { /* NSE may be blocked from cloud servers */ }
 
-    // No bridge, no NSE — session error
-    return { expiries: [], sessionError: true, message: 'Breeze API session not active. Please generate a session in Settings.' };
+    // Last resort: Upstox's public instrument file needs no login, so it can
+    // list expiries even when no broker is connected.
+    const listed = await getUpstox().expiries(symbol).catch(() => [] as string[]);
+    if (listed.length > 0) {
+      if (this.cache) await this.cache.set(cacheKey, listed, 3600);
+      return { expiries: listed };
+    }
+
+    return { expiries: [], sessionError: true, message: 'No option data source is connected. Connect ICICI Breeze or Upstox in Settings → Broker.' };
   }
 
   async getOptionsChain(symbol: string, expiry?: string) {
@@ -1875,22 +1892,8 @@ export class MarketDataService {
 
   // ── Upstox: used only when a user has made it the active broker ──
 
-  private upstoxAccounts: BrokerAccountsService | null = null;
-
-  private async upstoxToken(userId?: string): Promise<string | null> {
-    try {
-      if (!this.upstoxAccounts) {
-        const accounts = new BrokerAccountsService(getPrisma());
-        this.upstoxAccounts = accounts;
-        getUpstox().onAuthFailure ??= (token) => {
-          log.warn('Upstox rejected the access token; marking the Upstox login as expired');
-          accounts.expireUpstoxToken(token).catch(() => {});
-        };
-      }
-      return await this.upstoxAccounts.upstoxToken(userId);
-    } catch {
-      return null;                                  // no database (tests, startup): skip Upstox
-    }
+  private upstoxToken(userId?: string): Promise<string | null> {
+    return activeUpstoxToken(userId);
   }
 
   private async fetchQuoteFromUpstox(symbol: string, exchange: string): Promise<MarketQuote | null> {
@@ -2711,6 +2714,15 @@ export class MarketDataService {
       }
     } catch (err) {
       console.log(`[LotSizes] Bridge fetch error: ${err}`);
+    }
+
+    // Upstox's public instrument file carries every contract's lot size and
+    // needs no login, so it answers even without a broker session.
+    const listed = await getUpstox().lotSizes().catch(() => ({} as Record<string, number>));
+    if (Object.keys(listed).length > 0) {
+      const result = { lotSizes: listed, source: 'upstox-instruments' };
+      if (this.cache) await this.cache.set(cacheKey, result, 3600);
+      return result;
     }
 
     return { lotSizes: {}, source: 'none' };

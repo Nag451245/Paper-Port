@@ -421,9 +421,9 @@ export class BacktestService {
     if (bars.length < 5) {
       // Say which source was missing, so the fix is obvious.
       const why = contract
-        ? 'Futures and options history comes only from ICICI Breeze. Check that Breeze is connected ' +
-          'today, and that this contract (underlying, expiry, strike) really traded in that period — ' +
-          'Breeze may not keep data for long-expired contracts.'
+        ? 'Futures and options history comes from your broker: ICICI Breeze, or Upstox (expired contracts ' +
+          'need an Upstox Plus plan). Check that the broker is connected today, and that this contract ' +
+          '(underlying, expiry, strike) really traded in that period.'
         : !isDailyInterval(interval)
           ? 'Intraday history comes from ICICI Breeze (the backup source keeps only the last ~60 days ' +
             'of 5-minute data). Connect Breeze in Settings, or pick a recent period or daily candles.'

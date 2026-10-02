@@ -6,7 +6,7 @@ const MASTER = [
   { segment: 'NSE_EQ', instrument_type: 'EQ', trading_symbol: 'RELIANCE', instrument_key: 'NSE_EQ|INE002A01018' },
   { segment: 'BSE_EQ', instrument_type: 'EQ', trading_symbol: 'RELIANCE', instrument_key: 'BSE_EQ|INE002A01018' },
   // 2026-10-29 23:59:59 IST
-  { segment: 'NSE_FO', instrument_type: 'CE', underlying_symbol: 'NIFTY', expiry: Date.parse('2026-10-29T23:59:59+05:30'), strike_price: 24000.0, instrument_key: 'NSE_FO|111' },
+  { segment: 'NSE_FO', instrument_type: 'CE', underlying_symbol: 'NIFTY', expiry: Date.parse('2026-10-29T23:59:59+05:30'), strike_price: 24000.0, lot_size: 75, instrument_key: 'NSE_FO|111' },
   { segment: 'NSE_FO', instrument_type: 'FUT', underlying_symbol: 'NIFTY', expiry: Date.parse('2026-10-29T23:59:59+05:30'), strike_price: 0, instrument_key: 'NSE_FO|222' },
 ];
 
@@ -129,5 +129,47 @@ describe('option chain', () => {
     expect(url).toContain('instrument_key=NSE_INDEX%7CNifty%2050');
     expect(url).toContain('expiry_date=2026-10-29');
     expect(chain?.expiries).toEqual(['2026-10-29']);
+  });
+});
+
+describe('instrument file extras (no login needed)', () => {
+  it('lists upcoming option expiries and lot sizes per underlying', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-10-02T10:00:00+05:30') });
+    onTestFinished(() => vi.useRealTimers());
+    const svc = new UpstoxService(fakeFetch(() => json({})));
+    expect(await svc.expiries('nifty')).toEqual(['2026-10-29']);
+    expect(await svc.lotSizes()).toMatchObject({ NIFTY: 75 });
+  });
+});
+
+describe('expired contracts (for backtests)', () => {
+  it('finds the expired contract by strike and type, then pages its candles', async () => {
+    const f = fakeFetch((url) => {
+      if (url.includes('/expired-instruments/option/contract')) {
+        return json({ status: 'success', data: [
+          { instrument_type: 'CE', strike_price: 20400, instrument_key: 'NSE_FO|1|17-04-2025' },
+          { instrument_type: 'PE', strike_price: 20400, instrument_key: 'NSE_FO|47983|17-04-2025' },
+        ] });
+      }
+      return json({ status: 'success', data: { candles: [['2025-04-10T09:15:00+05:30', 12, 13, 11, 12.5, 500, 9000]] } });
+    });
+    const bars = await new UpstoxService(f).history('tok', 'NIFTY2025041720400PE', '5minute', '2025-04-01', '2025-04-30');
+
+    const urls = f.mock.calls.map((c) => String(c[0]));
+    expect(urls.find((u) => u.includes('/option/contract'))).toContain('instrument_key=NSE_INDEX%7CNifty%2050&expiry_date=2025-04-17');
+    const candleCalls = urls.filter((u) => u.includes('/expired-instruments/historical-candle/'));
+    expect(candleCalls[0]).toContain('/historical-candle/NSE_FO%7C47983%7C17-04-2025/5minute/');
+    // History stops at expiry, not at the requested end date.
+    expect(candleCalls.at(-1)).toContain('/2025-04-17/');
+    expect(bars).toEqual([{ timestamp: '2025-04-10 09:15:00', open: 12, high: 13, low: 11, close: 12.5, volume: 500 }]);
+  });
+
+  it('returns nothing, without marking the login bad, when the account has no Upstox Plus', async () => {
+    const f = fakeFetch(() => json({ status: 'error', errors: [{ errorCode: 'UDAPI1149', message: 'This API is available exclusively with an Upstox Plus plan subscription.' }] }, false, 403));
+    const svc = new UpstoxService(f);
+    const rejected: string[] = [];
+    svc.onAuthFailure = (t) => rejected.push(t);
+    expect(await svc.history('tok', 'NIFTY2025041720400PE', '1day', '2025-03-01', '2025-04-17')).toEqual([]);
+    expect(rejected).toEqual([]);
   });
 });

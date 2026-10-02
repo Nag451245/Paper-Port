@@ -4,6 +4,8 @@ import { createHash, createDecipheriv } from 'crypto';
 import https from 'https';
 import { env } from '../config.js';
 import { engineGreeks, isEngineAvailable } from '../lib/rust-engine.js';
+import { activeUpstoxToken } from '../lib/upstox-session.js';
+import { getUpstox } from './upstox.service.js';
 
 const CACHE_TTL = 120;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -1044,7 +1046,17 @@ export class IntelligenceService {
   }
 
   private async fetchOptionsChain(symbol: string): Promise<any> {
-    // Primary: Python Breeze Bridge (correct symbol mapping, IV computation, Greeks)
+    // The user's chosen broker first, when it is Upstox (Greeks included).
+    const upstoxToken = await activeUpstoxToken();
+    if (upstoxToken) {
+      const chain = await getUpstox().optionChain(upstoxToken, symbol.toUpperCase());
+      if (chain && chain.strikes.length > 0) {
+        console.log(`[Intelligence] ${symbol} chain → Upstox (${chain.strikes.length} strikes, pcr=${chain.pcr})`);
+        return chain;
+      }
+    }
+
+    // Python Breeze Bridge (correct symbol mapping, IV computation, Greeks)
     try {
       const bridgeUrl = `${env.BREEZE_BRIDGE_URL}/option-chain/${encodeURIComponent(symbol.toUpperCase())}`;
       const ac = new AbortController();

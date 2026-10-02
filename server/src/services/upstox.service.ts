@@ -169,6 +169,9 @@ export class UpstoxService {
     const spec = upstoxInterval(interval);
     const maps = await this.instrumentMaps();
     const key = maps ? resolveKey(maps, symbol, exchange) : null;
+    // A contract missing from today's instrument file has expired: Upstox keeps
+    // those under a separate API (Upstox Plus only).
+    if (!key && maps && spec && isDerivativeSymbol(symbol)) return this.expiredHistory(token, maps, symbol, interval, from, to);
     if (!spec || !key) return [];
 
     const daily = isDailyInterval(interval);
@@ -193,6 +196,73 @@ export class UpstoxService {
       return [];
     }
     return [...byTime.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  }
+
+  /** Upcoming option expiries for an underlying, from the public instrument file (no login needed). */
+  async expiries(symbol: string): Promise<string[]> {
+    const maps = await this.instrumentMaps();
+    const today = formatBarTime(Date.now(), true);
+    return [...(maps?.optionExpiries.get(symbol.trim().toUpperCase()) ?? [])].filter((e) => e >= today).sort();
+  }
+
+  /** Current F&O lot sizes by underlying, from the public instrument file (no login needed). */
+  async lotSizes(): Promise<Record<string, number>> {
+    const maps = await this.instrumentMaps();
+    return maps ? Object.fromEntries(maps.lotSizes) : {};
+  }
+
+  /**
+   * Candles for an expired futures or options contract (for backtests).
+   * Finds the contract in Upstox's expired list for that expiry, then pages
+   * through its history. Upstox serves these to Upstox Plus subscribers only.
+   */
+  private async expiredHistory(
+    token: string, maps: InstrumentMaps, symbol: string, interval: string, from: string, to: string,
+  ): Promise<HistoricalBar[]> {
+    const EXPIRED_INTERVALS: Record<string, string> = {
+      '1minute': '1minute', '1m': '1minute', 'minute': '1minute',
+      '5minute': '5minute', '5m': '5minute', '15minute': '15minute', '15m': '15minute',
+      '30minute': '30minute', '30m': '30minute',
+    };
+    const daily = isDailyInterval(interval);
+    const upInterval = daily ? 'day' : EXPIRED_INTERVALS[interval.toLowerCase()];
+    const spec = parseInstrumentSymbol(symbol);
+    const underlyingKey = resolveKey(maps, spec.underlying);
+    if (!upInterval || !underlyingKey || !spec.expiry || spec.exchange !== 'NFO') return [];
+    const expiry = istDateStr(spec.expiry);
+    const kind = spec.instrumentType === 'FUTURES' ? 'future' : 'option';
+    try {
+      const contracts = await this.get(
+        `/v2/expired-instruments/${kind}/contract?instrument_key=${encodeURIComponent(underlyingKey)}&expiry_date=${expiry}`, token,
+      ) as any[];
+      const match = (contracts ?? []).find((c) => kind === 'future'
+        || (c.instrument_type === spec.optionType && Number(c.strike_price) === spec.strike));
+      if (!match?.instrument_key) return [];
+
+      const windowDays = daily ? 3600 : 28;
+      const end = expiry < to ? expiry : to;
+      const byTime = new Map<string, HistoricalBar>();
+      for (let start = from; start <= end; start = addDays(start, windowDays)) {
+        const stop = addDays(start, windowDays - 1) < end ? addDays(start, windowDays - 1) : end;
+        const data = await this.get(
+          `/v2/expired-instruments/historical-candle/${encodeURIComponent(match.instrument_key)}/${upInterval}/${stop}/${start}`, token,
+        );
+        for (const c of (data?.candles ?? []) as any[]) {
+          const [ts, open, high, low, close, volume] = c;
+          if (!(Number(open) > 0)) continue;
+          const timestamp = formatBarTime(Date.parse(ts), daily);
+          byTime.set(timestamp, { timestamp, open: +open, high: +high, low: +low, close: +close, volume: Number(volume) || 0 });
+        }
+      }
+      return [...byTime.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    } catch (err) {
+      const msg = (err as Error).message;
+      log.warn({ symbol, err: msg }, /Plus/i.test(msg)
+        ? 'Expired-contract history needs an Upstox Plus subscription'
+        : 'Upstox expired-contract history failed');
+      this.authFailed(token, err);
+      return [];
+    }
   }
 
   /** The Upstox account the token belongs to (its user_id), or null if Upstox refuses the token. */

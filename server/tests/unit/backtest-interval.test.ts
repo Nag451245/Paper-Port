@@ -41,11 +41,11 @@ describe('BacktestService interval and contracts', () => {
     expect(JSON.parse(result.strategyParams).interval).toBe('5minute');
   });
 
-  it('explains that contract history needs Breeze when none comes back', async () => {
+  it('explains that contract history needs a connected broker when none comes back', async () => {
     getHistory.mockResolvedValue([]);
     const run = new BacktestService(prisma).run('u1', { ...input, symbol: 'NIFTY2025022724000CE' });
     await expect(run).rejects.toBeInstanceOf(BacktestError);
-    await expect(run).rejects.toThrow(/only from ICICI Breeze/);
+    await expect(run).rejects.toThrow(/comes from your broker: ICICI Breeze, or Upstox/);
   });
 
   it('explains the intraday limit when no 5-minute history comes back', async () => {
