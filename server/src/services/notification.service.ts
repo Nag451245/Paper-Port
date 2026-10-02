@@ -34,7 +34,8 @@ export class NotificationService {
       notificationType: type,
     });
 
-    if (type === 'critical' || type === 'trade' || type === 'signal') {
+    // Signals stay in-app; Telegram gets them only through the stock alert digest.
+    if (type === 'critical' || type === 'trade') {
       this.telegram.notifyUser(userId, title, message).catch(() => {});
     }
   }

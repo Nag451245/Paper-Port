@@ -26,7 +26,6 @@ import { mlScore, isMLServiceAvailable, mlScoreSequence, mlScoreTFT, mlEnsembleS
 import { StrategyRegistry, type Bar as StrategyBar, type Signal as StrategySignal } from './strategy-sdk.js';
 import { RegimeDetectorService } from './regime-detector.service.js';
 import { PortfolioOptimizerService } from './portfolio-optimizer.service.js';
-import { TelegramService } from './telegram.service.js';
 
 const log = createChildLogger('BotEngine');
 
@@ -260,7 +259,6 @@ export class BotEngine {
   private decisionFusion = new DecisionFusionService();
   private lessonsEngine = new LessonsEngineService();
   private regimeDetector: RegimeDetectorService;
-  private telegramService: TelegramService;
 
   constructor(private prisma: PrismaClient, oms?: OrderManagementService) {
     this.tradeService = new TradeService(prisma, oms);
@@ -272,7 +270,6 @@ export class BotEngine {
     this.twapExecutor = new TWAPExecutor(prisma);
     this.twapExecutor.setTradeService(this.tradeService);
     this.regimeDetector = new RegimeDetectorService(prisma);
-    this.telegramService = new TelegramService(prisma);
     this._rustAvailable = isEngineAvailable();
     console.log(`[BotEngine] Initialized — Rust engine: ${this._rustAvailable ? 'AVAILABLE' : 'NOT FOUND (using Gemini AI only)'}`);
 
@@ -2232,19 +2229,7 @@ export class BotEngine {
       }
     } catch { /* options signals are best-effort */ }
 
-    // Consolidated Telegram notification for all Rust scan signals
-    if (rustSignals.length > 0) {
-      try {
-        const lines = rustSignals.slice(0, 10).map(sig => {
-          const emoji = sig.direction === 'BUY' ? '🟢' : '🔴';
-          return `${emoji} <b>${sig.direction} ${sig.symbol}</b> @ ₹${sig.entry.toFixed(2)} | Conf: ${(sig.confidence * 100).toFixed(0)}% | SL: ₹${sig.stop_loss.toFixed(2)} | T: ₹${sig.target.toFixed(2)}`;
-        });
-        const summary = `🦀 <b>Rust Engine Scan</b> — ${rustSignals.length} signal(s)${optionsSignalCount > 0 ? ` + ${optionsSignalCount} options` : ''}\n\n${lines.join('\n')}`;
-        await this.telegramService.notifyUser(userId, '🦀 Rust Scan Summary', summary);
-      } catch (err) {
-        log.warn({ err, userId }, 'Failed to send Rust scan Telegram summary');
-      }
-    }
+    // Telegram hears about these through the stock alert digest (stock-alerts.service), not per scan.
 
     await this.prisma.tradingBot.update({
       where: { id: botId },

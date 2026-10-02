@@ -23,6 +23,7 @@ import { emit } from '../lib/event-bus.js';
 import type { LearningEngine } from './learning-engine.js';
 import type { BotEngine } from './bot-engine.js';
 import { TelegramService } from './telegram.service.js';
+import { getStockAlerts } from './stock-alerts.service.js';
 import { engineRecordOutcome } from '../lib/rust-engine.js';
 import { mlOnlineUpdate, isMLServiceAvailable } from '../lib/ml-service-client.js';
 
@@ -34,6 +35,8 @@ export function registerAllWorkers(
   botEngine?: BotEngine,
 ): void {
   const telegram = new TelegramService(prisma);
+  // Stock signals reach Telegram only through the alert digest, never one by one.
+  const stockAlerts = getStockAlerts(prisma);
   log.info('Registering event bus workers for all 5 categories');
 
   // ── Execution events: order fills, position changes, OMS state transitions ──
@@ -223,13 +226,8 @@ export function registerAllWorkers(
       case 'SIGNAL_GENERATED':
         if ('userId' in event) {
           wsHub.broadcastToUser(event.userId, { type: 'signal_generated', data: event });
-          const confidence = event.confidence ?? 0;
-          if (confidence >= 0.3) {
-            telegram.notifySignal(
-              event.userId, event.symbol, event.direction ?? 'LONG',
-              confidence, event.entry ?? 0, event.target ?? 0, event.stopLoss ?? 0,
-              event.source,
-            ).catch(err => log.warn({ err }, 'Telegram signal notification failed'));
+          if (event.userId !== 'system' && (event.confidence ?? 0) >= 0.3 && !/options/i.test(event.source ?? '')) {
+            stockAlerts.offer(event.symbol, event.direction ?? '', event.source ?? '');
           }
         }
         break;
@@ -251,12 +249,7 @@ export function registerAllWorkers(
           mlScore: event.mlScore,
         }, 'Pipeline signal received — routing to bot engine');
 
-        if (event.confidence >= 0.5) {
-          telegram.notifyPipelineSignal(
-            event.symbol, event.direction, event.confidence,
-            event.strategy, event.mlScore, event.source,
-          ).catch(err => log.warn({ err }, 'Telegram pipeline signal notification failed'));
-        }
+        if (event.confidence >= 0.5) stockAlerts.offer(event.symbol, event.direction, 'rust-pipeline');
 
         if (botEngine) {
           try {

@@ -46,6 +46,7 @@ model User {
   botTasks         BotTask[]
   priceAlerts      PriceAlert[]
   notifications    Notification[]
+  stockAlerts      StockAlert[]
   riskEvents       RiskEvent[]
   perfSnapshots    PerformanceSnapshot[]
   strategyLedgers  StrategyLedger[]
@@ -505,6 +506,26 @@ model Notification {
 
   @@index([userId, isRead, createdAt])
   @@map("notifications")
+}
+
+/// A stock alert sent to a user, one per stock per day (stops repeats across restarts).
+model StockAlert {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  symbol    String
+  direction String
+  /// IST trading day, YYYY-MM-DD
+  day       String
+  score     Float
+  /// The numbers behind the alert, as JSON
+  details   String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, symbol, day])
+  @@index([userId, createdAt])
+  @@map("stock_alerts")
 }
 
 model RiskEvent {

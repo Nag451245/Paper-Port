@@ -33,6 +33,7 @@ import { MorningBoot } from './services/morning-boot.js';
 import { ServerOrchestrator } from './services/server-orchestrator.js';
 import { TargetTracker } from './services/target-tracker.service.js';
 import { EODReviewService } from './services/eod-review.service.js';
+import { getStockAlerts } from './services/stock-alerts.service.js';
 import { GlobalMarketService } from './services/global-market.service.js';
 import { StopLossMonitor } from './services/stop-loss-monitor.service.js';
 import { PriceFeedService } from './services/price-feed.service.js';
@@ -390,6 +391,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         try { await targetTracker.updateProgress(user.id); } catch (e) { app.log.warn(`[TargetTracker] Failed for user ${user.id}: ${(e as Error).message}`); }
       }
     } catch (err) { console.error('[TargetTracker Cron] Error:', (err as Error).message); }
+  });
+
+  // Telegram stock alerts — scored every 5 min; the service itself only sends 09:30–15:20 IST.
+  orchestrator.scheduleMarketDay('*/5 3-10 * * 1-5', async () => {
+    try { await getStockAlerts(getPrisma()).run(); } catch (err) { app.log.warn(`[StockAlerts] ${(err as Error).message}`); }
   });
 
   // EOD Review — 15:35 IST = 10:05 UTC
