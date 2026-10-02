@@ -17,6 +17,11 @@ struct ScanInput {
     regime: Option<String>,
     #[serde(default)]
     current_date: Option<String>,  // YYYY-MM-DD for expiry detection
+    /// Underlyings whose F&O contracts expire today, from the brokers' contract
+    /// lists (server: expiry-calendar.service.ts). When given it replaces the
+    /// weekday rules, which cannot know about holiday-shifted expiries.
+    #[serde(default)]
+    expiries_today: Option<Vec<String>>,
     #[serde(default)]
     pair_universe: Option<Vec<(String, String)>>,
 }
@@ -910,16 +915,28 @@ pub fn compute(data: Value) -> Result<Value, String> {
         None
     };
 
-    if let Some((dow, is_last_of_weekday)) = date_info {
+    let listed_expiries: Option<Vec<String>> = input
+        .expiries_today
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.to_uppercase()).collect());
+
+    if date_info.is_some() || listed_expiries.is_some() {
         for sym_data in &input.symbols {
             let sym_upper = sym_data.symbol.to_uppercase();
 
-            let is_expiry_for_symbol = match sym_upper.as_str() {
-                "NIFTY" => dow == 3,            // Weekly Tuesday
-                "SENSEX" => dow == 5,           // Weekly Thursday
-                "BANKNIFTY" | "FINNIFTY" | "MIDCPNIFTY" | "NIFTYNXT50" =>
-                    dow == 3 && is_last_of_weekday, // Monthly: last Tuesday only
-                _ => continue,
+            let is_expiry_for_symbol = if let Some(listed) = &listed_expiries {
+                // The exchange's own list: holiday shifts included.
+                listed.contains(&sym_upper)
+            } else if let Some((dow, is_last_of_weekday)) = date_info {
+                match sym_upper.as_str() {
+                    "NIFTY" => dow == 3,            // Weekly Tuesday
+                    "SENSEX" => dow == 5,           // Weekly Thursday
+                    "BANKNIFTY" | "FINNIFTY" | "MIDCPNIFTY" | "NIFTYNXT50" =>
+                        dow == 3 && is_last_of_weekday, // Monthly: last Tuesday only
+                    _ => continue,
+                }
+            } else {
+                false
             };
             if !is_expiry_for_symbol {
                 continue;
@@ -1425,6 +1442,34 @@ mod tests {
             })
             .collect();
         assert!(expiry_signals.is_empty(), "non-expiry day should not produce expiry signals");
+    }
+
+    fn expiry_signal_count(current_date: &str, expiries_today: Option<Vec<&str>>) -> usize {
+        let nifty: Vec<f64> = (0..30).map(|i| 22000.0 + (i as f64 * 10.0).sin() * 50.0).collect();
+        let data: Vec<(f64, f64)> = nifty.iter().map(|&c| (c, 100000.0)).collect();
+        let candles = make_candles_with_volume(&data);
+        let mut input = json!({
+            "symbols": [{ "symbol": "NIFTY", "candles": serde_json::to_value(&candles).unwrap() }],
+            "aggressiveness": "low",
+            "current_date": current_date
+        });
+        if let Some(list) = expiries_today {
+            input["expiries_today"] = json!(list);
+        }
+        let result = run_scan(input);
+        result.get("signals").unwrap().as_array().unwrap().iter()
+            .filter(|s| s.get("strategy").and_then(|v| v.as_str()).map(|s| s.starts_with("expiry_")).unwrap_or(false))
+            .count()
+    }
+
+    #[test]
+    fn test_listed_expiry_overrides_weekday_rules() {
+        // 2026-10-19 is a Monday: NIFTY's expiry moved there because Tuesday is a holiday.
+        assert!(expiry_signal_count("2026-10-19", Some(vec!["NIFTY"])) > 0, "listed holiday-shifted expiry must count");
+        assert_eq!(expiry_signal_count("2026-10-19", None), 0, "weekday rules alone miss a Monday expiry");
+        // 2026-03-03 is a Tuesday, but the list says nothing expires today.
+        assert_eq!(expiry_signal_count("2026-03-03", Some(vec![])), 0, "an empty list means no expiry today");
+        assert_eq!(expiry_signal_count("2026-03-03", Some(vec!["nifty"])) > 0, true, "names are case-insensitive");
     }
 
     #[test]
