@@ -453,9 +453,9 @@ describe('UAT Flow 8: Backtest Execution', () => {
     const runRes = await app.inject({
       method: 'POST', url: '/api/backtest/run', headers: auth(),
       payload: {
-        strategyId: 'ema-crossover', symbol: 'RELIANCE',
+        strategyId: 'sma-crossover', symbol: 'RELIANCE',          // has a JavaScript backup; no engine in tests
         startDate: '2024-01-01', endDate: '2024-12-31',
-        initialCapital: 1000000, parameters: { ema_short: 9, ema_long: 21 },
+        initialCapital: 1000000, parameters: { fast: 9, slow: 21 },
       },
     });
     expect(runRes.statusCode).toBe(201);

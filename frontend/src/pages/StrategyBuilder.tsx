@@ -97,7 +97,7 @@ export default function StrategyBuilder() {
   const [legs, setLegs] = useState<StrategyLeg[]>([]);
   const [payoff, setPayoff] = useState<PayoffResult | null>(null);
   const [loadingPayoff, setLoadingPayoff] = useState(false);
-  const [lotSize, setLotSize] = useState(25);
+
 
   // Strategy execution
   const [executing, setExecuting] = useState(false);
@@ -127,6 +127,7 @@ export default function StrategyBuilder() {
     } catch { /* silent */ }
   }, []);
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- loads data when the page opens
   useEffect(() => { fetchDeployedStrategies(); }, [fetchDeployedStrategies]);
 
   // UI toggles
@@ -169,13 +170,8 @@ export default function StrategyBuilder() {
     })();
   }, []);
 
-  // Update lot size when symbol or lotSizeMap changes
-  useEffect(() => {
-    const sym = symbol.toUpperCase();
-    const lot = lotSizeMap[sym];
-    if (lot && lot > 0) setLotSize(lot);
-    else setLotSize(25);
-  }, [symbol, lotSizeMap]);
+  // Lot size follows the symbol (derived, so it can never lag behind it).
+  const lotSize = lotSizeMap[symbol.toUpperCase()] > 0 ? lotSizeMap[symbol.toUpperCase()] : 25;
 
   // ── Fetch expiries on symbol change ─────────────────────────────────────
   useEffect(() => {
@@ -245,7 +241,6 @@ export default function StrategyBuilder() {
         if (sp > 0) setSpotPrice(sp);
         const apiLot = Number(d?.lotSize);
         if (apiLot > 0) {
-          setLotSize(apiLot);
           setLotSizeMap(prev => ({ ...prev, [symbol.toUpperCase()]: apiLot }));
         }
       }
@@ -260,6 +255,7 @@ export default function StrategyBuilder() {
     if (!silent) setChainLoading(false);
   }, [symbol, selectedExpiry, spotPrice, sessionError]);
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- loads the chain when symbol/expiry change
   useEffect(() => { fetchChain(); }, [fetchChain]);
 
   // ── Auto-refresh ────────────────────────────────────────────────────────
@@ -1112,7 +1108,7 @@ export default function StrategyBuilder() {
                                   checked={selectedLegs.has(leg.id)}
                                   onChange={() => setSelectedLegs(prev => {
                                     const n = new Set(prev);
-                                    n.has(leg.id) ? n.delete(leg.id) : n.add(leg.id);
+                                    if (n.has(leg.id)) n.delete(leg.id); else n.add(leg.id);
                                     return n;
                                   })}
                                   className="rounded border-slate-300"

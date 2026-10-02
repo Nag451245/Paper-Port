@@ -17,7 +17,7 @@ export interface TradeEvent {
 export function useTradeUpdates(onRefresh: () => void) {
   const [lastEvent, setLastEvent] = useState<TradeEvent | null>(null);
   const refreshRef = useRef(onRefresh);
-  refreshRef.current = onRefresh;
+  useEffect(() => { refreshRef.current = onRefresh; }, [onRefresh]);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {

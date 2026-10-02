@@ -6,44 +6,10 @@ import { env } from '../config.js';
 import { engineGreeks, isEngineAvailable } from '../lib/rust-engine.js';
 import { activeUpstoxToken } from '../lib/upstox-session.js';
 import { getUpstox } from './upstox.service.js';
+import { getExpiryCalendar } from './expiry-calendar.service.js';
 
 const CACHE_TTL = 120;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
-function getNextExpiryForSymbol(symbol: string): string {
-  const now = new Date();
-  const sym = (symbol ?? '').toUpperCase();
-  const fmt = (d: Date) => d.toISOString().split('T')[0] + 'T06:00:00.000Z';
-
-  // SEBI Nov 2024: only NIFTY (weekly Tue) and SENSEX (weekly Thu).
-  // Everything else (BANKNIFTY, FINNIFTY, stocks) is monthly only — last Tuesday.
-  if (sym === 'SENSEX') {
-    const day = now.getDay();
-    let d = (4 - day + 7) % 7; // Thursday = 4
-    if (d === 0 && now.getHours() >= 15) d = 7;
-    const exp = new Date(now); exp.setDate(exp.getDate() + d);
-    return fmt(exp);
-  }
-  if (sym === 'NIFTY') {
-    const day = now.getDay();
-    let d = (2 - day + 7) % 7; // Tuesday = 2
-    if (d === 0 && now.getHours() >= 15) d = 7;
-    const exp = new Date(now); exp.setDate(exp.getDate() + d);
-    return fmt(exp);
-  }
-  // Monthly: last Tuesday of the month
-  const lastTue = (y: number, m: number) => {
-    const d = new Date(y, m + 1, 0);
-    while (d.getDay() !== 2) d.setDate(d.getDate() - 1);
-    return d;
-  };
-  let exp = lastTue(now.getFullYear(), now.getMonth());
-  if (exp < now || (exp.toDateString() === now.toDateString() && now.getHours() >= 15)) {
-    const nm = now.getMonth() + 1;
-    exp = lastTue(now.getFullYear() + (nm > 11 ? 1 : 0), nm % 12);
-  }
-  return fmt(exp);
-}
 
 const BREEZE_STOCK_CODES: Record<string, string> = {
   NIFTY: 'NIFTY', BANKNIFTY: 'CNXBAN', FINNIFTY: 'NIFFIN',
@@ -951,7 +917,10 @@ export class IntelligenceService {
     now.setMilliseconds(0);
     const timestamp = now.toISOString();
 
-    const expiryDate = getNextExpiryForSymbol(symbol);
+    // From the broker/exchange contract list (holiday shifts included), not a weekday rule.
+    const next = await getExpiryCalendar().nextExpiry(symbol);
+    if (!next) return null;
+    const expiryDate = `${next}T06:00:00.000Z`;
 
     const breezeCode = BREEZE_STOCK_CODES[symbol.toUpperCase()] ?? symbol.toUpperCase();
 

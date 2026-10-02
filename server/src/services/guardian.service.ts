@@ -2,6 +2,8 @@ import type { PrismaClient, GuardianState, Prisma } from '@prisma/client';
 import { chatCompletion } from '../lib/openai.js';
 import { wsHub } from '../lib/websocket.js';
 import { istDateStr } from '../lib/ist.js';
+import { getExpiryCalendar } from './expiry-calendar.service.js';
+import { getUpstox } from './upstox.service.js';
 import { GuardianMemoryService } from './guardian-memory.service.js';
 import { processCommandCenterChat } from '../routes/command-center.js';
 import {
@@ -109,6 +111,10 @@ export class GuardianService {
     const virtualCapital = user?.virtualCapital ? Number(user.virtualCapital) : 1_000_000;
 
     const awarenessStr = await this.getAwareness(userId);
+    // Expiries and lot sizes from the brokers' contract lists, so they are never stale.
+    const expiryStr = await getExpiryCalendar().summary().catch(() => '');
+    const lots = await getUpstox().lotSizes().catch(() => ({} as Record<string, number>));
+    const lotStr = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX'].filter((u) => lots[u]).map((u) => `${u}=${lots[u]}`).join(', ');
 
     const opinions = await this.memory.getActiveOpinions(userId);
     const memoriesContext = opinions.length > 0
@@ -157,11 +163,11 @@ Virtual Capital: ₹${virtualCapital.toLocaleString('en-IN')}
 
 INDIAN MARKET EXPERTISE:
 - NSE/BSE settlement: T+1 for equities, T+1 for F&O
-- F&O expiry: Weekly every Thursday, monthly last Thursday. NIFTY/BANKNIFTY/FINNIFTY weekly, stock options monthly
+- F&O expiry (from the exchange contract lists): ${expiryStr || 'NIFTY weekly, SENSEX weekly; other index and stock options monthly'}. Expiries move earlier when the usual day is a holiday.
 - Market hours: Pre-open 9:00-9:08, regular 9:15-15:30 IST, post-close till 16:00
 - Circuit breakers: Stock level (5%/10%/20%), index level (10%/15%/20% from previous close)
 - Key indices: NIFTY 50 (broad), BANK NIFTY (banking), NIFTY IT, NIFTY PHARMA, NIFTY MIDCAP 100
-- Lot sizes vary by symbol (NIFTY=25, BANKNIFTY=15, stocks vary)
+- Current lot sizes: ${lotStr || 'see the option chain; they change periodically'} (stocks vary)
 
 OPTIONS MASTERY:
 - Greeks: Delta (directional risk), Gamma (acceleration), Theta (time decay ~accelerates in last 7 days), Vega (vol sensitivity)

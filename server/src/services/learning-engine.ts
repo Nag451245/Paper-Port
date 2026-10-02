@@ -13,7 +13,7 @@ import { emit } from '../lib/event-bus.js';
 import { getPrisma } from '../lib/prisma.js';
 import { MarketMemoryService } from './market-memory.service.js';
 import { FeaturePipelineService } from './feature-pipeline.service.js';
-import { istDateStr, istDaysAgo } from '../lib/ist.js';
+import { istDateStr, istDaysAgo, istHour, istDayOfWeek } from '../lib/ist.js';
 import { LessonsEngineService } from './lessons-engine.service.js';
 import { DecisionFusionService } from './decision-fusion.service.js';
 
@@ -127,8 +127,8 @@ export class LearningEngine {
             volume_vote: snapshot.volume_vote ?? 0,
             composite_score: d.confidence,
             regime: 1.0,
-            hour_of_day: d.createdAt.getHours(),
-            day_of_week: d.createdAt.getDay(),
+            hour_of_day: istHour(d.createdAt),
+            day_of_week: istDayOfWeek(d.createdAt),
             raw_features: [],
           },
           outcome: d.outcome === 'WIN' ? 1.0 : d.outcome === 'BREAKEVEN' ? 0.5 : 0.0,
@@ -1019,8 +1019,8 @@ Top losers: ${JSON.stringify(topLosers)}`,
         const snapshot = typeof d.marketDataSnapshot === 'string'
           ? JSON.parse(d.marketDataSnapshot) : d.marketDataSnapshot;
 
-        const hour = d.createdAt.getHours();
-        const dow = d.createdAt.getDay();
+        const hour = istHour(d.createdAt);
+        const dow = istDayOfWeek(d.createdAt);
 
         // Attempt to compute rich features from stored candle data
         let rawFeatures: number[] = [];

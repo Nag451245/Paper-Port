@@ -80,6 +80,12 @@ export function buildMaps(records: MasterRecord[]): InstrumentMaps {
       if (r.instrument_type && LISTED_TYPES[ex].has(r.instrument_type)) {
         listed[ex].push({ key: r.instrument_key, symbol: r.trading_symbol.toUpperCase(), name: r.name ?? r.trading_symbol, group: r.instrument_type });
       }
+    } else if (r.segment === 'BSE_FO' && r.underlying_symbol && r.expiry && (r.instrument_type === 'CE' || r.instrument_type === 'PE')) {
+      // BSE index options (SENSEX, BANKEX): expiry dates and lot sizes only.
+      const u = r.underlying_symbol.toUpperCase();
+      if (!optionExpiries.has(u)) optionExpiries.set(u, new Set());
+      optionExpiries.get(u)!.add(formatBarTime(r.expiry, true));
+      if (r.lot_size && r.lot_size > 0) lotSizes.set(u, r.lot_size);
     } else if (r.segment === 'NSE_FO' && r.underlying_symbol && r.expiry && r.instrument_type) {
       const kind = r.instrument_type === 'FUT' ? 'FUT' : r.instrument_type;    // CE / PE / FUT
       const strike = kind === 'FUT' ? '-' : String(Number(r.strike_price));

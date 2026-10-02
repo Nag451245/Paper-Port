@@ -56,7 +56,7 @@ const REFRESH_OFF = 3_600_000;
 
 function useAutoRefresh(loadFn: () => void, enabled: boolean) {
   const fnRef = useRef(loadFn);
-  fnRef.current = loadFn;
+  useEffect(() => { fnRef.current = loadFn; }, [loadFn]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -453,7 +453,6 @@ function EventsTab() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    setLoading(true);
     Promise.all([
       intelligenceApi.earningsCalendar().catch(() => ({ data: [] })),
       intelligenceApi.macroEvents().catch(() => ({ data: [] })),
@@ -684,12 +683,12 @@ function MetricBox({ label, value, color }: { label: string; value: string; colo
 }
 
 function RefreshButton({ onClick, lastUpdated }: { onClick: () => void; lastUpdated: Date | null }) {
-  const [, setTick] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const t = setInterval(() => setTick(n => n + 1), 5000);
+    const t = setInterval(() => setNow(Date.now()), 5000);
     return () => clearInterval(t);
   }, []);
-  const ago = lastUpdated ? Math.round((Date.now() - lastUpdated.getTime()) / 1000) : null;
+  const ago = lastUpdated ? Math.max(0, Math.round((now - lastUpdated.getTime()) / 1000)) : null;
   const label = ago !== null ? (ago < 10 ? 'just now' : ago < 60 ? `${ago}s ago` : `${Math.floor(ago / 60)}m ago`) : '';
   const live = isIndianMarketOpen();
   return (

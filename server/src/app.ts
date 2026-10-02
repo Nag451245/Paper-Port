@@ -37,6 +37,7 @@ import { getStockAlerts } from './services/stock-alerts.service.js';
 import { getShadowBook } from './services/shadow-book.service.js';
 import { getCandleLakeSync } from './services/candle-lake-sync.service.js';
 import { PatternScanner } from './services/pattern-scanner.service.js';
+import { getExpiryCalendar } from './services/expiry-calendar.service.js';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -419,6 +420,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
   orchestrator.scheduleAlways('15,45 11-20 * * *', async () => {
     try { await getCandleLakeSync().backfill(1_400); } catch (err) { app.log.warn(`[CandleLake] ${(err as Error).message}`); }
+  });
+
+  // F&O expiry dates from the brokers' contract lists: loaded at startup and
+  // refreshed every morning at 08:30 IST, so exchange changes and holiday
+  // shifts are picked up without a code change.
+  getExpiryCalendar().warm().catch(() => {});
+  orchestrator.scheduleAlways('0 3 * * *', async () => {
+    try { await getExpiryCalendar().warm(); } catch (err) { app.log.warn(`[ExpiryCalendar] ${(err as Error).message}`); }
   });
 
   // Promoted intraday patterns, checked at their checkpoints and sent to the shadow book only.

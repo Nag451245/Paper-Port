@@ -1,4 +1,6 @@
 import { createChildLogger } from '../lib/logger.js';
+import { istDayOfWeek, istHour } from '../lib/ist.js';
+import { getExpiryCalendar } from './expiry-calendar.service.js';
 
 const log = createChildLogger('FeaturePipeline');
 
@@ -241,10 +243,11 @@ export class FeaturePipelineService {
         sectorRs: marketState?.sectorRs ?? 0,
       },
       time: {
-        dayOfWeek: now.getDay(),
-        hourOfDay: now.getHours(),
-        isExpiryDay: now.getDay() === 4 ? 1 : 0,
-        daysToExpiry: this.daysUntilNextThursday(now),
+        // Indian time (the server runs on UTC), and NIFTY's real expiry calendar.
+        dayOfWeek: istDayOfWeek(now),
+        hourOfDay: istHour(now),
+        isExpiryDay: getExpiryCalendar().isExpiryDaySync('NIFTY') ? 1 : 0,
+        daysToExpiry: getExpiryCalendar().daysToExpirySync('NIFTY'),
       },
       memory: {
         memoryWinRate: memoryRecall?.winRate ?? 0,
@@ -584,12 +587,6 @@ export class FeaturePipelineService {
     const mean = values.reduce((a, b) => a + b, 0) / values.length;
     const variance = values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / (values.length - 1);
     return Math.sqrt(variance);
-  }
-
-  private daysUntilNextThursday(date: Date): number {
-    const day = date.getDay();
-    const diff = (4 - day + 7) % 7;
-    return diff === 0 ? 7 : diff;
   }
 
   private zeroVector(): FeatureVector {

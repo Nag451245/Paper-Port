@@ -14,7 +14,7 @@ import { RiskService } from './risk.service.js';
 import { TWAPExecutor, selectOrderType } from './twap-executor.service.js';
 import { ExitCoordinator } from './exit-coordinator.service.js';
 import { emit } from '../lib/event-bus.js';
-import { istDateStr, istDaysAgo } from '../lib/ist.js';
+import { istDateStr, istDaysAgo, istHour, istDayOfWeek } from '../lib/ist.js';
 import { wsHub } from '../lib/websocket.js';
 import { createChildLogger } from '../lib/logger.js';
 import { env } from '../config.js';
@@ -28,6 +28,7 @@ import { RegimeDetectorService } from './regime-detector.service.js';
 import { PortfolioOptimizerService } from './portfolio-optimizer.service.js';
 import { getShadowBook, gateMode, strategyOf, type ShadowBook } from './shadow-book.service.js';
 import { MtfShadowScan } from './mtf-shadow.service.js';
+import { sizePosition } from '../lib/position-size.js';
 
 const log = createChildLogger('BotEngine');
 
@@ -216,6 +217,20 @@ const AUTO_PAUSE_ACCURACY = 0.35;
 interface RollingAccuracy {
   outcomes: ('WIN' | 'LOSS' | 'BREAKEVEN')[];
   accuracy: number;
+}
+
+/**
+ * The regime detector says TRENDING_UP / TRENDING_DOWN / MEAN_REVERTING /
+ * VOLATILE; the Rust scan's regime weights are keyed "trending" /
+ * "mean_reverting" / "volatile". Without this the names never matched and
+ * the regime weighting silently never applied.
+ */
+export function engineRegime(regime: string | null | undefined): string | undefined {
+  const r = (regime ?? '').toUpperCase();
+  if (r.startsWith('TRENDING')) return 'trending';
+  if (r === 'MEAN_REVERTING' || r === 'RANGING') return 'mean_reverting';
+  if (r === 'VOLATILE') return 'volatile';
+  return undefined;
 }
 
 export class BotEngine {
@@ -1133,8 +1148,12 @@ export class BotEngine {
         } catch { /* will be fetched by TradeService */ }
 
         const kellyAllocation = await this.computeKellySize(userId, symbol, nav);
-        const maxPerTrade = nav * kellyAllocation;
-        const qty = ltp > 0 ? Math.max(1, Math.floor(maxPerTrade / ltp)) : 1;
+        const qty = sizePosition({ nav, ltp, allocation: kellyAllocation, stopLoss: signalMeta?.stopLoss });
+        if (qty <= 0) {
+          return { success: false, message: ltp <= 0 ? `Cannot size ${symbol}: no price available`
+            : kellyAllocation <= 0 ? `Skipped ${symbol}: its recent trades show no edge (Kelly ≤ 0)`
+            : `Skipped ${symbol}: one share risks more than the per-trade risk budget` };
+        }
 
         let optimizedQty = qty;
         try {
@@ -1169,7 +1188,7 @@ export class BotEngine {
               direction, confidence: signalMeta?.confidence ?? 0,
               conditions: {
                 niftyLevel: 22000, vixLevel: 15, regime: 'unknown',
-                dayOfWeek: new Date().getDay(), hourOfDay: new Date().getHours(), gapPct: 0,
+                dayOfWeek: istDayOfWeek(), hourOfDay: istHour(), gapPct: 0,
               },
               fingerprint: '[]',
               marketSnapshot: { riskBlocked: true, violations: riskCheck.violations },
@@ -1325,8 +1344,11 @@ export class BotEngine {
         if (ltp <= 0) return { success: false, message: `Cannot short ${symbol}: no price available` };
 
         const kellyAllocation = await this.computeKellySize(userId, symbol, nav);
-        const maxPerTrade = nav * kellyAllocation;
-        const qty = Math.max(1, Math.floor(maxPerTrade / ltp));
+        const qty = sizePosition({ nav, ltp, allocation: kellyAllocation, stopLoss: signalMeta?.stopLoss });
+        if (qty <= 0) {
+          return { success: false, message: kellyAllocation <= 0 ? `Skipped short ${symbol}: its recent trades show no edge (Kelly ≤ 0)`
+            : `Skipped short ${symbol}: one share risks more than the per-trade risk budget` };
+        }
 
         const sellRiskCheck = await this.riskService.preTradeCheck(userId, symbol, 'SELL', qty, ltp);
         if (!sellRiskCheck.allowed) {
@@ -1342,7 +1364,7 @@ export class BotEngine {
               direction, confidence: signalMeta?.confidence ?? 0,
               conditions: {
                 niftyLevel: 22000, vixLevel: 15, regime: 'unknown',
-                dayOfWeek: new Date().getDay(), hourOfDay: new Date().getHours(), gapPct: 0,
+                dayOfWeek: istDayOfWeek(), hourOfDay: istHour(), gapPct: 0,
               },
               fingerprint: '[]',
               marketSnapshot: { riskBlocked: true, violations: sellRiskCheck.violations },
@@ -1564,7 +1586,9 @@ export class BotEngine {
       const kelly = winRate - (1 - winRate) / wlRatio;
       const halfKelly = kelly / 2;
 
-      return Math.max(0.02, Math.min(allocationCap, halfKelly));
+      // A negative Kelly says this stock's trades lose: size zero, do not trade.
+      if (halfKelly <= 0) return 0;
+      return Math.min(allocationCap, Math.max(0.02, halfKelly));
     } catch {
       return 0.05;
     }
@@ -1735,7 +1759,7 @@ export class BotEngine {
               symbols: candleData,
               aggressiveness: aggressiveness as any,
               strategy_params: Object.keys(strategyParams).length > 0 ? strategyParams : undefined,
-              regime: regime ?? undefined,
+              regime: engineRegime(regime),
             });
             rustSignals = scanResult.signals ?? [];
             this.shadowBook.record(rustSignals).catch(() => {});
@@ -1967,8 +1991,8 @@ export class BotEngine {
           niftyLevel: niftyQuote.ltp || 22000,
           vixLevel: vixQuote.ltp || 15,
           regime: detectedRegime ?? 'MEAN_REVERTING',
-          dayOfWeek: new Date().getDay(),
-          hourOfDay: new Date().getHours(),
+          dayOfWeek: istDayOfWeek(),
+          hourOfDay: istHour(),
           gapPct: 0,
         }, fingerprint, 20);
 
@@ -2004,8 +2028,8 @@ export class BotEngine {
 
             const tftSequence = candleBars.slice(-30).map((b: any, i: number, arr: any[]) => ({
               ...b,
-              day_of_week: new Date().getDay(),
-              hour_of_day: new Date().getHours(),
+              day_of_week: istDayOfWeek(),
+              hour_of_day: istHour(),
               is_expiry_day: 0,
               returns: i > 0 ? (b.close - arr[i - 1].close) / arr[i - 1].close : 0,
               volume_ratio: 1,
@@ -2080,8 +2104,8 @@ export class BotEngine {
           direction: sig.direction, confidence: sig.confidence,
           conditions: {
             niftyLevel: niftyQuote.ltp || 22000, vixLevel: vixQuote.ltp || 15,
-            regime: detectedRegime ?? 'MEAN_REVERTING', dayOfWeek: new Date().getDay(),
-            hourOfDay: new Date().getHours(), gapPct: 0,
+            regime: detectedRegime ?? 'MEAN_REVERTING', dayOfWeek: istDayOfWeek(),
+            hourOfDay: istHour(), gapPct: 0,
           },
           fingerprint,
           marketSnapshot: { indicators: sig.indicators, votes: sig.votes, mlScore: mlScoreResult.winProbability },
@@ -2441,8 +2465,8 @@ Approve or reject?` },
       volume_vote: sig.votes?.volume ?? 0,
       composite_score: sig.confidence,
       regime: 1.0,
-      hour_of_day: now.getHours(),
-      day_of_week: now.getDay(),
+      hour_of_day: istHour(now),
+      day_of_week: istDayOfWeek(now),
     };
 
     // ── Step 1: Rust scorer (fast, always available if weights exist) ──
@@ -2927,7 +2951,7 @@ INSTRUCTIONS:
               symbols: candleData,
               aggressiveness: aggressiveness as any,
               strategy_params: Object.keys(agentStrategyParams).length > 0 ? agentStrategyParams : undefined,
-              regime: agentRegime ?? undefined,
+              regime: engineRegime(agentRegime),
               current_date: new Date().toISOString().split('T')[0],
             });
             rustSignals = scanResult.signals ?? [];

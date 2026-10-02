@@ -163,6 +163,8 @@ describe('Portfolio Data Consistency', () => {
 
     it('should refetch when force=true', async () => {
       const { usePortfolioStore } = await import('@/stores/portfolio');
+      // The store is shared across tests: start from empty, not from the previous test's portfolio.
+      usePortfolioStore.setState({ portfolios: [], activePortfolio: null, summary: null, _lastFetchedAt: 0 });
 
       (portfolioApi.list as any).mockResolvedValue({
         data: [{ id: 'cache-p2', currentNav: 1_000_000 }],

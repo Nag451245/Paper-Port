@@ -127,6 +127,8 @@ function OverviewPanel() {
     setLoading(false);
   }, []);
 
+  // Loading data when the page opens is what this effect is for.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, [load]);
 
   const triggerNightly = async () => {

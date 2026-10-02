@@ -803,10 +803,23 @@ export async function engineScan(data: {
   vote_weights?: Record<string, number>;
   regime?: string;
   current_date?: string;
+  /** Underlyings whose F&O contracts expire today. Filled in from the expiry calendar when absent. */
+  expiries_today?: string[];
 }): Promise<ScanResult> {
-  const res = await runEngine('scan', data);
+  // Expiry days come from the brokers' contract lists (holiday shifts included),
+  // not from the engine's weekday rules.
+  const { getExpiryCalendar, KEY_UNDERLYINGS } = await import('../services/expiry-calendar.service.js');
+  const calendar = getExpiryCalendar();
+  const expiriesToday = data.expiries_today ?? KEY_UNDERLYINGS.filter((u) => calendar.isExpiryDaySync(u));
+  const res = await runEngine('scan', { ...data, expiries_today: expiriesToday });
   if (!res.success) throw new Error(res.error ?? 'Scan computation failed');
-  return res.data as ScanResult;
+  const result = res.data as ScanResult;
+  // An engine that still uses weekday rules may flag expiry trades on the wrong
+  // day; only today's real expiries are kept.
+  if (Array.isArray(result?.signals)) {
+    result.signals = result.signals.filter((s) => !s.strategy?.startsWith('expiry_') || expiriesToday.includes(s.symbol.toUpperCase()));
+  }
+  return result;
 }
 
 // ── Monte Carlo Simulation ──

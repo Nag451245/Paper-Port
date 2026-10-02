@@ -47,6 +47,16 @@ export function istMinutesSinceMidnight(d: Date = new Date()): number {
   return h * 60 + m;
 }
 
+/** Hour of the day (0–23) in IST. Use this, not Date#getHours(): the server runs on UTC. */
+export function istHour(d: Date = new Date()): number {
+  return Math.floor(istMinutesSinceMidnight(d) / 60);
+}
+
+/** Day of the week (0 = Sunday) in IST. */
+export function istDayOfWeek(d: Date = new Date()): number {
+  return new Date(`${istDateStr(d)}T00:00:00Z`).getUTCDay();
+}
+
 /** Parses "HH:MM" into minutes since midnight. Returns null if malformed. */
 export function parseHHMM(time: string): number | null {
   const match = /^(\d{1,2}):(\d{2})$/.exec(time.trim());

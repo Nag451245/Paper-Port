@@ -70,6 +70,12 @@ rm -rf node_modules
 
 echo "== [7/8] Restart"
 cd "$APP"
+# Rotate PM2 logs so they cannot fill the disk again (unrotated logs once reached
+# 14 GB and stopped SSH logins). Installed once; settings re-applied every deploy.
+pm2 describe pm2-logrotate >/dev/null 2>&1 || pm2 install pm2-logrotate >/dev/null 2>&1 || echo "  (could not install pm2-logrotate)"
+pm2 set pm2-logrotate:max_size 50M >/dev/null 2>&1 || true
+pm2 set pm2-logrotate:retain 7 >/dev/null 2>&1 || true
+pm2 set pm2-logrotate:compress true >/dev/null 2>&1 || true
 pm2 restart all --update-env
 sudo systemctl reload nginx
 sleep 15

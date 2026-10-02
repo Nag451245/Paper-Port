@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    # ci/** branches let a change be compiled and tested here before it reaches main.
+    branches: [main, master, 'ci/**']
   pull_request:
     branches: [main, master]
 
@@ -43,10 +44,13 @@ jobs:
         working-directory: server
 
       - name: Run database migrations
-        run: npx prisma migrate deploy 2>/dev/null || npx prisma db push --force-reset
+        # Applies the real migrations to an empty database, as a deploy would.
+        # DIRECT_URL is required by schema.prisma; without it every run failed here.
+        run: npx prisma migrate deploy
         working-directory: server
         env:
           DATABASE_URL: "postgresql://test:test@localhost:5432/capitalguard_test"
+          DIRECT_URL: "postgresql://test:test@localhost:5432/capitalguard_test"
 
       - name: Type check
         run: npx tsc --noEmit
@@ -84,7 +88,7 @@ jobs:
         working-directory: frontend
 
       - name: Run tests
-        run: npm test -- --run --passWithNoTests 2>/dev/null || true
+        run: npm test -- --run --passWithNoTests
         working-directory: frontend
 
       - name: Build

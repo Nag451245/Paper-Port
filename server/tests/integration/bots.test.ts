@@ -231,13 +231,26 @@ describe('Backtest Routes Integration', () => {
       const res = await app.inject({
         method: 'POST', url: '/api/backtest/run', headers: authHeaders(),
         payload: {
-          strategyId: 'ema-crossover', symbol: 'RELIANCE',
+          // No engine in tests: the strategy must have a JavaScript backup.
+          strategyId: 'sma-crossover', symbol: 'RELIANCE',
           startDate: '2024-01-01', endDate: '2024-12-31',
-          initialCapital: 1000000, parameters: { ema_short: 9, ema_long: 21 },
+          initialCapital: 1000000, parameters: { fast: 9, slow: 21 },
         },
       });
 
       expect(res.statusCode).toBe(201);
+    });
+
+    it('refuses a strategy it cannot run instead of running a different one', async () => {
+      const run = (strategyId: string) => app.inject({
+        method: 'POST', url: '/api/backtest/run', headers: authHeaders(),
+        payload: { strategyId, symbol: 'RELIANCE', startDate: '2024-01-01', endDate: '2024-12-31', initialCapital: 1000000, parameters: {} },
+      });
+      const unknown = await run('composite');
+      expect(unknown.statusCode).toBe(400);
+      expect(unknown.json().error ?? unknown.body).toMatch(/composite vote has no backtest version/);
+      const noBackup = await run('ema-crossover');                    // engine down, no JS version
+      expect(noBackup.statusCode).toBe(503);
     });
 
     it('should return 400 for missing strategyId', async () => {

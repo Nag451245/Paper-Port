@@ -4,6 +4,32 @@ import { MarketDataService, barsPerSession, isDailyInterval, type HistoricalBar 
 import { isDerivativeSymbol, parseInstrumentSymbol } from '../lib/instrument.js';
 import { isEngineAvailable, engineBacktest } from '../lib/rust-engine.js';
 
+/**
+ * Strategies the Rust backtester implements (engine/src/strategy.rs), keyed by
+ * every name it accepts. The engine answers an unknown name with an EMA
+ * crossover instead of an error, so names are checked here first.
+ */
+const BACKTEST_STRATEGIES: Record<string, string> = {
+  ema_crossover: 'ema_crossover', supertrend: 'supertrend', super_trend: 'supertrend',
+  sma_crossover: 'sma_crossover', rsi_reversal: 'rsi_reversal', mean_reversion: 'mean_reversion',
+  momentum: 'momentum', orb: 'orb', opening_range_breakout: 'orb', gap_trading: 'gap_trading',
+  vwap_reversion: 'vwap_reversion', volatility_breakout: 'volatility_breakout',
+  sector_rotation: 'sector_rotation', pairs_trading: 'pairs_trading', expiry_theta: 'expiry_theta',
+  calendar_spread: 'calendar_spread', trend_following: 'trend_following', adx: 'trend_following',
+};
+
+/** The JavaScript backup implementation, when the Rust engine is down. Never a different strategy. */
+function jsStrategy(key: string) {
+  const fn = STRATEGIES[key];
+  if (!fn) throw new BacktestError(`The backtest engine is unavailable and "${key}" has no backup implementation. Try again shortly.`, 503);
+  return fn;
+}
+
+/** The engine's name for a strategy, or null when it cannot be backtested. */
+export function backtestStrategyName(id: string): string | null {
+  return BACKTEST_STRATEGIES[id.toLowerCase().replace(/[^a-z_]/g, '_')] ?? null;
+}
+
 export class BacktestError extends Error {
   constructor(
     message: string,
@@ -412,6 +438,16 @@ export class BacktestService {
   }
 
   async run(userId: string, input: RunBacktestInput): Promise<BacktestResult> {
+    const engineStrategy = backtestStrategyName(input.strategyId);
+    if (!engineStrategy) {
+      throw new BacktestError(
+        `"${input.strategyId}" cannot be backtested here` +
+        (input.strategyId.toLowerCase() === 'composite'
+          ? ": the live engine's composite vote has no backtest version yet; its live record is in Edge Lab → Live Evidence."
+          : `. Available: ${[...new Set(Object.values(BACKTEST_STRATEGIES))].join(', ')}.`),
+        400,
+      );
+    }
     const interval = input.interval ?? '1day';
     const contract = isDerivativeSymbol(input.symbol) ? parseInstrumentSymbol(input.symbol) : null;
     const bars = await this.marketService.getHistory(
@@ -434,7 +470,7 @@ export class BacktestService {
       );
     }
 
-    const strategyKey = input.strategyId.toLowerCase().replace(/[^a-z_]/g, '_');
+    const strategyKey = engineStrategy;
     const allParams = { ...input.parameters, symbol: input.symbol };
     let metrics: ReturnType<typeof computeMetrics>;
     let trades: TradeEntry[];
@@ -479,14 +515,14 @@ export class BacktestService {
           date: p.date, value: p.nav,
         }));
       } catch {
-        const strategyFn = STRATEGIES[strategyKey] ?? STRATEGIES.orb;
+        const strategyFn = jsStrategy(strategyKey);
         const jsResult = strategyFn(bars, allParams, input.initialCapital);
         trades = jsResult.trades;
         equityCurve = jsResult.equityCurve;
         metrics = computeMetrics(trades, input.initialCapital, equityCurve);
       }
     } else {
-      const strategyFn = STRATEGIES[strategyKey] ?? STRATEGIES.orb;
+      const strategyFn = jsStrategy(strategyKey);
       const jsResult = strategyFn(bars, allParams, input.initialCapital);
       trades = jsResult.trades;
       equityCurve = jsResult.equityCurve;
