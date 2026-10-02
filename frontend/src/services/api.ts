@@ -292,6 +292,38 @@ export const intelligenceApi = {
   insiderTransactions: () => api.get('/intelligence/insider-transactions'),
 };
 
+// ─── Brokers ──────────────────────────────────────────────────────
+export type BrokerId = 'breeze' | 'upstox' | 'zerodha' | 'fyers' | 'dhan';
+export type BrokerField = 'apiKey' | 'apiSecret' | 'clientId' | 'accessToken';
+
+export interface BrokerStatus {
+  id: BrokerId;
+  name: string;
+  fields: { key: BrokerField; label: string; secret: boolean }[];
+  login: 'breeze' | 'oauth' | 'token' | 'none';
+  marketData: boolean;
+  note: string;
+  docsUrl: string;
+  saved: boolean;
+  connected: boolean;
+  tokenExpiresAt: string | null;
+  fieldsSaved: BrokerField[];
+}
+
+export interface BrokerList {
+  active: BrokerId;
+  redirectUris: { upstox: string };
+  brokers: BrokerStatus[];
+}
+
+export const brokersApi = {
+  list: () => api.get<BrokerList>('/brokers'),
+  save: (broker: BrokerId, fields: Partial<Record<BrokerField, string>>) => api.put<BrokerList>(`/brokers/${broker}`, fields),
+  remove: (broker: BrokerId) => api.delete<BrokerList>(`/brokers/${broker}`),
+  setActive: (broker: BrokerId) => api.post<BrokerList>('/brokers/active', { broker }),
+  upstoxLogin: () => api.get<{ loginUrl: string; redirectUri: string }>('/brokers/upstox/login'),
+};
+
 // ─── Replay Lab (manual backtesting) ──────────────────────────────
 export interface ReplayBar { timestamp: string; open: number; high: number; low: number; close: number; volume: number }
 

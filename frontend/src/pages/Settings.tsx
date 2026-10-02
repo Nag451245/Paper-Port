@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { breezeApi, portfolioApi, telegramApi, learningApi } from '@/services/api';
 import type { BreezeCredentialStatus } from '@/types';
+import BrokerSection from '@/components/settings/BrokerSection';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -303,6 +304,8 @@ export default function Settings() {
 
       {activeTab === 'config' && (
         <>
+          <BrokerSection />
+
           {/* Breeze API Credentials */}
           <section className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm">
             <div className="flex items-center gap-2 mb-4">

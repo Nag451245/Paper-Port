@@ -7,6 +7,7 @@ import * as OTPAuth from 'otpauth';
 import { env } from '../config.js';
 import { getRedis } from '../lib/redis.js';
 import { sendMail } from '../lib/mailer.js';
+import { appBaseUrl } from '../lib/app-url.js';
 import { notePasswordChanged } from '../lib/token-revocation.js';
 
 const SALT_ROUNDS = 12;
@@ -18,11 +19,6 @@ const sha256Hex = (value: string) => createHash('sha256').update(value).digest('
 const escapeHtml = (s: string) =>
   s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
-/** Where emailed links point. From config only, never from the request's Host header. */
-function appBaseUrl(): string {
-  const base = env.APP_BASE_URL || env.CORS_ORIGINS.split(',')[0].trim();
-  return base.replace(/\/+$/, '');
-}
 
 function httpsRequestWithBody(options: https.RequestOptions, body?: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
@@ -159,7 +155,7 @@ function deriveEncryptionKey(secret: string): Buffer {
  */
 const CIPHER_V2 = 'v2';
 
-function encrypt(text: string, secret: string): string {
+export function encrypt(text: string, secret: string): string {
   const key = deriveEncryptionKey(secret);
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
@@ -168,7 +164,7 @@ function encrypt(text: string, secret: string): string {
   return `${CIPHER_V2}:${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
 }
 
-function decrypt(encryptedText: string, secret: string): string {
+export function decrypt(encryptedText: string, secret: string): string {
   const key = deriveEncryptionKey(secret);
   const parts = encryptedText.split(':');
 

@@ -8,6 +8,8 @@ import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
 import { istDateStr, istDaysAgo } from '../lib/ist.js';
 import { parseInstrumentSymbol, isDerivativeSymbol, type InstrumentSpec } from '../lib/instrument.js';
+import { getUpstox } from './upstox.service.js';
+import { BrokerAccountsService } from './broker-accounts.service.js';
 
 const log = createChildLogger('MarketData');
 
@@ -334,29 +336,9 @@ export interface HistoricalBar {
   volume: number;
 }
 
-const IST_OFFSET_MS = 330 * 60_000;
-
-/**
- * The one timestamp format every source returns: 'YYYY-MM-DD' for daily bars,
- * Indian time 'YYYY-MM-DD HH:MM:SS' for intraday (the format Breeze uses).
- * Mixing formats is what made a leg's candles miss the underlying's.
- */
-export function formatBarTime(instantMs: number, daily: boolean): string {
-  const ist = new Date(instantMs + IST_OFFSET_MS).toISOString();
-  return daily ? ist.slice(0, 10) : ist.slice(0, 19).replace('T', ' ');
-}
-
-/** A bar timestamp as an instant. A time with no zone is Indian time — never the host's zone. */
-export function barInstant(ts: string): number {
-  if (/[zZ]$|[+-]\d\d:\d\d$/.test(ts)) return Date.parse(ts);
-  if (ts.length <= 10) return Date.parse(`${ts}T00:00:00+05:30`);
-  return Date.parse(`${ts.slice(0, 19).replace(' ', 'T')}+05:30`);
-}
-
-export function isDailyInterval(interval: string): boolean {
-  const i = interval.toLowerCase();
-  return i.includes('day') || i === 'daily' || i === '1d' || i === 'd';
-}
+// Shared with the Upstox source; re-exported so existing imports keep working.
+export { formatBarTime, barInstant, isDailyInterval } from '../lib/bar-time.js';
+import { formatBarTime, barInstant, isDailyInterval } from '../lib/bar-time.js';
 
 /**
  * Candles in one trading session: NSE/NFO 09:15-15:30, MCX 09:00-23:30.
@@ -581,6 +563,15 @@ export class MarketDataService {
     if (this.cache) {
       const cached = await this.cache.get<MarketQuote>(cacheKey);
       if (cached && cached.ltp > 0) return cached;
+    }
+
+    // The user's chosen broker comes first when it is Upstox (Breeze is below).
+    if (exchange !== 'MCX' && exchange !== 'CDS') {
+      const upstoxQuote = await this.fetchQuoteFromUpstox(symbol, exchange);
+      if (upstoxQuote) {
+        if (this.cache) await this.cache.set(cacheKey, upstoxQuote, getQuoteCacheTTL());
+        return upstoxQuote;
+      }
     }
 
     // F&O option symbol detection (e.g. NIFTY20260310248000CE)
@@ -840,7 +831,8 @@ export class MarketDataService {
     // any commodity backtest was fitted to noise. They now take the same path as
     // everything else. An empty result is the honest answer when there is no
     // data; fabricated bars are not.
-    const bars = await this.fetchFromBreeze(symbol, interval, fromDate, toDate, userId, exchange, contract);
+    let bars = await this.fetchHistoryFromUpstox(symbol, interval, fromDate, toDate, userId, exchange);
+    if (bars.length === 0) bars = await this.fetchFromBreeze(symbol, interval, fromDate, toDate, userId, exchange, contract);
     if (bars.length > 0) {
       const clean = this.validateCandles(bars, symbol, interval, !!contract);
       if (this.cache) await this.cache.set(cacheKey, clean, ttl);
@@ -1864,6 +1856,32 @@ export class MarketDataService {
       console.log(`[Breeze SDK] generateSession failed: ${err?.message ?? err}`);
       return null;
     }
+  }
+
+  // ── Upstox: used only when a user has made it the active broker ──
+
+  private upstoxAccounts: BrokerAccountsService | null = null;
+
+  private async upstoxToken(userId?: string): Promise<string | null> {
+    try {
+      this.upstoxAccounts ??= new BrokerAccountsService(getPrisma());
+      return await this.upstoxAccounts.upstoxToken(userId);
+    } catch {
+      return null;                                  // no database (tests, startup): skip Upstox
+    }
+  }
+
+  private async fetchQuoteFromUpstox(symbol: string, exchange: string): Promise<MarketQuote | null> {
+    const token = await this.upstoxToken();
+    return token ? getUpstox().quote(token, symbol, exchange) : null;
+  }
+
+  private async fetchHistoryFromUpstox(
+    symbol: string, interval: string, fromDate: string, toDate: string, userId: string | undefined, exchange: string,
+  ): Promise<HistoricalBar[]> {
+    if (exchange === 'MCX' || exchange === 'CDS') return [];
+    const token = await this.upstoxToken(userId);
+    return token ? getUpstox().history(token, symbol, interval, fromDate, toDate, exchange) : [];
   }
 
   private async fetchFromBreeze(

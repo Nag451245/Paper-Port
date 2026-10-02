@@ -43,6 +43,8 @@ model User {
   isActive       Boolean  @default(true) @map("is_active")
   // Sign-in tokens issued before this instant are refused (set on password reset).
   passwordChangedAt DateTime? @map("password_changed_at")
+  // Which broker feeds market data: "breeze" (ICICI Direct) or "upstox".
+  activeBroker   String   @default("breeze") @map("active_broker")
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
@@ -70,6 +72,7 @@ model User {
   guardianState    GuardianState?
   guardianMemories GuardianMemory[]
   passwordResetTokens PasswordResetToken[]
+  brokerAccounts   BrokerAccount[]
 
   @@map("users")
 }
@@ -1098,4 +1101,25 @@ model PasswordResetToken {
 
   @@index([userId])
   @@map("password_reset_tokens")
+}
+
+/// API credentials for brokers other than ICICI Breeze (which keeps breeze_credentials).
+/// Everything secret is encrypted with ENCRYPTION_KEY. Never a broker password:
+/// logins happen on the broker's own site and only the resulting token is kept.
+model BrokerAccount {
+  id                   String    @id @default(uuid())
+  userId               String    @map("user_id")
+  broker               String
+  encryptedApiKey      String?   @map("encrypted_api_key")
+  encryptedApiSecret   String?   @map("encrypted_api_secret")
+  encryptedClientId    String?   @map("encrypted_client_id")
+  encryptedAccessToken String?   @map("encrypted_access_token")
+  tokenExpiresAt       DateTime? @map("token_expires_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, broker])
+  @@map("broker_accounts")
 }

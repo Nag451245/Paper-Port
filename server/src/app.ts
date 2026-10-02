@@ -51,6 +51,7 @@ import { OMSRecoveryService } from './services/oms-recovery.service.js';
 import { TickStoreService } from './services/tick-store.service.js';
 import reportRoutes from './routes/reports.js';
 import guardianRoutes from './routes/guardian.js';
+import { brokerRoutes } from './routes/brokers.js';
 import { isEngineAvailable, ensureEngineAvailable, startDaemon, stopDaemon, getEngineStatus } from './lib/rust-engine.js';
 import { initTracing } from './lib/tracing.js';
 import { leaderElection } from './lib/leader-election.js';
@@ -333,6 +334,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(engineRoutes, { prefix: '/api/engine' });
   await app.register(reportRoutes, { prefix: '/api/reports' });
   await app.register(guardianRoutes, { prefix: '/api/guardian' });
+  await app.register(brokerRoutes, { prefix: '/api/brokers' });
 
   await registerWebSocket(app);
   app.decorate('wsHub', wsHub);
