@@ -5,6 +5,44 @@
     <link rel="icon" type="image/svg+xml" href="/boat.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>PaperPort — Paper Trading Platform</title>
+    <script>
+      // Plain old JavaScript on purpose: this must run in browsers too old for
+      // the app itself. It explains the two cases where a phone gets the wrong
+      // layout and the app cannot fix it: "Desktop site" switched on, or a
+      // browser too old for the stylesheet (Chrome < 99, Safari < 15.4).
+      (function () {
+        try {
+          var oldBrowser = !('CSSLayerBlockRule' in window) || !('noModule' in document.createElement('script'));
+          var shortSide = Math.min(screen.width, screen.height);
+          var desktopModeOnPhone = (navigator.maxTouchPoints || 0) > 0 && shortSide < 600 && window.innerWidth >= 900;
+          var msg = oldBrowser
+            ? 'This browser is too old to show PaperPort properly. Please update Chrome or Safari (on iPhone, update iOS), or open the site in an up-to-date browser.'
+            : desktopModeOnPhone
+              ? 'You are seeing the desktop version on a phone. Turn off "Desktop site" in the browser menu (Safari: tap aA, then "Request Mobile Website") for the phone layout.'
+              : null;
+          if (!msg) return;
+          try { if (sessionStorage.getItem('pp-layout-hint') === msg) return; } catch (e) {}
+          var show = function () {
+            var bar = document.createElement('div');
+            bar.setAttribute('role', 'alert');
+            bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:2147483647;background:#fef3c7;color:#78350f;' +
+              'border-bottom:1px solid #f59e0b;font:14px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;padding:12px 44px 12px 14px;';
+            bar.appendChild(document.createTextNode(msg));
+            var close = document.createElement('button');
+            close.setAttribute('aria-label', 'Dismiss');
+            close.appendChild(document.createTextNode('×'));
+            close.style.cssText = 'position:absolute;right:6px;top:6px;width:32px;height:32px;border:0;background:none;color:#78350f;font-size:22px;cursor:pointer;';
+            close.onclick = function () {
+              bar.parentNode.removeChild(bar);
+              try { sessionStorage.setItem('pp-layout-hint', msg); } catch (e) {}
+            };
+            bar.appendChild(close);
+            document.body.appendChild(bar);
+          };
+          if (document.body) show(); else document.addEventListener('DOMContentLoaded', show);
+        } catch (e) { /* never block the app */ }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

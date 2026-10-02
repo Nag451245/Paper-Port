@@ -1,3 +1,4 @@
+import { isPhoneLayout } from '@/lib/layout';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useGuardianStore, type GuardianMood } from '@/stores/guardian';
 
@@ -12,7 +13,7 @@ interface Position {
 
 /** Space kept clear at the bottom: the phone navigation bar (see --mobile-nav-space). */
 function bottomReserve(): number {
-  return window.innerWidth < 768 ? 80 : 0;
+  return isPhoneLayout() ? 80 : 0;
 }
 
 function getDefaultPosition(): Position {
@@ -20,7 +21,7 @@ function getDefaultPosition(): Position {
   return {
     x: window.innerWidth - AVATAR_SIZE - margin,
     // On phones, also clear one input bar: chat-style pages keep theirs at the bottom.
-    y: window.innerHeight - AVATAR_SIZE - margin - bottomReserve() - (window.innerWidth < 768 ? 64 : 0),
+    y: window.innerHeight - AVATAR_SIZE - margin - bottomReserve() - (isPhoneLayout() ? 64 : 0),
   };
 }
 

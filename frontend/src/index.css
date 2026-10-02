@@ -1,6 +1,11 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Sidebar layout: wide AND tall enough. A phone held sideways is 800-930px wide
+   but only ~400px tall; it keeps the phone layout (bottom bar), not the sidebar.
+   Keep in step with SIDEBAR_LAYOUT_QUERY in src/lib/layout.ts. */
+@custom-variant sidenav (@media (min-width: 48rem) and (min-height: 32rem));
+
 @theme inline {
     --radius-sm: calc(var(--radius) - 4px);
     --radius-md: calc(var(--radius) - 2px);
@@ -192,11 +197,11 @@ html {
 }
 
 /* Room at the bottom of every page for the phone navigation bar (and the
-   iPhone home indicator); nothing on tablets and up, where the sidebar shows. */
+   iPhone home indicator); nothing where the sidebar shows (see sidenav). */
 :root {
   --mobile-nav-space: calc(4.5rem + env(safe-area-inset-bottom, 0px));
 }
-@media (min-width: 768px) {
+@media (min-width: 48rem) and (min-height: 32rem) {
   :root {
     --mobile-nav-space: 0px;
   }

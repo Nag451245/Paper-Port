@@ -56,7 +56,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
     <>
       {/* Desktop sidebar */}
       <aside
-        className={`hidden md:flex flex-col fixed top-14 left-0 bottom-0 z-30 border-r border-slate-200/60 bg-white transition-all duration-300 ${
+        className={`hidden sidenav:flex flex-col fixed top-14 left-0 bottom-0 z-30 border-r border-slate-200/60 bg-white transition-all duration-300 ${
           collapsed ? 'w-16' : 'w-56'
         }`}
       >
@@ -118,7 +118,7 @@ function MobileNav() {
     <>
       {/* Bottom bar: phones only */}
       <nav
-        className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-xl border-t border-slate-200/60 flex shadow-lg"
+        className="sidenav:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-xl border-t border-slate-200/60 flex shadow-lg"
         style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
       >
         {primary.map(({ to, icon: Icon, short }) => (
@@ -148,7 +148,7 @@ function MobileNav() {
       {/* Every page, as a sheet from the bottom */}
       {open && (
         // Above the floating assistant (z-index 9999), which would otherwise sit on the tiles.
-        <div className="md:hidden fixed inset-0" style={{ zIndex: 10000 }} role="dialog" aria-modal="true" aria-label="All pages">
+        <div className="sidenav:hidden fixed inset-0" style={{ zIndex: 10000 }} role="dialog" aria-modal="true" aria-label="All pages">
           <button className="absolute inset-0 bg-slate-900/40" aria-label="Close" onClick={() => setOpen(false)} />
           <div
             className="absolute bottom-0 left-0 right-0 bg-white rounded-t-2xl shadow-2xl max-h-[80dvh] overflow-y-auto"

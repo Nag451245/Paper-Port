@@ -87,7 +87,7 @@ export default function AppShell() {
       />
       <main
         className={`transition-all duration-300 ${
-          sidebarCollapsed ? 'md:pl-16' : 'md:pl-56'
+          sidebarCollapsed ? 'sidenav:pl-16' : 'sidenav:pl-56'
         }`}
         style={{ paddingTop: 'calc(3.5rem + env(safe-area-inset-top, 0px))', paddingBottom: 'var(--mobile-nav-space)' }}
       >

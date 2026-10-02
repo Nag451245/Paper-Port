@@ -233,7 +233,7 @@ export default function CommandCenter() {
   }
 
   return (
-    <div className="h-[calc(100dvh-9.5rem)] md:h-[calc(100vh-4rem)] flex gap-3 p-0 sm:p-3">
+    <div className="h-[calc(100dvh-9.5rem)] sidenav:h-[calc(100vh-4rem)] flex gap-3 p-0 sm:p-3">
       {/* ── Left: Unified Timeline ── */}
       <div className={`${sidebarCollapsed ? 'flex' : 'hidden lg:flex'} flex-1 min-w-0 flex-col bg-slate-900 rounded-xl border border-slate-700/50 overflow-hidden`}>
         <div className="px-4 py-3 border-b border-slate-700/50 bg-slate-800/50 flex items-center justify-between">
