@@ -508,6 +508,7 @@ export class MarketDataService {
     try {
       const yahooSym = toYahooSymbol(symbol, exchange);
       const yahooInterval = this.mapIntervalToYahoo(interval);
+      if (!yahooInterval) return [];
 
       const period1 = Math.floor(new Date(fromDate).getTime() / 1000);
       const period2 = Math.floor(new Date(toDate + 'T23:59:59Z').getTime() / 1000);
@@ -556,18 +557,20 @@ export class MarketDataService {
     }
   }
 
-  private mapIntervalToYahoo(interval: string): string {
+  // null for an interval Yahoo has no name for. It used to fall back to daily,
+  // so a request for 1-minute candles silently came back as daily ones.
+  private mapIntervalToYahoo(interval: string): string | null {
     const map: Record<string, string> = {
-      '1m': '1m', '1min': '1m', 'minute': '1m',
+      '1m': '1m', '1min': '1m', 'minute': '1m', '1minute': '1m',
       '5m': '5m', '5min': '5m', '5minute': '5m',
       '15m': '15m', '15min': '15m', '15minute': '15m',
       '30m': '30m', '30min': '30m', '30minute': '30m',
-      '1h': '1h', '60m': '1h', '60min': '1h',
+      '1h': '1h', '60m': '1h', '60min': '1h', '1hour': '1h',
       '1d': '1d', '1day': '1d', 'day': '1d', 'daily': '1d',
       '1wk': '1wk', 'week': '1wk', 'weekly': '1wk',
       '1mo': '1mo', 'month': '1mo', 'monthly': '1mo',
     };
-    return map[interval.toLowerCase()] ?? '1d';
+    return map[interval.toLowerCase()] ?? null;
   }
 
   // ── Public API ──

@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { portfolioApi, tradingApi, marketApi } from '@/services/api';
 import { createChart, ColorType, CandlestickSeries, type IChartApi, type ISeriesApi, type CandlestickData, type Time } from 'lightweight-charts';
+import { TIMEFRAMES, timeframeSpec, isIntraday, aggregate, applyTick, type Timeframe, type ChartBar, type RawBar } from '@/lib/candles';
 import { useLivePrice } from '@/hooks/useLivePrice';
 import { useTradeUpdates } from '@/hooks/useTradeUpdates';
 import OrderForm from '@/components/trading/OrderForm';
@@ -75,6 +76,13 @@ export default function TradingTerminal() {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const [timeframe, setTimeframe] = useState<Timeframe>(() => {
+    try { return (localStorage.getItem('terminal.timeframe') as Timeframe) || '1D'; } catch { return '1D'; }
+  });
+  const timeframeRef = useRef(timeframe);
+  const lastBarRef = useRef<ChartBar | undefined>(undefined);
+  const [chartLoading, setChartLoading] = useState(false);
+  const [chartEmpty, setChartEmpty] = useState(false);
 
   // Real-time live price via WebSocket
   const livePrice = useLivePrice(symbol || null);
@@ -244,6 +252,36 @@ export default function TradingTerminal() {
     return () => { if (searchTimeout.current) clearTimeout(searchTimeout.current); };
   }, [searchQuery, searchExchangeFilter]);
 
+  /** Load candles for the chosen timeframe; quiet reloads keep the user's zoom. */
+  const loadChart = useCallback(async (sym: string, exch: string, quiet = false) => {
+    const tf = timeframeRef.current;
+    const spec = timeframeSpec(tf);
+    const istToday = new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
+    const fromDate = new Date(Date.now() + 330 * 60_000 - spec.days * 86_400_000).toISOString().slice(0, 10);
+    if (!quiet) setChartLoading(true);
+    try {
+      const { data } = await marketApi.historical(sym, spec.interval, fromDate, istToday, exch);
+      if (timeframeRef.current !== tf) return;          // the user switched while this loaded
+      const raw: RawBar[] = (Array.isArray(data) ? data : [])
+        .filter((c: any) => c.date ?? c.datetime ?? c.timestamp)
+        .map((c: any) => ({
+          timestamp: String(c.timestamp ?? c.datetime ?? c.date),
+          open: num(c.open), high: num(c.high), low: num(c.low), close: num(c.close), volume: num(c.volume),
+        }));
+      const bars = aggregate(raw, tf, exch);
+      lastBarRef.current = bars[bars.length - 1];
+      setChartEmpty(bars.length === 0);
+      if (seriesRef.current) {
+        seriesRef.current.setData(bars as unknown as CandlestickData<Time>[]);
+        if (!quiet) chartRef.current?.timeScale().fitContent();
+      }
+    } catch {
+      if (!quiet) setChartEmpty(true);
+    } finally {
+      if (!quiet) setChartLoading(false);
+    }
+  }, []);
+
   const selectSymbol = useCallback(async (sym: string, exchange?: string) => {
     const exch = exchange || selectedExchange || 'NSE';
     setSymbol(sym);
@@ -256,31 +294,8 @@ export default function TradingTerminal() {
       setQuote(data);
     } catch { setQuote(null); } finally { setQuoteLoading(false); }
 
-    const to = new Date().toISOString().slice(0, 10);
-    const fromDate = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
-    try {
-      const { data } = await marketApi.historical(sym, '1d', fromDate, to, exch);
-      const candles = Array.isArray(data) ? data : [];
-      if (candles.length > 0 && seriesRef.current) {
-        const chartData: CandlestickData<Time>[] = candles
-          .filter((c: any) => (c.date ?? c.datetime ?? c.timestamp))
-          .map((c: any) => ({
-            time: (c.date ?? c.datetime ?? c.timestamp ?? '').slice(0, 10) as Time,
-            open: num(c.open),
-            high: num(c.high),
-            low: num(c.low),
-            close: num(c.close),
-          }))
-          .sort((a: CandlestickData<Time>, b: CandlestickData<Time>) =>
-            (a.time as string).localeCompare(b.time as string)
-          );
-        seriesRef.current.setData(chartData);
-        chartRef.current?.timeScale().fitContent();
-      } else if (seriesRef.current) {
-        seriesRef.current.setData([]);
-      }
-    } catch { /* chart data unavailable */ }
-  }, [selectedExchange]);
+    void loadChart(sym, exch);
+  }, [selectedExchange, loadChart]);
 
   // Initialize chart
   useEffect(() => {
@@ -306,6 +321,32 @@ export default function TradingTerminal() {
     window.addEventListener('resize', handleResize);
     return () => { window.removeEventListener('resize', handleResize); chart.remove(); chartRef.current = null; seriesRef.current = null; };
   }, []);
+
+  // Timeframe switch: show times on the axis for intraday, then reload.
+  useEffect(() => {
+    timeframeRef.current = timeframe;
+    try { localStorage.setItem('terminal.timeframe', timeframe); } catch { /* private mode */ }
+    chartRef.current?.applyOptions({ timeScale: { timeVisible: isIntraday(timeframe), secondsVisible: false } });
+    if (symbol) void loadChart(symbol, selectedExchange || 'NSE');
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reload on timeframe change only; symbol changes load via selectSymbol
+  }, [timeframe]);
+
+  // Intraday charts re-sync with the server every minute, so new candles appear without a refresh.
+  useEffect(() => {
+    if (!symbol || !isIntraday(timeframe)) return;
+    const id = setInterval(() => void loadChart(symbol, selectedExchange || 'NSE', true), 60_000);
+    return () => clearInterval(id);
+  }, [symbol, selectedExchange, timeframe, loadChart]);
+
+  // Between re-syncs, every live price moves the last candle.
+  useEffect(() => {
+    const ltpNow = num(quote?.ltp ?? quote?.last_price);
+    const next = applyTick(lastBarRef.current, ltpNow, Date.now(), timeframeRef.current, selectedExchange || 'NSE');
+    if (next && seriesRef.current) {
+      seriesRef.current.update(next as unknown as CandlestickData<Time>);
+      lastBarRef.current = next;
+    }
+  }, [quote?.ltp, quote?.last_price, selectedExchange]);
 
   const handleCancelOrder = async (orderId: string) => {
     try {
@@ -434,12 +475,29 @@ export default function TradingTerminal() {
               )}
               {quoteLoading && <Loader2 className="w-4 h-4 animate-spin text-slate-400" />}
             </div>
+            <div className="flex items-center gap-1 ml-auto mr-2 overflow-x-auto" role="group" aria-label="Chart timeframe">
+              {TIMEFRAMES.map((t) => (
+                <button key={t.value} onClick={() => setTimeframe(t.value)}
+                  className={`px-2 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                    timeframe === t.value ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-100'
+                  }`}>
+                  {t.label}
+                </button>
+              ))}
+              {chartLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-400 ml-1" />}
+            </div>
             <button onClick={fetchAll} className="p-1.5 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors" title="Refresh data">
               <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
             </button>
           </div>
           <div className="relative" style={{ minHeight: 360 }}>
             <div ref={chartContainerRef} className="w-full" style={{ height: 360 }} />
+            {symbol && chartEmpty && !chartLoading && (
+              <div className="absolute inset-x-0 top-1/3 text-center text-xs text-slate-400 z-10 px-6">
+                No {timeframeSpec(timeframe).label} candles for {symbol}.
+                {isIntraday(timeframe) && ' Intraday history comes from ICICI Breeze; without it only recent days are available.'}
+              </div>
+            )}
             {!symbol && (
               <div className="absolute inset-0 flex items-center justify-center bg-white text-slate-400 z-10">
                 <div className="text-center">

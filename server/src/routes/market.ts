@@ -6,7 +6,7 @@ import { authenticate, getUserId } from '../middleware/auth.js';
 import { istDateStr, istDaysAgo } from '../lib/ist.js';
 
 const symbolParam = z.string().min(1).max(30).regex(/^[A-Z0-9&_-]+$/i, 'Invalid symbol');
-const intervalParam = z.string().regex(/^(1d|1day|day|daily|1h|1hour|hour|5m|5min|5minute|15m|15min|15minute|30m|30min|30minute)$/i).default('1day');
+const intervalParam = z.string().regex(/^(1d|1day|day|daily|1h|1hour|hour|5m|5min|5minute|15m|15min|15minute|30m|30min|30minute|1m|1min|1minute|minute)$/i).default('1day');
 const dateParam = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 export async function marketRoutes(app: FastifyInstance): Promise<void> {
