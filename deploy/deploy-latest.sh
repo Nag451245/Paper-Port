@@ -6,6 +6,9 @@
 #
 # Stops at the first error. Until step 7 the running app is untouched, so a
 # failed test or build leaves the live site exactly as it was.
+#
+# Builds go to a side folder and are swapped in only when complete, so the
+# site never serves a half-built, missing or out-of-date copy mid-deploy.
 set -euo pipefail
 BRANCH="${1:-main}"
 APP=~/capital-guard
@@ -20,9 +23,17 @@ if [ -n "$(git status --porcelain --untracked-files=no -- . ':!server/dist' ':!f
   echo "STOP: code was edited directly on the VM:"; git status --short --untracked-files=no; exit 1
 fi
 PREV=$(git log --oneline -1)
+# Keep the builds that are serving the site right now. Older commits tracked a
+# stale copy of these folders in Git, and switching commits put that old
+# website back on the live site until the new build finished.
+rm -rf /tmp/pp-live && mkdir -p /tmp/pp-live
+if [ -d frontend/dist ]; then cp -a frontend/dist /tmp/pp-live/frontend-dist; fi
+if [ -d server/dist ]; then cp -a server/dist /tmp/pp-live/server-dist; fi
 git fetch origin
 git checkout -f -B "$BRANCH" "origin/$BRANCH"
 cp /tmp/nse_universe.vm.json "$UNIVERSE" 2>/dev/null || true
+if [ -d /tmp/pp-live/frontend-dist ]; then rm -rf frontend/dist; cp -a /tmp/pp-live/frontend-dist frontend/dist; fi
+if [ -d /tmp/pp-live/server-dist ]; then rm -rf server/dist; cp -a /tmp/pp-live/server-dist server/dist; fi
 echo "   was: $PREV"
 echo "   now: $(git log --oneline -1)"
 
@@ -43,7 +54,9 @@ mv -f "$APP/server/bin/capital-guard-engine.new" "$APP/server/bin/capital-guard-
 echo "== [4/8] Backend"
 cd "$APP/server"
 npm ci
-npm run build
+npx prisma generate
+npx tsc --outDir dist-new
+rm -rf dist-old; if [ -d dist ]; then mv dist dist-old; fi; mv dist-new dist; rm -rf dist-old
 
 echo "== [5/8] Database migrations"
 npx prisma migrate deploy
@@ -51,7 +64,8 @@ npx prisma migrate deploy
 echo "== [6/8] Frontend"
 cd "$APP/frontend"
 npm ci
-npx vite build
+npx vite build --outDir dist-new --emptyOutDir
+rm -rf dist-old; if [ -d dist ]; then mv dist dist-old; fi; mv dist-new dist; rm -rf dist-old
 rm -rf node_modules
 
 echo "== [7/8] Restart"
