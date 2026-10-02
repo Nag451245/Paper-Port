@@ -84,3 +84,23 @@ describe('quote', () => {
     expect(q).toMatchObject({ ltp: 1210, change: 10, close: 1200, changePercent: 0.83, bidPrice: 1209.9, askQty: 40 });
   });
 });
+
+describe('rejected login', () => {
+  it('reports a token Upstox refuses, once per failed call, and serves nothing from it', async () => {
+    const f = fakeFetch(() => json({ status: 'error', errors: [{ message: 'Invalid token used to access API' }] }, false, 401));
+    const svc = new UpstoxService(f);
+    const rejected: string[] = [];
+    svc.onAuthFailure = (t) => rejected.push(t);
+    expect(await svc.quote('stale-token', 'RELIANCE')).toBeNull();
+    expect(rejected).toEqual(['stale-token']);
+  });
+
+  it('does not treat other failures as a bad login', async () => {
+    const f = fakeFetch(() => json({ status: 'error', errors: [{ message: 'Too many requests' }] }, false, 429));
+    const svc = new UpstoxService(f);
+    const rejected: string[] = [];
+    svc.onAuthFailure = (t) => rejected.push(t);
+    await svc.quote('tok', 'RELIANCE');
+    expect(rejected).toEqual([]);
+  });
+});

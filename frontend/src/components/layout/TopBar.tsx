@@ -10,14 +10,17 @@ import {
   Wifi,
   WifiOff,
   AlertCircle,
+  Radio,
 } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth';
+import { brokersApi, type BrokerList } from '@/services/api';
 import { useMarketDataStore } from '@/stores/market-data';
 
 export default function TopBar() {
   const { user, logout } = useAuthStore();
   const { indices, vix, isMarketOpen, fetchIndices, fetchVIX, checkMarketStatus } = useMarketDataStore();
   const [bridgeStatus, setBridgeStatus] = useState<'ok' | 'unhealthy' | 'unknown'>('unknown');
+  const [brokers, setBrokers] = useState<BrokerList | null>(null);
   // Opened by tap or click: a hover-only menu cannot be reached on a touch screen.
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -43,14 +46,19 @@ export default function TopBar() {
       } catch { setBridgeStatus('unhealthy'); }
     };
     checkBridge();
+    const checkBroker = () => brokersApi.list().then(({ data }) => setBrokers(data)).catch(() => {});
+    checkBroker();
+    // Switching broker in Settings and coming back should show at once.
+    window.addEventListener('focus', checkBroker);
 
     const interval = setInterval(() => {
       fetchIndices();
       fetchVIX();
       checkMarketStatus();
       checkBridge();
+      checkBroker();
     }, 60_000);
-    return () => clearInterval(interval);
+    return () => { clearInterval(interval); window.removeEventListener('focus', checkBroker); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -99,16 +107,31 @@ export default function TopBar() {
         )}
       </div>
 
-      {bridgeStatus === 'unhealthy' && (
-        <Link
-          to="/settings"
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-amber-200 bg-amber-50 text-xs flex-shrink-0 hover:bg-amber-100 transition-colors"
-          title="Breeze API session not active. Click to configure."
-        >
-          <AlertCircle className="w-3 h-3 text-amber-600" />
-          <span className="text-amber-700 font-medium hidden sm:inline">Breeze Offline</span>
-        </Link>
-      )}
+      {/* Which broker is actually supplying market data, and whether it is connected */}
+      {(() => {
+        const active = brokers?.brokers.find((b) => b.id === brokers.active);
+        const isUpstox = brokers?.active === 'upstox';
+        const ok = isUpstox ? !!active?.connected : bridgeStatus !== 'unhealthy';
+        if (!brokers && bridgeStatus !== 'unhealthy') return null;
+        const name = isUpstox ? 'Upstox' : 'ICICI Breeze';
+        const label = ok ? name : isUpstox ? 'Upstox: log in' : 'Breeze Offline';
+        return (
+          <Link
+            to="/settings"
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs flex-shrink-0 transition-colors ${
+              ok ? 'border-emerald-200 bg-emerald-50 hover:bg-emerald-100' : 'border-amber-200 bg-amber-50 hover:bg-amber-100'
+            }`}
+            title={ok
+              ? `Market data from ${name}. Change in Settings → Broker.`
+              : isUpstox
+                ? 'Upstox is your data source but not logged in (logins expire at 3:30 AM). Prices fall back to other sources until you log in again.'
+                : 'Breeze session not active. Click to configure.'}
+          >
+            {ok ? <Radio className="w-3 h-3 text-emerald-600" /> : <AlertCircle className="w-3 h-3 text-amber-600" />}
+            <span className={`font-medium hidden sm:inline ${ok ? 'text-emerald-700' : 'text-amber-700'}`}>{label}</span>
+          </Link>
+        );
+      })()}
 
       {/* Phones and tablets: NIFTY only, so the market is still in view */}
       {nifty && (

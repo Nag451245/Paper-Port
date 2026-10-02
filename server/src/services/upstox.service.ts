@@ -92,6 +92,9 @@ export function upstoxInterval(interval: string): { unit: string; n: number; win
   return null;
 }
 
+/** Upstox refused the access token: expired, revoked, or used from an unlisted IP. */
+export class UpstoxAuthError extends Error {}
+
 const addDays = (date: string, days: number) =>
   new Date(Date.parse(`${date}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
 
@@ -100,7 +103,14 @@ export class UpstoxService {
   private loadedAt = 0;
   private loading: Promise<InstrumentMaps | null> | null = null;
 
+  /** Called once per rejected token, so the app can stop presenting Upstox as connected. */
+  onAuthFailure: ((token: string) => void) | null = null;
+
   constructor(private readonly fetchImpl: typeof fetch = (input, init) => fetch(input, init)) {}
+
+  private authFailed(token: string, err: unknown): void {
+    if (err instanceof UpstoxAuthError) this.onAuthFailure?.(token);
+  }
 
   async instrumentMaps(): Promise<InstrumentMaps | null> {
     if (this.maps && Date.now() - this.loadedAt < MASTER_TTL_MS) return this.maps;
@@ -136,7 +146,8 @@ export class UpstoxService {
     const body = await res.json().catch(() => null) as any;
     if (!res.ok || body?.status !== 'success') {
       const msg = body?.errors?.[0]?.message ?? `HTTP ${res.status}`;
-      throw new Error(`Upstox ${path.split('?')[0]}: ${msg}`);
+      const text = `Upstox ${path.split('?')[0]}: ${msg}`;
+      throw res.status === 401 ? new UpstoxAuthError(text) : new Error(text);
     }
     return body.data;
   }
@@ -166,6 +177,7 @@ export class UpstoxService {
     } catch (err) {
       // A gap mid-series would be served as if complete; return nothing instead.
       log.warn({ symbol, interval, err: (err as Error).message }, 'Upstox history failed');
+      this.authFailed(token, err);
       return [];
     }
     return [...byTime.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
@@ -200,6 +212,7 @@ export class UpstoxService {
       };
     } catch (err) {
       log.warn({ symbol, err: (err as Error).message }, 'Upstox quote failed');
+      this.authFailed(token, err);
       return null;
     }
   }

@@ -495,7 +495,7 @@ export default function TradingTerminal() {
             {symbol && chartEmpty && !chartLoading && (
               <div className="absolute inset-x-0 top-1/3 text-center text-xs text-slate-400 z-10 px-6">
                 No {timeframeSpec(timeframe).label} candles for {symbol}.
-                {isIntraday(timeframe) && ' Intraday history comes from ICICI Breeze; without it only recent days are available.'}
+                {isIntraday(timeframe) && ' Intraday history comes from your broker (Settings → Broker); without one connected, only recent days are available.'}
               </div>
             )}
             {!symbol && (

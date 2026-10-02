@@ -38,7 +38,7 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
     );
 
     if (bars.length === 0) {
-      return reply.send({ error: 'No historical data. Configure Breeze API credentials and session token in Settings.', data: [] });
+      return reply.send({ error: 'No historical data. Connect a broker (ICICI Breeze or Upstox) in Settings → Broker.', data: [] });
     }
 
     return reply.send(bars);

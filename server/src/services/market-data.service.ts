@@ -558,7 +558,10 @@ export class MarketDataService {
   // ── Public API ──
 
   async getQuote(symbol: string, exchange = 'NSE'): Promise<MarketQuote> {
-    const cacheKey = `quote:${exchange}:${symbol}`;
+    // Quotes are cached per source: after switching to Upstox, a price fetched
+    // earlier from Breeze or Yahoo must not be served for the rest of its TTL.
+    const viaUpstox = exchange !== 'MCX' && exchange !== 'CDS' && !!(await this.upstoxToken());
+    const cacheKey = `quote:${viaUpstox ? 'upstox:' : ''}${exchange}:${symbol}`;
 
     if (this.cache) {
       const cached = await this.cache.get<MarketQuote>(cacheKey);
@@ -566,7 +569,7 @@ export class MarketDataService {
     }
 
     // The user's chosen broker comes first when it is Upstox (Breeze is below).
-    if (exchange !== 'MCX' && exchange !== 'CDS') {
+    if (viaUpstox) {
       const upstoxQuote = await this.fetchQuoteFromUpstox(symbol, exchange);
       if (upstoxQuote) {
         if (this.cache) await this.cache.set(cacheKey, upstoxQuote, getQuoteCacheTTL());
@@ -1864,7 +1867,14 @@ export class MarketDataService {
 
   private async upstoxToken(userId?: string): Promise<string | null> {
     try {
-      this.upstoxAccounts ??= new BrokerAccountsService(getPrisma());
+      if (!this.upstoxAccounts) {
+        const accounts = new BrokerAccountsService(getPrisma());
+        this.upstoxAccounts = accounts;
+        getUpstox().onAuthFailure ??= (token) => {
+          log.warn('Upstox rejected the access token; marking the Upstox login as expired');
+          accounts.expireUpstoxToken(token).catch(() => {});
+        };
+      }
       return await this.upstoxAccounts.upstoxToken(userId);
     } catch {
       return null;                                  // no database (tests, startup): skip Upstox

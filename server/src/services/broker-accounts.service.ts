@@ -164,6 +164,25 @@ export class BrokerAccountsService {
   }
 
   /**
+   * Upstox refused this token: record it as logged out, so Settings and the top
+   * bar say "log in" instead of showing Upstox as connected while prices
+   * silently come from elsewhere.
+   */
+  async expireUpstoxToken(token: string): Promise<void> {
+    const rows = await this.prisma.brokerAccount.findMany({
+      where: { broker: 'upstox', encryptedAccessToken: { not: null } },
+      select: { id: true, encryptedAccessToken: true },
+    });
+    const now = new Date();
+    for (const r of rows) {
+      let t: string | null = null;
+      try { t = this.dec(r.encryptedAccessToken!); } catch { /* unreadable: leave it */ }
+      if (t === token) await this.prisma.brokerAccount.update({ where: { id: r.id }, data: { tokenExpiresAt: now } });
+    }
+    tokenCache.clear();
+  }
+
+  /**
    * A live Upstox token to fetch market data with, or null when Upstox is not
    * the active broker. Without a user (background jobs), any user who made
    * Upstox active with a live token is used — the same way Breeze works here.
