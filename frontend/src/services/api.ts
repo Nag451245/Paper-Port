@@ -308,11 +308,14 @@ export interface BrokerStatus {
   connected: boolean;
   tokenExpiresAt: string | null;
   fieldsSaved: BrokerField[];
+  /** Upstox: a browser login has linked the account, so the daily approval can be used. */
+  autoSessionReady?: boolean;
 }
 
 export interface BrokerList {
   active: BrokerId;
   redirectUris: { upstox: string };
+  notifierUris: { upstox: string };
   brokers: BrokerStatus[];
 }
 
@@ -322,6 +325,7 @@ export const brokersApi = {
   remove: (broker: BrokerId) => api.delete<BrokerList>(`/brokers/${broker}`),
   setActive: (broker: BrokerId) => api.post<BrokerList>('/brokers/active', { broker }),
   upstoxLogin: () => api.get<{ loginUrl: string; redirectUri: string }>('/brokers/upstox/login'),
+  upstoxRequestToken: () => api.post<{ message: string }>('/brokers/upstox/request-token'),
 };
 
 // ─── Replay Lab (manual backtesting) ──────────────────────────────

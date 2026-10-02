@@ -6,7 +6,7 @@ let app: FastifyInstance;
 vi.mock('../../src/lib/prisma.js', () => {
   const mock = {
     user: { findUnique: vi.fn().mockResolvedValue({ activeBroker: 'breeze' }), update: vi.fn() },
-    brokerAccount: { findMany: vi.fn().mockResolvedValue([]), findUnique: vi.fn(), findFirst: vi.fn() },
+    brokerAccount: { findMany: vi.fn().mockResolvedValue([]), findUnique: vi.fn(), findFirst: vi.fn(), update: vi.fn() },
     breezeCredential: { findUnique: vi.fn().mockResolvedValue(null), findMany: vi.fn().mockResolvedValue([]) },
     $disconnect: vi.fn(),
     $connect: vi.fn(),
@@ -16,8 +16,11 @@ vi.mock('../../src/lib/prisma.js', () => {
   return { getPrisma: vi.fn(() => mock), disconnectPrisma: vi.fn(), __mockPrisma: mock };
 });
 
+let mockPrisma: any;
+
 beforeAll(async () => {
   const { buildApp } = await import('../../src/app.js');
+  mockPrisma = ((await import('../../src/lib/prisma.js')) as any).__mockPrisma;
   app = await buildApp({ logger: false });
   await app.ready();
 }, 30_000);
@@ -50,5 +53,20 @@ describe('/api/brokers', () => {
     expect(location.host).not.toBe('evil.example');
     expect(location.pathname).toBe('/settings');
     expect(Object.fromEntries(location.searchParams)).toMatchObject({ broker: 'upstox', status: 'error' });
+  });
+
+  it('answers the notifier webhook the same way whatever is posted, and saves nothing unverified', async () => {
+    const forged = await app.inject({
+      method: 'POST', url: '/api/brokers/upstox/notifier',
+      payload: { client_id: 'guess', user_id: 'guess', access_token: 'attacker-token', message_type: 'access_token' },
+    });
+    const junk = await app.inject({ method: 'POST', url: '/api/brokers/upstox/notifier', payload: { hello: 'world' } });
+    expect(forged.statusCode).toBe(200);
+    expect(forged.json()).toEqual(junk.json());
+    expect(mockPrisma.brokerAccount.update).not.toHaveBeenCalled();
+  });
+
+  it('needs a signed-in user to send the phone approval request', async () => {
+    expect((await app.inject({ method: 'POST', url: '/api/brokers/upstox/request-token' })).statusCode).toBe(401);
   });
 });

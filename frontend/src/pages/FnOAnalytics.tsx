@@ -384,7 +384,7 @@ export default function FnOAnalytics() {
         setLastUpdated(new Date());
         setDataError(null);
       } else if (!silent) {
-        setDataError('Unable to fetch F&O data. The Breeze API session may have expired — check Settings.');
+        setDataError('Unable to fetch F&O data. Your broker login may have expired — check Settings → Broker.');
       }
     } catch {
       if (!silent) setDataError('Failed to connect to market data services. Please check your connection.');

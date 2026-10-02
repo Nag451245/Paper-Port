@@ -1101,6 +1101,9 @@ model BrokerAccount {
   encryptedClientId    String?   @map("encrypted_client_id")
   encryptedAccessToken String?   @map("encrypted_access_token")
   tokenExpiresAt       DateTime? @map("token_expires_at")
+  /// The broker's own account id (Upstox user_id), learned at the first browser
+  /// login. A token pushed to the notifier webhook is accepted only for this id.
+  brokerUserId         String?   @map("broker_user_id")
   createdAt            DateTime  @default(now()) @map("created_at")
   updatedAt            DateTime  @updatedAt @map("updated_at")
 

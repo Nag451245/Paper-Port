@@ -184,7 +184,7 @@ export default function OptionChain() {
         setStrikes([]);
         setSpotPrice(0);
         if (!silent) setError(data?.sessionError
-          ? 'Breeze API session not active. Please enter your session key in Settings.'
+          ? 'No option data source is connected. Connect ICICI Breeze or Upstox in Settings → Broker.'
           : 'No option chain data available for this symbol.');
       }
     } catch {

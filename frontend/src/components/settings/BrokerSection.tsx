@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Building2, CheckCircle, AlertCircle, Loader2, ExternalLink, Copy, Trash2, LogIn, Radio } from 'lucide-react';
+import { Building2, CheckCircle, AlertCircle, Loader2, ExternalLink, Copy, Trash2, LogIn, Radio, Smartphone } from 'lucide-react';
 import { brokersApi, type BrokerId, type BrokerList, type BrokerStatus, type BrokerField } from '@/services/api';
 
 const errorText = (err: unknown, fallback: string) =>
@@ -133,7 +133,21 @@ export default function BrokerSection() {
                 <Copy className="w-3.5 h-3.5" />
               </button>
             </div>
-            <p>2. Save the app&apos;s API key and secret below. 3. Log in with Upstox (once a day; Upstox tokens expire at 3:30 AM).</p>
+            <p>2. Save the app&apos;s API key and secret below. 3. Log in with Upstox once in the browser.</p>
+            <p className="pt-2 font-medium text-slate-700">Daily login from your phone (optional)</p>
+            <p>
+              Upstox logins expire at 3:30 AM. Instead of logging in here each morning, set the app&apos;s
+              <strong> Notifier Webhook Endpoint</strong> to the address below. Every weekday at 8:00 AM the app sends
+              you an approval request in the Upstox app and on WhatsApp; one tap and today&apos;s login is done.
+              No password, PIN or 2FA code is stored.
+            </p>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 min-w-0 truncate rounded bg-white border border-slate-200 px-2 py-1 font-mono text-[11px]">{list.notifierUris.upstox}</code>
+              <button onClick={() => navigator.clipboard?.writeText(list.notifierUris.upstox).then(() => setSuccess('Notifier address copied.'))}
+                className="p-1.5 rounded border border-slate-200 bg-white hover:bg-slate-100" title="Copy">
+                <Copy className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         )}
 
@@ -176,6 +190,19 @@ export default function BrokerSection() {
               className="px-4 py-2 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-sm font-semibold rounded-lg disabled:opacity-50 flex items-center gap-1.5">
               {busy === 'login' ? <Loader2 className="w-4 h-4 animate-spin" /> : <LogIn className="w-4 h-4" />}
               {broker.connected ? 'Log in again' : `Log in with ${broker.name}`}
+            </button>
+          )}
+
+          {broker.id === 'upstox' && broker.autoSessionReady && !broker.connected && (
+            <button
+              disabled={!!busy}
+              onClick={() => run('approve', async () => {
+                const { data } = await brokersApi.upstoxRequestToken();
+                setSuccess(data.message);
+              })}
+              className="px-4 py-2 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-sm font-semibold rounded-lg disabled:opacity-50 flex items-center gap-1.5">
+              {busy === 'approve' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Smartphone className="w-4 h-4" />}
+              Send approval to my phone
             </button>
           )}
 

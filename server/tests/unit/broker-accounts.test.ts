@@ -11,6 +11,8 @@ const prisma = {
 } as any;
 
 const enc = (v: string) => encrypt(v, env.ENCRYPTION_KEY);
+/** Stands in for Upstox's profile API: who a token belongs to. */
+const upstoxAs = (owner: string | null) => ({ profileUserId: vi.fn(async () => owner) });
 
 describe('BrokerAccountsService', () => {
   beforeEach(() => {
@@ -53,7 +55,7 @@ describe('BrokerAccountsService', () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ access_token: 'upstox-token' }) });
     const state = await createBreezeState('u1');
 
-    await new BrokerAccountsService(prisma, fetchImpl as any).upstoxCallback('one-time-code', state);
+    await new BrokerAccountsService(prisma, fetchImpl as any, upstoxAs('UPX123')).upstoxCallback('one-time-code', state);
 
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe('https://api.upstox.com/v2/login/authorization/token');
@@ -62,15 +64,16 @@ describe('BrokerAccountsService', () => {
     });
     const saved = prisma.brokerAccount.update.mock.calls[0][0].data;
     expect(saved.encryptedAccessToken).not.toContain('upstox-token');
+    expect(saved.brokerUserId).toBe('UPX123');                 // remembered for the daily approval flow
     expect(prisma.user.update).toHaveBeenCalledWith({ where: { id: 'u1' }, data: { activeBroker: 'upstox' } });
   });
 
   it('refuses a callback whose state was never issued or is already used', async () => {
-    const svc = new BrokerAccountsService(prisma, vi.fn() as any);
+    const svc = new BrokerAccountsService(prisma, vi.fn() as any, upstoxAs(null));
     await expect(svc.upstoxCallback('code', 'made-up-state')).rejects.toThrow(/expired/);
     const state = await createBreezeState('u1');
     prisma.brokerAccount.findUnique.mockResolvedValue({ id: 'a1', encryptedApiKey: enc('k'), encryptedApiSecret: enc('s') });
-    const ok = new BrokerAccountsService(prisma, vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ access_token: 't' }) }) as any);
+    const ok = new BrokerAccountsService(prisma, vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ access_token: 't' }) }) as any, upstoxAs('U'));
     await ok.upstoxCallback('code', state);
     await expect(ok.upstoxCallback('code', state)).rejects.toThrow(/expired/);
   });
@@ -80,6 +83,50 @@ describe('BrokerAccountsService', () => {
     expect(await new BrokerAccountsService(prisma).upstoxToken('u-token-test')).toBe('live-token');
     expect(prisma.brokerAccount.findFirst.mock.calls[0][0].where).toMatchObject({
       broker: 'upstox', userId: 'u-token-test', user: { activeBroker: 'upstox' },
+    });
+  });
+
+  describe('daily approval (no password stored)', () => {
+    const account = { id: 'a1', userId: 'u1', encryptedApiKey: enc('app-key'), encryptedApiSecret: enc('app-secret'), brokerUserId: 'UPX123' };
+
+    it('asks Upstox to send the approval prompt, with the app secret in the body', async () => {
+      prisma.brokerAccount.findUnique.mockResolvedValue(account);
+      const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ status: 'success', data: {} }) });
+      const r = await new BrokerAccountsService(prisma, fetchImpl as any, upstoxAs(null)).requestUpstoxToken('u1');
+      const [url, init] = fetchImpl.mock.calls[0];
+      expect(url).toBe('https://api.upstox.com/v3/login/auth/token/request/app-key');
+      expect(JSON.parse(init.body)).toEqual({ client_secret: 'app-secret' });
+      expect(r.message).toMatch(/Approve it in the Upstox app or on WhatsApp/);
+    });
+
+    it('needs one browser login first, to know whose account it is', async () => {
+      prisma.brokerAccount.findUnique.mockResolvedValue({ ...account, brokerUserId: null });
+      await expect(new BrokerAccountsService(prisma, vi.fn() as any, upstoxAs(null)).requestUpstoxToken('u1'))
+        .rejects.toThrow(/Log in with Upstox once/);
+    });
+
+    const notice = { client_id: 'app-key', user_id: 'UPX123', access_token: 'fresh-token', expires_at: String(Date.now() + 3_600_000), message_type: 'access_token' };
+
+    it('saves a pushed token only when app key, account and Upstox all agree', async () => {
+      prisma.brokerAccount.findMany.mockResolvedValue([account]);
+      const ok = await new BrokerAccountsService(prisma, vi.fn() as any, upstoxAs('UPX123')).acceptUpstoxNotice(notice);
+      expect(ok).toBe(true);
+      const data = prisma.brokerAccount.update.mock.calls[0][0].data;
+      expect(data.encryptedAccessToken).not.toContain('fresh-token');
+      expect(data.tokenExpiresAt.getTime()).toBe(Number(notice.expires_at));
+    });
+
+    it.each([
+      ['an app key that is not saved', { client_id: 'someone-elses-app' }, 'UPX123'],
+      ['a token Upstox says belongs to another account', {}, 'INTRUDER'],
+      ['a token Upstox refuses', {}, null],
+      ['a different message type', { message_type: 'order_update' }, 'UPX123'],
+    ])('ignores %s', async (_label, override, owner) => {
+      prisma.brokerAccount.findMany.mockResolvedValue([account]);
+      const ok = await new BrokerAccountsService(prisma, vi.fn() as any, upstoxAs(owner as string | null))
+        .acceptUpstoxNotice({ ...notice, ...override });
+      expect(ok).toBe(false);
+      expect(prisma.brokerAccount.update).not.toHaveBeenCalled();
     });
   });
 });

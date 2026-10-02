@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, onTestFinished } from 'vitest';
 import { gzipSync } from 'zlib';
-import { UpstoxService, buildMaps, resolveKey, upstoxInterval } from '../../src/services/upstox.service.js';
+import { UpstoxService, buildMaps, resolveKey, upstoxInterval, mapOptionChain } from '../../src/services/upstox.service.js';
 
 const MASTER = [
   { segment: 'NSE_EQ', instrument_type: 'EQ', trading_symbol: 'RELIANCE', instrument_key: 'NSE_EQ|INE002A01018' },
@@ -102,5 +102,32 @@ describe('rejected login', () => {
     svc.onAuthFailure = (t) => rejected.push(t);
     await svc.quote('tok', 'RELIANCE');
     expect(rejected).toEqual([]);
+  });
+});
+
+describe('option chain', () => {
+  const row = (strike: number, callOI: number, putOI: number) => ({
+    strike_price: strike, underlying_spot_price: 24010, expiry: '2026-10-29',
+    call_options: { instrument_key: 'NSE_FO|1', market_data: { ltp: 120, volume: 10, oi: callOI, close_price: 100, bid_price: 119, ask_price: 121, prev_oi: callOI - 5 }, option_greeks: { iv: 14.2, delta: 0.52, gamma: 0.001, theta: -9, vega: 12 } },
+    put_options: { instrument_key: 'NSE_FO|2', market_data: { ltp: 95, volume: 20, oi: putOI, close_price: 110, bid_price: 94, ask_price: 96, prev_oi: putOI + 10 }, option_greeks: { iv: 15.1, delta: -0.48, gamma: 0.001, theta: -8, vega: 11 } },
+  });
+
+  it('maps Upstox rows into the app\'s chain, with the right max pain', () => {
+    const chain = mapOptionChain('nifty', '2026-10-29', ['2026-10-29'], 75, [row(24100, 50, 900), row(23900, 900, 50), row(24000, 300, 300)]);
+    expect(chain.strikes.map((s) => s.strike)).toEqual([23900, 24000, 24100]);
+    expect(chain.strikes[1]).toMatchObject({ callLTP: 120, callOIChange: 5, callNetChange: 20, callIV: 14.2, putOIChange: -10, putNetChange: -15, putDelta: -0.48 });
+    expect(chain).toMatchObject({ symbol: 'NIFTY', spotPrice: 24010, lotSize: 75, source: 'upstox', pcr: 1 });
+    expect(mapOptionChain('X', 'e', [], 1, [row(100, 0, 1000), row(200, 10, 10), row(300, 500, 0)]).maxPain).toBe(200);
+  });
+
+  it('asks for the nearest upcoming expiry by default', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-10-02T10:00:00+05:30') });   // before the 29 Oct expiry
+    onTestFinished(() => vi.useRealTimers());
+    const f = fakeFetch(() => json({ status: 'success', data: [row(24000, 1, 1)] }));
+    const chain = await new UpstoxService(f).optionChain('tok', 'NIFTY');
+    const url = f.mock.calls.map((c) => String(c[0])).find((u) => u.includes('/option/chain'))!;
+    expect(url).toContain('instrument_key=NSE_INDEX%7CNifty%2050');
+    expect(url).toContain('expiry_date=2026-10-29');
+    expect(chain?.expiries).toEqual(['2026-10-29']);
   });
 });

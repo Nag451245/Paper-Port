@@ -1391,10 +1391,22 @@ export class MarketDataService {
   }
 
   async getOptionsChain(symbol: string, expiry?: string) {
-    const cacheKey = expiry ? `options:${symbol}:${expiry}` : `options:${symbol}`;
+    // Cached per source, like quotes, so switching broker takes effect at once.
+    const upstoxToken = await this.upstoxToken();
+    const cacheKey = `options:${upstoxToken ? 'upstox:' : ''}${symbol}${expiry ? `:${expiry}` : ''}`;
     if (this.cache) {
       const cached = await this.cache.get<any>(cacheKey);
       if (cached) return cached;
+    }
+
+    // The user's chosen broker first, when it is Upstox.
+    if (upstoxToken) {
+      const chain = await getUpstox().optionChain(upstoxToken, symbol, expiry);
+      if (chain && chain.strikes.length > 0) {
+        console.log(`[OptionChain] ${symbol} expiry=${chain.expiry} → Upstox (${chain.strikes.length} strikes)`);
+        if (this.cache) await this.cache.set(cacheKey, chain, 10);
+        return chain;
+      }
     }
 
     // Primary: Python Breeze Bridge (official Python SDK — most reliable)
@@ -1448,7 +1460,7 @@ export class MarketDataService {
     }
     console.log(`[OptionChain] ${symbol} → No Breeze bridge session, no fallback`);
     return { symbol, strikes: [], expiry: expiry ?? '', expiries: [], sessionError: true,
-      message: 'Breeze API session not active. Please generate a session in Settings.' };
+      message: 'No option data source is connected. Connect ICICI Breeze or Upstox in Settings → Broker.' };
   }
 
   private async fetchOptionsChainFromNiftyTrader(symbol: string, expiry?: string) {
@@ -2285,8 +2297,10 @@ export class MarketDataService {
     for (const st of strikes) {
       let pain = 0;
       for (const s2 of strikes) {
-        if (s2.strike < st.strike) pain += (st.strike - s2.strike) * s2.putOI;
-        if (s2.strike > st.strike) pain += (s2.strike - st.strike) * s2.callOI;
+        // Calls below the expiry price and puts above it finish in the money.
+        // (These two were swapped, so this Breeze fallback reported the wrong strike.)
+        if (s2.strike < st.strike) pain += (st.strike - s2.strike) * s2.callOI;
+        if (s2.strike > st.strike) pain += (s2.strike - st.strike) * s2.putOI;
       }
       if (pain < minPain) { minPain = pain; maxPainStrike = st.strike; }
     }
@@ -2440,8 +2454,10 @@ export class MarketDataService {
     for (const st of strikes) {
       let pain = 0;
       for (const s2 of strikes) {
-        if (s2.strike < st.strike) pain += (st.strike - s2.strike) * s2.putOI;
-        if (s2.strike > st.strike) pain += (s2.strike - st.strike) * s2.callOI;
+        // Calls below the expiry price and puts above it finish in the money.
+        // (These two were swapped, so the NSE fallback reported the wrong strike.)
+        if (s2.strike < st.strike) pain += (st.strike - s2.strike) * s2.callOI;
+        if (s2.strike > st.strike) pain += (s2.strike - st.strike) * s2.putOI;
       }
       if (pain < minPain) { minPain = pain; maxPainStrike = st.strike; }
     }

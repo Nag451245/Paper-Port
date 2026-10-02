@@ -352,6 +352,20 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
   });
 
+  // Upstox: send the daily login approval request to users' phones (Upstox app
+  // and WhatsApp). One tap there and the token arrives at the notifier webhook.
+  orchestrator.scheduleAlways('0 8 * * 1-5', async () => {
+    try {
+      const { BrokerAccountsService } = await import('./services/broker-accounts.service.js');
+      const result = await new BrokerAccountsService(getPrisma()).requestDailyUpstoxTokens();
+      if (result.requested > 0 || result.errors.length > 0) {
+        console.log(`[Upstox Cron] Approval requests sent: ${result.requested}`, result.errors.length ? result.errors : '');
+      }
+    } catch (err) {
+      console.error('[Upstox Cron] Daily approval request failed:', (err as Error).message);
+    }
+  });
+
   orchestrator.scheduleAlways('30 8 * * 1-6', async () => {
     try {
       const result = await authService.renewExpiringSessions();

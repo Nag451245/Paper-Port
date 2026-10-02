@@ -188,3 +188,18 @@ describe('history helpers', () => {
     expect(coversRange([], '2025-01-01', '2025-01-31')).toBe(false);
   });
 });
+
+describe('NSE option chain fallback', () => {
+  it('puts max pain where option writers pay least (calls and puts were swapped)', () => {
+    const svc = new MarketDataService(null as any);
+    const leg = (strike: number, callOI: number, putOI: number) => ({
+      strikePrice: strike, expiryDate: '29-Oct-2026',
+      CE: { openInterest: callOI, lastPrice: 1 }, PE: { openInterest: putOI, lastPrice: 1 },
+    });
+    const chain = (svc as any).parseOptionsChain('NIFTY', {
+      // Lopsided on purpose: the swapped formula would answer 100 here.
+      records: { expiryDates: ['29-Oct-2026'], underlyingValue: 200, data: [leg(100, 0, 1000), leg(200, 10, 10), leg(300, 500, 0)] },
+    });
+    expect(chain.maxPain).toBe(200);
+  });
+});

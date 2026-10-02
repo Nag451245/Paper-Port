@@ -42,7 +42,7 @@ export const BROKERS: BrokerInfo[] = [
     ],
     login: 'oauth',
     marketData: true,
-    note: 'Quotes and candles for stocks and indices. Log in with Upstox once a day (Upstox tokens expire at 3:30 AM).',
+    note: 'Quotes, candles and option chains (with Greeks) for stocks, indices and NSE F&O. Logins expire at 3:30 AM; renew each morning with one tap on your phone, or log in here.',
     docsUrl: 'https://account.upstox.com/developer/apps',
   },
   {

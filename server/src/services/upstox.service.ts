@@ -41,17 +41,22 @@ interface MasterRecord {
   underlying_symbol?: string;
   expiry?: number;
   strike_price?: number;
+  lot_size?: number;
 }
 
 export interface InstrumentMaps {
   equity: Map<string, string>;                 // "NSE:RELIANCE" -> key
   derivatives: Map<string, string>;            // "NIFTY|CE|2026-10-29|24000" -> key
+  optionExpiries: Map<string, Set<string>>;    // "NIFTY" -> {"2026-10-29", ...}
+  lotSizes: Map<string, number>;               // "NIFTY" -> 75
 }
 
 /** Build lookup maps from master records. Exported for tests. */
 export function buildMaps(records: MasterRecord[]): InstrumentMaps {
   const equity = new Map<string, string>();
   const derivatives = new Map<string, string>();
+  const optionExpiries = new Map<string, Set<string>>();
+  const lotSizes = new Map<string, number>();
   for (const r of records) {
     if (!r.instrument_key || !r.segment) continue;
     if ((r.segment === 'NSE_EQ' || r.segment === 'BSE_EQ') && r.trading_symbol) {
@@ -59,10 +64,17 @@ export function buildMaps(records: MasterRecord[]): InstrumentMaps {
     } else if (r.segment === 'NSE_FO' && r.underlying_symbol && r.expiry && r.instrument_type) {
       const kind = r.instrument_type === 'FUT' ? 'FUT' : r.instrument_type;    // CE / PE / FUT
       const strike = kind === 'FUT' ? '-' : String(Number(r.strike_price));
-      derivatives.set(`${r.underlying_symbol.toUpperCase()}|${kind}|${formatBarTime(r.expiry, true)}|${strike}`, r.instrument_key);
+      const u = r.underlying_symbol.toUpperCase();
+      const expiry = formatBarTime(r.expiry, true);
+      derivatives.set(`${u}|${kind}|${expiry}|${strike}`, r.instrument_key);
+      if (kind !== 'FUT') {
+        if (!optionExpiries.has(u)) optionExpiries.set(u, new Set());
+        optionExpiries.get(u)!.add(expiry);
+      }
+      if (r.lot_size && r.lot_size > 0) lotSizes.set(u, r.lot_size);
     }
   }
-  return { equity, derivatives };
+  return { equity, derivatives, optionExpiries, lotSizes };
 }
 
 /** The Upstox key for an app symbol, or null when Upstox cannot serve it (MCX, unknown). */
@@ -183,6 +195,38 @@ export class UpstoxService {
     return [...byTime.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   }
 
+  /** The Upstox account the token belongs to (its user_id), or null if Upstox refuses the token. */
+  async profileUserId(token: string): Promise<string | null> {
+    try {
+      const data = await this.get('/v2/user/profile', token);
+      return data?.user_id ? String(data.user_id) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The option chain for an index or stock and one expiry (nearest upcoming when not given). */
+  async optionChain(token: string, symbol: string, expiry?: string) {
+    const maps = await this.instrumentMaps();
+    const u = symbol.trim().toUpperCase();
+    const key = maps ? resolveKey(maps, u) : null;
+    const expiries = [...(maps?.optionExpiries.get(u) ?? [])].sort();
+    const today = formatBarTime(Date.now(), true);
+    const target = expiry || expiries.find((e) => e >= today);
+    if (!maps || !key || !target) return null;
+    try {
+      const rows = await this.get(
+        `/v2/option/chain?instrument_key=${encodeURIComponent(key)}&expiry_date=${target}`, token,
+      );
+      if (!Array.isArray(rows) || rows.length === 0) return null;
+      return mapOptionChain(u, target, expiries.filter((e) => e >= today), maps.lotSizes.get(u) ?? 0, rows);
+    } catch (err) {
+      log.warn({ symbol: u, expiry: target, err: (err as Error).message }, 'Upstox option chain failed');
+      this.authFailed(token, err);
+      return null;
+    }
+  }
+
   async quote(token: string, symbol: string, exchange = 'NSE'): Promise<MarketQuote | null> {
     const maps = await this.instrumentMaps();
     const key = maps ? resolveKey(maps, symbol, exchange) : null;
@@ -216,6 +260,54 @@ export class UpstoxService {
       return null;
     }
   }
+}
+
+/** Upstox option chain in the app's option-chain shape (the same one the Breeze bridge returns). */
+export function mapOptionChain(symbol: string, expiry: string, expiries: string[], lotSize: number, rows: any[]) {
+  const side = (o: any) => {
+    const m = o?.market_data ?? {};
+    const g = o?.option_greeks ?? {};
+    const n = (v: unknown) => Number(v) || 0;
+    return {
+      OI: n(m.oi), OIChange: n(m.oi) - n(m.prev_oi), Volume: n(m.volume),
+      IV: n(g.iv), LTP: n(m.ltp), NetChange: +(n(m.ltp) - n(m.close_price)).toFixed(2),
+      BidPrice: n(m.bid_price), AskPrice: n(m.ask_price),
+      Delta: n(g.delta), Gamma: n(g.gamma), Theta: n(g.theta), Vega: n(g.vega),
+    };
+  };
+  const strikes = rows
+    .map((r) => {
+      const c = side(r.call_options), p = side(r.put_options);
+      return {
+        strike: Number(r.strike_price),
+        callOI: c.OI, callOIChange: c.OIChange, callVolume: c.Volume, callIV: c.IV, callLTP: c.LTP, callNetChange: c.NetChange,
+        callBidPrice: c.BidPrice, callAskPrice: c.AskPrice, callDelta: c.Delta, callGamma: c.Gamma, callTheta: c.Theta, callVega: c.Vega,
+        putOI: p.OI, putOIChange: p.OIChange, putVolume: p.Volume, putIV: p.IV, putLTP: p.LTP, putNetChange: p.NetChange,
+        putBidPrice: p.BidPrice, putAskPrice: p.AskPrice, putDelta: p.Delta, putGamma: p.Gamma, putTheta: p.Theta, putVega: p.Vega,
+      };
+    })
+    .filter((s) => s.strike > 0)
+    .sort((a, b) => a.strike - b.strike);
+
+  const spot = Number(rows.find((r) => Number(r.underlying_spot_price) > 0)?.underlying_spot_price) || 0;
+  const totalCallOI = strikes.reduce((t, s) => t + s.callOI, 0);
+  const totalPutOI = strikes.reduce((t, s) => t + s.putOI, 0);
+  // Max pain: the expiry price at which option writers pay out least. Calls
+  // below the price and puts above it finish in the money.
+  let maxPain = 0, least = Infinity;
+  for (const at of strikes) {
+    let pay = 0;
+    for (const k of strikes) {
+      if (k.strike < at.strike) pay += (at.strike - k.strike) * k.callOI;
+      if (k.strike > at.strike) pay += (k.strike - at.strike) * k.putOI;
+    }
+    if (pay < least) { least = pay; maxPain = at.strike; }
+  }
+  return {
+    symbol: symbol.toUpperCase(), expiry, underlyingValue: spot, spotPrice: spot, strikes,
+    pcr: totalCallOI > 0 ? Math.round((totalPutOI / totalCallOI) * 100) / 100 : 0,
+    maxPain, totalCallOI, totalPutOI, expiries, lotSize, source: 'upstox',
+  };
 }
 
 let shared: UpstoxService | null = null;

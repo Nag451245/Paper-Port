@@ -56,6 +56,23 @@ export async function brokerRoutes(app: FastifyInstance): Promise<void> {
     } catch (err) { return fail(reply, err); }
   });
 
+  // Daily login without a browser: Upstox asks the user to approve on their phone.
+  app.post('/upstox/request-token', { preHandler: [authenticate] }, async (request, reply) => {
+    try {
+      return reply.send(await service.requestUpstoxToken(getUserId(request)));
+    } catch (err) { return fail(reply, err); }
+  });
+
+  // Upstox posts the approved token here. No app session: the payload is
+  // checked against the saved account and verified with Upstox before use.
+  // Always 200, so the response says nothing about which accounts exist.
+  app.post('/upstox/notifier', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
+    try {
+      await service.acceptUpstoxNotice((request.body ?? {}) as Record<string, string>);
+    } catch { /* ignored: never reveal why */ }
+    return reply.send({ status: 'received' });
+  });
+
   // Upstox redirects the browser here after login. No app session is needed:
   // the single-use `state` nonce identifies the user who started the login.
   app.get('/upstox/callback', async (request, reply) => {

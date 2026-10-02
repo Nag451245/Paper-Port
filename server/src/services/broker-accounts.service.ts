@@ -9,6 +9,10 @@ import { BROKERS, brokerInfo, type BrokerId, type CredentialField } from '../lib
 import { encrypt, decrypt } from './auth.service.js';
 import { appBaseUrl } from '../lib/app-url.js';
 import { createBreezeState as createLoginState, consumeBreezeState as consumeLoginState } from '../lib/oauth-state.js';
+import { getUpstox, type UpstoxService } from './upstox.service.js';
+import { createChildLogger } from '../lib/logger.js';
+
+const log = createChildLogger('BrokerAccounts');
 
 export class BrokerError extends Error {
   constructor(message: string, public readonly statusCode = 400) {
@@ -33,6 +37,16 @@ export function nextUpstoxExpiry(now = new Date()): Date {
 }
 
 export const upstoxRedirectUri = () => `${appBaseUrl()}/api/brokers/upstox/callback`;
+/** Where Upstox delivers a token after the user approves the daily request. */
+export const upstoxNotifierUri = () => `${appBaseUrl()}/api/brokers/upstox/notifier`;
+
+export interface UpstoxTokenNotice {
+  client_id?: string;
+  user_id?: string;
+  access_token?: string;
+  expires_at?: string | number;
+  message_type?: string;
+}
 
 /** Short cache so a quote does not cost a database lookup. */
 const TOKEN_TTL_MS = 30_000;
@@ -42,6 +56,7 @@ export class BrokerAccountsService {
   constructor(
     private readonly prisma: PrismaClient,
     private readonly fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+    private readonly upstox: Pick<UpstoxService, 'profileUserId'> = getUpstox(),
   ) {}
 
   private enc = (v: string) => encrypt(v, env.ENCRYPTION_KEY);
@@ -57,6 +72,7 @@ export class BrokerAccountsService {
     return {
       active: user?.activeBroker ?? 'breeze',
       redirectUris: { upstox: upstoxRedirectUri() },
+      notifierUris: { upstox: upstoxNotifierUri() },
       brokers: BROKERS.map((b) => {
         if (b.id === 'breeze') {
           const connected = !!breeze?.sessionToken && (!breeze.sessionExpiresAt || breeze.sessionExpiresAt > now);
@@ -67,7 +83,11 @@ export class BrokerAccountsService {
         const connected = b.login === 'oauth'
           ? !!a?.encryptedAccessToken && !!a.tokenExpiresAt && a.tokenExpiresAt > now
           : false;
-        return { ...b, saved: !!a, connected, tokenExpiresAt: a?.tokenExpiresAt?.toISOString() ?? null, fieldsSaved };
+        return {
+          ...b, saved: !!a, connected, tokenExpiresAt: a?.tokenExpiresAt?.toISOString() ?? null, fieldsSaved,
+          // Daily approval needs the account id from one browser login first.
+          autoSessionReady: b.id === 'upstox' && !!a?.brokerUserId,
+        };
       }),
     };
   }
@@ -153,14 +173,94 @@ export class BrokerAccountsService {
     if (!res.ok || !body?.access_token) {
       throw new BrokerError(`Upstox refused the login: ${body?.errors?.[0]?.message ?? `HTTP ${res.status}`}`);
     }
+    // Remember whose account this is, so a token pushed to the notifier webhook
+    // later can be checked against it.
+    const brokerUserId = await this.upstox.profileUserId(body.access_token);
     await this.prisma.brokerAccount.update({
       where: { id: a.id },
-      data: { encryptedAccessToken: this.enc(body.access_token), tokenExpiresAt: nextUpstoxExpiry() },
+      data: {
+        encryptedAccessToken: this.enc(body.access_token), tokenExpiresAt: nextUpstoxExpiry(),
+        ...(brokerUserId ? { brokerUserId } : {}),
+      },
     });
     // The user chose Upstox and just logged in: make it the data source.
     await this.prisma.user.update({ where: { id: userId }, data: { activeBroker: 'upstox' } });
     tokenCache.clear();
     return userId;
+  }
+
+  /**
+   * Ask Upstox to send this user an approval request (Upstox app and WhatsApp).
+   * When they approve, Upstox posts the day's token to the notifier webhook, so
+   * no password, PIN or 2FA secret is ever stored here.
+   */
+  async requestUpstoxToken(userId: string): Promise<{ message: string }> {
+    const a = await this.prisma.brokerAccount.findUnique({ where: { userId_broker: { userId, broker: 'upstox' } } });
+    if (!a?.encryptedApiKey || !a.encryptedApiSecret) throw new BrokerError('Save your Upstox API key and secret first.');
+    if (!a.brokerUserId) throw new BrokerError('Log in with Upstox once in the browser first; after that the daily login can be approved from your phone.');
+    const clientId = this.dec(a.encryptedApiKey);
+    const res = await this.fetchImpl(`https://api.upstox.com/v3/login/auth/token/request/${encodeURIComponent(clientId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ client_secret: this.dec(a.encryptedApiSecret) }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const body = await res.json().catch(() => null) as any;
+    if (!res.ok || body?.status === 'error') {
+      throw new BrokerError(`Upstox refused the request: ${body?.errors?.[0]?.message ?? `HTTP ${res.status}`}`);
+    }
+    return { message: 'Approval request sent. Approve it in the Upstox app or on WhatsApp; the login completes by itself.' };
+  }
+
+  /**
+   * Upstox posting a token after the user approved. Anyone can call this URL,
+   * so the token is used only if the app key matches a saved Upstox account,
+   * the account id matches the one seen at the browser login, and Upstox
+   * itself confirms the token belongs to that account.
+   */
+  async acceptUpstoxNotice(notice: UpstoxTokenNotice): Promise<boolean> {
+    if (notice.message_type && notice.message_type !== 'access_token') return false;
+    if (!notice.client_id || !notice.user_id || !notice.access_token) return false;
+    const rows = await this.prisma.brokerAccount.findMany({
+      where: { broker: 'upstox', brokerUserId: String(notice.user_id) },
+      select: { id: true, userId: true, encryptedApiKey: true },
+    });
+    const match = rows.find((r) => {
+      try { return !!r.encryptedApiKey && this.dec(r.encryptedApiKey) === notice.client_id; } catch { return false; }
+    });
+    if (!match) return false;
+    if ((await this.upstox.profileUserId(notice.access_token)) !== String(notice.user_id)) {
+      log.warn('Upstox notifier: token does not belong to the linked Upstox account; ignored');
+      return false;
+    }
+    const expiresMs = Number(notice.expires_at);
+    await this.prisma.brokerAccount.update({
+      where: { id: match.id },
+      data: {
+        encryptedAccessToken: this.enc(notice.access_token),
+        tokenExpiresAt: expiresMs > Date.now() ? new Date(expiresMs) : nextUpstoxExpiry(),
+      },
+    });
+    tokenCache.clear();
+    log.info({ userId: match.userId }, 'Upstox daily login approved and saved');
+    return true;
+  }
+
+  /** Morning job: send the approval request to everyone using Upstox without a live login. */
+  async requestDailyUpstoxTokens(): Promise<{ requested: number; errors: string[] }> {
+    const rows = await this.prisma.brokerAccount.findMany({
+      where: {
+        broker: 'upstox', brokerUserId: { not: null }, user: { activeBroker: 'upstox' },
+        OR: [{ tokenExpiresAt: null }, { tokenExpiresAt: { lte: new Date() } }],
+      },
+      select: { userId: true },
+    });
+    let requested = 0;
+    const errors: string[] = [];
+    for (const r of rows) {
+      try { await this.requestUpstoxToken(r.userId); requested += 1; } catch (err) { errors.push((err as Error).message); }
+    }
+    return { requested, errors };
   }
 
   /**
