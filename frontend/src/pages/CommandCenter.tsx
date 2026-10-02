@@ -128,7 +128,8 @@ export default function CommandCenter() {
   const [scanSymbol, setScanSymbol] = useState('');
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Below laptop width the chat and the panel share the screen one at a time; chat first.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.innerWidth < 1024);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -232,9 +233,9 @@ export default function CommandCenter() {
   }
 
   return (
-    <div className="h-[calc(100vh-4rem)] flex gap-3 p-3">
+    <div className="h-[calc(100dvh-9.5rem)] md:h-[calc(100vh-4rem)] flex gap-3 p-0 sm:p-3">
       {/* ── Left: Unified Timeline ── */}
-      <div className="flex-1 flex flex-col bg-slate-900 rounded-xl border border-slate-700/50 overflow-hidden">
+      <div className={`${sidebarCollapsed ? 'flex' : 'hidden lg:flex'} flex-1 min-w-0 flex-col bg-slate-900 rounded-xl border border-slate-700/50 overflow-hidden`}>
         <div className="px-4 py-3 border-b border-slate-700/50 bg-slate-800/50 flex items-center justify-between">
           <div>
             <h2 className="text-sm font-bold text-white tracking-wide">Mission Control</h2>
@@ -346,7 +347,13 @@ export default function CommandCenter() {
       </div>
 
       {/* ── Right: Context Sidebar ── */}
-      <div className={`w-[360px] flex flex-col gap-3 overflow-y-auto shrink-0 transition-all ${sidebarCollapsed ? 'hidden lg:flex' : 'flex'}`}>
+      <div className={`w-full lg:w-[360px] flex-col gap-3 overflow-y-auto shrink-0 transition-all ${sidebarCollapsed ? 'hidden lg:flex' : 'flex'}`}>
+        <button
+          onClick={() => setSidebarCollapsed(true)}
+          className="lg:hidden self-start text-xs text-slate-600 bg-white hover:bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200"
+        >
+          ← Back to chat
+        </button>
 
         {/* Target Progress */}
         <div className="bg-slate-900 rounded-xl border border-slate-700/50 p-4">

@@ -285,12 +285,13 @@ export default function GuardianChatPanel() {
   return (
     <div
       className={`fixed z-50 flex flex-col rounded-2xl overflow-hidden
-        bottom-20 right-4 sm:bottom-6 sm:right-6
+        right-2 sm:right-6 bottom-[calc(var(--mobile-nav-space)+0.5rem)] sm:bottom-6
         transition-all duration-300 ease-out
         ${isExpanded ? 'scale-100 opacity-100' : 'scale-90 opacity-0 pointer-events-none'}`}
       style={{
-        width: 390,
-        maxHeight: 620,
+        // Never wider than the screen, never taller than the space above the phone bar.
+        width: 'min(390px, calc(100vw - 1rem))',
+        maxHeight: 'min(620px, calc(100dvh - 9rem))',
         backgroundColor: '#0b1120',
         borderWidth: 1,
         borderStyle: 'solid',

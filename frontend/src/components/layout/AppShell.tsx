@@ -64,23 +64,34 @@ function GuardianWrapperInner({ onError }: { onError: () => void }) {
 }
 
 export default function AppShell() {
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-
-  useEffect(() => {}, []);
+  // Icons-only on tablets and small laptops, so the page keeps its width; the
+  // user's own choice wins once they toggle it.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      const saved = localStorage.getItem('sidebar.collapsed');
+      if (saved !== null) return saved === '1';
+    } catch { /* private mode */ }
+    return window.innerWidth < 1280;
+  });
+  const toggleSidebar = () => setSidebarCollapsed((c) => {
+    try { localStorage.setItem('sidebar.collapsed', c ? '0' : '1'); } catch { /* private mode */ }
+    return !c;
+  });
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/30 to-indigo-50/20 text-slate-900">
       <TopBar />
       <Sidebar
         collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+        onToggle={toggleSidebar}
       />
       <main
-        className={`pt-14 pb-16 md:pb-0 transition-all duration-300 ${
+        className={`transition-all duration-300 ${
           sidebarCollapsed ? 'md:pl-16' : 'md:pl-56'
         }`}
+        style={{ paddingTop: 'calc(3.5rem + env(safe-area-inset-top, 0px))', paddingBottom: 'var(--mobile-nav-space)' }}
       >
-        <div className="p-4 lg:p-6">
+        <div className="p-3 sm:p-4 lg:p-6 max-w-[1920px] mx-auto">
           <Outlet />
         </div>
       </main>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Activity,
@@ -18,6 +18,15 @@ export default function TopBar() {
   const { user, logout } = useAuthStore();
   const { indices, vix, isMarketOpen, fetchIndices, fetchVIX, checkMarketStatus } = useMarketDataStore();
   const [bridgeStatus, setBridgeStatus] = useState<'ok' | 'unhealthy' | 'unknown'>('unknown');
+  // Opened by tap or click: a hover-only menu cannot be reached on a touch screen.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = (e: PointerEvent) => { if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false); };
+    document.addEventListener('pointerdown', close);
+    return () => document.removeEventListener('pointerdown', close);
+  }, [menuOpen]);
 
   useEffect(() => {
     fetchIndices();
@@ -50,9 +59,12 @@ export default function TopBar() {
   const sensex = indices.find((i) => i.name === 'SENSEX');
 
   return (
-    <header className="fixed top-0 left-0 right-0 z-40 h-14 bg-white/90 backdrop-blur-xl border-b border-slate-200/60 flex items-center px-4 gap-4 shadow-sm">
+    <header
+      className="fixed top-0 left-0 right-0 z-40 bg-white/90 backdrop-blur-xl border-b border-slate-200/60 flex items-center px-3 sm:px-4 gap-2 sm:gap-4 shadow-sm"
+      style={{ paddingTop: 'env(safe-area-inset-top, 0px)', height: 'calc(3.5rem + env(safe-area-inset-top, 0px))' }}
+    >
       {/* Logo */}
-      <Link to="/dashboard" className="flex items-center gap-2.5 mr-4 flex-shrink-0 group">
+      <Link to="/dashboard" className="flex items-center gap-2.5 sm:mr-4 flex-shrink-0 group">
         <div className="w-9 h-9 rounded-xl flex items-center justify-center shadow-lg shadow-[#4a6b52]/20 group-hover:shadow-[#4a6b52]/35 transition-shadow" style={{ background: 'linear-gradient(135deg, #5a7d63, #3d5a47)' }}>
           <svg viewBox="0 0 120 100" className="w-6 h-5" fill="none">
             <path d="M15 65 L60 85 L105 65 L95 70 L60 78 L25 70 Z" fill="#fff" opacity="0.9" />
@@ -98,6 +110,17 @@ export default function TopBar() {
         </Link>
       )}
 
+      {/* Phones and tablets: NIFTY only, so the market is still in view */}
+      {nifty && (
+        <div className="lg:hidden flex items-center gap-1 text-[11px] font-mono min-w-0">
+          <span className="text-slate-500 font-sans font-medium">NIFTY</span>
+          <span className="font-semibold text-slate-800">{nifty.value.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+          <span className={`font-semibold ${nifty.change >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+            {nifty.change >= 0 ? '+' : ''}{nifty.changePercent.toFixed(2)}%
+          </span>
+        </div>
+      )}
+
       {/* Index tickers */}
       <div className="hidden lg:flex items-center gap-4 ml-2 overflow-x-auto">
         {nifty && (
@@ -121,14 +144,19 @@ export default function TopBar() {
       </div>
 
       {/* Data freshness */}
-      <div className="hidden md:flex items-center gap-1.5 ml-auto mr-4 text-[11px] text-slate-400">
+      <div className="hidden md:flex items-center gap-1.5 ml-auto mr-4 text-[11px] text-slate-400 whitespace-nowrap">
         <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
         <span>Real-time</span>
       </div>
 
       {/* User menu */}
-      <div className="relative group ml-auto md:ml-0 flex-shrink-0">
-        <button className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-100 transition-colors">
+      <div ref={menuRef} className="relative group ml-auto md:ml-0 flex-shrink-0">
+        <button
+          onClick={() => setMenuOpen((o) => !o)}
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          className="flex items-center gap-2 px-1 sm:px-2 py-1.5 rounded-lg hover:bg-slate-100 transition-colors"
+        >
           <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white shadow-sm" style={{ background: 'linear-gradient(135deg, #5a7d63, #3d5a47)' }}>
             {user?.fullName?.charAt(0) || <User className="w-4 h-4" />}
           </div>
@@ -136,14 +164,16 @@ export default function TopBar() {
           <ChevronDown className="w-3.5 h-3.5 text-slate-400 hidden sm:block" />
         </button>
 
-        <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200">
-          <Link to="/settings" className="flex items-center gap-2 px-4 py-2.5 text-sm text-slate-600 hover:bg-slate-50 rounded-t-xl">
+        <div className={`absolute right-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-xl shadow-xl transition-all duration-200 ${
+          menuOpen ? 'opacity-100 visible' : 'opacity-0 invisible md:group-hover:opacity-100 md:group-hover:visible'
+        }`} role="menu">
+          <Link to="/settings" onClick={() => setMenuOpen(false)} className="flex items-center gap-2 px-4 py-3 text-sm text-slate-600 hover:bg-slate-50 rounded-t-xl">
             <User className="w-4 h-4" />
             Profile & Settings
           </Link>
           <button
             onClick={logout}
-            className="flex items-center gap-2 px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 w-full rounded-b-xl"
+            className="flex items-center gap-2 px-4 py-3 text-sm text-red-600 hover:bg-red-50 w-full rounded-b-xl"
           >
             <LogOut className="w-4 h-4" />
             Logout

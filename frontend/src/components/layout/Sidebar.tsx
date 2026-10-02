@@ -1,4 +1,5 @@
-import { NavLink } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { NavLink, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard,
   Monitor,
@@ -20,6 +21,8 @@ import {
   Target,
   ShieldAlert,
   Flame,
+  LayoutGrid,
+  X,
 } from 'lucide-react';
 
 const navItems = [
@@ -85,23 +88,98 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
         </button>
       </aside>
 
-      {/* Mobile bottom nav */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-xl border-t border-slate-200/60 flex shadow-lg">
-        {navItems.slice(0, 5).map(({ to, icon: Icon, label }) => (
+      <MobileNav />
+    </>
+  );
+}
+
+/** The four pages a phone gets one tap away; everything else is under "More". */
+const MOBILE_PRIMARY: { to: string; short: string }[] = [
+  { to: '/dashboard', short: 'Home' },
+  { to: '/terminal', short: 'Trade' },
+  { to: '/portfolio', short: 'Portfolio' },
+  { to: '/option-chain', short: 'Options' },
+];
+
+function MobileNav() {
+  const [open, setOpen] = useState(false);
+  const location = useLocation();
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open]);
+
+  const primary = MOBILE_PRIMARY.map((m) => ({ ...navItems.find((n) => n.to === m.to)!, short: m.short }));
+  const inMore = !MOBILE_PRIMARY.some((m) => location.pathname.startsWith(m.to));
+
+  return (
+    <>
+      {/* Bottom bar: phones only */}
+      <nav
+        className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-xl border-t border-slate-200/60 flex shadow-lg"
+        style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
+      >
+        {primary.map(({ to, icon: Icon, short }) => (
           <NavLink
             key={to}
             to={to}
             className={({ isActive }) =>
-              `flex-1 flex flex-col items-center gap-0.5 py-2 text-[10px] transition-colors ${
-                isActive ? 'text-teal-600 font-semibold' : 'text-slate-400'
+              `flex-1 flex flex-col items-center gap-0.5 py-2 min-h-[56px] justify-center text-[11px] transition-colors ${
+                isActive ? 'text-teal-600 font-semibold' : 'text-slate-500'
               }`
             }
           >
             <Icon className="w-5 h-5" />
-            <span>{label}</span>
+            <span>{short}</span>
           </NavLink>
         ))}
+        <button
+          onClick={() => setOpen(true)}
+          aria-label="All pages"
+          className={`flex-1 flex flex-col items-center gap-0.5 py-2 min-h-[56px] justify-center text-[11px] ${inMore ? 'text-teal-600 font-semibold' : 'text-slate-500'}`}
+        >
+          <LayoutGrid className="w-5 h-5" />
+          <span>More</span>
+        </button>
       </nav>
+
+      {/* Every page, as a sheet from the bottom */}
+      {open && (
+        // Above the floating assistant (z-index 9999), which would otherwise sit on the tiles.
+        <div className="md:hidden fixed inset-0" style={{ zIndex: 10000 }} role="dialog" aria-modal="true" aria-label="All pages">
+          <button className="absolute inset-0 bg-slate-900/40" aria-label="Close" onClick={() => setOpen(false)} />
+          <div
+            className="absolute bottom-0 left-0 right-0 bg-white rounded-t-2xl shadow-2xl max-h-[80dvh] overflow-y-auto"
+            style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 12px)' }}
+          >
+            <div className="sticky top-0 bg-white flex items-center justify-between px-4 pt-4 pb-2">
+              <p className="text-sm font-semibold text-slate-800">All pages</p>
+              <button onClick={() => setOpen(false)} className="p-2 -m-2 text-slate-400 hover:text-slate-600" aria-label="Close">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="grid grid-cols-3 gap-2 px-4 pb-2">
+              {navItems.map(({ to, icon: Icon, label, color }) => (
+                <NavLink
+                  key={to}
+                  to={to}
+                  onClick={() => setOpen(false)}
+                  className={({ isActive }) =>
+                    `flex flex-col items-center gap-1.5 rounded-xl p-3 text-center text-[11px] font-medium leading-tight transition-colors ${
+                      isActive ? 'bg-gradient-to-br ' + color + ' text-white' : 'bg-slate-50 text-slate-600 active:bg-slate-100'
+                    }`
+                  }
+                >
+                  <Icon className="w-5 h-5" />
+                  <span>{label}</span>
+                </NavLink>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

@@ -10,10 +10,17 @@ interface Position {
   y: number;
 }
 
+/** Space kept clear at the bottom: the phone navigation bar (see --mobile-nav-space). */
+function bottomReserve(): number {
+  return window.innerWidth < 768 ? 80 : 0;
+}
+
 function getDefaultPosition(): Position {
+  const margin = window.innerWidth < 640 ? 12 : 24;
   return {
-    x: window.innerWidth - AVATAR_SIZE - 24,
-    y: window.innerHeight - AVATAR_SIZE - 24,
+    x: window.innerWidth - AVATAR_SIZE - margin,
+    // On phones, also clear one input bar: chat-style pages keep theirs at the bottom.
+    y: window.innerHeight - AVATAR_SIZE - margin - bottomReserve() - (window.innerWidth < 768 ? 64 : 0),
   };
 }
 
@@ -39,7 +46,7 @@ function savePosition(pos: Position): void {
 function clampPosition(pos: Position): Position {
   return {
     x: Math.max(0, Math.min(pos.x, window.innerWidth - AVATAR_SIZE)),
-    y: Math.max(0, Math.min(pos.y, window.innerHeight - AVATAR_SIZE)),
+    y: Math.max(56, Math.min(pos.y, window.innerHeight - AVATAR_SIZE - bottomReserve())),
   };
 }
 

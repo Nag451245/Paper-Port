@@ -190,3 +190,14 @@ html {
     mask-composite: exclude;
     pointer-events: none;
 }
+
+/* Room at the bottom of every page for the phone navigation bar (and the
+   iPhone home indicator); nothing on tablets and up, where the sidebar shows. */
+:root {
+  --mobile-nav-space: calc(4.5rem + env(safe-area-inset-bottom, 0px));
+}
+@media (min-width: 768px) {
+  :root {
+    --mobile-nav-space: 0px;
+  }
+}
