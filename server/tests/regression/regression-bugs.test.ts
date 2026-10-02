@@ -137,9 +137,12 @@ describe('REG-001: P&L Timezone — IST midnight boundary', () => {
 
   it('istMidnight boundary excludes 23:59 IST yesterday and includes 00:01 IST today', () => {
     const boundary = todayStartIST();
-    const now = new Date();
-    const yesterdayLate = istDate(now.getFullYear(), now.getMonth() + 1, now.getDate() - 1, 23, 59);
-    const todayEarly = istDate(now.getFullYear(), now.getMonth() + 1, now.getDate(), 0, 1);
+    // Today's date in India, not on the server's clock: between 18:30 and 24:00 UTC
+    // the two differ, and building "today" from getDate() picked the wrong day.
+    const istToday = new Date(Date.now() + 330 * 60_000);
+    const [y, mo, d] = [istToday.getUTCFullYear(), istToday.getUTCMonth() + 1, istToday.getUTCDate()];
+    const yesterdayLate = istDate(y, mo, d - 1, 23, 59);
+    const todayEarly = istDate(y, mo, d, 0, 1);
 
     // The real regression: on a UTC server, a naive setHours(0,0,0,0) boundary
     // would place 00:01 IST *before* "today" and pull 23:59 IST yesterday in.
