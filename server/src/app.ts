@@ -34,6 +34,7 @@ import { ServerOrchestrator } from './services/server-orchestrator.js';
 import { TargetTracker } from './services/target-tracker.service.js';
 import { EODReviewService } from './services/eod-review.service.js';
 import { getStockAlerts } from './services/stock-alerts.service.js';
+import { getShadowBook } from './services/shadow-book.service.js';
 import { GlobalMarketService } from './services/global-market.service.js';
 import { StopLossMonitor } from './services/stop-loss-monitor.service.js';
 import { PriceFeedService } from './services/price-feed.service.js';
@@ -396,6 +397,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // Telegram stock alerts — scored every 5 min; the service itself only sends 09:30–15:20 IST.
   orchestrator.scheduleMarketDay('*/5 3-10 * * 1-5', async () => {
     try { await getStockAlerts(getPrisma()).run(); } catch (err) { app.log.warn(`[StockAlerts] ${(err as Error).message}`); }
+  });
+
+  // Shadow book — settle the engine's would-be trades on 5-minute candles; final pass after the close.
+  orchestrator.scheduleMarketDay('*/5 4-9 * * 1-5', async () => {
+    try { await getShadowBook(getPrisma()).settleOpen(); } catch (err) { app.log.warn(`[ShadowBook] ${(err as Error).message}`); }
+  });
+  orchestrator.scheduleMarketDay('40 10 * * 1-5', async () => {
+    try { await getShadowBook(getPrisma()).settleOpen(true); } catch (err) { app.log.warn(`[ShadowBook] ${(err as Error).message}`); }
   });
 
   // EOD Review — 15:35 IST = 10:05 UTC

@@ -523,6 +523,40 @@ model Notification {
 }
 
 /// A stock alert sent to a user, one per stock per day (stops repeats across restarts).
+/// What a strategy's signal would have done, traded on live 5-minute candles
+/// with costs. Measures each engine strategy's real edge; never places orders.
+model ShadowTrade {
+  id          String    @id @default(uuid())
+  strategy    String
+  symbol      String
+  side        String
+  /// IST trading day, YYYY-MM-DD
+  day         String
+  signalAt    DateTime  @map("signal_at")
+  signalPrice Float     @map("signal_price")
+  stopDist    Float     @map("stop_dist")
+  targetDist  Float     @map("target_dist")
+  confidence  Float
+  entryAt     DateTime? @map("entry_at")
+  entry       Float?
+  exitAt      DateTime? @map("exit_at")
+  exitPrice   Float?    @map("exit_price")
+  /// target | stop | session-end | no-data
+  exitReason  String?   @map("exit_reason")
+  /// Result in units of the stop distance, after costs
+  rMultiple   Float?    @map("r_multiple")
+  /// Result as a fraction of the entry price, after costs
+  netReturn   Float?    @map("net_return")
+  /// OPEN | CLOSED | VOID
+  status      String    @default("OPEN")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@unique([strategy, symbol, side, day])
+  @@index([status, day])
+  @@index([strategy, status])
+  @@map("shadow_trades")
+}
+
 model StockAlert {
   id        String   @id @default(uuid())
   userId    String   @map("user_id")

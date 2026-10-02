@@ -9,8 +9,10 @@ import {
   PieChart as PieIcon, Target, Zap, AlertTriangle,
 } from 'lucide-react';
 import { edgeApi } from '@/services/api';
+import ShadowEvidencePanel from '@/components/edge/ShadowEvidencePanel';
 
 const TABS = [
+  { id: 'evidence', label: 'Live Evidence', icon: Shield },
   { id: 'track-record', label: 'Track Record', icon: TrendingUp },
   { id: 'sentiment', label: 'Sentiment', icon: Activity },
   { id: 'composition', label: 'Strategy Weights', icon: PieIcon },
@@ -333,7 +335,7 @@ function EmptyState({ message }: { message: string }) {
 }
 
 export default function EdgeLab() {
-  const [activeTab, setActiveTab] = useState<TabId>('track-record');
+  const [activeTab, setActiveTab] = useState<TabId>('evidence');
 
   return (
     <div className="max-w-7xl mx-auto space-y-6 p-4 md:p-6">
@@ -364,6 +366,7 @@ export default function EdgeLab() {
         ))}
       </div>
 
+      {activeTab === 'evidence' && <ShadowEvidencePanel />}
       {activeTab === 'track-record' && <TrackRecordPanel />}
       {activeTab === 'sentiment' && <SentimentPanel />}
       {activeTab === 'composition' && <CompositionPanel />}

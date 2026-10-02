@@ -26,6 +26,7 @@ import { mlScore, isMLServiceAvailable, mlScoreSequence, mlScoreTFT, mlEnsembleS
 import { StrategyRegistry, type Bar as StrategyBar, type Signal as StrategySignal } from './strategy-sdk.js';
 import { RegimeDetectorService } from './regime-detector.service.js';
 import { PortfolioOptimizerService } from './portfolio-optimizer.service.js';
+import { getShadowBook, gateMode, strategyOf, type ShadowBook } from './shadow-book.service.js';
 
 const log = createChildLogger('BotEngine');
 
@@ -261,6 +262,7 @@ export class BotEngine {
   private regimeDetector: RegimeDetectorService;
 
   constructor(private prisma: PrismaClient, oms?: OrderManagementService) {
+    this.shadowBook = getShadowBook(prisma);
     this.tradeService = new TradeService(prisma, oms);
     this.targetTracker = new TargetTracker(prisma);
     this.globalMarket = new GlobalMarketService();
@@ -307,6 +309,8 @@ export class BotEngine {
   }
 
   private alphaDecayCache = new Map<string, { isDecaying: boolean; ts: number }>();
+  /** Records every automated scan signal as a shadow trade; its verdicts drive the evidence gate. */
+  private shadowBook: ShadowBook;
 
   /**
    * Thompson sampling: select strategy by sampling from Beta(alpha, beta) posteriors.
@@ -915,6 +919,7 @@ export class BotEngine {
             const todayStr = new Date().toISOString().split('T')[0];
             const result = await engineScan({ symbols: scanInput, aggressiveness: 'high', current_date: todayStr });
             rustSignals = result.signals ?? [];
+            this.shadowBook.record(rustSignals).catch(() => {});
           } catch { /* scan failed */ }
 
           signals = rustSignals.map(sig => {
@@ -1725,6 +1730,7 @@ export class BotEngine {
               regime: regime ?? undefined,
             });
             rustSignals = scanResult.signals ?? [];
+            this.shadowBook.record(rustSignals).catch(() => {});
             log.info({ botId, signalCount: rustSignals.length, regime }, 'Rust scan completed');
             if (rustSignals.length > 0) {
               wsHub.broadcastBotActivity(userId, {
@@ -2107,10 +2113,14 @@ export class BotEngine {
         }
       } catch { /* calibration is best-effort */ }
 
-      const execute = shouldAutoExecute && (fusionDecision ? fusionDecision.action === 'EXECUTE' : finalConfidence >= 0.35);
+      // Evidence gate: has this strategy's shadow record proven an edge after costs?
+      const proven = await this.shadowBook.isProven(strategyOf(sig)).catch(() => false);
+      const gateBlocks = !proven && gateMode() === 'enforce';
+      const execute = !gateBlocks && shouldAutoExecute && (fusionDecision ? fusionDecision.action === 'EXECUTE' : finalConfidence >= 0.35);
 
       if (!execute) {
         const reasons: string[] = [];
+        if (gateBlocks) reasons.push(`strategy '${strategyOf(sig)}' has no proven edge yet (evidence gate)`);
         if (!shouldAutoExecute) reasons.push(`bot role '${bot.role}' cannot auto-execute (needs EXECUTOR/SCANNER)`);
         if (fusionDecision && fusionDecision.action !== 'EXECUTE') reasons.push(`DecisionFusion action=${fusionDecision.action}`);
         if (!fusionDecision && finalConfidence < 0.35) reasons.push(`confidence ${(finalConfidence * 100).toFixed(0)}% < 35% threshold`);
@@ -2127,7 +2137,7 @@ export class BotEngine {
           compositeScore: finalConfidence,
           gateScores: JSON.stringify(gateScores),
           strategyId: bot.assignedStrategy || null,
-          rationale: `Rust engine: ${sig.direction} @ ₹${sig.entry} | SL: ₹${sig.stop_loss} | Target: ₹${sig.target} | Confidence: ${(sig.confidence * 100).toFixed(0)}%${gptApproved ? ' [GPT approved]' : ' [GPT filtered]'}`,
+          rationale: `Rust engine: ${sig.direction} @ ₹${sig.entry} | SL: ₹${sig.stop_loss} | Target: ₹${sig.target} | Confidence: ${(sig.confidence * 100).toFixed(0)}%${gptApproved ? ' [GPT approved]' : ' [GPT filtered]'}${proven ? ' [proven edge]' : ' [UNPROVEN strategy]'}`,
           status: execute ? 'EXECUTED' : 'PENDING',
           executedAt: execute ? new Date() : null,
           expiresAt: new Date(Date.now() + 4 * 60 * 60_000),
@@ -2913,6 +2923,7 @@ INSTRUCTIONS:
               current_date: new Date().toISOString().split('T')[0],
             });
             rustSignals = scanResult.signals ?? [];
+            this.shadowBook.record(rustSignals).catch(() => {});
             log.info({ signalCount: rustSignals.length, regime: agentRegime }, 'Agent Rust scan completed');
           } catch { /* fall through */ }
 
@@ -2932,7 +2943,8 @@ INSTRUCTIONS:
             if (riskData && riskData.max_drawdown_percent > 10) continue;
 
             const autoExecThreshold = config.mode === 'AUTONOMOUS' ? 0.45 : config.mode === 'SIGNAL' ? 0.55 : 0.65;
-            const autoExecute = sig.confidence >= autoExecThreshold;
+            const agentProven = await this.shadowBook.isProven(strategyOf(sig)).catch(() => false);
+            const autoExecute = sig.confidence >= autoExecThreshold && (agentProven || gateMode() !== 'enforce');
 
             const agentRustGates = this.deriveGateScores(sig.confidence, sig.indicators, sig.votes, { source: 'rust-engine' });
             await this.prisma.aITradeSignal.create({
@@ -2942,7 +2954,7 @@ INSTRUCTIONS:
                 signalType: sig.direction,
                 compositeScore: sig.confidence,
                 gateScores: JSON.stringify(agentRustGates),
-                rationale: `Rust: ${sig.direction} @ ₹${sig.entry} | SL: ₹${sig.stop_loss} | Target: ₹${sig.target} | Confidence: ${(sig.confidence * 100).toFixed(0)}%`,
+                rationale: `Rust: ${sig.direction} @ ₹${sig.entry} | SL: ₹${sig.stop_loss} | Target: ₹${sig.target} | Confidence: ${(sig.confidence * 100).toFixed(0)}%${agentProven ? ' [proven edge]' : ' [UNPROVEN strategy]'}`,
                 status: autoExecute ? 'EXECUTED' : 'PENDING',
                 executedAt: autoExecute ? new Date() : null,
                 expiresAt: new Date(Date.now() + 4 * 60 * 60_000),

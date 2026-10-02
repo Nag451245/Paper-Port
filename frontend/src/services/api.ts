@@ -491,7 +491,20 @@ export const telegramApi = {
 };
 
 // ─── Edge Features ──────────────────────────────────────────────────
+export interface ShadowEvidence {
+  strategy: string; trades: number; winRate: number; avgR: number; tStat: number; avgNetReturnPct: number;
+  verdict: 'proven' | 'disproven' | 'unproven';
+}
+export interface ShadowResponse {
+  gateMode: 'label' | 'enforce';
+  rule: { minTrades: number; minT: number; costPct: number };
+  open: number;
+  strategies: ShadowEvidence[];
+  recent: { strategy: string; symbol: string; side: string; day: string; entry: number | null; exitPrice: number | null; exitReason: string | null; rMultiple: number | null; netReturn: number | null }[];
+}
+
 export const edgeApi = {
+  getShadow: () => api.get<ShadowResponse>('/edge/shadow'),
   getComposition: () => api.get('/edge/composition'),
   getKelly: (strategy: string) => api.get(`/edge/composition/kelly/${strategy}`),
   walkForward: (data: { strategy: string; symbol: string; candles: unknown[]; param_grid?: Record<string, number[]>; num_folds?: number }) =>

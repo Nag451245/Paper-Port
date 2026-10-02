@@ -5,6 +5,8 @@ import { SentimentEngine } from '../services/sentiment-engine.js';
 import { engineAdvancedSignals, engineIVSurface, engineWalkForward } from '../lib/rust-engine.js';
 import { istDateStr } from '../lib/ist.js';
 import type { ServerOrchestrator } from '../services/server-orchestrator.js';
+import { getShadowBook, gateMode } from '../services/shadow-book.service.js';
+import { EVIDENCE_RULE, INTRADAY_COST } from '../lib/shadow-math.js';
 
 export async function edgeRoutes(app: FastifyInstance) {
   const prisma = getPrisma();
@@ -119,6 +121,20 @@ export async function edgeRoutes(app: FastifyInstance) {
       spot: body.spot,
       strikes: body.strikes,
     });
+  });
+
+  // ── Live evidence: each engine strategy's shadow-trade record ──
+  app.get('/shadow', async () => {
+    const book = getShadowBook(prisma);
+    const [strategies, open, recent] = await Promise.all([
+      book.evidence(),
+      prisma.shadowTrade.count({ where: { status: 'OPEN' } }),
+      prisma.shadowTrade.findMany({
+        where: { status: 'CLOSED' }, orderBy: { exitAt: 'desc' }, take: 20,
+        select: { strategy: true, symbol: true, side: true, day: true, entry: true, exitPrice: true, exitReason: true, rMultiple: true, netReturn: true },
+      }),
+    ]);
+    return { gateMode: gateMode(), rule: { ...EVIDENCE_RULE, costPct: INTRADAY_COST * 100 }, open, strategies, recent };
   });
 
   // ── Track Record / Performance ──
