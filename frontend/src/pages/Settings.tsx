@@ -76,20 +76,29 @@ export default function Settings() {
       }
     }).catch(() => {});
 
-    const onSessionSaved = async (event: MessageEvent) => {
-      if (event.data?.type !== 'breeze_session_saved') return;
-      if (event.data.token) {
-        try {
-          await breezeApi.saveSession(event.data.token);
-        } catch { /* already saved server-side if state was valid */ }
-      }
-      breezeApi.status().then(({ data }) => setBreezeStatus(data)).catch(() => {});
-      setBreezeSuccess('Session token captured and saved from popup.');
+    // ICICI's login popup comes back here: /settings?breeze_session=<token>
+    // (or ?breeze=saved). Save it, tell the main window, and close the popup.
+    const channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('breeze-session') : null;
+    const refresh = () => breezeApi.status().then(({ data }) => setBreezeStatus(data)).catch(() => {});
+    const params = new URLSearchParams(window.location.search);
+    const returned = params.get('breeze_session');
+    if (returned || params.get('breeze') === 'saved') {
+      window.history.replaceState(null, '', window.location.pathname);
+      (returned ? breezeApi.saveSession(returned) : Promise.resolve())
+        .then(() => {
+          setBreezeSuccess('Breeze session saved. This window will close.');
+          refresh();
+          channel?.postMessage('saved');
+          setTimeout(() => window.close(), 1500);   // no-op if this is not the popup
+        })
+        .catch((err: any) => setBreezeError(err?.response?.data?.error || 'Could not save the Breeze session. Paste it below instead.'));
+    }
+    if (channel) channel.onmessage = () => {
+      refresh();
+      setBreezeSuccess('Breeze session saved from the ICICI login window.');
       setTimeout(() => setBreezeSuccess(''), 4000);
     };
-
-    window.addEventListener('message', onSessionSaved);
-    return () => window.removeEventListener('message', onSessionSaved);
+    return () => channel?.close();
   }, []);
 
   const handleBreezeConnect = async () => {

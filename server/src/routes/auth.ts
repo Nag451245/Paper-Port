@@ -6,6 +6,7 @@ import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
 import { createBreezeState, consumeBreezeState } from '../lib/oauth-state.js';
 import { env } from '../config.js';
+import { appBaseUrl } from '../lib/app-url.js';
 
 const registerSchema = z.object({
   email: z.string().email(),
@@ -284,15 +285,6 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  const escapeHtml = (s: string): string =>
-    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-
-  const getAllowedOrigin = (): string => {
-    const origins = env.CORS_ORIGINS.split(',').map(o => o.trim());
-    return origins[0] || 'null';
-  };
-
   const TOKEN_PATTERN = /^[a-zA-Z0-9_\-]{8,256}$/;
 
   const handleBreezeCallback = async (request: any, reply: any) => {
@@ -318,46 +310,28 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).type('text/html').send('<html><body><h3>Invalid session token format</h3></body></html>');
     }
 
-    const origin = getAllowedOrigin();
+    // Back to the Settings page, which shows the result. (An inline-script page
+    // here never ran: the site's security policy blocks inline scripts, and
+    // after ICICI's pages the popup has no link back to the window that opened it.)
+    const back = new URL(`${appBaseUrl()}/settings`);
     const state = params.state;
-
+    let saved = false;
     if (state) {
       try {
         const stateUserId = await consumeBreezeState(state);
         if (stateUserId) {
           await authService.saveSessionToken(stateUserId, token);
-          const safeOrigin = escapeHtml(origin);
-          return reply.type('text/html').send(
-            `<html><body><script>window.opener&&window.opener.postMessage({type:"breeze_session_saved"},"${safeOrigin}");window.close();</script><h3>Session saved! You can close this tab.</h3></body></html>`,
-          );
+          saved = true;
         }
       } catch {
-        // state lookup failed, fall through to manual save page
+        // state lookup failed; the signed-in Settings page saves it instead
       }
     }
-
-    const safeOrigin = escapeHtml(origin);
-    const safeTokenPreview = escapeHtml(token.substring(0, 4));
-    const safeTokenJson = JSON.stringify(token);
-
-    return reply.type('text/html').send(
-      `<html><body>
-<h3>Session token received: ${safeTokenPreview}****</h3>
-<p>Saving to your account...</p>
-<script>
-(function() {
-  var t = ${safeTokenJson};
-  if (window.opener) {
-    window.opener.postMessage({ type: 'breeze_session_saved', token: t }, "${safeOrigin}");
-    document.querySelector('p').textContent = 'Saved! You can close this tab.';
-    setTimeout(function() { window.close(); }, 1500);
-  } else {
-    document.querySelector('p').textContent = 'Copy this token and paste it in Settings > Session Token: ' + t;
-  }
-})();
-</script>
-</body></html>`,
-    );
+    // ICICI does not pass `state` back, so usually the Settings page (signed in,
+    // same browser) saves the token. It is our own site and the URL is cleaned at once.
+    if (saved) back.searchParams.set('breeze', 'saved');
+    else back.searchParams.set('breeze_session', token);
+    return reply.redirect(back.toString());
   };
 
   app.get('/breeze-callback', handleBreezeCallback);
