@@ -38,7 +38,16 @@ api.interceptors.request.use((config) => {
 
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error) => {
+    // "Too many requests": wait as long as the server says and try again, at
+    // most twice. Only for reads — an order is never sent twice.
+    const cfg = error.config as (typeof error.config & { _retries429?: number }) | undefined;
+    if (error.response?.status === 429 && cfg && (cfg.method ?? 'get').toLowerCase() === 'get' && (cfg._retries429 ?? 0) < 2) {
+      cfg._retries429 = (cfg._retries429 ?? 0) + 1;
+      const wait = Math.min(15, Number(error.response.headers?.['retry-after']) || 3);
+      await new Promise((r) => setTimeout(r, wait * 1000));
+      return api.request(cfg);
+    }
     if (error.response?.status === 401) {
       const url = error.config?.url || '';
       const isAuthEndpoint = url.includes('/auth/login') || url.includes('/auth/register');

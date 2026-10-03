@@ -44,6 +44,8 @@ const envSchema = z.object({
   ENCRYPTION_KEY: z.string().min(16, 'ENCRYPTION_KEY must be at least 16 characters'),
   CORS_ORIGINS: z.string().default('http://localhost:5173'),
   RATE_LIMIT_MAX: z.coerce.number().default(600),
+  /** Which proxies may set X-Forwarded-For: 'loopback' = nginx on this machine. */
+  TRUST_PROXY: z.string().default('loopback'),
   // Refuse to run automated trading unless a Redis leader lease can be held.
   // Recommended in any environment that might run more than one instance.
   REQUIRE_LEADER_LOCK: z.coerce.boolean().default(false),

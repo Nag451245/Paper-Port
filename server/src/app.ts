@@ -76,6 +76,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   const app = Fastify({
     logger: options.logger ?? true,
+    // nginx on the same machine forwards every request, so without this every
+    // visitor looked like 127.0.0.1 — one shared rate-limit bucket for everyone.
+    trustProxy: env.TRUST_PROXY,
     bodyLimit: 1_048_576, // 1 MB max body
     pluginTimeout: 120_000,
   });
@@ -145,15 +148,22 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     } : false,
   });
 
-  // 5000/min was high enough to be no limit at all. 600/min (10 rps) still
-  // covers a busy polling dashboard; raise RATE_LIMIT_MAX if a real client
-  // legitimately needs more.
+  // 600/min (10 rps) per signed-in user covers several busy tabs; raise
+  // RATE_LIMIT_MAX if a real client legitimately needs more. The limit runs
+  // before sign-in is checked, so the user is read here from a verified token
+  // (an unverified one could be used to spend someone else's allowance).
   await app.register(rateLimit, {
     max: env.RATE_LIMIT_MAX,
     timeWindow: '1 minute',
     keyGenerator: (req) => {
-      const user = (req as any).user;
-      return user?.sub || req.ip;
+      const auth = req.headers.authorization;
+      if (auth?.startsWith('Bearer ')) {
+        try {
+          const sub = app.jwt.verify<{ sub?: string }>(auth.slice(7)).sub;
+          if (sub) return `user:${sub}`;
+        } catch { /* invalid or expired: count by address */ }
+      }
+      return `ip:${req.ip}`;
     },
   });
 

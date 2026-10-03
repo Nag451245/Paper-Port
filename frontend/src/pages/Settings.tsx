@@ -59,7 +59,8 @@ export default function Settings() {
   const [telegramTesting, setTelegramTesting] = useState(false);
 
   useEffect(() => {
-    breezeApi.status().then(({ data }) => setBreezeStatus(data)).catch(() => {});
+    breezeApi.status().then(({ data }) => setBreezeStatus(data))
+      .catch(() => setBreezeError('Could not check the Breeze connection just now. Reload the page in a moment.'));
 
     telegramApi.getStatus().then(({ data }) => {
       setTelegramConnected(data.connected);
