@@ -142,7 +142,9 @@ export default function Dashboard() {
               <TrendingUp className="w-4 h-4 text-white" />
             </div>
           </div>
-          {portfolioLoading ? (
+          {/* Spinner only before the first load: background refreshes (every order or
+              position event) keep the numbers on screen instead of blinking. */}
+          {portfolioLoading && !summary ? (
             <div className="flex items-center justify-center py-8">
               <div className="w-6 h-6 border-2 border-teal-500 border-t-transparent rounded-full animate-spin" />
             </div>

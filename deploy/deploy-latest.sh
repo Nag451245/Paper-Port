@@ -74,6 +74,10 @@ cd "$APP"
 if grep -q '^HOST=.*0.0.0.0' server/.env 2>/dev/null; then
   sed -i 's/^HOST=.*/HOST="127.0.0.1"/' server/.env && echo "  API now listens on 127.0.0.1 only"
 fi
+# The API's memory limits (ecosystem.config.cjs) only change when PM2 re-reads them.
+if pm2 jlist 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const p=JSON.parse(s).find(x=>x.name==="capital-guard-api");process.exit(p&&Number(p.pm2_env.max_memory_restart||0)<1e9?0:1)})'; then
+  pm2 delete capital-guard-api >/dev/null && pm2 start ecosystem.config.cjs --only capital-guard-api >/dev/null && pm2 save >/dev/null && echo "  API memory limits raised (2 GB heap, restart at 1.8 GB)"
+fi
 if pm2 jlist 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const p=JSON.parse(s).find(x=>x.name==="ml-service");process.exit(p&&String(p.pm2_env.args).includes("0.0.0.0")?0:1)})'; then
   pm2 delete ml-service >/dev/null && pm2 start ecosystem.config.cjs --only ml-service >/dev/null && pm2 save >/dev/null && echo "  ML service now listens on 127.0.0.1 only"
 fi

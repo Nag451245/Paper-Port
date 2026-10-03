@@ -31,7 +31,10 @@ interface AuthState {
   clearError: () => void;
 }
 
-export const useAuthStore = create<AuthState>((set) => ({
+/** Quiet retries of the session check after a network or server hiccup (5 s apart, ~1 minute). */
+let sessionRetries = 0;
+
+export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   token: localStorage.getItem('token'),
   isAuthenticated: !!localStorage.getItem('token'),
@@ -86,14 +89,25 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({ isAuthenticated: false, isLoading: false });
       return;
     }
-    set({ isLoading: true });
+    // Only the first check shows the full-page loader; quiet retries keep the screen as it is.
+    if (!get().isAuthenticated || sessionRetries === 0) set({ isLoading: true });
     try {
       const { data } = await authApi.me();
       const user = normalizeUser(data as unknown as Record<string, unknown>);
+      sessionRetries = 0;
       set({ user, isAuthenticated: true, isLoading: false });
-    } catch {
-      localStorage.removeItem('token');
-      set({ user: null, token: null, isAuthenticated: false, isLoading: false });
+    } catch (err) {
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      if (status === 401) {
+        // The server rejected the session: sign out.
+        localStorage.removeItem('token');
+        set({ user: null, token: null, isAuthenticated: false, isLoading: false });
+        return;
+      }
+      // Network drop, timeout, or the server restarting: keep the session and
+      // try again shortly, rather than throwing the user back to the login page.
+      set({ isAuthenticated: true, isLoading: false });
+      if (++sessionRetries <= 12) setTimeout(() => { void get().loadUser(); }, 5000);
     }
   },
 

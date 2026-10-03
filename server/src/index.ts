@@ -11,7 +11,8 @@ process.on('uncaughtException', (err) => {
   setTimeout(() => process.exit(1), 3000).unref();
 });
 
-const HEAP_LIMIT_MB = 512;
+// Warn well before the 2 GB V8 limit set in ecosystem.config.cjs.
+const HEAP_LIMIT_MB = 1536;
 let lastHeapCheck = 0;
 setInterval(() => {
   const mem = process.memoryUsage();

@@ -34,6 +34,23 @@ const RiskDashboard = lazy(() => import('@/pages/RiskDashboard'));
 const PortfolioHeatMap = lazy(() => import('@/pages/PortfolioHeatMap'));
 const Onboarding = lazy(() => import('@/pages/Onboarding'));
 
+/**
+ * The pages people open most (the phone menu's tabs), fetched in the
+ * background once the app is idle, so moving between them never flashes a
+ * loading spinner while the page's code downloads. Same imports as above, so
+ * the browser fetches each file once.
+ */
+function prefetchMainPages() {
+  const load = () => {
+    void import('@/pages/TradingTerminal');
+    void import('@/pages/Portfolio');
+    void import('@/pages/OptionChain');
+    void import('@/pages/MarketMovers');
+  };
+  const idle = (window as Window & { requestIdleCallback?: (cb: () => void) => void }).requestIdleCallback;
+  if (idle) idle(load); else setTimeout(load, 3000);
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: { retry: 1, refetchOnWindowFocus: false },
@@ -56,6 +73,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     loadUser();
+    prefetchMainPages();
   }, []);
 
   useEffect(() => {

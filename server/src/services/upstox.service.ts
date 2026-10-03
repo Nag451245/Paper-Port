@@ -17,6 +17,7 @@ const log = createChildLogger('Upstox');
 
 const API = 'https://api.upstox.com';
 const MASTER_URL = (exchange: string) => `https://assets.upstox.com/market-quote/instruments/exchange/${exchange}.json.gz`;
+const USED_SEGMENTS = new Set(['NSE_EQ', 'NSE_FO', 'BSE_EQ', 'BSE_FO']);
 const MASTER_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Index keys are fixed; the app's index names map onto them. */
@@ -164,7 +165,10 @@ export class UpstoxService {
             const res = await this.fetchImpl(MASTER_URL(exchange), { signal: AbortSignal.timeout(60_000) });
             if (!res.ok) throw new Error(`${exchange} instrument master HTTP ${res.status}`);
             const json = JSON.parse(gunzipSync(Buffer.from(await res.arrayBuffer())).toString('utf8'));
-            if (Array.isArray(json)) records.push(...json);
+            // Keep only what buildMaps uses (cash and F&O); the commodity, currency
+            // and index rows are about a third of the file. Each file is parsed and
+            // filtered before the next is fetched, so both are never in memory at once.
+            if (Array.isArray(json)) for (const r of json) if (USED_SEGMENTS.has(r?.segment)) records.push(r);
           }
           this.maps = buildMaps(records);
           this.loadedAt = Date.now();

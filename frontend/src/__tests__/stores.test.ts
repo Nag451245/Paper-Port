@@ -69,12 +69,12 @@ describe('Auth Store', () => {
     expect(state.user?.email).toBe('me@test.com');
   });
 
-  it('loadUser clears state when token exists but api me() fails', async () => {
+  it('loadUser signs out when the server rejects the session (401)', async () => {
     const { useAuthStore } = await import('../stores/auth');
     const { authApi } = await import('../services/api');
 
     localStorage.setItem('token', 'invalid-token');
-    (authApi.me as any).mockRejectedValueOnce(new Error('Invalid token'));
+    (authApi.me as any).mockRejectedValueOnce(Object.assign(new Error('Unauthorized'), { response: { status: 401 } }));
 
     await useAuthStore.getState().loadUser();
 
@@ -82,6 +82,29 @@ describe('Auth Store', () => {
     expect(state.isAuthenticated).toBe(false);
     expect(state.user).toBeNull();
     expect(localStorage.getItem('token')).toBeNull();
+  });
+
+  it('loadUser keeps the session through a network drop or server restart', async () => {
+    vi.useFakeTimers();
+    try {
+      const { useAuthStore } = await import('../stores/auth');
+      const { authApi } = await import('../services/api');
+
+      localStorage.setItem('token', 'good-token');
+      (authApi.me as any).mockRejectedValueOnce(new Error('Network Error'));
+
+      await useAuthStore.getState().loadUser();
+
+      expect(useAuthStore.getState().isAuthenticated).toBe(true);
+      expect(useAuthStore.getState().isLoading).toBe(false);
+      expect(localStorage.getItem('token')).toBe('good-token');
+      // ...and quietly retries a few seconds later.
+      (authApi.me as any).mockResolvedValueOnce({ data: { id: 'u1', email: 'a@b.c', fullName: 'A' } });
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(useAuthStore.getState().user?.id).toBe('u1');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
