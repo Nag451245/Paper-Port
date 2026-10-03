@@ -13,6 +13,7 @@ import { getMarketMovers } from './market-movers.service.js';
 import { lakeInterval, readBars as readLakeBars } from '../lib/candle-lake.js';
 import { getExpiryCalendar } from './expiry-calendar.service.js';
 import { activeUpstoxToken } from '../lib/upstox-session.js';
+import { cleanCredential } from '../lib/credential-text.js';
 
 const log = createChildLogger('MarketData');
 
@@ -2062,7 +2063,7 @@ export class MarketDataService {
         const decipher = createDecipheriv('aes-256-cbc', key, iv);
         let decrypted = decipher.update(data, 'hex', 'utf8');
         decrypted += decipher.final('utf8');
-        return decrypted;
+        return cleanCredential(decrypted);
       };
 
       let sessionToken = credential.sessionToken!;

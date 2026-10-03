@@ -8,6 +8,7 @@ import { env } from '../config.js';
 import { getRedis } from '../lib/redis.js';
 import { sendMail } from '../lib/mailer.js';
 import { appBaseUrl } from '../lib/app-url.js';
+import { cleanCredential, quotePlus } from '../lib/credential-text.js';
 import { notePasswordChanged } from '../lib/token-revocation.js';
 
 const SALT_ROUNDS = 12;
@@ -474,9 +475,10 @@ export class AuthService {
   async saveBreezeCredentials(userId: string, input: BreezeCredentialInput): Promise<{ configured: boolean; updatedAt: Date }> {
     const existing = await this.prisma.breezeCredential.findUnique({ where: { userId } });
 
-    const encryptedApiKey = input.apiKey ? encrypt(input.apiKey, this.encKey) : undefined;
-    const encryptedSecret = input.secretKey ? encrypt(input.secretKey, this.encKey) : undefined;
-    const encSession = input.sessionToken ? encrypt(input.sessionToken, this.encKey) : undefined;
+    // Pasted keys often carry a stray space or line break; ICICI rejects the key with it.
+    const encryptedApiKey = input.apiKey ? encrypt(cleanCredential(input.apiKey), this.encKey) : undefined;
+    const encryptedSecret = input.secretKey ? encrypt(cleanCredential(input.secretKey), this.encKey) : undefined;
+    const encSession = input.sessionToken ? encrypt(cleanCredential(input.sessionToken), this.encKey) : undefined;
 
     if (!existing && (!encryptedApiKey || !encryptedSecret)) {
       throw new AuthError('API Key and Secret Key are required for first-time setup.', 400);
@@ -511,8 +513,8 @@ export class AuthService {
       throw new AuthError('Breeze credentials not configured. Save API key and secret first.', 400);
     }
 
-    const apiKey = decrypt(credential.encryptedApiKey, this.encKey);
-    const secretKey = decrypt(credential.encryptedSecret, this.encKey);
+    const apiKey = cleanCredential(decrypt(credential.encryptedApiKey, this.encKey));
+    const secretKey = cleanCredential(decrypt(credential.encryptedSecret, this.encKey));
 
     // Send the raw API session token to the Python Breeze Bridge.
     // The bridge calls generate_session() which exchanges the single-use token.
@@ -648,8 +650,8 @@ export class AuthService {
       }
     }
     return {
-      apiKey: decrypt(credential.encryptedApiKey, this.encKey),
-      secretKey: decrypt(credential.encryptedSecret, this.encKey),
+      apiKey: cleanCredential(decrypt(credential.encryptedApiKey, this.encKey)),
+      secretKey: cleanCredential(decrypt(credential.encryptedSecret, this.encKey)),
       sessionToken,
     };
   }
@@ -659,18 +661,16 @@ export class AuthService {
     if (!credential) {
       throw new AuthError('Breeze credentials not configured. Save API key and secret first.', 400);
     }
-    const apiKey = decrypt(credential.encryptedApiKey, this.encKey);
+    const apiKey = cleanCredential(decrypt(credential.encryptedApiKey, this.encKey));
+    // The app's own address (was a leftover Render hostname in production).
     const callbackUrl = process.env.BREEZE_CALLBACK_URL
       || (env.NODE_ENV === 'production'
-        ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME || 'paper-port.onrender.com'}/api/auth/breeze-callback`
+        ? `${appBaseUrl()}/api/auth/breeze-callback`
         : `http://localhost:${env.PORT}/api/auth/breeze-callback`);
-    const url = new URL('https://api.icicidirect.com/apiuser/login');
-    url.searchParams.set('api_key', apiKey);
-    url.searchParams.set('redirect_url', callbackUrl);
-    if (state) {
-      url.searchParams.set('state', state);
-    }
-    return { loginUrl: url.toString(), callbackUrl };
+    // Encoded exactly as ICICI's own sample does (quote_plus), e.g. "*" → "%2A".
+    let loginUrl = `https://api.icicidirect.com/apiuser/login?api_key=${quotePlus(apiKey)}&redirect_url=${quotePlus(callbackUrl)}`;
+    if (state) loginUrl += `&state=${quotePlus(state)}`;
+    return { loginUrl, callbackUrl };
   }
 
   async autoGenerateSession(userId: string): Promise<{ success: boolean; sessionExpiry: string; method: string }> {
@@ -684,8 +684,8 @@ export class AuthService {
       throw new AuthError('TOTP secret not configured. Set BREEZE_TOTP_SECRET in server/.env on the server.', 400);
     }
 
-    const apiKey = decrypt(credential.encryptedApiKey, this.encKey);
-    const secretKey = decrypt(credential.encryptedSecret, this.encKey);
+    const apiKey = cleanCredential(decrypt(credential.encryptedApiKey, this.encKey));
+    const secretKey = cleanCredential(decrypt(credential.encryptedSecret, this.encKey));
     let rawTotp: string;
     try {
       rawTotp = env.BREEZE_TOTP_SECRET || decrypt(credential.totpSecret!, this.encKey);
@@ -841,7 +841,7 @@ export class AuthService {
     loginPassword: string,
     totpRawSecret: string,
   ): Promise<string | null> {
-    const loginPageUrl = `https://api.icicidirect.com/apiuser/login?api_key=${encodeURIComponent(apiKey)}`;
+    const loginPageUrl = `https://api.icicidirect.com/apiuser/login?api_key=${quotePlus(apiKey)}`;
     console.log('[Breeze Auto-Login] Step 1: Loading login page...');
 
     // Step 1: GET the login page

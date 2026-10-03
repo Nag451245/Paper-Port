@@ -56,6 +56,7 @@ cd "$APP/server"
 npm ci
 npx prisma generate
 npx tsc --outDir dist-new
+git rev-parse --short HEAD > dist-new/version.txt     # reported by /health, checked in step 8
 rm -rf dist-old; if [ -d dist ]; then mv dist dist-old; fi; mv dist-new dist; rm -rf dist-old
 
 echo "== [5/8] Database migrations"
@@ -93,6 +94,20 @@ sleep 15
 pm2 status
 
 echo "== [8/8] Health"
-curl -sf http://localhost:8000/api/health | head -c 300 && echo || echo "API NOT HEALTHY: run  pm2 logs capital-guard-api --lines 50"
+# Confirm the API answering is the build just deployed, not a leftover copy
+# (e.g. one started by a second PM2 run under sudo) still holding the port.
+WANT=$(git rev-parse --short HEAD)
+GOT=none
+for i in $(seq 1 20); do
+  GOT=$( { curl -sf -m 5 http://127.0.0.1:8000/health || true; } | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);console.log(j.version+" "+j.status+" pid "+j.pid)}catch{console.log("none")}})')
+  [ "${GOT%% *}" = "$WANT" ] && break
+  sleep 3
+done
+echo "  API answering: $GOT (deployed $WANT)"
+if [ "${GOT%% *}" != "$WANT" ]; then
+  echo "  !! The API on port 8000 is NOT the version just deployed."
+  echo "  !! Process listening on 8000:"; sudo ss -ltnp 2>/dev/null | grep ':8000 ' || echo "     (none)"
+  echo "  !! PM2's API pid: $(pm2 pid capital-guard-api 2>/dev/null || echo none)"
+fi
 echo
 echo "Deployed $(git log --oneline -1)"

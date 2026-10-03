@@ -7,6 +7,7 @@ import { engineGreeks, isEngineAvailable } from '../lib/rust-engine.js';
 import { activeUpstoxToken } from '../lib/upstox-session.js';
 import { getUpstox } from './upstox.service.js';
 import { getExpiryCalendar } from './expiry-calendar.service.js';
+import { cleanCredential } from '../lib/credential-text.js';
 
 const CACHE_TTL = 120;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -874,7 +875,7 @@ export class IntelligenceService {
         const [ivHex, data] = encrypted.split(':');
         const iv = Buffer.from(ivHex, 'hex');
         const decipher = createDecipheriv('aes-256-cbc', key, iv);
-        return decipher.update(data, 'hex', 'utf8') + decipher.final('utf8');
+        return cleanCredential(decipher.update(data, 'hex', 'utf8') + decipher.final('utf8'));
       };
 
       let sessionToken = credential.sessionToken!;

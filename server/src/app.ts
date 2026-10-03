@@ -41,7 +41,7 @@ import { getExpiryCalendar } from './services/expiry-calendar.service.js';
 import { adminRoutes } from './routes/admin.js';
 import { AdminService } from './services/admin.service.js';
 import { spawn } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { GlobalMarketService } from './services/global-market.service.js';
 import { StopLossMonitor } from './services/stop-loss-monitor.service.js';
@@ -237,6 +237,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   let breezeBridgeHealthy: boolean | null = null;
+  // The commit this build came from (written by deploy-latest.sh), so a deploy can
+  // tell whether the process answering is really the new code.
+  const buildVersion = (() => {
+    try { return readFileSync(fileURLToPath(new URL('./version.txt', import.meta.url)), 'utf8').trim() || 'dev'; }
+    catch { return 'dev'; }
+  })();
 
   app.get('/health', async () => {
     const checks: Record<string, string> = {};
@@ -308,6 +314,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
     return {
       status: overall,
+      version: buildVersion,
+      pid: process.pid,
       timestamp: new Date().toISOString(),
       uptime: Math.round(process.uptime()),
       checks,

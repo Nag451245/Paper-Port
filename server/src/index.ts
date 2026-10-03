@@ -64,18 +64,28 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM', app));
   process.on('SIGINT', () => gracefulShutdown('SIGINT', app));
 
-  try {
-    await app.listen({ host: env.HOST, port: env.PORT });
-    console.log(`Capital Guard backend running on ${env.HOST}:${env.PORT}`);
-    const mem = process.memoryUsage();
-    console.log(`[MEMORY] Startup: Heap ${Math.round(mem.heapUsed / 1024 / 1024)}MB | RSS ${Math.round(mem.rss / 1024 / 1024)}MB`);
-  } catch (err: any) {
-    if (err.code === 'EADDRINUSE') {
-      console.error(`[FATAL] Port ${env.PORT} already in use — exiting (PM2 will retry after delay)`);
-    } else {
-      console.error('Failed to start server:', err);
+  // On a restart the previous process can still be releasing the port; wait for
+  // it (up to ~30 s) instead of exiting and making PM2 restart us repeatedly.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await app.listen({ host: env.HOST, port: env.PORT });
+      console.log(`Capital Guard backend running on ${env.HOST}:${env.PORT} (pid ${process.pid})`);
+      const mem = process.memoryUsage();
+      console.log(`[MEMORY] Startup: Heap ${Math.round(mem.heapUsed / 1024 / 1024)}MB | RSS ${Math.round(mem.rss / 1024 / 1024)}MB`);
+      return;
+    } catch (err: any) {
+      if (err.code === 'EADDRINUSE' && attempt < 15) {
+        if (attempt === 1) console.warn(`[STARTUP] Port ${env.PORT} is busy — waiting for the previous process to release it`);
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+      if (err.code === 'EADDRINUSE') {
+        console.error(`[FATAL] Port ${env.PORT} still in use after 30 s — another process is holding it (see: sudo ss -ltnp | grep :${env.PORT}). Exiting.`);
+      } else {
+        console.error('Failed to start server:', err);
+      }
+      process.exit(1);
     }
-    process.exit(1);
   }
 }
 
