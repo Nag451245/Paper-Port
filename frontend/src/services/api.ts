@@ -136,6 +136,8 @@ export const tradingApi = {
     expiry: string;
     strategy_name?: string;
     legs: { type: 'CE' | 'PE'; strike: number; action: 'BUY' | 'SELL'; qty: number; premium?: number }[];
+    /** Close every leg automatically: P&L after charges reaches target / stop (rupees), or at exit_at (ISO time). */
+    exit_plan?: { target?: number; stop?: number; exit_at?: string };
   }) =>
     api.post('/trades/execute-strategy', data),
 
@@ -147,6 +149,9 @@ export const tradingApi = {
 
   exitAllLegs: (strategyTag: string) =>
     api.post('/trades/strategies/exit-all', { strategy_tag: strategyTag }),
+
+  cancelExitPlan: (strategyTag: string) =>
+    api.delete('/trades/strategies/exit-plan', { params: { strategy_tag: strategyTag } }),
 
   listTrades: (params?: { page?: number; limit?: number; from_date?: string; to_date?: string; symbol?: string }) =>
     api.get('/trades/trades', { params }),
@@ -220,14 +225,29 @@ export const marketApi = {
 };
 
 // ─── Options Strategy ─────────────────────────────────────────────
+export interface VolContext {
+  symbol: string;
+  atmIv: number | null;
+  realizedVol20: number | null;
+  realizedVol60: number | null;
+  ivToRealized: number | null;
+  verdict: 'cheap' | 'fair' | 'expensive' | null;
+  vix: { now: number; low: number; high: number; rank: number; percentile: number; days: number } | null;
+  asOf: string;
+}
+
 export const optionsApi = {
   templates: () => api.get('/options/templates'),
 
-  payoffEngine: (legs: any[], spotPrice: number, riskFreeRate?: number) =>
-    api.post('/options/payoff-engine', { legs, spotPrice, riskFreeRate }),
+  /** Profit and loss come back after charges; realizedVol (0.12) gives the expected P&L at recent movement. */
+  payoffEngine: (legs: any[], spotPrice: number, opts: { symbol?: string; realizedVol?: number; riskFreeRate?: number } = {}) =>
+    api.post('/options/payoff-engine', { legs, spotPrice, ...opts }),
 
-  optimize: (symbol: string, expiry?: string, view?: string) =>
-    api.post('/options/optimize', { symbol, expiry, view }),
+  optimize: (symbol: string, expiry?: string, view?: string, opts: { lotSize?: number; lots?: number; maxLoss?: number; realizedVol?: number } = {}) =>
+    api.post('/options/optimize', { symbol, expiry, view, ...opts }),
+
+  volContext: (symbol: string, atmIv?: number) =>
+    api.get<VolContext>('/options/vol-context', { params: { symbol, atmIv } }),
 
   explain: (strategyName: string, legs: any[], spotPrice: number) =>
     api.post('/options/explain', { strategyName, legs, spotPrice }),

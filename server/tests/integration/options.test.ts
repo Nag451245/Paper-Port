@@ -165,6 +165,10 @@ describe('POST /api/options/payoff-engine', () => {
     expect(data.unlimitedProfit).toBe(false);
     expect(data.greeks.net_theta).toBeGreaterThan(500);
     expect(data.greeks.net_theta).toBeLessThan(20_000);
+    // Profit shown after charges: two sell orders, STT at today's 0.15% of premium, ₹20 brokerage each.
+    expect(data.charges.entry.stt).toBeCloseTo(259.7 * 65 * 0.0015, 0);
+    expect(data.charges.entry.brokerage).toBe(40);
+    expect(data.maxProfit).toBeLessThan(data.netPremium - data.charges.entry.totalCost + 1);
   });
 });
 

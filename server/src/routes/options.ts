@@ -2,9 +2,12 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
-import { OptionsService, type OptionLeg, calculateStrategyGreeks, calculatePayoffCurve } from '../services/options.service.js';
+import { OptionsService, type OptionLeg, calculateStrategyGreeks } from '../services/options.service.js';
 import { engineOptionsStrategy, isEngineAvailable } from '../lib/rust-engine.js';
 import { MarketDataService } from '../services/market-data.service.js';
+import { fnoRatesOn, optionOrderCharges, sumCharges } from '../lib/fno-charges.js';
+import { istDateStr } from '../lib/ist.js';
+import { analyzeStrategy, realisedVol } from '../lib/strategy-math.js';
 
 const legSchema = z.object({
   type: z.enum(['CE', 'PE']),
@@ -123,6 +126,9 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
     })).min(1).max(10),
     spotPrice: z.number().positive(),
     riskFreeRate: z.number().optional(),
+    symbol: z.string().max(20).optional(),
+    /** Recent realised volatility of the underlying (0.12 = 12%), for the expected P&L. */
+    realizedVol: z.number().positive().max(5).optional(),
   });
 
   app.post('/payoff-engine', { preHandler: [authenticate] }, async (request, reply) => {
@@ -137,6 +143,25 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
     // Above the highest strike the P&L keeps moving by the net calls held:
     // more bought than sold = unlimited profit, more sold = unlimited loss.
     const netCalls = legs.filter(l => l.type === 'CE').reduce((s, l) => s + (l.action === 'BUY' ? l.qty : -l.qty), 0);
+
+    // Every profit and loss below is after charges: the orders that open the
+    // position now, and STT on long options that expire in the money. Closing
+    // before expiry costs another set of orders, shown separately.
+    const rates = fnoRatesOn(istDateStr(), { underlying: parsed.data.symbol });
+    const entry = sumCharges(legs.map(l => optionOrderCharges(rates, l.action, l.premium, l.qty)));
+    const exitEarly = sumCharges(legs.map(l => optionOrderCharges(rates, l.action === 'BUY' ? 'SELL' : 'BUY', l.premium, l.qty)));
+    const charges = { entry, exitEarlyEstimate: exitEarly.totalCost, exerciseSttRate: rates.sttOptionExercise, asOf: istDateStr() };
+
+    // Expected P&L at expiry if the index keeps moving as it has lately (realised
+    // volatility, when the page sends it), else at implied volatility.
+    const days = Math.min(...legs.map(l => l.expiryDays ?? 7));
+    const ivs = legs.map(l => l.iv).filter((v): v is number => !!v);
+    const avgIv = ivs.length ? ivs.reduce((a, b) => a + b, 0) / ivs.length : 0.2;
+    const analysis = analyzeStrategy(legs, spotPrice, {
+      days, sigma: avgIv, sigmaEv: parsed.data.realizedVol, rf: riskFreeRate,
+      fixedCost: entry.totalCost, exerciseStt: rates.sttOptionExercise,
+    });
+    const expected = { expectedPnl: analysis.expectedPnl, expectedPnlBasis: parsed.data.realizedVol ? 'realised' : 'implied' };
 
     // Try Rust engine first (only if available)
     if (isEngineAvailable()) try {
@@ -153,6 +178,8 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
         legs: rustLegs,
         spot: spotPrice,
         risk_free_rate: riskFreeRate ?? 0.065,
+        fixed_cost: entry.totalCost,
+        exercise_stt: rates.sttOptionExercise,
       }) as any;
 
       return {
@@ -171,63 +198,77 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
         // The engine counts premium paid as positive; here + means credit received (as below).
         netPremium: -(result.risk_metrics?.net_premium ?? 0),
         strategyName: result.strategy_name ?? 'Custom',
+        charges,
+        ...expected,
       };
     } catch { /* Rust engine unavailable, use JS fallback */ }
 
-    // JS fallback
-    const jsLegs: OptionLeg[] = legs.map(l => ({
-      type: l.type,
-      strike: l.strike,
-      action: l.action,
-      qty: l.qty,
-      premium: l.premium,
-    }));
-
-    const range: [number, number] = [spotPrice * 0.8, spotPrice * 1.2];
-    const payoffCurve = calculatePayoffCurve(jsLegs, range, 100);
-    const avgIV = legs.reduce((s, l) => s + (l.iv ?? 0.2), 0) / legs.length;
-    const daysToExpiry = legs[0]?.expiryDays ?? 7;
-    const greeks = calculateStrategyGreeks(jsLegs, spotPrice, daysToExpiry / 365, avgIV || 0.2, riskFreeRate ?? 0.065);
-
-    const hasSells = legs.some(l => l.action === 'SELL');
-    const hasBuys = legs.some(l => l.action === 'BUY');
-    const buyPremium = legs.filter(l => l.action === 'BUY').reduce((s, l) => s + l.premium * l.qty, 0);
-
-    let capitalRequired: number;
-    let marginRequired = 0;
-    if (!hasSells) {
-      capitalRequired = buyPremium;
-    } else if (hasBuys && greeks.maxLoss !== 0 && isFinite(greeks.maxLoss)) {
-      capitalRequired = Math.abs(greeks.maxLoss);
-      marginRequired = capitalRequired;
-    } else {
-      const spanMargin = legs
-        .filter(l => l.action === 'SELL')
-        .reduce((s, l) => s + spotPrice * l.qty * 0.15, 0);
-      marginRequired = spanMargin;
-      capitalRequired = spanMargin + buyPremium;
-    }
-
+    // Without the engine: the same maths in TypeScript (lib/strategy-math.ts).
+    const jsGreeks = calculateStrategyGreeks(legs, spotPrice, days / 365, avgIv || 0.2, riskFreeRate ?? 0.065);
     return {
       source: 'js',
-      payoffCurve: payoffCurve.map(p => ({ spot: p.spotPrice, pnl: p.pnl })),
-      greeks: {
-        net_delta: greeks.delta,
-        net_gamma: greeks.gamma,
-        net_theta: greeks.theta,
-        net_vega: greeks.vega,
-      },
-      maxProfit: greeks.maxProfit,
-      maxLoss: greeks.maxLoss,
-      unlimitedProfit: netCalls > 0,
-      unlimitedLoss: netCalls < 0,
-      breakevens: greeks.breakevens,
-      probabilityOfProfit: 0,
-      riskRewardRatio: greeks.maxLoss !== 0 ? Math.abs(greeks.maxProfit / greeks.maxLoss) : 0,
-      capitalRequired,
-      marginRequired,
-      netPremium: greeks.netPremium,
+      payoffCurve: analysis.curve,
+      greeks: { net_delta: jsGreeks.delta, net_gamma: jsGreeks.gamma, net_theta: jsGreeks.theta, net_vega: jsGreeks.vega },
+      maxProfit: analysis.maxProfit,
+      maxLoss: analysis.maxLoss,
+      unlimitedProfit: analysis.unlimitedProfit,
+      unlimitedLoss: analysis.unlimitedLoss,
+      breakevens: analysis.breakevens,
+      probabilityOfProfit: analysis.pop,
+      riskRewardRatio: !analysis.unlimitedLoss && !analysis.unlimitedProfit && analysis.maxLoss < 0 ? Math.abs(analysis.maxProfit / analysis.maxLoss) : 0,
+      capitalRequired: analysis.margin,
+      marginRequired: analysis.margin,
+      netPremium: analysis.netPremium,
       strategyName: 'Custom',
+      charges,
+      ...expected,
+    };
+  });
+
+  // Are options cheap or expensive right now? Implied volatility against how much
+  // the underlying has actually been moving, plus India VIX's place in its 1-year range.
+  const VIX_UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'NIFTYNXT50']);
+  app.get('/vol-context', { preHandler: [authenticate] }, async (request, reply) => {
+    const q = z.object({ symbol: z.string().min(1).max(20), atmIv: z.coerce.number().positive().max(500).optional() })
+      .safeParse(request.query);
+    if (!q.success) return reply.code(400).send({ error: 'symbol is required' });
+    const symbol = q.data.symbol.toUpperCase();
+    const market = new MarketDataService();
+    const to = istDateStr();
+    const from = istDateStr(new Date(Date.now() - 400 * 86_400_000));
+    const closes = (await market.getHistory(symbol, '1day', from, to).catch(() => []))
+      .map(b => b.close);
+    const rv20 = realisedVol(closes, 20);
+    const rv60 = realisedVol(closes, 60);
+
+    let vix: { now: number; low: number; high: number; rank: number; percentile: number; days: number } | null = null;
+    if (VIX_UNDERLYINGS.has(symbol)) {
+      const series = (await market.getHistory('INDIA VIX', '1day', istDateStr(new Date(Date.now() - 370 * 86_400_000)), to).catch(() => []))
+        .map(b => b.close).filter(v => v > 0);
+      if (series.length >= 100) {
+        const now = series[series.length - 1];
+        const low = Math.min(...series), high = Math.max(...series);
+        vix = {
+          now, low, high, days: series.length,
+          rank: high > low ? Math.round(((now - low) / (high - low)) * 1000) / 10 : 50,
+          percentile: Math.round((series.filter(v => v < now).length / series.length) * 1000) / 10,
+        };
+      }
+    }
+
+    const iv = q.data.atmIv ? (q.data.atmIv > 3 ? q.data.atmIv / 100 : q.data.atmIv) : null;
+    const ratio = iv && rv20 ? iv / rv20 : null;
+    const verdict = ratio == null ? null
+      : ratio >= 1.2 ? 'expensive' : ratio <= 0.9 ? 'cheap' : 'fair';
+    return {
+      symbol,
+      atmIv: iv,
+      realizedVol20: rv20,
+      realizedVol60: rv60,
+      ivToRealized: ratio != null ? Math.round(ratio * 100) / 100 : null,
+      verdict,
+      vix,
+      asOf: to,
     };
   });
 
@@ -236,6 +277,11 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
     symbol: z.string().min(1),
     expiry: z.string().optional(),
     view: z.enum(['bullish', 'bearish', 'neutral', 'volatile']).optional(),
+    lotSize: z.number().int().positive().optional(),
+    lots: z.number().int().positive().max(50).optional(),
+    /** Most the user is willing to lose at expiry, rupees (after charges). Unlimited-loss strategies are left out when set. */
+    maxLoss: z.number().positive().optional(),
+    realizedVol: z.number().positive().max(5).optional(),
   });
 
   app.post('/optimize', { preHandler: [authenticate] }, async (request, reply) => {
@@ -274,8 +320,11 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
     };
 
     const daysToExpiry = chain.expiry
-      ? Math.max(1, Math.ceil((new Date(chain.expiry).getTime() - Date.now()) / 86400000))
+      ? Math.max(0.5, (new Date(`${String(chain.expiry).slice(0, 10)}T15:30:00+05:30`).getTime() - Date.now()) / 86400000)
       : 7;
+    // Real lots: the candidates below are written per unit and scaled here.
+    const qty = (Number(chain.lotSize) || parsed.data.lotSize || 1) * (parsed.data.lots ?? 1);
+    const rates = fnoRatesOn(istDateStr(), { underlying: symbol });
 
     type CandidateStrategy = {
       name: string;
@@ -374,53 +423,59 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
     ];
 
     const filtered = view ? candidates.filter(c => c.category === view) : candidates;
+    const ivOf = (l: OptionLeg) => {
+      const st = strikes.find((ss: any) => ss.strike === l.strike);
+      const iv = Number(l.type === 'CE' ? st?.callIV : st?.putIV) || 0;
+      return iv > 3 ? iv / 100 : iv;
+    };
 
-    const evaluated = filtered.map(strategy => {
-      const range: [number, number] = [spot * 0.85, spot * 1.15];
-      const payoffCurve = calculatePayoffCurve(strategy.legs, range, 60);
-      const pnls = payoffCurve.map(p => p.pnl);
-      const maxProfit = Math.max(...pnls);
-      const maxLoss = Math.min(...pnls);
-      const netPremium = strategy.legs.reduce((s, l) =>
-        s + (l.action === 'SELL' ? l.premium * l.qty : -l.premium * l.qty), 0);
-      const riskReward = maxLoss !== 0 ? Math.abs(maxProfit / maxLoss) : maxProfit > 0 ? Infinity : 0;
-      const profitablePoints = pnls.filter(p => p > 0).length;
-      const popEstimate = Math.round((profitablePoints / pnls.length) * 100);
+    // Each candidate at real size, after charges. Ranked by the expected P&L per
+    // rupee of margin if the index keeps moving as it has lately (realised
+    // volatility) — selling options only pays when they are priced above that.
+    const evaluated = filtered
+      .map(c => ({ ...c, legs: c.legs.map(l => ({ ...l, qty: l.qty * qty })) }))
+      .filter(c => c.legs.every(l => l.premium > 0))
+      .map(strategy => {
+        const ivs = strategy.legs.map(ivOf).filter(v => v > 0);
+        const sigma = ivs.length ? ivs.reduce((a, b) => a + b, 0) / ivs.length : 0.2;
+        const entry = sumCharges(strategy.legs.map(l => optionOrderCharges(rates, l.action, l.premium, l.qty)));
+        const an = analyzeStrategy(strategy.legs, spot, {
+          days: daysToExpiry, sigma, sigmaEv: parsed.data.realizedVol,
+          fixedCost: entry.totalCost, exerciseStt: rates.sttOptionExercise, range: [spot * 0.85, spot * 1.15], points: 60,
+        });
+        const greeks = calculateStrategyGreeks(strategy.legs, spot, daysToExpiry / 365, sigma, 0.065);
+        const evPerMargin = an.margin > 0 ? an.expectedPnl / an.margin : 0;
+        return {
+          ...strategy,
+          legs: strategy.legs.map(l => ({ ...l, iv: ivOf(l) * 100 })),
+          spotPrice: spot,
+          expiry: chain.expiry,
+          daysToExpiry: Math.round(daysToExpiry * 10) / 10,
+          maxProfit: Math.round(an.maxProfit),
+          maxLoss: Math.round(an.maxLoss),
+          unlimitedProfit: an.unlimitedProfit,
+          unlimitedLoss: an.unlimitedLoss,
+          netPremium: Math.round(an.netPremium),
+          charges: entry.totalCost,
+          margin: Math.round(an.margin),
+          expectedPnl: Math.round(an.expectedPnl),
+          expectedReturnOnMargin: Math.round(evPerMargin * 10000) / 100,
+          riskReward: !an.unlimitedLoss && !an.unlimitedProfit && an.maxLoss < 0 ? Math.round(Math.abs(an.maxProfit / an.maxLoss) * 100) / 100 : 0,
+          pop: Math.round(an.pop * 1000) / 10,
+          popEstimate: Math.round(an.pop * 100),
+          breakevens: an.breakevens,
+          greeks: { delta: greeks.delta, gamma: greeks.gamma, theta: greeks.theta, vega: greeks.vega },
+          payoffPreview: an.curve.filter((_, i) => i % 3 === 0).map(p => ({ spot: p.spot, pnl: Math.round(p.pnl) })),
+          score: Math.round(evPerMargin * 10000) / 100,
+        };
+      })
+      .filter(s => parsed.data.maxLoss == null || (!s.unlimitedLoss && -s.maxLoss <= parsed.data.maxLoss));
 
-      const breakevens: number[] = [];
-      for (let i = 1; i < payoffCurve.length; i++) {
-        if ((payoffCurve[i - 1].pnl <= 0 && payoffCurve[i].pnl >= 0) || (payoffCurve[i - 1].pnl >= 0 && payoffCurve[i].pnl <= 0)) {
-          const ratio = Math.abs(payoffCurve[i - 1].pnl) / (Math.abs(payoffCurve[i - 1].pnl) + Math.abs(payoffCurve[i].pnl));
-          breakevens.push(Math.round(payoffCurve[i - 1].spotPrice + ratio * (payoffCurve[i].spotPrice - payoffCurve[i - 1].spotPrice)));
-        }
-      }
+    evaluated.sort((a, b) => b.score - a.score || b.pop - a.pop);
 
-      const avgIV = strategy.legs.reduce((s, l) => {
-        const st = strikes.find((ss: any) => ss.strike === l.strike);
-        return s + ((l.type === 'CE' ? st?.callIV : st?.putIV) || 20);
-      }, 0) / strategy.legs.length;
-
-      const greeks = calculateStrategyGreeks(strategy.legs, spot, daysToExpiry / 365, (avgIV || 20) / 100, 0.065);
-
-      return {
-        ...strategy,
-        spotPrice: spot,
-        expiry: chain.expiry,
-        daysToExpiry,
-        maxProfit: Math.round(maxProfit),
-        maxLoss: Math.round(maxLoss),
-        netPremium: Math.round(netPremium),
-        riskReward: Math.round(riskReward * 100) / 100,
-        popEstimate,
-        breakevens,
-        greeks: { delta: greeks.delta, gamma: greeks.gamma, theta: greeks.theta, vega: greeks.vega },
-        payoffPreview: payoffCurve.filter((_: any, i: number) => i % 3 === 0).map(p => ({ spot: p.spotPrice, pnl: Math.round(p.pnl) })),
-        score: popEstimate * 0.4 + Math.min(riskReward, 5) * 12 + (netPremium > 0 ? 10 : 0),
-      };
-    });
-
-    evaluated.sort((a, b) => b.score - a.score);
-
-    return { strategies: evaluated.slice(0, 5), spotPrice: spot, symbol, expiry: chain.expiry };
+    return {
+      strategies: evaluated.slice(0, 6), spotPrice: spot, symbol, expiry: chain.expiry, lotSize: qty,
+      basis: parsed.data.realizedVol ? 'realised' : 'implied',
+    };
   });
 }

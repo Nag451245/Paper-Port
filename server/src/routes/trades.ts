@@ -8,6 +8,7 @@ import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
 import { buildOptionSymbol } from '../lib/instrument.js';
 import { MarketDataService } from '../services/market-data.service.js';
+import { StrategyExitPlanService } from '../services/strategy-exit-plan.service.js';
 
 const placeOrderSchema = z.object({
   portfolio_id: z.string().uuid(),
@@ -35,6 +36,8 @@ const closePositionSchema = z.object({
 export async function tradeRoutes(app: FastifyInstance): Promise<void> {
   const oms = (app as any).oms as OrderManagementService | undefined;
   const service = new TradeService(getPrisma(), oms ?? undefined);
+  const quotes = new MarketDataService();
+  const exitPlans = new StrategyExitPlanService(getPrisma(), (sym, ex) => quotes.getQuote(sym, ex));
 
   app.addHook('preHandler', authenticate);
 
@@ -169,7 +172,25 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
   app.get('/strategies', async (request, reply) => {
     const userId = getUserId(request);
     const strategies = await service.listActiveStrategies(userId);
-    return reply.send(strategies);
+    // P&L after charges paid and the cost of closing now, and any automatic exit.
+    const plans = new Map((await exitPlans.plansFor(userId)).filter(p => p.status === 'ACTIVE').map(p => [p.strategyTag, p]));
+    const withNet = await Promise.all(strategies.map(async (s) => {
+      const pnl = await exitPlans.pnl(userId, s.strategyTag).catch(() => null);
+      const plan = plans.get(s.strategyTag);
+      return {
+        ...s,
+        netPnl: pnl?.netPnl ?? null, chargesPaid: pnl?.chargesPaid ?? null, exitChargesEstimate: pnl?.exitChargesEstimate ?? null,
+        exitPlan: plan ? { target: plan.targetRupees, stop: plan.stopRupees, exitAt: plan.exitAt } : null,
+      };
+    }));
+    return reply.send(withNet);
+  });
+
+  app.delete('/strategies/exit-plan', async (request, reply) => {
+    const q = z.object({ strategy_tag: z.string().min(1) }).safeParse(request.query);
+    if (!q.success) return reply.code(400).send({ error: 'strategy_tag is required' });
+    await exitPlans.cancel(getUserId(request), q.data.strategy_tag);
+    return reply.send({ ok: true });
   });
 
   app.post('/strategies/exit-legs', async (request, reply) => {
@@ -285,6 +306,12 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
         qty: z.number().int().positive(),
         premium: z.number().min(0).optional(),
       })).min(1).max(10),
+      /** Close every leg automatically: P&L after charges reaches target / stop, or at exit_at. */
+      exit_plan: z.object({
+        target: z.number().positive().optional(),
+        stop: z.number().positive().optional(),
+        exit_at: z.string().datetime({ offset: true }).optional(),
+      }).optional(),
     });
 
     const parsed = strategySchema.safeParse(request.body);
@@ -295,7 +322,10 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
     try {
       const userId = getUserId(request);
       const { portfolio_id, symbol, expiry, strategy_name, legs } = parsed.data;
-      const tag = strategy_name ? `STRAT:${strategy_name}` : 'STRATEGY';
+      // Each placement gets its own tag (name + time), so two straddles placed
+      // the same day are tracked, charged and exited separately.
+      const placedAt = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+      const tag = `STRAT:${strategy_name || 'Custom'} · ${placedAt}`;
 
       const results: { leg: number; order: any; error?: string }[] = [];
 
@@ -352,7 +382,9 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
       };
 
       if (missing === 0) {
-        return reply.code(201).send({ ...payload, unbalanced: false });
+        const plan = parsed.data.exit_plan;
+        if (plan) await exitPlans.setPlan(userId, tag, { target: plan.target, stop: plan.stop, exitAt: plan.exit_at ? new Date(plan.exit_at) : undefined });
+        return reply.code(201).send({ ...payload, strategyTag: tag, exitPlan: plan ?? null, unbalanced: false });
       }
 
       // A partially-filled defined-risk structure is NOT a success. An iron

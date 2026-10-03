@@ -1183,3 +1183,46 @@ model BrokerAccount {
   @@unique([userId, broker])
   @@map("broker_accounts")
 }
+
+/// Automatic exit for a multi-leg strategy placed from the Strategy Builder:
+/// close every leg when the P&L after charges reaches the target or the stop,
+/// or at a set time.
+model StrategyExitPlan {
+  id           String    @id @default(uuid())
+  userId       String    @map("user_id")
+  strategyTag  String    @map("strategy_tag")
+  /// Rupees after charges
+  targetRupees Float?    @map("target_rupees")
+  /// Rupees after charges (a positive number: the most to lose)
+  stopRupees   Float?    @map("stop_rupees")
+  exitAt       DateTime? @map("exit_at")
+  /// ACTIVE | DONE | CANCELLED
+  status       String    @default("ACTIVE")
+  reason       String?
+  closedPnl    Float?    @map("closed_pnl")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@unique([userId, strategyTag])
+  @@index([status])
+  @@map("strategy_exit_plans")
+}
+
+/// One options-strategy backtest run (Rust engine), kept so it can be reopened.
+model OptionBacktestRun {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  underlying String
+  dateFrom   String   @map("date_from")
+  dateTo     String   @map("date_to")
+  /// JSON: the rules that were tested
+  params     String
+  /// JSON: totals, win rate, drawdown, charges
+  summary    String
+  /// JSON: every simulated trade
+  trades     String
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@map("option_backtest_runs")
+}

@@ -106,6 +106,8 @@ export class AdminService {
       this.prisma.tradingBot.deleteMany({ where: { id: { in: bots } } }),
       this.prisma.order.deleteMany({ where: { portfolioId: { in: portfolios } } }),
       this.prisma.trade.deleteMany({ where: { portfolioId: { in: portfolios } } }),
+      this.prisma.strategyExitPlan.deleteMany({ where: { userId: user.id } }),
+      this.prisma.optionBacktestRun.deleteMany({ where: { userId: user.id } }),
       this.prisma.user.delete({ where: { id: user.id } }),
     ]);
     forgetAccount(user.id);

@@ -8,6 +8,10 @@ struct Config {
     risk_free_rate: Option<f64>,
     price_range: Option<(f64, f64)>,
     num_points: Option<usize>,
+    /// Charges paid to open the position (brokerage, STT, exchange, GST, stamp), in rupees.
+    fixed_cost: Option<f64>,
+    /// STT rate on the intrinsic value of long options that expire in the money (0.0015 = 0.15%).
+    exercise_stt: Option<f64>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -74,8 +78,14 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
 
     // Positive = premium paid (debit), negative = premium received (credit).
     let net_premium: f64 = config.legs.iter().map(|l| l.premium * l.quantity as f64).sum();
+    // Profit or loss at expiry after charges: the opening charges, and STT on
+    // long options that expire in the money (cash-settled at intrinsic value).
+    let fixed_cost = config.fixed_cost.unwrap_or(0.0).max(0.0);
+    let ex_stt = config.exercise_stt.unwrap_or(0.0).max(0.0);
+    let keep = |l: &Leg| if l.quantity > 0 { 1.0 - ex_stt } else { 1.0 };
     let pnl_at = |price: f64| -> f64 {
-        config.legs.iter().map(|l| intrinsic(l, price) * l.quantity as f64).sum::<f64>() - net_premium
+        config.legs.iter().map(|l| intrinsic(l, price) * l.quantity as f64 * keep(l)).sum::<f64>()
+            - net_premium - fixed_cost
     };
 
     // Chart: an even grid plus every strike, so the peaks and corners are drawn exactly.
@@ -85,14 +95,14 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
     prices.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
     let payoff_diagram: Vec<PayoffPoint> = prices.iter().map(|&p| {
         let pnl = pnl_at(p);
-        PayoffPoint { price: round2(p), payoff: round2(pnl + net_premium), pnl: round2(pnl) }
+        PayoffPoint { price: round2(p), payoff: round2(pnl + net_premium + fixed_cost), pnl: round2(pnl) }
     }).collect();
 
     // The P&L is a straight line between strikes, so its best and worst values sit
     // at a strike or at a price of 0. Above the highest strike it keeps moving by
     // the net number of calls per point: more calls bought than sold = unlimited
     // profit, more sold than bought = unlimited loss.
-    let net_calls: f64 = config.legs.iter().filter(|l| l.option_type == "call").map(|l| l.quantity as f64).sum();
+    let net_calls: f64 = config.legs.iter().filter(|l| l.option_type == "call").map(|l| l.quantity as f64 * keep(l)).sum();
     let unlimited_profit = net_calls > 0.0;
     let unlimited_loss = net_calls < 0.0;
     let mut corners: Vec<f64> = vec![0.0];
@@ -502,6 +512,21 @@ mod tests {
         assert!(!r.unlimited_profit && !r.unlimited_loss);
         assert_eq!(r.max_profit, 4.0);
         assert_eq!(r.max_loss, -1.0);
+    }
+
+    #[test]
+    fn test_charges_come_off_profit_and_move_breakevens() {
+        let base = run(json!([{"option_type":"call","strike":100.0,"premium":5.0,"quantity":-100}]), 100.0);
+        let net = run_with(json!({ "spot": 100.0, "fixed_cost": 50.0, "exercise_stt": 0.0015,
+            "legs": [{"option_type":"call","strike":100.0,"premium":5.0,"quantity":-100}] }));
+        assert_eq!(base.max_profit, 500.0);
+        assert_eq!(net.max_profit, 450.0);
+        assert_eq!(net.breakeven_points, vec![104.5]);
+        // A long call pays STT on its intrinsic value at expiry.
+        let long = run_with(json!({ "spot": 100.0, "exercise_stt": 0.0015,
+            "legs": [{"option_type":"call","strike":100.0,"premium":5.0,"quantity":100}] }));
+        assert!(long.unlimited_profit);
+        assert!(long.breakeven_points[0] > 105.0);
     }
 
     fn run_with(cfg: serde_json::Value) -> StrategyResult {

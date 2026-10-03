@@ -34,6 +34,8 @@ vi.mock('../../src/lib/prisma.js', () => {
     botMessage: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
     order: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
     trade: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+    strategyExitPlan: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+    optionBacktestRun: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
     notification: { create: vi.fn().mockResolvedValue({}) },
     breezeCredential: { findUnique: vi.fn().mockResolvedValue(null), findMany: vi.fn().mockResolvedValue([]) },
     brokerAccount: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn() },

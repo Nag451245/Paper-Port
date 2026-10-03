@@ -416,6 +416,22 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     } catch (err) { console.error('[TargetTracker Cron] Error:', (err as Error).message); }
   });
 
+  // Strategy exit plans (target / stop after charges, or a set time) — every minute, 09:16–15:30 IST.
+  orchestrator.scheduleMarketDay('* 3-10 * * 1-5', async () => {
+    const ist = new Date(Date.now() + 330 * 60_000);
+    const minute = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    if (minute < 9 * 60 + 16 || minute > 15 * 60 + 30) return;
+    try {
+      const { StrategyExitPlanService } = await import('./services/strategy-exit-plan.service.js');
+      const { TradeService } = await import('./services/trade.service.js');
+      const { MarketDataService } = await import('./services/market-data.service.js');
+      const market = new MarketDataService();
+      const trades = new TradeService(getPrisma());
+      await new StrategyExitPlanService(getPrisma(), (s, ex) => market.getQuote(s, ex))
+        .check((userId, ids) => trades.exitStrategyLegs(userId, ids));
+    } catch (err) { app.log.warn(`[ExitPlans] ${(err as Error).message}`); }
+  });
+
   // Telegram stock alerts — scored every 5 min; the service itself only sends 09:30–15:20 IST.
   orchestrator.scheduleMarketDay('*/5 3-10 * * 1-5', async () => {
     try { await getStockAlerts(getPrisma()).run(); } catch (err) { app.log.warn(`[StockAlerts] ${(err as Error).message}`); }

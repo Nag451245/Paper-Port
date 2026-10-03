@@ -56,6 +56,11 @@ export interface PayoffResult {
   netPremium: number;
   /** 0..1 */
   probabilityOfProfit?: number;
+  /** Charges to open now (all P&L above is after them), and to close before expiry. */
+  charges?: { entry: { totalCost: number; brokerage: number; stt: number; exchangeCharges: number; gst: number; sebiCharges: number; stampDuty: number }; exitEarlyEstimate: number; exerciseSttRate: number; asOf: string };
+  /** Average P&L at expiry, after charges, if the index moves as it has lately ('realised') or as options price in ('implied'). */
+  expectedPnl?: number;
+  expectedPnlBasis?: 'realised' | 'implied';
   riskRewardRatio?: number;
   capitalRequired?: number;
   source?: string;
@@ -72,6 +77,14 @@ export interface OptimizedStrategy {
   netPremium: number;
   riskReward: number;
   pop: number;
+  unlimitedLoss?: boolean;
+  unlimitedProfit?: boolean;
+  /** After charges, at recent realised movement when known. */
+  expectedPnl?: number;
+  /** Expected P&L as % of margin. */
+  expectedReturnOnMargin?: number;
+  margin?: number;
+  charges?: number;
   score: number;
 }
 
@@ -360,6 +373,41 @@ export function estimateMargin(legs: StrategyLeg[], spot: number, maxLoss: numbe
   margin += buyPremium;
 
   return Math.round(Math.max(margin, 0));
+}
+
+// ─── Pricing before expiry ───────────────────────────────────────────────────
+
+function normCdf(x: number): number {
+  const sign = x < 0 ? -1 : 1;
+  const z = Math.abs(x) / Math.SQRT2;
+  const t = 1 / (1 + 0.3275911 * z);
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-z * z);
+  return 0.5 * (1 + sign * y);
+}
+
+/** Black-Scholes price of one option; `years` to expiry, `sigma` annual (0.146). At expiry: intrinsic. */
+export function bsPrice(spot: number, strike: number, years: number, sigma: number, type: 'CE' | 'PE', rf = 0.065): number {
+  if (years <= 0 || sigma <= 0) return Math.max(0, type === 'CE' ? spot - strike : strike - spot);
+  const d1 = (Math.log(spot / strike) + (rf + sigma * sigma / 2) * years) / (sigma * Math.sqrt(years));
+  const d2 = d1 - sigma * Math.sqrt(years);
+  return type === 'CE'
+    ? spot * normCdf(d1) - strike * Math.exp(-rf * years) * normCdf(d2)
+    : strike * Math.exp(-rf * years) * normCdf(-d2) - spot * normCdf(-d1);
+}
+
+/** The chain shows IV in percent (14.6); pricing needs 0.146. */
+export const ivFraction = (iv?: number): number => (!iv || iv <= 0 ? 0.15 : iv > 3 ? iv / 100 : iv);
+
+/**
+ * Profit or loss if the position is closed `daysForward` days from now at
+ * `spot`, with every IV moved by `ivShift` (0.2 = +20%), before charges.
+ */
+export function pnlOnDate(legs: StrategyLeg[], spot: number, daysForward: number, ivShift = 0): number {
+  return legs.reduce((sum, l) => {
+    const left = Math.max(0, (l.expiryDays ?? 0) - daysForward) / 365;
+    const price = bsPrice(spot, l.strike, left, ivFraction(l.iv) * (1 + ivShift), l.type);
+    return sum + (price - l.premium) * l.qty * (l.action === 'BUY' ? 1 : -1);
+  }, 0);
 }
 
 // ─── Local Payoff Computation ────────────────────────────────────────────────

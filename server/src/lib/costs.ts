@@ -1,3 +1,6 @@
+import { fnoRatesOn, optionOrderCharges, futureOrderCharges } from './fno-charges.js';
+import { istDateStr } from './ist.js';
+
 export interface CostBreakdown {
   brokerage: number;
   stt: number;
@@ -29,54 +32,13 @@ export function resolveInstrumentKind(
   return 'FUTURES';
 }
 
-function round2(n: number): number {
-  return Number(n.toFixed(2));
-}
 
-/**
- * NSE/BSE F&O charges. Rates are FY2024-25 (post the 1 Oct 2024 STT revision)
- * for a flat-fee discount broker. These are statutory and change with each
- * budget — revisit when SEBI/exchange circulars land.
- *
- * Note the base differs from equity: options charges are levied on *premium*
- * turnover, futures on notional turnover.
- */
-function calculateFnoCosts(
-  turnover: number,
-  side: string,
-  kind: 'FUTURES' | 'OPTIONS',
-): CostBreakdown {
-  const isSell = side === 'SELL';
-
-  const brokerage = kind === 'OPTIONS'
-    ? 20                                       // flat per order on premium
-    : Math.min(turnover * 0.0003, 20);
-
-  // STT: options 0.10% on sell premium, futures 0.02% on sell notional
-  const stt = isSell ? turnover * (kind === 'OPTIONS' ? 0.001 : 0.0002) : 0;
-
-  // Exchange transaction charges
-  const exchangeCharges = turnover * (kind === 'OPTIONS' ? 0.0003503 : 0.0000173);
-
-  // SEBI turnover fees — Rs 10 per crore
-  const sebiCharges = turnover * 0.000001;
-
-  // Stamp duty, buy side only
-  const stampDuty = isSell ? 0 : turnover * (kind === 'OPTIONS' ? 0.00003 : 0.00002);
-
-  const gst = (brokerage + exchangeCharges + sebiCharges) * 0.18;
-
-  const totalCost = brokerage + stt + exchangeCharges + gst + sebiCharges + stampDuty;
-
-  return {
-    brokerage: round2(brokerage),
-    stt: round2(stt),
-    exchangeCharges: round2(exchangeCharges),
-    gst: round2(gst),
-    sebiCharges: round2(sebiCharges),
-    stampDuty: round2(stampDuty),
-    totalCost: round2(totalCost),
-  };
+/** NSE/BSE F&O charges at today's statutory rates (lib/fno-charges.ts keeps the dated table).
+ * Options are charged on premium turnover, futures on notional. */
+function calculateFnoCosts(turnover: number, side: string, kind: 'FUTURES' | 'OPTIONS'): CostBreakdown {
+  const rates = fnoRatesOn(istDateStr());
+  const s = side === 'SELL' ? 'SELL' : 'BUY';
+  return kind === 'OPTIONS' ? optionOrderCharges(rates, s, turnover, 1) : futureOrderCharges(rates, s, turnover, 1);
 }
 
 export function calculateCosts(

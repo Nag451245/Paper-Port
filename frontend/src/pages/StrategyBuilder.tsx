@@ -1,13 +1,15 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
-  AreaChart,
+  ComposedChart,
   Area,
+  Line,
   XAxis,
   YAxis,
   Tooltip,
   ResponsiveContainer,
   CartesianGrid,
   ReferenceLine,
+  ReferenceArea,
 } from 'recharts';
 import {
   TrendingUp,
@@ -34,7 +36,7 @@ import {
   BookOpen,
   AlertTriangle,
 } from 'lucide-react';
-import api, { marketApi, optionsApi, tradingApi, portfolioApi } from '@/services/api';
+import { marketApi, optionsApi, tradingApi, portfolioApi, type VolContext } from '@/services/api';
 import {
   type Strike,
   type StrategyLeg,
@@ -52,6 +54,8 @@ import {
   isMarketOpen,
   estimateMargin,
   computeLocalPayoff,
+  pnlOnDate,
+  ivFraction,
   INDEX_SET,
   SCENARIOS,
   STRATEGY_TEMPLATES,
@@ -146,6 +150,19 @@ export default function StrategyBuilder() {
   const [optimizedStrategies, setOptimizedStrategies] = useState<OptimizedStrategy[]>([]);
   const [loadingOptimize, setLoadingOptimize] = useState(false);
   const [optimizerView, setOptimizerView] = useState<string>('');
+  const [optimizerLots, setOptimizerLots] = useState(1);
+  const [optimizerMaxLoss, setOptimizerMaxLoss] = useState('');
+  const [optimizerBasis, setOptimizerBasis] = useState<'realised' | 'implied' | null>(null);
+
+  // Cheap or expensive: IV against recent movement, VIX's 1-year rank
+  const [volCtx, setVolCtx] = useState<VolContext | null>(null);
+  // "P&L on a date": close the position N days from now, with IV moved by X%
+  const [daysForward, setDaysForward] = useState(0);
+  const [ivShift, setIvShift] = useState(0);
+  // Exit plan sent with Execute Strategy
+  const [planTarget, setPlanTarget] = useState('');
+  const [planStop, setPlanStop] = useState('');
+  const [planTime, setPlanTime] = useState('');
 
   // Dynamic lot sizes
   const [lotSizeMap, setLotSizeMap] = useState<Record<string, number>>({});
@@ -268,6 +285,22 @@ export default function StrategyBuilder() {
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
   }, [fetchChain]);
 
+  // ── Cheap or expensive? (refreshed when the symbol or the ATM IV moves) ──
+  const atmIv = useMemo(() => {
+    const s = findStrike(chain, atmStrike);
+    const ivs = [s?.callIV, s?.putIV].filter((v): v is number => !!v && v > 0);
+    return ivs.length ? ivs.reduce((a, b) => a + b, 0) / ivs.length : 0;
+  }, [chain, atmStrike]);
+  const atmIvRounded = Math.round(atmIv * 2) / 2;
+  useEffect(() => {
+    let cancelled = false;
+    optionsApi.volContext(symbol, atmIvRounded || undefined)
+      .then(({ data }) => { if (!cancelled) setVolCtx(data); })
+      .catch(() => { if (!cancelled) setVolCtx(null); });
+    return () => { cancelled = true; };
+  }, [symbol, atmIvRounded]);
+  const realizedVol = volCtx?.realizedVol20 ?? null;
+
   // ── Calculate payoff (Rust engine with JS fallback) ─────────────────────
   const calculatePayoff = useCallback(async (currentLegs: StrategyLeg[], spot: number) => {
     if (currentLegs.length === 0 || spot <= 0) return;
@@ -282,7 +315,7 @@ export default function StrategyBuilder() {
         iv: l.iv,
         expiryDays: l.expiryDays ?? dte(l.expiry ?? selectedExpiry),
       }));
-      const { data } = await optionsApi.payoffEngine(engineLegs, spot);
+      const { data } = await optionsApi.payoffEngine(engineLegs, spot, { symbol, realizedVol: realizedVol ?? undefined });
       if (data?.payoffCurve?.length > 0) {
         setPayoff({
           payoffCurve: data.payoffCurve,
@@ -303,6 +336,9 @@ export default function StrategyBuilder() {
           capitalRequired: data.capitalRequired,
           source: data.source ?? 'rust',
           strategyName: data.strategyName,
+          charges: data.charges,
+          expectedPnl: data.expectedPnl,
+          expectedPnlBasis: data.expectedPnlBasis,
         });
         setLoadingPayoff(false);
         return;
@@ -310,7 +346,7 @@ export default function StrategyBuilder() {
     } catch { /* fallback */ }
     setPayoff(computeLocalPayoff(currentLegs, spot));
     setLoadingPayoff(false);
-  }, [selectedExpiry]);
+  }, [selectedExpiry, symbol, realizedVol]);
 
   useEffect(() => {
     if (legs.length > 0 && spotPrice > 0) {
@@ -371,8 +407,18 @@ export default function StrategyBuilder() {
   const runOptimizer = async () => {
     setLoadingOptimize(true);
     try {
-      const { data } = await optionsApi.optimize(symbol, selectedExpiry, optimizerView || undefined);
+      const cap = Number(optimizerMaxLoss);
+      const { data } = await optionsApi.optimize(symbol, selectedExpiry, optimizerView || undefined, {
+        lotSize, lots: optimizerLots, maxLoss: cap > 0 ? cap : undefined, realizedVol: realizedVol ?? undefined,
+      });
+      setOptimizerBasis(data?.basis ?? null);
       const strats: OptimizedStrategy[] = (data?.strategies ?? []).map((s: any) => ({
+        unlimitedLoss: !!s.unlimitedLoss,
+        unlimitedProfit: !!s.unlimitedProfit,
+        expectedPnl: s.expectedPnl,
+        expectedReturnOnMargin: s.expectedReturnOnMargin,
+        margin: s.margin,
+        charges: s.charges,
         name: s.name ?? 'Unknown',
         category: s.category ?? 'neutral',
         legs: (s.legs ?? []).map((l: any) => ({
@@ -397,22 +443,16 @@ export default function StrategyBuilder() {
   };
 
   // ── Scenarios ───────────────────────────────────────────────────────────
-  const runScenarios = async () => {
+  // Each scenario closes the whole position at the moved price and IV, after
+  // the charges to open and to close.
+  const runScenarios = () => {
     setLoadingScenarios(true);
-    try {
-      const { data } = await api.post('/options/scenario', { legs, spotPrice, scenarios: SCENARIOS });
-      setScenarioResults(Array.isArray(data) ? data : data.results || []);
-    } catch {
-      setScenarioResults(SCENARIOS.map(sc => {
-        const adjSpot = spotPrice * (1 + sc.spotDelta);
-        let pnl = 0;
-        for (const leg of legs) {
-          const intr = leg.type === 'CE' ? Math.max(adjSpot - leg.strike, 0) : Math.max(leg.strike - adjSpot, 0);
-          pnl += (leg.action === 'BUY' ? intr - leg.premium : leg.premium - intr) * leg.qty;
-        }
-        return { label: sc.label, pnl: Math.round(pnl), spotPrice: Math.round(adjSpot) };
-      }));
-    }
+    const charges = (payoff?.charges?.entry.totalCost ?? 0) + (payoff?.charges?.exitEarlyEstimate ?? 0);
+    setScenarioResults(SCENARIOS.map(sc => {
+      const adjSpot = spotPrice * (1 + sc.spotDelta);
+      const pnl = pnlOnDate(legs, adjSpot, sc.daysPass, sc.ivDelta) - charges;
+      return { label: sc.label, pnl: Math.round(pnl), spotPrice: Math.round(adjSpot) };
+    }));
     setLoadingScenarios(false);
   };
 
@@ -421,12 +461,24 @@ export default function StrategyBuilder() {
     setLoadingExplain(true);
     try {
       const name = payoff?.strategyName || 'Custom Strategy';
-      const { data } = await api.post('/options/explain', { strategyName: name, legs, spotPrice });
+      const { data } = await optionsApi.explain(name, legs, spotPrice);
       setExplanation(data.explanation || data.text || JSON.stringify(data));
     } catch {
       setExplanation('Unable to generate explanation. Please ensure you have legs configured.');
     }
     setLoadingExplain(false);
+  };
+
+  // ── Liquidity: little open interest or no trades today means wide spreads and poor fills ──
+  const thinLeg = (leg: StrategyLeg): string | null => {
+    const s = findStrike(chain, leg.strike);
+    if (!s) return null;
+    const oi = leg.type === 'CE' ? s.callOI : s.putOI;
+    const vol = leg.type === 'CE' ? s.callVolume : s.putVolume;
+    const maxOi = Math.max(1, ...chain.map(c => (leg.type === 'CE' ? c.callOI : c.putOI)));
+    if (oi < maxOi * 0.02) return `Open interest ${oi.toLocaleString('en-IN')} is under 2% of the busiest strike: expect wide bid-ask spreads and slippage.`;
+    if (isMarketOpen() && vol === 0) return 'No trades in this contract today: the price shown may be stale.';
+    return null;
   };
 
   // ── Chain display: filter near ATM ──────────────────────────────────────
@@ -489,6 +541,25 @@ export default function StrategyBuilder() {
   const pnlTop = pnls.length ? Math.max(...pnls) : 0;
   const pnlBottom = pnls.length ? Math.min(...pnls) : 0;
   const zeroAt = pnlTop <= 0 ? 0 : pnlBottom >= 0 ? 1 : pnlTop / (pnlTop - pnlBottom);
+
+  // "Closed on a date" line: priced with Black-Scholes at the remaining time and
+  // shifted IV, after the charges to open and to close.
+  const maxDays = legs.length ? Math.max(0, Math.min(...legs.map(l => l.expiryDays ?? dte(l.expiry ?? selectedExpiry)))) : 0;
+  const daysAhead = Math.min(daysForward, maxDays);
+  const showOnDate = legs.length > 0 && maxDays > 0 && daysAhead < maxDays;
+  // Counted back from the expiry close, so rendering never reads the clock.
+  const onDateLabel = daysAhead <= 0 || !selectedExpiry ? 'today'
+    : new Date(Date.parse(`${selectedExpiry.slice(0, 10)}T15:30:00+05:30`) - (maxDays - daysAhead) * 86_400_000)
+      .toLocaleDateString('en-IN', { day: '2-digit', month: 'short', timeZone: 'Asia/Kolkata' }) + ` (+${daysAhead.toFixed(daysAhead % 1 ? 1 : 0)}d)`;
+  const roundTripCharges = (payoff?.charges?.entry.totalCost ?? 0) + (payoff?.charges?.exitEarlyEstimate ?? 0);
+  const chartData = useMemo(() => (payoff?.payoffCurve ?? []).map(p => ({
+    ...p,
+    onDate: showOnDate
+      ? Math.round(pnlOnDate(legs.map(l => ({ ...l, expiryDays: l.expiryDays ?? dte(l.expiry ?? selectedExpiry) })), p.spot, daysAhead, ivShift) - roundTripCharges)
+      : undefined,
+  })), [payoff, legs, showOnDate, daysAhead, ivShift, roundTripCharges, selectedExpiry]);
+  // One standard deviation of the move to expiry implied by the ATM option.
+  const expectedMove = atmIv > 0 && spotPrice > 0 && maxDays > 0 ? spotPrice * ivFraction(atmIv) * Math.sqrt(maxDays / 365) : 0;
 
   // ────────────────────────────────────────────────────────────────────────
   //  RENDER
@@ -775,6 +846,9 @@ export default function StrategyBuilder() {
                             <input type="number" value={leg.strike} onChange={e => updateLeg(i, 'strike', Number(e.target.value))}
                               className="w-[70px] px-1.5 py-1 border border-slate-200 rounded font-mono text-[11px] focus:outline-none" step={50} />
                           )}
+                          {thinLeg(leg) && (
+                            <span className="block text-[8px] font-semibold text-amber-600 mt-0.5" title={thinLeg(leg) ?? ''}>⚠ thin</span>
+                          )}
                         </td>
                         <td className="py-1.5 px-1">
                           <select value={leg.action} onChange={e => updateLeg(i, 'action', e.target.value as 'BUY' | 'SELL')}
@@ -841,12 +915,70 @@ export default function StrategyBuilder() {
                   ) : payoff.maxProfit > 0 && payoff.maxLoss < 0 && !payoff.unlimitedLoss && !payoff.unlimitedProfit ? (
                     <MetricCard label="Risk/Reward" value={Math.abs(payoff.maxProfit / payoff.maxLoss)} format="ratio" color="amber" />
                   ) : null}
+                  {payoff.expectedPnl != null && (
+                    <div className={`rounded-lg p-2 text-center border ${payoff.expectedPnl >= 0 ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-red-50 text-red-600 border-red-100'}`}
+                      title={payoff.expectedPnlBasis === 'realised'
+                        ? 'Average result at expiry if the index keeps moving as much as it has over the last 20 days. Not a forecast.'
+                        : 'Average result at expiry if the index moves as much as option prices imply. Not a forecast.'}>
+                      <p className="text-[9px] font-semibold uppercase opacity-70">Expected P&L</p>
+                      <p className="text-xs font-bold font-mono">{payoff.expectedPnl >= 0 ? '+' : '-'}₹{formatNum(Math.abs(payoff.expectedPnl))}</p>
+                      <p className="text-[8px] opacity-70">{payoff.expectedPnlBasis === 'realised' ? 'at recent movement' : 'at implied movement'}</p>
+                    </div>
+                  )}
                   {payoff.breakevens?.length > 0 && (
                     <div className="bg-slate-50 rounded-lg p-2 text-center col-span-3">
-                      <p className="text-[9px] font-semibold text-slate-400 uppercase">Breakevens</p>
+                      <p className="text-[9px] font-semibold text-slate-400 uppercase">Breakevens (after charges)</p>
                       <p className="text-xs font-bold font-mono text-slate-700">
                         {payoff.breakevens.map(b => b.toLocaleString('en-IN')).join(' | ')}
                       </p>
+                    </div>
+                  )}
+                  {payoff.charges && (
+                    <div className="col-span-3 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-[10px] text-slate-600 leading-relaxed">
+                      <span className="font-semibold text-slate-700">All profit and loss figures are after charges.</span>{' '}
+                      To open: <b>₹{payoff.charges.entry.totalCost.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</b>
+                      {' '}(brokerage ₹{payoff.charges.entry.brokerage.toFixed(0)}, STT ₹{payoff.charges.entry.stt.toFixed(0)},
+                      {' '}exchange ₹{payoff.charges.entry.exchangeCharges.toFixed(0)}, GST ₹{payoff.charges.entry.gst.toFixed(0)},
+                      {' '}stamp ₹{payoff.charges.entry.stampDuty.toFixed(0)}). Closing before expiry costs about
+                      {' '}<b>₹{payoff.charges.exitEarlyEstimate.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</b> more;
+                      {' '}held to expiry, bought options that finish in the money pay {(payoff.charges.exerciseSttRate * 100).toFixed(3)}% STT on their value.
+                    </div>
+                  )}
+                  {volCtx && (volCtx.verdict || volCtx.vix) && (
+                    <div className="col-span-3 rounded-lg border border-indigo-100 bg-indigo-50/40 px-2.5 py-2 text-[10px] text-slate-600 leading-relaxed">
+                      {volCtx.verdict && volCtx.atmIv && volCtx.realizedVol20 && (
+                        <p>
+                          <span className={`font-bold ${volCtx.verdict === 'expensive' ? 'text-emerald-700' : volCtx.verdict === 'cheap' ? 'text-amber-700' : 'text-slate-700'}`}>
+                            Options look {volCtx.verdict}.
+                          </span>{' '}
+                          They price in {(volCtx.atmIv * 100).toFixed(1)}% a year; {symbol} has actually moved {(volCtx.realizedVol20 * 100).toFixed(1)}% (last 20 days).
+                          {volCtx.verdict === 'expensive' ? ' Selling premium has the wind behind it.' : volCtx.verdict === 'cheap' ? ' Buying options is cheaper than usual.' : ''}
+                        </p>
+                      )}
+                      {volCtx.vix && (
+                        <p>India VIX {volCtx.vix.now.toFixed(2)}: higher than {volCtx.vix.percentile.toFixed(0)}% of the last year (range {volCtx.vix.low.toFixed(1)}–{volCtx.vix.high.toFixed(1)}).</p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Exit plan: closes every leg automatically (P&L after charges, or a time) */}
+                  {legs.length > 0 && (
+                    <div className="col-span-3 rounded-lg border border-slate-200 p-2">
+                      <p className="text-[9px] font-semibold uppercase text-slate-400 mb-1.5">Exit plan (optional) — closes all legs automatically</p>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        <label className="text-[9px] text-slate-500">Target profit ₹
+                          <input type="number" min={0} value={planTarget} onChange={e => setPlanTarget(e.target.value)} placeholder="e.g. 5000"
+                            className="mt-0.5 w-full px-1.5 py-1 border border-slate-200 rounded font-mono text-[11px]" />
+                        </label>
+                        <label className="text-[9px] text-slate-500">Stop loss ₹
+                          <input type="number" min={0} value={planStop} onChange={e => setPlanStop(e.target.value)} placeholder="e.g. 4000"
+                            className="mt-0.5 w-full px-1.5 py-1 border border-slate-200 rounded font-mono text-[11px]" />
+                        </label>
+                        <label className="text-[9px] text-slate-500">Exit at
+                          <input type="datetime-local" value={planTime} onChange={e => setPlanTime(e.target.value)}
+                            className="mt-0.5 w-full px-1 py-1 border border-slate-200 rounded text-[10px]" />
+                        </label>
+                      </div>
                     </div>
                   )}
 
@@ -855,6 +987,12 @@ export default function StrategyBuilder() {
                     <button
                       onClick={async () => {
                         if (executing) return;
+                        const target = Number(planTarget), stop = Number(planStop);
+                        // The datetime box is local (IST) time; the server wants an absolute instant.
+                        const exitAt = planTime ? new Date(planTime) : null;
+                        const exitPlan = target > 0 || stop > 0 || (exitAt && !isNaN(exitAt.getTime()))
+                          ? { target: target > 0 ? target : undefined, stop: stop > 0 ? stop : undefined, exit_at: exitAt && !isNaN(exitAt.getTime()) ? exitAt.toISOString() : undefined }
+                          : undefined;
                         if (!confirm(`Execute ${legs.length}-leg strategy on ${symbol} (${selectedExpiry})?\n\nThis will place ${legs.length} orders in your portfolio.`)) return;
                         setExecuting(true);
                         setExecResult(null);
@@ -867,9 +1005,10 @@ export default function StrategyBuilder() {
                             expiry: selectedExpiry,
                             strategy_name: payoff?.strategyName || undefined,
                             legs: legs.map(l => ({ type: l.type, strike: l.strike, action: l.action, qty: l.qty, premium: l.premium })),
+                            exit_plan: exitPlan,
                           });
                           const d = data as any;
-                          setExecResult({ ok: true, msg: `Strategy deployed: ${d.filled} filled, ${d.pending} pending` });
+                          setExecResult({ ok: true, msg: `Strategy deployed: ${d.filled} filled, ${d.pending} pending${exitPlan ? ' · exit plan active' : ''}` });
                           fetchDeployedStrategies();
                         } catch (err: any) {
                           // A partial fill comes back 409, not 2xx: some legs are
@@ -935,10 +1074,29 @@ export default function StrategyBuilder() {
             <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Payoff Diagram</h2>
             {loadingPayoff && <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />}
           </div>
+          {legs.length > 0 && maxDays > 0 && (
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 mb-3 text-[11px] text-slate-600">
+              <label className="flex items-center gap-2">
+                <span className="whitespace-nowrap">P&L on <b>{onDateLabel}</b></span>
+                <input type="range" min={0} max={maxDays} step={Math.max(0.25, maxDays / 40)} value={Math.min(daysForward, maxDays)}
+                  onChange={e => setDaysForward(Number(e.target.value))} className="w-32 accent-amber-500" />
+              </label>
+              <label className="flex items-center gap-2">
+                <span className="whitespace-nowrap">IV {ivShift >= 0 ? '+' : ''}{Math.round(ivShift * 100)}%</span>
+                <input type="range" min={-0.5} max={0.5} step={0.05} value={ivShift}
+                  onChange={e => setIvShift(Number(e.target.value))} className="w-28 accent-amber-500" />
+              </label>
+              <span className="flex items-center gap-3 text-[10px] text-slate-400">
+                <span className="flex items-center gap-1"><span className="w-4 h-0.5 bg-emerald-600 inline-block" /> at expiry</span>
+                <span className="flex items-center gap-1"><span className="w-4 h-0.5 bg-amber-500 inline-block" /> closed on that date</span>
+                {expectedMove > 0 && <span className="flex items-center gap-1"><span className="w-3 h-3 bg-indigo-100 inline-block rounded-sm" /> expected move ±{Math.round(expectedMove).toLocaleString('en-IN')} (1 s.d.)</span>}
+              </span>
+            </div>
+          )}
           <div className="h-[500px]">
             {payoff && payoff.payoffCurve?.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={payoff.payoffCurve} margin={{ top: 10, right: 30, left: 10, bottom: 20 }}>
+                <ComposedChart data={chartData} margin={{ top: 10, right: 30, left: 10, bottom: 20 }}>
                   <defs>
                     {/* Green above the zero line, red below it. */}
                     <linearGradient id="pnlFill" x1="0" y1="0" x2="0" y2="1">
@@ -964,7 +1122,10 @@ export default function StrategyBuilder() {
                     tickFormatter={(v: number) => `₹${formatNum(v)}`}
                     label={{ value: 'P&L', angle: -90, position: 'insideLeft', offset: 5, fontSize: 11, fill: '#94a3b8' }}
                   />
-                  <Tooltip content={<PayoffTooltip spotPrice={spotPrice} />} />
+                  <Tooltip content={<PayoffTooltip spotPrice={spotPrice} onDateLabel={onDateLabel} />} />
+                  {expectedMove > 0 && (
+                    <ReferenceArea x1={spotPrice - expectedMove} x2={spotPrice + expectedMove} fill="#6366f1" fillOpacity={0.07} ifOverflow="hidden" />
+                  )}
                   <ReferenceLine y={0} stroke="#64748b" strokeDasharray="4 4" strokeWidth={1.5} />
                   <ReferenceLine
                     x={spotPrice}
@@ -992,7 +1153,10 @@ export default function StrategyBuilder() {
                     dot={false}
                     activeDot={{ r: 6, fill: '#6366f1', stroke: '#fff', strokeWidth: 2 }}
                   />
-                </AreaChart>
+                  {showOnDate && (
+                    <Line type="monotone" dataKey="onDate" stroke="#f59e0b" strokeWidth={2} dot={false} isAnimationActive={false} />
+                  )}
+                </ComposedChart>
               </ResponsiveContainer>
             ) : (
               <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-3">
@@ -1044,6 +1208,22 @@ export default function StrategyBuilder() {
                         <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${(strat.unrealizedPnl ?? 0) >= 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}`}>
                           Unrealized: {(strat.unrealizedPnl ?? 0) >= 0 ? '+' : ''}₹{Number(strat.unrealizedPnl || 0).toFixed(0)}
                         </span>
+                        {strat.netPnl != null && (
+                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${strat.netPnl >= 0 ? 'border-emerald-200 text-emerald-700' : 'border-red-200 text-red-700'}`}
+                            title={`Charges paid ₹${Number(strat.chargesPaid ?? 0).toFixed(0)} + closing now ~₹${Number(strat.exitChargesEstimate ?? 0).toFixed(0)}`}>
+                            After charges: {strat.netPnl >= 0 ? '+' : ''}₹{Number(strat.netPnl).toFixed(0)}
+                          </span>
+                        )}
+                        {strat.exitPlan && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-50 text-violet-700 flex items-center gap-1">
+                            Auto-exit
+                            {strat.exitPlan.target != null && <> · +₹{Number(strat.exitPlan.target).toFixed(0)}</>}
+                            {strat.exitPlan.stop != null && <> · -₹{Number(strat.exitPlan.stop).toFixed(0)}</>}
+                            {strat.exitPlan.exitAt && <> · {new Date(strat.exitPlan.exitAt).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</>}
+                            <button title="Cancel the automatic exit" className="ml-0.5 text-violet-400 hover:text-violet-700"
+                              onClick={async () => { await tradingApi.cancelExitPlan(strat.strategyTag).catch(() => null); fetchDeployedStrategies(); }}>×</button>
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-1.5">
                         {stratLegsSelected.length > 0 && (
@@ -1375,9 +1555,25 @@ export default function StrategyBuilder() {
               </button>
             ))}
           </div>
+          <div className="grid grid-cols-2 gap-1.5 mb-3">
+            <label className="text-[9px] text-slate-500">Lots
+              <input type="number" min={1} max={50} value={optimizerLots} onChange={e => setOptimizerLots(Math.max(1, Number(e.target.value) || 1))}
+                className="mt-0.5 w-full px-1.5 py-1 border border-slate-200 rounded font-mono text-[11px]" />
+            </label>
+            <label className="text-[9px] text-slate-500">Most I accept losing ₹
+              <input type="number" min={0} value={optimizerMaxLoss} onChange={e => setOptimizerMaxLoss(e.target.value)} placeholder="any"
+                className="mt-0.5 w-full px-1.5 py-1 border border-slate-200 rounded font-mono text-[11px]" />
+            </label>
+          </div>
 
+          {optimizedStrategies.length > 0 && (
+            <p className="text-[9px] text-slate-400 mb-1.5 leading-snug">
+              Ranked by expected P&L per rupee of margin, after charges, if {symbol} keeps moving
+              {optimizerBasis === 'realised' ? ' as it has over the last 20 days' : ' as option prices imply'}. Not a forecast.
+            </p>
+          )}
           {optimizedStrategies.length > 0 ? (
-            <div className="space-y-2 max-h-52 overflow-y-auto">
+            <div className="space-y-2 max-h-80 overflow-y-auto">
               {optimizedStrategies.map((strat, i) => {
                 const meta = CATEGORY_META[strat.category] || CATEGORY_META.neutral;
                 const Icon = meta.icon;
@@ -1389,17 +1585,24 @@ export default function StrategyBuilder() {
                         <Icon className="w-3 h-3 text-slate-500" />
                         <span className="text-[11px] font-semibold text-slate-800">{strat.name}</span>
                       </div>
-                      <span className="text-[9px] font-bold text-indigo-600">{strat.score.toFixed(0)}pts</span>
+                      {strat.expectedReturnOnMargin != null && (
+                        <span className={`text-[9px] font-bold ${strat.expectedReturnOnMargin >= 0 ? 'text-emerald-600' : 'text-red-600'}`}
+                          title="Expected P&L after charges as a % of the margin blocked">
+                          {strat.expectedReturnOnMargin >= 0 ? '+' : ''}{strat.expectedReturnOnMargin.toFixed(2)}% on margin
+                        </span>
+                      )}
                     </div>
-                    <div className="flex items-center gap-3 text-[10px] text-slate-500">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-slate-500">
                       <span className="text-emerald-600 flex items-center gap-0.5">
-                        <ArrowUpRight className="w-2.5 h-2.5" />₹{formatNum(strat.maxProfit)}
+                        <ArrowUpRight className="w-2.5 h-2.5" />{strat.unlimitedProfit ? 'Unlimited' : `₹${formatNum(strat.maxProfit)}`}
                       </span>
                       <span className="text-red-600 flex items-center gap-0.5">
-                        <ArrowDownRight className="w-2.5 h-2.5" />₹{formatNum(strat.maxLoss)}
+                        <ArrowDownRight className="w-2.5 h-2.5" />{strat.unlimitedLoss ? 'Unlimited' : `₹${formatNum(Math.abs(strat.maxLoss))}`}
                       </span>
-                      {strat.pop > 0 && <span>PoP: {strat.pop.toFixed(0)}%</span>}
-                      {strat.riskReward > 0 && <span>RR: {strat.riskReward.toFixed(2)}</span>}
+                      {strat.pop > 0 && <span>Profit chance {strat.pop.toFixed(0)}%</span>}
+                      {strat.expectedPnl != null && <span>Expected {strat.expectedPnl >= 0 ? '+' : '-'}₹{formatNum(Math.abs(strat.expectedPnl))}</span>}
+                      {strat.margin != null && <span>Margin ₹{formatNum(strat.margin)}</span>}
+                      {strat.charges != null && <span>Charges ₹{formatNum(strat.charges)}</span>}
                     </div>
                   </button>
                 );
@@ -1407,7 +1610,7 @@ export default function StrategyBuilder() {
             </div>
           ) : (
             <div className="text-xs text-slate-400 text-center py-6">
-              Click Optimize to find the best strategies for current market conditions
+              Click Optimize to rank common strategies for this expiry, after charges
             </div>
           )}
         </div>
@@ -1460,9 +1663,10 @@ function GreekCard({ label, symbol: sym, value, color }: {
   );
 }
 
-function PayoffTooltip({ active, payload, label, spotPrice }: any) {
+function PayoffTooltip({ active, payload, label, spotPrice, onDateLabel }: any) {
   if (!active || !payload?.length) return null;
-  const pnl = payload[0]?.value ?? 0;
+  const pnl = payload.find((p: any) => p.dataKey === 'pnl')?.value ?? 0;
+  const onDate = payload.find((p: any) => p.dataKey === 'onDate')?.value;
   const spot = Number(label) || 0;
   const distance = spot - spotPrice;
   const distPct = spotPrice > 0 ? ((distance / spotPrice) * 100).toFixed(2) : '0';
@@ -1478,6 +1682,15 @@ function PayoffTooltip({ active, payload, label, spotPrice }: any) {
           {pnl >= 0 ? '+' : ''}₹{formatNum(pnl)}
         </span>
       </div>
+      {onDate != null && (
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-[10px] font-semibold text-amber-600 uppercase">Closed {onDateLabel}</span>
+          <span className={`text-sm font-bold font-mono ${onDate >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+            {onDate >= 0 ? '+' : ''}₹{formatNum(onDate)}
+          </span>
+        </div>
+      )}
+      <p className="text-[9px] text-slate-400 mb-1">After charges</p>
       <div className="flex items-center justify-between border-t border-slate-100 pt-1.5 mt-1.5">
         <span className="text-[10px] text-slate-400">From current spot</span>
         <span className={`text-xs font-semibold font-mono ${distance >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>

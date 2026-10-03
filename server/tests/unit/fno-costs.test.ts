@@ -46,10 +46,10 @@ describe('F&O transaction costs', () => {
     expect(costs.brokerage).toBe(20);
   });
 
-  it('charges options STT at 0.1% of premium on the sell side only', () => {
+  it('charges options STT at 0.15% of premium on the sell side only (from 1 Apr 2026)', () => {
     const sell = calculateCosts(OPT_QTY, OPT_PREMIUM, 'SELL', 'NFO', 'OPTIONS');
     const buy = calculateCosts(OPT_QTY, OPT_PREMIUM, 'BUY', 'NFO', 'OPTIONS');
-    expect(sell.stt).toBeCloseTo(OPT_TURNOVER * 0.001, 2);
+    expect(sell.stt).toBeCloseTo(OPT_TURNOVER * 0.0015, 2);
     expect(buy.stt).toBe(0);
   });
 
@@ -73,10 +73,10 @@ describe('F&O transaction costs', () => {
   const FUT_PRICE = 24_000;
   const FUT_TURNOVER = FUT_QTY * FUT_PRICE;
 
-  it('charges futures STT at 0.02% of notional on the sell side only', () => {
+  it('charges futures STT at 0.05% of notional on the sell side only (from 1 Apr 2026)', () => {
     const sell = calculateCosts(FUT_QTY, FUT_PRICE, 'SELL', 'NFO', 'FUTURES');
     const buy = calculateCosts(FUT_QTY, FUT_PRICE, 'BUY', 'NFO', 'FUTURES');
-    expect(sell.stt).toBeCloseTo(FUT_TURNOVER * 0.0002, 2);
+    expect(sell.stt).toBeCloseTo(FUT_TURNOVER * 0.0005, 2);
     expect(buy.stt).toBe(0);
   });
 

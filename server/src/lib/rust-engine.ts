@@ -855,6 +855,10 @@ export async function engineOptionsStrategy(data: {
   spot: number;
   risk_free_rate?: number;
   price_range?: [number, number];
+  /** Opening charges in rupees; profit and loss come back after them. */
+  fixed_cost?: number;
+  /** STT rate on long options expiring in the money. */
+  exercise_stt?: number;
 }): Promise<unknown> {
   const res = await runEngine('options_strategy', data);
   if (!res.success) throw new Error(res.error ?? 'Options strategy analysis failed');

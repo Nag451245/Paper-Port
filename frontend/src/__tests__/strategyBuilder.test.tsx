@@ -16,6 +16,12 @@ vi.mock('../services/api', () => {
   return {
     default: mockApi,
     marketApi: { quote: vi.fn().mockResolvedValue({ data: { ltp: 23500 } }) },
+    optionsApi: {
+      volContext: vi.fn().mockResolvedValue({ data: null }),
+      payoffEngine: vi.fn().mockRejectedValue(new Error('offline')),
+      optimize: vi.fn().mockResolvedValue({ data: { strategies: [] } }),
+      explain: vi.fn().mockResolvedValue({ data: {} }),
+    },
   };
 });
 
@@ -27,7 +33,9 @@ vi.mock('../stores/auth', () => ({
 }));
 
 vi.mock('recharts', () => ({
-  AreaChart: ({ children }: any) => <div data-testid="area-chart">{children}</div>,
+  ComposedChart: ({ children }: any) => <div data-testid="area-chart">{children}</div>,
+  Line: () => null,
+  ReferenceArea: () => null,
   Area: () => <div data-testid="area" />,
   XAxis: () => null,
   YAxis: () => null,
