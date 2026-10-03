@@ -1365,6 +1365,10 @@ def live_orders_enabled():
     return os.environ.get("LIVE_ORDERS_ENABLED", "").strip().lower() == "true"
 
 
+# Breeze stock codes for BSE index derivatives (BFO).
+_BSE_DERIVATIVE_CODES = {"SENSEX": "BSESEN", "BANKEX": "BANKEX"}
+
+
 def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None, exchange="NSE",
                         product=None, expiry=None, strike=None, right=None):
     """Fetch historical candles via Breeze, for cash, futures or an option contract.
@@ -1403,16 +1407,19 @@ def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None
     if cached:
         return cached
 
+    bse_code = _BSE_DERIVATIVE_CODES.get(symbol.upper())
     if exchange == "MCX":
         exchange_code = "MCX"
     elif product == "cash":
         exchange_code = "NSE"
+    elif bse_code:
+        exchange_code = "BFO"  # SENSEX / BANKEX contracts trade on BSE's derivatives segment
     else:
         exchange_code = "NFO"
 
     kwargs = {
         "interval": breeze_interval,
-        "stock_code": _resolve_stock_code(symbol),
+        "stock_code": bse_code if (bse_code and product != "cash") else _resolve_stock_code(symbol),
         "exchange_code": exchange_code,
         "product_type": product,
     }
@@ -1437,6 +1444,16 @@ def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None
                 to_date=f"{w_to}T23:59:59.000Z",
                 **kwargs,
             )
+            if (exchange_code == "BFO" and kwargs["stock_code"] != symbol.upper()
+                    and result and result.get("Status") != 200 and not _is_no_data(result)):
+                # Breeze's BSE code for the index is not certain: try the plain name once.
+                kwargs["stock_code"] = symbol.upper()
+                result = _call_with_timeout(
+                    breeze_instance.get_historical_data_v2,
+                    from_date=f"{w_from}T00:00:00.000Z",
+                    to_date=f"{w_to}T23:59:59.000Z",
+                    **kwargs,
+                )
             if not result or result.get("Status") != 200:
                 if result and _is_no_data(result):
                     continue

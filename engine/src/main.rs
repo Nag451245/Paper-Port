@@ -24,6 +24,7 @@ mod iv_surface;
 mod monte_carlo;
 mod portfolio_opt;
 mod options_strategy;
+mod options_backtest;
 mod correlation;
 mod feature_store;
 mod multi_timeframe;
@@ -619,6 +620,7 @@ pub fn handle_request(req: Request, state: &Arc<AppState>) -> Response {
         "monte_carlo" => monte_carlo::compute(req.data),
         "optimize_portfolio" => portfolio_opt::compute(req.data),
         "options_strategy" => options_strategy::compute(req.data),
+        "options_backtest" => options_backtest::compute(req.data),
         "correlation" => correlation::compute(req.data),
         "correlation_guard" => correlation_guard::compute(req.data),
         "feature_store" => feature_store::compute(req.data),

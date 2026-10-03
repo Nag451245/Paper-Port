@@ -149,6 +149,7 @@ pub async fn run(state: SharedState) {
         .route("/api/monte_carlo", post(cmd_monte_carlo))
         .route("/api/portfolio/optimize", post(cmd_portfolio_opt))
         .route("/api/options_strategy", post(cmd_options_strategy))
+        .route("/api/options_backtest", post(cmd_options_backtest))
         .route("/api/correlation", post(cmd_correlation))
         .route("/api/feature_store", post(cmd_feature_store))
         .route("/api/multi_timeframe", post(cmd_multi_timeframe))
@@ -539,6 +540,7 @@ cmd_handler!(cmd_iv_surface, "iv_surface");
 cmd_handler!(cmd_monte_carlo, "monte_carlo");
 cmd_handler!(cmd_portfolio_opt, "optimize_portfolio");
 cmd_handler!(cmd_options_strategy, "options_strategy");
+cmd_handler!(cmd_options_backtest, "options_backtest");
 cmd_handler!(cmd_correlation, "correlation");
 cmd_handler!(cmd_feature_store, "feature_store");
 cmd_handler!(cmd_multi_timeframe, "multi_timeframe_scan");

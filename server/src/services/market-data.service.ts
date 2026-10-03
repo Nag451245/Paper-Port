@@ -1973,6 +1973,36 @@ export class MarketDataService {
     return token ? getUpstox().history(token, symbol, interval, fromDate, toDate, exchange) : [];
   }
 
+  /**
+   * Candles for one option contract straight from ICICI Breeze (expired ones
+   * too), telling "the contract had no trades" (bars: []) apart from "could not
+   * fetch" (error set), so callers can cache the first and retry the second.
+   */
+  async breezeOptionHistory(
+    underlying: string, expiry: string, strike: number, type: 'CE' | 'PE',
+    fromDate: string, toDate: string, interval = '5minute',
+  ): Promise<{ bars: HistoricalBar[]; error?: string }> {
+    if (!(await this.ensureBreezeBridgeSession())) return { bars: [], error: 'ICICI Breeze is not connected (Settings → Breeze session)' };
+    const params = new URLSearchParams({
+      interval, from: fromDate, to: toDate, exchange: 'NSE', product: 'options',
+      expiry, strike: String(strike), right: type === 'PE' ? 'put' : 'call',
+    });
+    try {
+      const res = await fetch(`${BREEZE_BRIDGE_URL}/historical/${encodeURIComponent(underlying)}?${params}`, { signal: AbortSignal.timeout(90_000) });
+      const data = await res.json().catch(() => null) as any;
+      if (!res.ok || !data) return { bars: [], error: data?.error ?? `bridge answered ${res.status}` };
+      if (data.error) return { bars: [], error: String(data.error) };
+      const bars = (data.bars as any[] ?? []).map((b: any) => ({
+        timestamp: String(b.timestamp ?? '').slice(0, 19),
+        open: Number(b.open) || 0, high: Number(b.high) || 0, low: Number(b.low) || 0,
+        close: Number(b.close) || 0, volume: Number(b.volume) || 0,
+      })).filter((b: HistoricalBar) => b.open > 0 && b.timestamp);
+      return { bars };
+    } catch (err) {
+      return { bars: [], error: (err as Error).message };
+    }
+  }
+
   private async fetchFromBreeze(
     symbol: string,
     interval: string,
