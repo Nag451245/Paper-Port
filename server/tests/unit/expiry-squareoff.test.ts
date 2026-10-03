@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { settlementType, isIndexUnderlying, parseInstrumentSymbol } from '../../src/lib/instrument.js';
 
 vi.mock('../../src/services/market-data.service.js', () => ({
-  MarketDataService: vi.fn().mockImplementation(() => ({ getQuote: vi.fn() })),
+  MarketDataService: vi.fn().mockImplementation(function () { return { getQuote: vi.fn() }; }),
 }));
 vi.mock('../../src/lib/redis.js', () => ({ getRedis: vi.fn().mockReturnValue(null) }));
 vi.mock('../../src/lib/event-bus.js', () => ({ emit: vi.fn().mockResolvedValue(undefined) }));

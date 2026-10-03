@@ -5,7 +5,7 @@ let app: FastifyInstance;
 let mockPrisma: any;
 
 vi.mock('../../src/services/market-calendar.js', () => ({
-  MarketCalendar: vi.fn().mockImplementation(() => ({
+  MarketCalendar: vi.fn().mockImplementation(function () { return {
     isMarketOpen: vi.fn().mockReturnValue(true),
     getMarketPhase: vi.fn().mockReturnValue('MARKET_OPEN'),
     getPhaseConfig: vi.fn().mockReturnValue({ label: 'Market Open', scanInterval: 60000, features: [] }),
@@ -16,7 +16,7 @@ vi.mock('../../src/services/market-calendar.js', () => ({
     getStatus: vi.fn().mockReturnValue({ isOpen: true, phase: 'MARKET_OPEN' }),
     nextOpen: vi.fn().mockReturnValue(new Date()),
     nextClose: vi.fn().mockReturnValue(new Date()),
-  })),
+  }; }),
 }));
 
 vi.mock('../../src/lib/openai.js', () => ({

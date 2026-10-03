@@ -24,13 +24,12 @@
   "dependencies": {
     "@fastify/cors": "^11.0.0",
     "@fastify/helmet": "^13.0.2",
-    "@fastify/jwt": "^9.0.0",
+    "@fastify/jwt": "^10.2.2",
     "@fastify/multipart": "^9.4.0",
     "@fastify/rate-limit": "^10.3.0",
     "@fastify/sensible": "^6.0.0",
     "@fastify/websocket": "^11.0.0",
-    "@prisma/client": "^6.0.0",
-    "adm-zip": "^0.5.16",
+    "@prisma/client": "^6.19.3",
     "axios": "^1.13.6",
     "bcryptjs": "^2.4.3",
     "breezeconnect": "^1.0.30",
@@ -51,13 +50,22 @@
     "@types/node-cron": "^3.0.11",
     "@types/nodemailer": "^8.0.2",
     "@types/ws": "^8.18.1",
-    "prisma": "^6.0.0",
+    "prisma": "^6.19.3",
     "tsx": "^4.19.0",
     "typescript": "~5.9.3",
-    "vitest": "^3.0.0"
+    "vitest": "^5.0.3"
   },
   "overrides": {
     "axios": "$axios",
-    "effect": ">=3.20.0"
+    "effect": "^3.20.0",
+    "breezeconnect": {
+      "csv-parse": "^7.0.3"
+    },
+    "node-cron": {
+      "uuid": "^11.1.1"
+    },
+    "@prisma/config": {
+      "deepmerge-ts": "^8.0.2"
+    }
   }
 }

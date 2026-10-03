@@ -1,15 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../../src/services/market-calendar.js', () => ({
-  MarketCalendar: vi.fn().mockImplementation(() => ({
+  MarketCalendar: vi.fn().mockImplementation(function () { return {
     isMarketOpen: vi.fn().mockReturnValue(true),
-  })),
+  }; }),
 }));
 
 vi.mock('../../src/services/market-data.service.js', () => ({
-  MarketDataService: vi.fn().mockImplementation(() => ({
+  MarketDataService: vi.fn().mockImplementation(function () { return {
     getQuote: vi.fn().mockResolvedValue({ ltp: 2500 }),
-  })),
+  }; }),
 }));
 
 import { TradeService, TradeError } from '../../src/services/trade.service.js';

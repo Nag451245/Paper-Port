@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PortfolioService, PortfolioError } from '../../src/services/portfolio.service.js';
 
 vi.mock('../../src/services/market-data.service.js', () => ({
-  MarketDataService: vi.fn().mockImplementation(() => ({
+  MarketDataService: vi.fn().mockImplementation(function () { return {
     getQuote: vi.fn().mockImplementation((symbol: string) => {
       const quotes: Record<string, { ltp: number; change: number }> = {
         RELIANCE: { ltp: 3000, change: 50 },
@@ -10,7 +10,7 @@ vi.mock('../../src/services/market-data.service.js', () => ({
       };
       return Promise.resolve(quotes[symbol] ?? { ltp: 0, change: 0 });
     }),
-  })),
+  }; }),
 }));
 
 function createMockPrisma() {

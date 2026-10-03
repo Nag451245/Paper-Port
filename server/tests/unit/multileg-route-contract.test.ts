@@ -3,15 +3,15 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 // Keep the route's TradeService construction offline; none of it is under test.
 vi.mock('../../src/services/market-calendar.js', () => ({
-  MarketCalendar: vi.fn().mockImplementation(() => ({
+  MarketCalendar: vi.fn().mockImplementation(function () { return {
     isMarketOpen: vi.fn().mockReturnValue(true),
-  })),
+  }; }),
 }));
 
 vi.mock('../../src/services/market-data.service.js', () => ({
-  MarketDataService: vi.fn().mockImplementation(() => ({
+  MarketDataService: vi.fn().mockImplementation(function () { return {
     getQuote: vi.fn().mockResolvedValue({ ltp: 100 }),
-  })),
+  }; }),
 }));
 
 vi.mock('../../src/middleware/auth.js', () => ({

@@ -3,10 +3,10 @@ import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 vi.mock('../../src/lib/redis.js', () => ({
   getRedis: vi.fn().mockReturnValue(null),
   disconnectRedis: vi.fn().mockResolvedValue(undefined),
-  CacheService: vi.fn().mockImplementation(() => ({
+  CacheService: vi.fn().mockImplementation(function () { return {
     get: vi.fn().mockResolvedValue(null),
     set: vi.fn().mockResolvedValue(undefined),
-  })),
+  }; }),
 }));
 
 vi.mock('../../src/lib/ml-service-client.js', () => ({
@@ -23,12 +23,12 @@ vi.mock('../../src/lib/job-queue.js', () => ({
 }));
 
 vi.mock('../../src/services/market-calendar.js', () => ({
-  MarketCalendar: vi.fn().mockImplementation(() => ({
+  MarketCalendar: vi.fn().mockImplementation(function () { return {
     isMarketOpen: vi.fn().mockReturnValue(false),
     getMarketPhase: vi.fn().mockReturnValue('AFTER_HOURS'),
     isHoliday: vi.fn().mockReturnValue(false),
     getNextMarketOpen: vi.fn().mockReturnValue(new Date()),
-  })),
+  }; }),
 }));
 
 import { createTestApp } from '../helpers.js';

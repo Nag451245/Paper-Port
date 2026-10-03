@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const getRedis = vi.fn();
 vi.mock('../../src/lib/redis.js', () => ({
   getRedis,
-  CacheService: vi.fn().mockImplementation(() => ({ get: vi.fn(), set: vi.fn() })),
+  CacheService: vi.fn().mockImplementation(function () { return { get: vi.fn(), set: vi.fn() }; }),
 }));
 vi.mock('../../src/lib/event-bus.js', () => ({ emit: vi.fn().mockResolvedValue(undefined) }));
 

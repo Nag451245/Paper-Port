@@ -16,9 +16,9 @@ vi.mock('../../src/lib/rust-engine.js', () => ({
 }));
 
 vi.mock('../../src/services/market-data.service.js', () => ({
-  MarketDataService: vi.fn().mockImplementation(() => ({
+  MarketDataService: vi.fn().mockImplementation(function () { return {
     getQuote: vi.fn().mockResolvedValue({ symbol: 'NIFTY', ltp: 24000 }),
-  })),
+  }; }),
 }));
 
 /**

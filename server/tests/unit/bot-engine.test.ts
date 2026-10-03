@@ -33,7 +33,7 @@ vi.mock('../../src/lib/rust-engine.js', () => ({
 }));
 
 vi.mock('../../src/services/market-data.service.js', () => ({
-  MarketDataService: vi.fn().mockImplementation(() => ({
+  MarketDataService: vi.fn().mockImplementation(function () { return {
     getQuote: vi.fn().mockResolvedValue({ symbol: 'RELIANCE', ltp: 2500, open: 2480, high: 2520, low: 2470, close: 2500, volume: 1000000, exchange: 'NSE' }),
     getHistory: vi.fn().mockResolvedValue([]),
     getVIX: vi.fn().mockResolvedValue({ value: 14.5, change: -0.2, changePercent: -1.36 }),
@@ -52,7 +52,7 @@ vi.mock('../../src/services/market-data.service.js', () => ({
     }),
     getTopMovers: vi.fn().mockResolvedValue({ gainers: [], losers: [] }),
     search: vi.fn().mockResolvedValue([]),
-  })),
+  }; }),
 }));
 
 function createMockPrisma() {

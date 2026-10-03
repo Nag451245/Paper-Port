@@ -9,10 +9,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../../src/services/market-calendar.js', () => ({
-  MarketCalendar: vi.fn().mockImplementation(() => ({ isMarketOpen: vi.fn().mockReturnValue(true) })),
+  MarketCalendar: vi.fn().mockImplementation(function () { return { isMarketOpen: vi.fn().mockReturnValue(true) }; }),
 }));
 vi.mock('../../src/services/market-data.service.js', () => ({
-  MarketDataService: vi.fn().mockImplementation(() => ({ getQuote: vi.fn().mockResolvedValue({ ltp: 2500 }) })),
+  MarketDataService: vi.fn().mockImplementation(function () { return { getQuote: vi.fn().mockResolvedValue({ ltp: 2500 }) }; }),
 }));
 vi.mock('../../src/lib/redis.js', () => ({ getRedis: vi.fn().mockReturnValue(null) }));
 vi.mock('../../src/lib/event-bus.js', () => ({ emit: vi.fn().mockResolvedValue(undefined) }));

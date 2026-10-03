@@ -65,7 +65,7 @@ vi.mock('../../src/lib/rust-engine.js', async (importOriginal) => {
 });
 
 vi.mock('../../src/services/market-calendar.js', () => ({
-  MarketCalendar: vi.fn().mockImplementation(() => ({
+  MarketCalendar: vi.fn().mockImplementation(function () { return {
     isMarketOpen: vi.fn().mockReturnValue(true),
     getMarketPhase: vi.fn().mockReturnValue('MARKET_HOURS'),
     getPhaseConfig: vi.fn().mockReturnValue({
@@ -82,11 +82,11 @@ vi.mock('../../src/services/market-calendar.js', () => ({
       nextOpen: { date: '', label: '' }, upcomingHolidays: [], timestamp: new Date().toISOString(),
     }),
     getUpcomingHolidays: vi.fn().mockReturnValue([]),
-  })),
+  }; }),
 }));
 
 vi.mock('../../src/services/market-data.service.js', () => ({
-  MarketDataService: vi.fn().mockImplementation(() => ({
+  MarketDataService: vi.fn().mockImplementation(function () { return {
     getQuote: vi.fn().mockResolvedValue({
       symbol: 'RELIANCE', ltp: 2500, open: 2480, high: 2520, low: 2470,
       close: 2500, change: 20, changePercent: 0.8, volume: 1000000, exchange: 'NSE',
@@ -109,7 +109,7 @@ vi.mock('../../src/services/market-data.service.js', () => ({
       ],
     }),
     search: vi.fn().mockResolvedValue([]),
-  })),
+  }; }),
 }));
 
 describe('Trade Pipeline Integration', () => {

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../../src/lib/prisma.js', () => ({
-  getPrisma: vi.fn(() => ({ $disconnect: vi.fn() })),
+  getPrisma: vi.fn(function () { return { $disconnect: vi.fn() }; }),
   disconnectPrisma: vi.fn(),
 }));
 

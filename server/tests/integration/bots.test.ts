@@ -17,7 +17,7 @@ vi.mock('../../src/lib/rust-engine.js', async (importOriginal) => {
 });
 
 vi.mock('../../src/services/market-data.service.js', () => ({
-  MarketDataService: vi.fn().mockImplementation(() => ({
+  MarketDataService: vi.fn().mockImplementation(function () { return {
     getHistory: vi.fn().mockResolvedValue(
       Array.from({ length: 100 }, (_, i) => ({
         timestamp: `2024-${String(Math.floor(i / 30) + 1).padStart(2, '0')}-${String((i % 28) + 1).padStart(2, '0')}T09:15:00.000Z`,
@@ -31,7 +31,7 @@ vi.mock('../../src/services/market-data.service.js', () => ({
     getVIX: vi.fn().mockResolvedValue({ value: 14.5, change: -0.2, changePercent: -1.36 }),
     getFIIDII: vi.fn().mockResolvedValue({ date: new Date().toISOString().split('T')[0], fiiBuy: 0, fiiSell: 0, fiiNet: 0, diiBuy: 0, diiSell: 0, diiNet: 0 }),
     getOptionsChain: vi.fn().mockResolvedValue({ symbol: 'NIFTY', strikes: [], expiry: '' }),
-  })),
+  }; }),
 }));
 
 vi.mock('../../src/lib/prisma.js', () => {

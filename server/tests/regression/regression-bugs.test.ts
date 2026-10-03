@@ -10,9 +10,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../../src/services/market-data.service.js', () => ({
-  MarketDataService: vi.fn().mockImplementation(() => ({
+  MarketDataService: vi.fn().mockImplementation(function () { return {
     getQuote: vi.fn().mockResolvedValue({ ltp: 2600, volume: 100000 }),
-  })),
+  }; }),
 }));
 
 vi.mock('../../src/lib/redis.js', () => ({

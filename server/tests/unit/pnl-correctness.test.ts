@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../../src/services/market-data.service.js', () => ({
-  MarketDataService: vi.fn().mockImplementation(() => ({
+  MarketDataService: vi.fn().mockImplementation(function () { return {
     getQuote: vi.fn().mockResolvedValue({ ltp: 2600 }),
-  })),
+  }; }),
 }));
 
 import { PortfolioService } from '../../src/services/portfolio.service.js';
@@ -250,9 +250,9 @@ describe('P&L Correctness', () => {
 
       // Override MarketDataService to fail
       const { MarketDataService } = await import('../../src/services/market-data.service.js');
-      (MarketDataService as any).mockImplementation(() => ({
+      (MarketDataService as any).mockImplementation(function () { return {
         getQuote: vi.fn().mockRejectedValue(new Error('timeout')),
-      }));
+      }; });
 
       prisma.portfolio.findUnique.mockResolvedValue({ ...portfolio, positions });
       prisma.trade.findMany.mockResolvedValue([]);
