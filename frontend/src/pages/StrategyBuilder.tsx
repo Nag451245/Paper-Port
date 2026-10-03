@@ -294,6 +294,8 @@ export default function StrategyBuilder() {
           },
           maxProfit: data.maxProfit ?? 0,
           maxLoss: data.maxLoss ?? 0,
+          unlimitedProfit: data.unlimitedProfit,
+          unlimitedLoss: data.unlimitedLoss,
           breakevens: data.breakevens ?? [],
           netPremium: data.netPremium ?? 0,
           probabilityOfProfit: data.probabilityOfProfit,
@@ -481,6 +483,12 @@ export default function StrategyBuilder() {
     Neutral: Activity,
     Volatile: Zap,
   };
+
+  // Where the zero line sits in the payoff chart (0 = top, 1 = bottom), for the green/red split.
+  const pnls = payoff?.payoffCurve?.map(p => p.pnl) ?? [];
+  const pnlTop = pnls.length ? Math.max(...pnls) : 0;
+  const pnlBottom = pnls.length ? Math.min(...pnls) : 0;
+  const zeroAt = pnlTop <= 0 ? 0 : pnlBottom >= 0 ? 1 : pnlTop / (pnlTop - pnlBottom);
 
   // ────────────────────────────────────────────────────────────────────────
   //  RENDER
@@ -808,9 +816,9 @@ export default function StrategyBuilder() {
               const marginRequired = backendMargin > 0 ? backendMargin : localMargin;
               return (
                 <div className="mt-3 grid grid-cols-3 gap-2">
-                  <MetricCard label="Net Premium" value={payoff.netPremium} format="inr" color={payoff.netPremium >= 0 ? 'emerald' : 'red'} />
-                  <MetricCard label="Max Profit" value={payoff.maxProfit} format="inr" color="emerald" unlimited={payoff.maxProfit >= 1e9} />
-                  <MetricCard label="Max Loss" value={payoff.maxLoss} format="inr" color="red" unlimited={payoff.maxLoss <= -1e9} />
+                  <MetricCard label={payoff.netPremium >= 0 ? 'Net Credit' : 'Net Debit'} value={Math.abs(payoff.netPremium)} format="inr" color={payoff.netPremium >= 0 ? 'emerald' : 'red'} />
+                  <MetricCard label="Max Profit" value={payoff.maxProfit} format="inr" color="emerald" unlimited={payoff.unlimitedProfit ?? payoff.maxProfit >= 1e9} />
+                  <MetricCard label="Max Loss" value={payoff.maxLoss} format="inr" color="red" unlimited={payoff.unlimitedLoss ?? payoff.maxLoss <= -1e9} />
                   <div className="bg-purple-50 rounded-lg p-2 text-center border border-purple-100">
                     <p className="text-[9px] font-semibold uppercase text-purple-600 opacity-70">Margin Req.</p>
                     <p className="text-xs font-bold font-mono text-purple-700">₹{formatNum(marginRequired)}</p>
@@ -826,11 +834,11 @@ export default function StrategyBuilder() {
                     })()}
                   </div>
                   {payoff.probabilityOfProfit != null && payoff.probabilityOfProfit > 0 && (
-                    <MetricCard label="Prob of Profit" value={payoff.probabilityOfProfit} format="pct" color="indigo" />
+                    <MetricCard label="Prob of Profit" value={payoff.probabilityOfProfit * 100} format="pct" color="indigo" />
                   )}
                   {payoff.riskRewardRatio != null && payoff.riskRewardRatio > 0 ? (
                     <MetricCard label="Risk/Reward" value={payoff.riskRewardRatio} format="ratio" color="amber" />
-                  ) : payoff.maxProfit > 0 && payoff.maxLoss < 0 ? (
+                  ) : payoff.maxProfit > 0 && payoff.maxLoss < 0 && !payoff.unlimitedLoss && !payoff.unlimitedProfit ? (
                     <MetricCard label="Risk/Reward" value={Math.abs(payoff.maxProfit / payoff.maxLoss)} format="ratio" color="amber" />
                   ) : null}
                   {payoff.breakevens?.length > 0 && (
@@ -932,17 +940,20 @@ export default function StrategyBuilder() {
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={payoff.payoffCurve} margin={{ top: 10, right: 30, left: 10, bottom: 20 }}>
                   <defs>
-                    <linearGradient id="profitGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#10b981" stopOpacity={0.35} />
-                      <stop offset="100%" stopColor="#10b981" stopOpacity={0} />
+                    {/* Green above the zero line, red below it. */}
+                    <linearGradient id="pnlFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset={zeroAt} stopColor="#10b981" stopOpacity={0.3} />
+                      <stop offset={zeroAt} stopColor="#ef4444" stopOpacity={0.25} />
                     </linearGradient>
-                    <linearGradient id="lossGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#ef4444" stopOpacity={0} />
-                      <stop offset="100%" stopColor="#ef4444" stopOpacity={0.15} />
+                    <linearGradient id="pnlStroke" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset={zeroAt} stopColor="#059669" />
+                      <stop offset={zeroAt} stopColor="#dc2626" />
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                   <XAxis
+                    type="number"
+                    domain={['dataMin', 'dataMax']}
                     dataKey="spot"
                     tick={{ fontSize: 11, fill: '#94a3b8' }}
                     tickFormatter={(v: number) => v.toLocaleString('en-IN')}
@@ -973,11 +984,11 @@ export default function StrategyBuilder() {
                     />
                   ))}
                   <Area
-                    type="monotone"
+                    type="linear"
                     dataKey="pnl"
-                    stroke="#6366f1"
+                    stroke="url(#pnlStroke)"
                     strokeWidth={2.5}
-                    fill="url(#profitGrad)"
+                    fill="url(#pnlFill)"
                     dot={false}
                     activeDot={{ r: 6, fill: '#6366f1', stroke: '#fff', strokeWidth: 2 }}
                   />

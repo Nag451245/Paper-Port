@@ -49,8 +49,12 @@ export interface PayoffResult {
   greeks: Greeks;
   maxProfit: number;
   maxLoss: number;
+  unlimitedProfit?: boolean;
+  unlimitedLoss?: boolean;
   breakevens: number[];
+  /** + = credit received, - = debit paid */
   netPremium: number;
+  /** 0..1 */
   probabilityOfProfit?: number;
   riskRewardRatio?: number;
   capitalRequired?: number;
@@ -389,6 +393,7 @@ export function computeLocalPayoff(legs: StrategyLeg[], spotPrice: number): Payo
   let netPremium = 0;
   for (const leg of legs) netPremium += leg.action === 'SELL' ? leg.premium * leg.qty : -leg.premium * leg.qty;
   const totalQty = legs.reduce((s, l) => s + l.qty, 0) || 1;
+  const netCalls = legs.filter(l => l.type === "CE").reduce((s, l) => s + (l.action === "BUY" ? l.qty : -l.qty), 0);
   return {
     payoffCurve: curve,
     greeks: {
@@ -397,7 +402,8 @@ export function computeLocalPayoff(legs: StrategyLeg[], spotPrice: number): Payo
       theta: +(legs.reduce((a, l) => a + (l.action === 'SELL' ? 1 : -1) * l.premium * 0.03 * l.qty, 0)).toFixed(2),
       vega: +(legs.reduce((a, l) => a + (l.action === 'BUY' ? 1 : -1) * 12 * l.qty, 0)).toFixed(2),
     },
-    maxProfit, maxLoss, breakevens, netPremium: Math.round(netPremium), source: 'local',
+    maxProfit, maxLoss, unlimitedProfit: netCalls > 0, unlimitedLoss: netCalls < 0,
+    breakevens, netPremium: Math.round(netPremium), source: 'local',
   };
 }
 

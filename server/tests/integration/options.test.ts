@@ -149,6 +149,25 @@ describe('POST /api/options/payoff', () => {
   });
 });
 
+describe('POST /api/options/payoff-engine', () => {
+  it('a short straddle shows the credit received, unlimited loss and a sane daily theta (IV given in percent)', async () => {
+    const res = await app.inject({ headers: signedIn(), method: 'POST', url: '/api/options/payoff-engine', payload: {
+      spotPrice: 22421.95,
+      legs: [
+        { type: 'CE', strike: 22400, action: 'SELL', qty: 65, premium: 156.1, iv: 14.6, expiryDays: 3 },
+        { type: 'PE', strike: 22400, action: 'SELL', qty: 65, premium: 103.6, iv: 14.6, expiryDays: 3 },
+      ],
+    } });
+    expect(res.statusCode).toBe(200);
+    const data = res.json();
+    expect(data.netPremium).toBeCloseTo(259.7 * 65, 0);          // + = credit
+    expect(data.unlimitedLoss).toBe(true);
+    expect(data.unlimitedProfit).toBe(false);
+    expect(data.greeks.net_theta).toBeGreaterThan(500);
+    expect(data.greeks.net_theta).toBeLessThan(20_000);
+  });
+});
+
 describe('POST /api/options/max-pain', () => {
   it('should compute correct max pain strike', async () => {
     const res = await app.inject({ headers: signedIn(),

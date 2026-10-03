@@ -131,7 +131,12 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
     }
 
-    const { legs, spotPrice, riskFreeRate } = parsed.data;
+    const { spotPrice, riskFreeRate } = parsed.data;
+    // The option chain gives IV in percent (14.6); the pricing model needs 0.146.
+    const legs = parsed.data.legs.map(l => ({ ...l, iv: l.iv && l.iv > 0 ? (l.iv > 3 ? l.iv / 100 : l.iv) : undefined }));
+    // Above the highest strike the P&L keeps moving by the net calls held:
+    // more bought than sold = unlimited profit, more sold = unlimited loss.
+    const netCalls = legs.filter(l => l.type === 'CE').reduce((s, l) => s + (l.action === 'BUY' ? l.qty : -l.qty), 0);
 
     // Try Rust engine first (only if available)
     if (isEngineAvailable()) try {
@@ -156,12 +161,15 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
         greeks: result.greeks_summary ?? { net_delta: 0, net_gamma: 0, net_theta: 0, net_vega: 0 },
         maxProfit: result.max_profit ?? 0,
         maxLoss: result.max_loss ?? 0,
+        unlimitedProfit: result.unlimited_profit ?? netCalls > 0,
+        unlimitedLoss: result.unlimited_loss ?? netCalls < 0,
         breakevens: result.breakeven_points ?? [],
         probabilityOfProfit: result.probability_of_profit ?? 0,
         riskRewardRatio: result.risk_metrics?.risk_reward_ratio ?? 0,
         capitalRequired: result.risk_metrics?.capital_required ?? 0,
         marginRequired: result.risk_metrics?.margin_required ?? 0,
-        netPremium: result.risk_metrics?.net_premium ?? 0,
+        // The engine counts premium paid as positive; here + means credit received (as below).
+        netPremium: -(result.risk_metrics?.net_premium ?? 0),
         strategyName: result.strategy_name ?? 'Custom',
       };
     } catch { /* Rust engine unavailable, use JS fallback */ }
@@ -211,6 +219,8 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
       },
       maxProfit: greeks.maxProfit,
       maxLoss: greeks.maxLoss,
+      unlimitedProfit: netCalls > 0,
+      unlimitedLoss: netCalls < 0,
       breakevens: greeks.breakevens,
       probabilityOfProfit: 0,
       riskRewardRatio: greeks.maxLoss !== 0 ? Math.abs(greeks.maxProfit / greeks.maxLoss) : 0,

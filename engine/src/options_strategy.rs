@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::utils::{round2, round4, bs_greeks as utils_bs_greeks};
+use crate::utils::{norm_cdf, round2, round4, bs_greeks as utils_bs_greeks};
 
 #[derive(Deserialize)]
 struct Config {
@@ -29,6 +29,10 @@ struct StrategyResult {
     breakeven_points: Vec<f64>,
     max_profit: f64,
     max_loss: f64,
+    #[serde(default)]
+    unlimited_profit: bool,
+    #[serde(default)]
+    unlimited_loss: bool,
     probability_of_profit: f64,
 }
 
@@ -68,48 +72,54 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
 
     let strategy_name = detect_strategy(&config.legs);
 
+    // Positive = premium paid (debit), negative = premium received (credit).
     let net_premium: f64 = config.legs.iter().map(|l| l.premium * l.quantity as f64).sum();
+    let pnl_at = |price: f64| -> f64 {
+        config.legs.iter().map(|l| intrinsic(l, price) * l.quantity as f64).sum::<f64>() - net_premium
+    };
 
-    let mut payoff_diagram = Vec::with_capacity(n_points + 1);
-    let mut max_profit = f64::NEG_INFINITY;
-    let mut max_loss = f64::INFINITY;
+    // Chart: an even grid plus every strike, so the peaks and corners are drawn exactly.
+    let mut prices: Vec<f64> = (0..=n_points).map(|i| low + step * i as f64).collect();
+    prices.extend(config.legs.iter().map(|l| l.strike).filter(|k| *k > low && *k < high));
+    prices.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    prices.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    let payoff_diagram: Vec<PayoffPoint> = prices.iter().map(|&p| {
+        let pnl = pnl_at(p);
+        PayoffPoint { price: round2(p), payoff: round2(pnl + net_premium), pnl: round2(pnl) }
+    }).collect();
+
+    // The P&L is a straight line between strikes, so its best and worst values sit
+    // at a strike or at a price of 0. Above the highest strike it keeps moving by
+    // the net number of calls per point: more calls bought than sold = unlimited
+    // profit, more sold than bought = unlimited loss.
+    let net_calls: f64 = config.legs.iter().filter(|l| l.option_type == "call").map(|l| l.quantity as f64).sum();
+    let unlimited_profit = net_calls > 0.0;
+    let unlimited_loss = net_calls < 0.0;
+    let mut corners: Vec<f64> = vec![0.0];
+    corners.extend(config.legs.iter().map(|l| l.strike));
+    let top = corners.iter().cloned().fold(config.spot, f64::max) * 2.0;
+    corners.push(top);
+    corners.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    corners.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    let corner_pnl: Vec<f64> = corners.iter().map(|&p| pnl_at(p)).collect();
+    let max_profit = corner_pnl.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let max_loss = corner_pnl.iter().cloned().fold(f64::INFINITY, f64::min);
+
+    // Exact breakevens: where the straight pieces cross zero.
     let mut breakevens = Vec::new();
-
-    let mut prev_pnl: Option<f64> = None;
-    let mut prev_price: Option<f64> = None;
-
-    for i in 0..=n_points {
-        let price = low + step * i as f64;
-        let mut payoff = 0.0;
-        for leg in &config.legs {
-            let intrinsic = match leg.option_type.as_str() {
-                "call" => (price - leg.strike).max(0.0),
-                "put" => (leg.strike - price).max(0.0),
-                _ => 0.0,
-            };
-            payoff += intrinsic * leg.quantity as f64;
+    for i in 1..corners.len() {
+        let (a, b, pa, pb) = (corners[i - 1], corners[i], corner_pnl[i - 1], corner_pnl[i]);
+        if (pa < 0.0) != (pb < 0.0) && (pb - pa).abs() > 1e-12 {
+            breakevens.push(round2(a + (0.0 - pa) * (b - a) / (pb - pa)));
         }
-        let adj_pnl = payoff - net_premium;
-
-        if adj_pnl > max_profit { max_profit = adj_pnl; }
-        if adj_pnl < max_loss { max_loss = adj_pnl; }
-
-        if let (Some(pp), Some(pprice)) = (prev_pnl, prev_price) {
-            if (pp < 0.0 && adj_pnl >= 0.0) || (pp >= 0.0 && adj_pnl < 0.0) {
-                let ratio = pp.abs() / (pp.abs() + adj_pnl.abs());
-                breakevens.push(round2(pprice + ratio * step));
-            }
-        }
-        prev_pnl = Some(adj_pnl);
-        prev_price = Some(price);
-
-        payoff_diagram.push(PayoffPoint { price: round2(price), payoff: round2(payoff), pnl: round2(adj_pnl) });
+    }
+    let last = *corner_pnl.last().unwrap();
+    if net_calls != 0.0 && (last < 0.0) != (net_calls < 0.0) {
+        breakevens.push(round2(top - last / net_calls));
     }
 
-    if max_profit == f64::NEG_INFINITY { max_profit = 0.0; }
-    if max_loss == f64::INFINITY { max_loss = 0.0; }
-    if max_profit > config.spot * 10.0 { max_profit = f64::INFINITY; }
-    if max_loss < -config.spot * 10.0 { max_loss = f64::NEG_INFINITY; }
+    // Implied volatility may arrive in percent (the chain shows 14.6); the model needs 0.146.
+    let sigma_of = |l: &Leg| l.iv.filter(|v| *v > 0.0).map(|v| if v > 3.0 { v / 100.0 } else { v });
 
     let mut net_delta = 0.0;
     let mut net_gamma = 0.0;
@@ -118,7 +128,7 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
 
     for leg in &config.legs {
         let t = leg.expiry_days.unwrap_or(30.0) / 365.0;
-        let sigma = leg.iv.unwrap_or(0.2);
+        let sigma = sigma_of(leg).unwrap_or(0.2);
         if t > 0.0 && sigma > 0.0 {
             let (d, g, th, v) = bs_greeks(config.spot, leg.strike, t, rf, sigma, &leg.option_type);
             net_delta += d * leg.quantity as f64;
@@ -139,31 +149,52 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
     let (capital_required, margin_required) = if !has_sells {
         // Buy-only: just the premium paid
         (buy_premium, 0.0)
-    } else if has_buys && max_loss.is_finite() && max_loss < 0.0 {
+    } else if has_buys && !unlimited_loss && max_loss < 0.0 {
         // Hedged strategy (spreads, condors): SEBI spread benefit applies
         // Margin ≈ max loss of the strategy
         let spread_margin = max_loss.abs();
         (spread_margin, spread_margin)
     } else {
-        // Naked short or unbounded risk: SPAN + exposure margin
-        // Index: ~15% of notional, Stock: ~20% (use 15% as default)
-        let span_margin: f64 = config.legs.iter()
-            .filter(|l| l.quantity < 0)
-            .map(|l| {
-                let notional = config.spot * l.quantity.unsigned_abs() as f64;
-                notional * 0.15
-            })
-            .sum();
+        // Naked short or unbounded risk: SPAN + exposure margin, ~15% of notional.
+        // Short calls and short puts cannot both lose at once, so with nothing
+        // bought (straddle, strangle) only the larger side is charged.
+        let side = |kind: &str| -> f64 {
+            config.legs.iter()
+                .filter(|l| l.quantity < 0 && l.option_type == kind)
+                .map(|l| config.spot * l.quantity.unsigned_abs() as f64 * 0.15)
+                .sum()
+        };
+        let span_margin = if has_buys { side("call") + side("put") } else { side("call").max(side("put")) };
         let total = span_margin + buy_premium;
         (total, span_margin)
     };
 
-    let rr = if max_loss.abs() > 0.01 && max_loss.is_finite() {
+    let rr = if !unlimited_loss && !unlimited_profit && max_loss.abs() > 0.01 {
         (max_profit / max_loss.abs()).min(99.0)
     } else { 0.0 };
 
-    let profitable_points = payoff_diagram.iter().filter(|p| p.pnl > 0.0).count();
-    let pop = profitable_points as f64 / payoff_diagram.len().max(1) as f64;
+    // Chance the strategy ends in profit at expiry, from a lognormal price at the
+    // legs' average implied volatility over the nearest expiry.
+    let ivs: Vec<f64> = config.legs.iter().filter_map(|l| sigma_of(l)).collect();
+    let sigma = if ivs.is_empty() { 0.2 } else { ivs.iter().sum::<f64>() / ivs.len() as f64 };
+    let t = config.legs.iter().filter_map(|l| l.expiry_days).fold(f64::INFINITY, f64::min);
+    let t = if t.is_finite() { t.max(0.5) / 365.0 } else { 30.0 / 365.0 };
+    let below = |x: f64| -> f64 {
+        if x <= 0.0 { return 0.0; }
+        norm_cdf(((x / config.spot).ln() - (rf - sigma * sigma / 2.0) * t) / (sigma * t.sqrt()))
+    };
+    let mut cuts = breakevens.clone();
+    cuts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut pop = 0.0;
+    let mut lo = 0.0;
+    for i in 0..=cuts.len() {
+        let hi = if i < cuts.len() { cuts[i] } else { f64::INFINITY };
+        let probe = if hi.is_finite() { (lo + hi) / 2.0 } else { lo.max(config.spot) * 1.5 + 1.0 };
+        if pnl_at(probe) > 0.0 {
+            pop += (if hi.is_finite() { below(hi) } else { 1.0 }) - below(lo);
+        }
+        lo = hi;
+    }
 
     let result = StrategyResult {
         strategy_name,
@@ -181,12 +212,22 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
             net_premium: round2(net_premium),
         },
         breakeven_points: breakevens,
-        max_profit: if max_profit.is_finite() { round2(max_profit) } else { f64::INFINITY },
-        max_loss: if max_loss.is_finite() { round2(max_loss) } else { f64::NEG_INFINITY },
-        probability_of_profit: round4(pop),
+        max_profit: round2(max_profit),
+        max_loss: round2(max_loss),
+        unlimited_profit,
+        unlimited_loss,
+        probability_of_profit: round4(pop.clamp(0.0, 1.0)),
     };
 
     serde_json::to_value(result).map_err(|e| e.to_string())
+}
+
+fn intrinsic(leg: &Leg, price: f64) -> f64 {
+    match leg.option_type.as_str() {
+        "call" => (price - leg.strike).max(0.0),
+        "put" => (leg.strike - price).max(0.0),
+        _ => 0.0,
+    }
 }
 
 fn detect_strategy(legs: &[Leg]) -> String {
@@ -423,6 +464,48 @@ mod tests {
         // max loss per side = (100 - 20)*75 = 6000
         assert!(r.risk_metrics.capital_required > 5000.0,
             "NIFTY condor margin should be >> 5K, got {}", r.risk_metrics.capital_required);
+    }
+
+    #[test]
+    fn test_short_straddle_numbers_from_the_screen() {
+        // NIFTY 22,400 short straddle, 3 days left, chain IV in percent.
+        let r = run_with(json!({ "spot": 22421.95, "legs": [
+            {"option_type":"call","strike":22400.0,"premium":156.1,"quantity":-65,"expiry_days":3.0,"iv":14.6},
+            {"option_type":"put","strike":22400.0,"premium":103.6,"quantity":-65,"expiry_days":3.0,"iv":14.6}
+        ]}));
+        assert!(r.unlimited_loss && !r.unlimited_profit);
+        assert!((r.max_profit - 259.7 * 65.0).abs() < 1.0, "max profit is the full credit, got {}", r.max_profit);
+        assert_eq!(r.breakeven_points, vec![22140.3, 22659.7]);
+        assert!(r.probability_of_profit > 0.3 && r.probability_of_profit < 0.8, "pop {}", r.probability_of_profit);
+        // Theta per day in rupees: a few thousand, not hundreds of thousands.
+        assert!(r.greeks_summary.net_theta > 500.0 && r.greeks_summary.net_theta < 20000.0, "theta {}", r.greeks_summary.net_theta);
+        // Only one side of a straddle can lose: ~15% of one side's notional.
+        assert!((r.risk_metrics.margin_required - 22421.95 * 65.0 * 0.15).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_long_call_is_unlimited_profit_limited_loss() {
+        let r = run(json!([{"option_type":"call","strike":100.0,"premium":5.0,"quantity":1,"expiry_days":30.0,"iv":0.2}]), 100.0);
+        assert!(r.unlimited_profit && !r.unlimited_loss);
+        assert_eq!(r.max_loss, -5.0);
+        assert_eq!(r.breakeven_points, vec![105.0]);
+    }
+
+    #[test]
+    fn test_iron_condor_is_bounded_both_ways() {
+        let r = run(json!([
+            {"option_type":"put","strike":90.0,"premium":1.0,"quantity":1},
+            {"option_type":"put","strike":95.0,"premium":3.0,"quantity":-1},
+            {"option_type":"call","strike":105.0,"premium":3.0,"quantity":-1},
+            {"option_type":"call","strike":110.0,"premium":1.0,"quantity":1}
+        ]), 100.0);
+        assert!(!r.unlimited_profit && !r.unlimited_loss);
+        assert_eq!(r.max_profit, 4.0);
+        assert_eq!(r.max_loss, -1.0);
+    }
+
+    fn run_with(cfg: serde_json::Value) -> StrategyResult {
+        serde_json::from_value(compute(cfg).unwrap()).unwrap()
     }
 
     #[test]
