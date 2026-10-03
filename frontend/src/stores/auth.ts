@@ -12,6 +12,7 @@ function normalizeUser(raw: Record<string, unknown>): User {
     virtualCapital: Number(raw.virtualCapital ?? raw.virtual_capital ?? 0),
     isOnboarded: Boolean(raw.isOnboarded ?? raw.is_onboarded ?? true),
     createdAt: String(raw.createdAt ?? raw.created_at ?? ''),
+    role: raw.role ? String(raw.role) : undefined,
   };
 }
 
@@ -23,7 +24,8 @@ interface AuthState {
   error: string | null;
 
   login: (email: string, password: string) => Promise<void>;
-  register: (data: { fullName: string; email: string; password: string; riskAppetite: string; virtualCapital: number }) => Promise<void>;
+  /** Resolves with `pending` when the account waits for the administrator's approval (no sign-in yet). */
+  register: (data: { fullName: string; email: string; password: string; riskAppetite: string; virtualCapital: number }) => Promise<{ pending: boolean; message?: string }>;
   logout: () => void;
   loadUser: () => Promise<void>;
   clearError: () => void;
@@ -56,10 +58,15 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ isLoading: true, error: null });
     try {
       const { data: res } = await authApi.register(data);
+      if ('pending' in res && res.pending) {
+        set({ isLoading: false });
+        return { pending: true, message: res.message };
+      }
       const token = res.access_token;
       localStorage.setItem('token', token);
       const user = normalizeUser(res.user as unknown as Record<string, unknown>);
       set({ user, token, isAuthenticated: true, isLoading: false });
+      return { pending: false };
     } catch (err: unknown) {
       const errData = (err as { response?: { data?: { error?: string; detail?: string; message?: string } } })?.response?.data;
       const message = errData?.error || errData?.detail || errData?.message || 'Registration failed';

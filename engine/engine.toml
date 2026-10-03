@@ -77,7 +77,9 @@ iv_crush_threshold_pct = 20.0  # IV change % to trigger crush/expansion signal
 max_pain_proximity_pct = 2.0   # Spot within this % of max pain triggers signal
 
 [broker]
-adapter = "icici_breeze"
+# "paper": simulated fills. Real-money trading is not approved; switching this to
+# "icici_breeze" would route engine orders to the real ICICI account.
+adapter = "paper"
 
 [broker.icici]
 bridge_url = "http://127.0.0.1:8001"

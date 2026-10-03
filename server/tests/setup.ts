@@ -13,6 +13,21 @@ process.env.CORS_ORIGINS = 'http://localhost:5173';
 process.env.HOST = '0.0.0.0';
 process.env.PORT = '8000';
 
+// Account checks (blocked / deleted / pending / password changed / admin role)
+// read the users table on every request. Tests mock the database, so by default
+// every signed-in test user is an ACTIVE, non-admin account; set
+// globalThis.__testAccount to change that. tests/unit/account-access.test.ts
+// exercises the real module.
+vi.mock('../src/lib/token-revocation.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/lib/token-revocation.js')>();
+  const acct = () => (globalThis as any).__testAccount ?? { problem: null, role: 'LEARNER' };
+  return {
+    ...actual,
+    sessionProblem: vi.fn(async () => acct().problem),
+    accountRole: vi.fn(async () => acct().role),
+  };
+});
+
 vi.mock('../src/lib/prisma.js', () => {
   const mockPrisma = {
     user: {

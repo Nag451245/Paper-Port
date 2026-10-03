@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } 
 import type { FastifyInstance } from 'fastify';
 
 let app: FastifyInstance;
+// Market and options data run on the owner's broker session: sign-in required.
+const signedIn = () => ({ authorization: `Bearer ${app.jwt.sign({ sub: 'test-user' })}` });
 let originalFetch: typeof globalThis.fetch;
 
 vi.mock('../../src/lib/prisma.js', () => {
@@ -35,11 +37,17 @@ beforeEach(() => { vi.resetAllMocks(); });
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 describe('Market Routes Integration', () => {
+  it("refuses anonymous callers (it would spend the owner's broker quota)", async () => {
+    for (const url of ['/api/market/quote/TCS', '/api/market/search?q=TC', '/api/market/options-chain/NIFTY', '/api/options/templates']) {
+      expect((await app.inject({ method: 'GET', url })).statusCode).toBe(401);
+    }
+  });
+
   describe('GET /api/market/quote/:symbol', () => {
     it('should return a quote (even empty when API unavailable)', async () => {
       globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network'));
 
-      const res = await app.inject({
+      const res = await app.inject({ headers: signedIn(),
         method: 'GET',
         url: '/api/market/quote/RELIANCE',
       });
@@ -52,7 +60,7 @@ describe('Market Routes Integration', () => {
 
   describe('GET /api/market/search', () => {
     it('should search for stocks by query', async () => {
-      const res = await app.inject({
+      const res = await app.inject({ headers: signedIn(),
         method: 'GET',
         url: '/api/market/search?q=reli',
       });
@@ -64,7 +72,7 @@ describe('Market Routes Integration', () => {
     });
 
     it('should return empty for no match', async () => {
-      const res = await app.inject({
+      const res = await app.inject({ headers: signedIn(),
         method: 'GET',
         url: '/api/market/search?q=xyzzzz',
       });
@@ -74,7 +82,7 @@ describe('Market Routes Integration', () => {
     });
 
     it('should return multiple results for partial match', async () => {
-      const res = await app.inject({
+      const res = await app.inject({ headers: signedIn(),
         method: 'GET',
         url: '/api/market/search?q=bank',
       });
@@ -109,7 +117,7 @@ describe('Market Routes Integration', () => {
     it('should return indices (empty when API unavailable)', async () => {
       globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network'));
 
-      const res = await app.inject({
+      const res = await app.inject({ headers: signedIn(),
         method: 'GET',
         url: '/api/market/indices',
       });
@@ -123,7 +131,7 @@ describe('Market Routes Integration', () => {
     it('should return VIX data', async () => {
       globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network'));
 
-      const res = await app.inject({
+      const res = await app.inject({ headers: signedIn(),
         method: 'GET',
         url: '/api/market/vix',
       });
@@ -135,7 +143,7 @@ describe('Market Routes Integration', () => {
 
   describe('GET /api/market/fii-dii', () => {
     it('should return FII/DII data', async () => {
-      const res = await app.inject({
+      const res = await app.inject({ headers: signedIn(),
         method: 'GET',
         url: '/api/market/fii-dii',
       });
@@ -147,7 +155,7 @@ describe('Market Routes Integration', () => {
 
   describe('GET /api/market/options-chain/:symbol', () => {
     it('should return placeholder for options chain', async () => {
-      const res = await app.inject({
+      const res = await app.inject({ headers: signedIn(),
         method: 'GET',
         url: '/api/market/options-chain/NIFTY',
       });
@@ -159,7 +167,7 @@ describe('Market Routes Integration', () => {
 
   describe('GET /api/market/market-depth/:symbol', () => {
     it('should return placeholder for market depth', async () => {
-      const res = await app.inject({
+      const res = await app.inject({ headers: signedIn(),
         method: 'GET',
         url: '/api/market/market-depth/RELIANCE',
       });

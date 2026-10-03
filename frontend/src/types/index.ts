@@ -8,6 +8,8 @@ export interface User {
   virtualCapital: number;
   isOnboarded: boolean;
   createdAt: string;
+  /** "ADMIN" for the administrator. */
+  role?: string;
 }
 
 export interface BreezeCredentialStatus {

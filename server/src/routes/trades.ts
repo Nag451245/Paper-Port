@@ -7,6 +7,7 @@ import { OrderManagementService } from '../services/oms.service.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
 import { buildOptionSymbol } from '../lib/instrument.js';
+import { MarketDataService } from '../services/market-data.service.js';
 
 const placeOrderSchema = z.object({
   portfolio_id: z.string().uuid(),
@@ -27,7 +28,8 @@ const placeOrderSchema = z.object({
 });
 
 const closePositionSchema = z.object({
-  exit_price: z.number().positive(),
+  // Ignored: the server prices the exit itself. Kept so older clients still validate.
+  exit_price: z.number().positive().optional(),
 });
 
 export async function tradeRoutes(app: FastifyInstance): Promise<void> {
@@ -58,7 +60,9 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
         side: parsed.data.side,
         orderType: parsed.data.order_type,
         qty: parsed.data.qty,
-        price: parsed.data.price,
+        // A market order fills at the market: a price sent with it is ignored,
+        // or anyone could fill a paper trade at a price of their choosing.
+        price: parsed.data.order_type === 'MARKET' ? undefined : parsed.data.price,
         triggerPrice: parsed.data.trigger_price,
         instrumentToken: parsed.data.instrument_token,
         exchange: parsed.data.exchange,
@@ -235,10 +239,21 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
       const { positionId } = request.params as { positionId: string };
       const userId = getUserId(request);
       const prisma = getPrisma();
+      // The exit is priced here from a live quote, never from the browser (its
+      // price can be minutes old, or typed in).
+      const position = await prisma.position.findFirst({
+        where: { id: positionId, portfolio: { userId } },
+        select: { symbol: true, exchange: true },
+      });
+      if (!position) return reply.code(404).send({ error: 'Position not found' });
+      const quote = await new MarketDataService().getQuote(position.symbol, position.exchange ?? 'NSE').catch(() => null);
+      if (!quote || !(quote.ltp > 0)) {
+        return reply.code(503).send({ error: `Could not get a live price for ${position.symbol}. Try again in a moment.` });
+      }
       const result = await ExitCoordinator.closePosition({
         positionId,
         userId,
-        exitPrice: parsed.data.exit_price,
+        exitPrice: quote.ltp,
         reason: 'Manual close via API',
         source: 'MANUAL_API',
         decisionType: 'POSITION_CLOSED',

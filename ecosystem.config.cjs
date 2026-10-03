@@ -64,7 +64,8 @@ module.exports = {
       name: 'ml-service',
       cwd: './server/ml-service',
       script: './venv/bin/python',
-      args: '-m uvicorn app:app --host 0.0.0.0 --port 8002',
+      // Local only: the API is its only client, and it has no login of its own.
+      args: '-m uvicorn app:app --host 127.0.0.1 --port 8002',
       interpreter: 'none',
       exec_mode: 'fork',
       env: {

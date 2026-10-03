@@ -21,6 +21,7 @@ const BotManagement = lazy(() => import('@/pages/BotManagement'));
 const Backtest = lazy(() => import('@/pages/Backtest'));
 const ReplayLab = lazy(() => import('@/pages/ReplayLab'));
 const MarketMovers = lazy(() => import('@/pages/MarketMovers'));
+const AdminUsers = lazy(() => import('@/pages/AdminUsers'));
 const TradeJournal = lazy(() => import('@/pages/TradeJournal'));
 const IntelligenceDashboard = lazy(() => import('@/pages/IntelligenceDashboard'));
 const StrategyBuilder = lazy(() => import('@/pages/StrategyBuilder'));
@@ -132,6 +133,7 @@ export default function App() {
             <Route path="/backtest" element={<Suspense fallback={<PageLoader />}><Backtest /></Suspense>} />
             <Route path="/replay" element={<Suspense fallback={<PageLoader />}><ReplayLab /></Suspense>} />
             <Route path="/movers" element={<Suspense fallback={<PageLoader />}><MarketMovers /></Suspense>} />
+            <Route path="/admin" element={<Suspense fallback={<PageLoader />}><AdminUsers /></Suspense>} />
             <Route path="/journal" element={<Suspense fallback={<PageLoader />}><TradeJournal /></Suspense>} />
             <Route path="/intelligence" element={<Suspense fallback={<PageLoader />}><IntelligenceDashboard /></Suspense>} />
             <Route path="/strategy-builder" element={<Suspense fallback={<PageLoader />}><StrategyBuilder /></Suspense>} />

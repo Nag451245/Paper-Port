@@ -27,6 +27,8 @@ model User {
   notifyTelegram Boolean  @default(false) @map("notify_telegram")
   notifyEmail    Boolean  @default(false) @map("notify_email")
   isActive       Boolean  @default(true) @map("is_active")
+  /// PENDING (signed up, waiting for the admin), ACTIVE, or BLOCKED. Existing users are ACTIVE.
+  status         String   @default("ACTIVE")
   // Sign-in tokens issued before this instant are refused (set on password reset).
   passwordChangedAt DateTime? @map("password_changed_at")
   // Which broker feeds market data: "breeze" (ICICI Direct) or "upstox".

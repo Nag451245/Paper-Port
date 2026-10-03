@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 
 let app: FastifyInstance;
@@ -206,7 +206,15 @@ describe('Trade Routes Integration', () => {
   });
 
   describe('POST /api/trades/positions/:id/close', () => {
-    it('should close a position and return trade', async () => {
+    let quoteSpy: any;
+    beforeEach(async () => {
+      const { MarketDataService } = await import('../../src/services/market-data.service.js');
+      quoteSpy = vi.spyOn(MarketDataService.prototype, 'getQuote').mockResolvedValue({ ltp: 2600 } as any);
+      mockPrisma.position.findFirst.mockResolvedValue({ symbol: 'RELIANCE', exchange: 'NSE' });
+    });
+    afterEach(() => quoteSpy.mockRestore());
+
+    it("should close a position at the live price, ignoring the browser's price", async () => {
       mockPrisma.position.findUnique.mockResolvedValue({
         id: 'pos1', portfolioId: 'p1', symbol: 'RELIANCE', exchange: 'NSE',
         qty: 10, avgEntryPrice: 2500, side: 'LONG', status: 'OPEN',
@@ -231,23 +239,26 @@ describe('Trade Routes Integration', () => {
         method: 'POST',
         url: '/api/trades/positions/pos1/close',
         headers: authHeaders(),
-        payload: { exit_price: 3000 },
+        payload: { exit_price: 3000 },             // a typed-in price: must not be used
       });
 
       expect(res.statusCode).toBe(200);
       expect(res.json().success).toBe(true);
       expect(res.json().pnl).toBeDefined();
+      expect(quoteSpy).toHaveBeenCalledWith('RELIANCE', 'NSE');
+      expect(JSON.stringify(mockPrisma.order.create.mock.calls)).not.toContain('3000');
     });
 
-    it('should return 400 for missing exit_price', async () => {
-      const res = await app.inject({
-        method: 'POST',
-        url: '/api/trades/positions/pos1/close',
-        headers: authHeaders(),
-        payload: {},
-      });
+    it('refuses to close at a guessed price when no live quote is available', async () => {
+      quoteSpy.mockRejectedValue(new Error('feed down'));
+      const res = await app.inject({ method: 'POST', url: '/api/trades/positions/pos1/close', headers: authHeaders(), payload: {} });
+      expect(res.statusCode).toBe(503);
+    });
 
-      expect(res.statusCode).toBe(400);
+    it("cannot close another user's position", async () => {
+      mockPrisma.position.findFirst.mockResolvedValue(null);
+      const res = await app.inject({ method: 'POST', url: '/api/trades/positions/pos1/close', headers: authHeaders(), payload: {} });
+      expect(res.statusCode).toBe(404);
     });
   });
 

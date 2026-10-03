@@ -1,5 +1,5 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
-import { isIssuedBeforePasswordChange } from '../lib/token-revocation.js';
+import { accountRole, sessionProblem } from '../lib/token-revocation.js';
 
 export interface JwtPayload {
   sub: string;
@@ -16,15 +16,28 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
   }
 
   const { sub, iat } = request.user as JwtPayload;
-  let revoked = false;
+  let problem: string | null = null;
   try {
-    revoked = await isIssuedBeforePasswordChange(sub, iat);
+    problem = await sessionProblem(sub, iat);
   } catch {
     // Database unreachable: the signature is valid, so let the request through
     // rather than lock every user out. The route's own queries will fail anyway.
   }
-  if (revoked) {
-    reply.code(401).send({ error: 'Session ended because the password was changed. Please sign in again.' });
+  if (problem) {
+    reply.code(401).send({ error: problem });
+  }
+}
+
+/** Signed in AND the administrator. The role is read from the database, never trusted from the token. */
+export async function requireAdmin(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  await authenticate(request, reply);
+  if (reply.sent) return;
+  let role = '';
+  try {
+    role = await accountRole(getUserId(request));
+  } catch { /* fall through to refuse */ }
+  if (role !== 'ADMIN') {
+    reply.code(403).send({ error: 'Only the administrator can do this.' });
   }
 }
 

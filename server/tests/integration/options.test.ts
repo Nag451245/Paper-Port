@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vites
 import type { FastifyInstance } from 'fastify';
 
 let app: FastifyInstance;
+// Market and options data run on the owner's broker session: sign-in required.
+const signedIn = () => ({ authorization: `Bearer ${app.jwt.sign({ sub: 'test-user' })}` });
 let mockPrisma: any;
 let authToken: string;
 
@@ -54,7 +56,7 @@ beforeEach(() => {
 
 describe('GET /api/options/templates', () => {
   it('should return all 17 templates', async () => {
-    const res = await app.inject({
+    const res = await app.inject({ headers: signedIn(),
       method: 'GET',
       url: '/api/options/templates',
     });
@@ -66,7 +68,7 @@ describe('GET /api/options/templates', () => {
 
 describe('GET /api/options/templates/:id', () => {
   it('should return a specific template', async () => {
-    const res = await app.inject({
+    const res = await app.inject({ headers: signedIn(),
       method: 'GET',
       url: '/api/options/templates/iron-condor',
     });
@@ -77,7 +79,7 @@ describe('GET /api/options/templates/:id', () => {
   });
 
   it('should return 404 for unknown template', async () => {
-    const res = await app.inject({
+    const res = await app.inject({ headers: signedIn(),
       method: 'GET',
       url: '/api/options/templates/nonexistent',
     });
@@ -87,7 +89,7 @@ describe('GET /api/options/templates/:id', () => {
 
 describe('GET /api/options/templates/category/:category', () => {
   it('should filter templates by bullish category', async () => {
-    const res = await app.inject({
+    const res = await app.inject({ headers: signedIn(),
       method: 'GET',
       url: '/api/options/templates/category/bullish',
     });
@@ -100,7 +102,7 @@ describe('GET /api/options/templates/category/:category', () => {
   });
 
   it('should return empty array for unknown category', async () => {
-    const res = await app.inject({
+    const res = await app.inject({ headers: signedIn(),
       method: 'GET',
       url: '/api/options/templates/category/unknown',
     });
@@ -111,7 +113,7 @@ describe('GET /api/options/templates/category/:category', () => {
 
 describe('POST /api/options/payoff', () => {
   it('should return payoff curve and greeks for valid legs', async () => {
-    const res = await app.inject({
+    const res = await app.inject({ headers: signedIn(),
       method: 'POST',
       url: '/api/options/payoff',
       payload: {
@@ -129,7 +131,7 @@ describe('POST /api/options/payoff', () => {
   });
 
   it('should return 400 for empty legs', async () => {
-    const res = await app.inject({
+    const res = await app.inject({ headers: signedIn(),
       method: 'POST',
       url: '/api/options/payoff',
       payload: { legs: [], spotPrice: 100 },
@@ -138,7 +140,7 @@ describe('POST /api/options/payoff', () => {
   });
 
   it('should return 400 for invalid data', async () => {
-    const res = await app.inject({
+    const res = await app.inject({ headers: signedIn(),
       method: 'POST',
       url: '/api/options/payoff',
       payload: { legs: 'invalid', spotPrice: -5 },
@@ -149,7 +151,7 @@ describe('POST /api/options/payoff', () => {
 
 describe('POST /api/options/max-pain', () => {
   it('should compute correct max pain strike', async () => {
-    const res = await app.inject({
+    const res = await app.inject({ headers: signedIn(),
       method: 'POST',
       url: '/api/options/max-pain',
       payload: {
@@ -166,7 +168,7 @@ describe('POST /api/options/max-pain', () => {
   });
 
   it('should return 400 for missing fields', async () => {
-    const res = await app.inject({
+    const res = await app.inject({ headers: signedIn(),
       method: 'POST',
       url: '/api/options/max-pain',
       payload: { strikes: [100] },

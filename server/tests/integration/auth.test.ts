@@ -57,7 +57,7 @@ beforeEach(() => {
 
 describe('Auth Routes Integration', () => {
   describe('POST /api/auth/register', () => {
-    it('should register a new user and return JWT', async () => {
+    it('a new sign-up waits for the administrator: no token, account pending', async () => {
       mockPrisma.user.findUnique.mockResolvedValue(null);
       mockPrisma.user.create.mockResolvedValue({
         id: 'new-user-id',
@@ -81,12 +81,11 @@ describe('Auth Routes Integration', () => {
         },
       });
 
-      expect(res.statusCode).toBe(201);
+      expect(res.statusCode).toBe(202);
       const body = res.json();
-      expect(body.access_token).toBeTruthy();
-      expect(body.token_type).toBe('bearer');
-      expect(body.user.email).toBe('newuser@example.com');
-      expect(body.user.fullName).toBe('New User');
+      expect(body.pending).toBe(true);
+      expect(body.access_token).toBeUndefined();
+      expect(mockPrisma.user.create.mock.calls.at(-1)[0].data).toMatchObject({ status: 'PENDING', isActive: false, role: 'LEARNER' });
     });
 
     it('should return 409 for duplicate email', async () => {
@@ -174,8 +173,23 @@ describe('Auth Routes Integration', () => {
         },
       });
 
+      expect(res.statusCode).toBe(202);
+      expect(mockPrisma.user.create.mock.calls.at(-1)[0].data).toMatchObject({ riskAppetite: 'AGGRESSIVE', virtualCapital: 5000000 });
+    });
+
+    it("the administrator's own sign-up is active at once and gets the admin role", async () => {
+      mockPrisma.user.findUnique.mockResolvedValue(null);
+      mockPrisma.user.create.mockImplementation(async ({ data }: any) => ({
+        id: 'admin-id', fullName: 'Admin', riskAppetite: 'MODERATE', virtualCapital: 1000000,
+        createdAt: new Date(), updatedAt: new Date(), ...data,
+      }));
+      const res = await app.inject({
+        method: 'POST', url: '/api/auth/register',
+        payload: { email: 'Nagender1.P@gmail.com', password: 'SecurePass123!', fullName: 'Admin' },
+      });
       expect(res.statusCode).toBe(201);
-      expect(res.json().user.riskAppetite).toBe('AGGRESSIVE');
+      expect(res.json().access_token).toBeTruthy();
+      expect(res.json().user).toMatchObject({ role: 'ADMIN', status: 'ACTIVE' });
     });
   });
 
@@ -553,7 +567,7 @@ describe('Auth Routes Integration', () => {
         method: 'POST',
         url: '/api/auth/register',
         payload: {
-          email: 'lifecycle@example.com',
+          email: 'nagender1.p@gmail.com',             // only the administrator is active straight away
           password: 'LifecyclePass123!',
           fullName: 'Lifecycle User',
         },

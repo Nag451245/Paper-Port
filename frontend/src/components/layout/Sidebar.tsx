@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
+import { useAuthStore } from '@/stores/auth';
 import {
   LayoutDashboard,
   Monitor,
@@ -24,6 +25,7 @@ import {
   LayoutGrid,
   X,
   TrendingUp,
+  UserCog,
 } from 'lucide-react';
 
 const navItems = [
@@ -53,7 +55,15 @@ interface SidebarProps {
   onToggle: () => void;
 }
 
+/** The administrator also sees Admin (user approvals). The server enforces it either way. */
+const ADMIN_ITEM = { to: '/admin', icon: UserCog, label: 'Admin · Users', color: 'from-slate-600 to-slate-800' };
+function useNavItems() {
+  const isAdmin = useAuthStore((s) => s.user?.role === 'ADMIN');
+  return isAdmin ? [...navItems, ADMIN_ITEM] : navItems;
+}
+
 export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
+  const items = useNavItems();
   return (
     <>
       {/* Desktop sidebar */}
@@ -63,7 +73,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
         }`}
       >
         <nav className="flex-1 py-4 space-y-0.5 overflow-y-auto px-2">
-          {navItems.map(({ to, icon: Icon, label, color }) => (
+          {items.map(({ to, icon: Icon, label, color }) => (
             <NavLink
               key={to}
               to={to}
@@ -104,6 +114,7 @@ const MOBILE_PRIMARY: { to: string; short: string }[] = [
 ];
 
 function MobileNav() {
+  const items = useNavItems();
   const [open, setOpen] = useState(false);
   const location = useLocation();
   useEffect(() => {
@@ -163,7 +174,7 @@ function MobileNav() {
               </button>
             </div>
             <div className="grid grid-cols-3 gap-2 px-4 pb-2">
-              {navItems.map(({ to, icon: Icon, label, color }) => (
+              {items.map(({ to, icon: Icon, label, color }) => (
                 <NavLink
                   key={to}
                   to={to}

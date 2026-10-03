@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AuthService, AuthError } from '../services/auth.service.js';
+import { AdminService } from '../services/admin.service.js';
 import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
 import { createBreezeState, consumeBreezeState } from '../lib/oauth-state.js';
@@ -67,7 +68,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
 
     try {
-      const { user, userId } = await authService.register(parsed.data);
+      const { user, userId, pending } = await authService.register(parsed.data);
+      if (pending) {
+        // No sign-in until the administrator approves the account.
+        new AdminService(getPrisma()).notifyNewSignup(user).catch(() => {});
+        return reply.code(202).send({
+          pending: true,
+          message: "Thanks for signing up. Your account is waiting for the administrator's approval; you can sign in once it is approved.",
+        });
+      }
       const token = app.jwt.sign({ sub: userId });
       return reply.code(201).send({ user, access_token: token, token_type: 'bearer' });
     } catch (err) {

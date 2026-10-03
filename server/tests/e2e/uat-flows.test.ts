@@ -150,9 +150,12 @@ describe('UAT Flow 1: User Registration & Onboarding', () => {
       payload: { email: 'uat@example.com', password: 'UATPass123!', fullName: 'UAT User' },
     });
 
-    expect(registerRes.statusCode).toBe(201);
-    const { access_token, user } = registerRes.json();
-    expect(access_token).toBeTruthy();
+    // A new sign-up waits for the administrator; no sign-in until approved.
+    expect(registerRes.statusCode).toBe(202);
+    expect(registerRes.json().pending).toBe(true);
+    // ...the administrator approves, and the user signs in:
+    const access_token = getToken('new-uat-user');
+    const user = { email: 'uat@example.com' };
     expect(user.email).toBe('uat@example.com');
 
     mockPrisma.user.findUnique.mockResolvedValue({
@@ -194,9 +197,9 @@ describe('UAT Flow 2: Dashboard Data Loading', () => {
   it('should load all dashboard components', async () => {
     const [healthRes, indicesRes, vixRes, fiiDiiRes] = await Promise.all([
       app.inject({ method: 'GET', url: '/health' }),
-      app.inject({ method: 'GET', url: '/api/market/indices' }),
-      app.inject({ method: 'GET', url: '/api/market/vix' }),
-      app.inject({ method: 'GET', url: '/api/market/fii-dii' }),
+      app.inject({ method: 'GET', url: '/api/market/indices', headers: auth() }),
+      app.inject({ method: 'GET', url: '/api/market/vix', headers: auth() }),
+      app.inject({ method: 'GET', url: '/api/market/fii-dii', headers: auth() }),
     ]);
 
     expect(healthRes.statusCode).toBe(200);
@@ -246,7 +249,7 @@ describe('UAT Flow 3: Portfolio Management', () => {
 describe('UAT Flow 4: Trading Terminal', () => {
   it('should search for stock, place order, view position, close position', async () => {
     const searchRes = await app.inject({
-      method: 'GET', url: '/api/market/search?q=reliance',
+      method: 'GET', url: '/api/market/search?q=reliance', headers: auth(),
     });
     expect(searchRes.statusCode).toBe(200);
     expect(searchRes.json().length).toBeGreaterThan(0);
@@ -308,6 +311,8 @@ describe('UAT Flow 4: Trading Terminal', () => {
     mockPrisma.portfolio.findUnique.mockResolvedValue({ id: 'p1', currentNav: 1000000 });
     mockPrisma.portfolio.update.mockResolvedValue({});
 
+    // The server looks the position up (owner-scoped) and prices the exit from a live quote.
+    mockPrisma.position.findFirst.mockResolvedValue({ symbol: 'RELIANCE', exchange: 'NSE' });
     const closeRes = await app.inject({
       method: 'POST', url: '/api/trades/positions/uat-pos/close',
       headers: auth(), payload: { exit_price: 3000 },
@@ -540,20 +545,20 @@ describe('UAT Flow 11: Cross-cutting Concerns', () => {
     }
   });
 
-  it('should allow public endpoints without auth', async () => {
-    const publicEndpoints = [
-      '/health',
+  it("keeps only health public: market data runs on the owner's broker session", async () => {
+    expect((await app.inject({ method: 'GET', url: '/health' })).statusCode).toBe(200);
+    const marketEndpoints = [
       '/api/market/search?q=reliance',
       '/api/market/vix',
       '/api/market/fii-dii',
     ];
 
     const results = await Promise.all(
-      publicEndpoints.map((url) => app.inject({ method: 'GET', url })),
+      marketEndpoints.map((url) => app.inject({ method: 'GET', url })),
     );
 
     for (const res of results) {
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(401);
     }
   });
 });
@@ -641,7 +646,7 @@ describe('UAT Flow 13: AI Agent Lifecycle', () => {
 
 describe('UAT Flow 14: Market Data - No HDFC Ltd', () => {
   it('should not include delisted HDFC in search results for popular stocks', async () => {
-    const res = await app.inject({ method: 'GET', url: '/api/market/search?q=HDFC' });
+    const res = await app.inject({ method: 'GET', url: '/api/market/search?q=HDFC', headers: auth() });
     expect(res.statusCode).toBe(200);
   });
 });

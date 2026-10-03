@@ -39,13 +39,16 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters for security'),
   JWT_ALGORITHM: z.string().default('HS256'),
   JWT_EXPIRES_IN: z.string().default('24h'),
+  // The one administrator: approves sign-ups, blocks and deletes users, runs engine controls.
+  ADMIN_EMAIL: z.string().email().default('nagender1.p@gmail.com'),
   ENCRYPTION_KEY: z.string().min(16, 'ENCRYPTION_KEY must be at least 16 characters'),
   CORS_ORIGINS: z.string().default('http://localhost:5173'),
   RATE_LIMIT_MAX: z.coerce.number().default(600),
   // Refuse to run automated trading unless a Redis leader lease can be held.
   // Recommended in any environment that might run more than one instance.
   REQUIRE_LEADER_LOCK: z.coerce.boolean().default(false),
-  HOST: z.string().default('0.0.0.0'),
+  // Local only: nginx is the public entry point and forwards to 127.0.0.1.
+  HOST: z.string().default('127.0.0.1'),
   PORT: z.coerce.number().default(8000),
   NODE_ENV: z.string().default('development'),
   NEWS_API_KEY: z.string().default(''),

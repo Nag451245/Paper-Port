@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { authenticate } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
 import { StrategyComposer } from '../services/strategy-composer.js';
 import { SentimentEngine } from '../services/sentiment-engine.js';
@@ -14,14 +15,12 @@ export async function edgeRoutes(app: FastifyInstance) {
   const composer = new StrategyComposer(prisma);
   const sentiment = new SentimentEngine(prisma);
 
-  app.addHook('onRequest', async (request, reply) => {
-    // Market status is public — skip auth
-    if (request.url.endsWith('/market-status')) return;
-    try {
-      await request.jwtVerify();
-    } catch {
-      throw app.httpErrors.unauthorized('Invalid or missing token');
-    }
+  // Market status is public. Matched against the route pattern: the raw URL's
+  // ending could be faked with a query string (/shadow?x=/market-status).
+  const publicRoutes = new Set([`${app.prefix}/market-status`]);
+  app.addHook('preHandler', async (request, reply) => {
+    if (publicRoutes.has(request.routeOptions?.url ?? '')) return;
+    await authenticate(request, reply);
   });
 
   app.get('/market-status', async () => {

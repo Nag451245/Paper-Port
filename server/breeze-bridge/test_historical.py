@@ -117,6 +117,20 @@ class HistoricalTests(unittest.TestCase):
         self.assertEqual([b["timestamp"][11:16] for b in h], ["09:15", "10:15"])
         self.assertEqual(h[0]["volume"], 50)
 
+    def test_real_orders_need_an_explicit_switch(self):
+        import os
+        old = os.environ.pop("LIVE_ORDERS_ENABLED", None)
+        try:
+            self.assertFalse(app.live_orders_enabled())
+            os.environ["LIVE_ORDERS_ENABLED"] = "yes"
+            self.assertFalse(app.live_orders_enabled())
+            os.environ["LIVE_ORDERS_ENABLED"] = "true"
+            self.assertTrue(app.live_orders_enabled())
+        finally:
+            os.environ.pop("LIVE_ORDERS_ENABLED", None)
+            if old is not None:
+                os.environ["LIVE_ORDERS_ENABLED"] = old
+
     def test_unknown_interval_is_refused(self):
         r = self.fetch("TCS", "7minute", "2025-01-01", "2025-01-05")
         self.assertIn("Unsupported interval", r["error"])

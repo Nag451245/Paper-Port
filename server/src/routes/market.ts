@@ -11,6 +11,8 @@ const intervalParam = z.string().regex(/^(1d|1day|day|daily|1h|1hour|hour|5m|5mi
 const dateParam = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 export async function marketRoutes(app: FastifyInstance): Promise<void> {
+  // Every route here runs on the owner's broker session: signed-in users only.
+  app.addHook('preHandler', authenticate);
   const service = new MarketDataService();
 
   app.get('/quote/:symbol', async (request, reply) => {

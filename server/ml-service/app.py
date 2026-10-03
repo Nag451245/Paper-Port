@@ -440,4 +440,4 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("ML_SERVICE_PORT", 8002))
     log.info(f"Starting ML Service on port {port}")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run(app, host=os.environ.get("ML_SERVICE_HOST", "127.0.0.1"), port=port, log_level="info")

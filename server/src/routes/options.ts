@@ -37,6 +37,8 @@ const maxPainSchema = z.object({
 });
 
 export async function optionsRoutes(app: FastifyInstance): Promise<void> {
+  // Every route here runs on the owner's broker session: signed-in users only.
+  app.addHook('preHandler', authenticate);
   const optionsService = new OptionsService(getPrisma());
 
   app.get('/templates', async () => {

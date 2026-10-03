@@ -36,6 +36,7 @@ export default function Register() {
   const [virtualCapital, setVirtualCapital] = useState(1000000);
   const [showPassword, setShowPassword] = useState(false);
   const [validationError, setValidationError] = useState('');
+  const [pendingMessage, setPendingMessage] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -43,7 +44,8 @@ export default function Register() {
     if (password !== confirmPassword) { setValidationError('Passwords do not match'); return; }
     if (password.length < 8) { setValidationError('Password must be at least 8 characters'); return; }
     try {
-      await register({ fullName, email, password, riskAppetite, virtualCapital });
+      const res = await register({ fullName, email, password, riskAppetite, virtualCapital });
+      if (res.pending) { setPendingMessage(res.message || "Your account is waiting for the administrator's approval."); return; }
       navigate('/onboarding');
     } catch { /* error is set in store */ }
   };
@@ -80,6 +82,12 @@ export default function Register() {
             <p className="text-sm text-stone-500 mt-1.5">Start your practice trading journey</p>
           </div>
 
+          {pendingMessage ? (
+            <div className="text-center space-y-4">
+              <p className="text-sm text-[#3d5a44] bg-green-50 border border-green-200 rounded-xl px-4 py-3">{pendingMessage}</p>
+              <Link to="/login" className="inline-block text-sm font-semibold text-[#4a6b52] hover:underline">Back to sign in</Link>
+            </div>
+          ) : (<>
           {(error || validationError) && (
             <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-600 flex items-center gap-2">
               <span>{validationError || error}</span>
@@ -153,6 +161,7 @@ export default function Register() {
               Create Account
             </button>
           </form>
+          </>)}
 
           <p className="text-center text-sm text-stone-500 mt-5">
             Already have an account?{' '}

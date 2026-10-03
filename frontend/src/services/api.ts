@@ -66,7 +66,7 @@ export const authApi = {
     api.post<{ user: User; access_token: string; token_type: string }>('/auth/login', { email, password }),
 
   register: (data: { fullName: string; email: string; password: string; riskAppetite: string; virtualCapital: number }) =>
-    api.post<{ user: User; access_token: string; token_type: string }>('/auth/register', data),
+    api.post<{ user: User; access_token: string; token_type: string; pending?: false } | { pending: true; message: string }>('/auth/register', data),
 
   me: () => api.get<User>('/auth/me'),
 
@@ -507,6 +507,15 @@ export interface LakeStatus {
   stocks: number; withIntraday: number; intradayComplete: number; dailyComplete: number;
   earliestIntraday: string | null; sizeBytes: number; callsToday: number;
 }
+
+export interface AdminUser { id: string; email: string; fullName: string; role: string; status: 'PENDING' | 'ACTIVE' | 'BLOCKED'; createdAt: string }
+export const adminApi = {
+  users: () => api.get<{ users: AdminUser[] }>('/admin/users'),
+  approve: (id: string) => api.post(`/admin/users/${id}/approve`),
+  block: (id: string) => api.post(`/admin/users/${id}/block`),
+  unblock: (id: string) => api.post(`/admin/users/${id}/unblock`),
+  remove: (id: string) => api.delete(`/admin/users/${id}`),
+};
 
 export const edgeApi = {
   getShadow: () => api.get<ShadowResponse>('/edge/shadow'),

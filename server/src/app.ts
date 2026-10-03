@@ -38,6 +38,8 @@ import { getShadowBook } from './services/shadow-book.service.js';
 import { getCandleLakeSync } from './services/candle-lake-sync.service.js';
 import { PatternScanner } from './services/pattern-scanner.service.js';
 import { getExpiryCalendar } from './services/expiry-calendar.service.js';
+import { adminRoutes } from './routes/admin.js';
+import { AdminService } from './services/admin.service.js';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -343,6 +345,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(reportRoutes, { prefix: '/api/reports' });
   await app.register(guardianRoutes, { prefix: '/api/guardian' });
   await app.register(brokerRoutes, { prefix: '/api/brokers' });
+  await app.register(adminRoutes, { prefix: '/api/admin' });
+  // ADMIN_EMAIL's account is the one administrator.
+  app.addHook('onReady', async () => {
+    try { await new AdminService(getPrisma()).ensureSingleAdmin(); }
+    catch (err) { app.log.warn(`[Admin] could not set the administrator: ${(err as Error).message}`); }
+  });
 
   await registerWebSocket(app);
   app.decorate('wsHub', wsHub);

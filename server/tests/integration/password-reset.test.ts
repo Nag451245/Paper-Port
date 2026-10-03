@@ -7,6 +7,9 @@ let app: FastifyInstance;
 let mockPrisma: any;
 
 const sendMail = vi.fn();
+// These tests exercise the real per-request account check (tests/setup.ts stubs it by default).
+vi.unmock('../../src/lib/token-revocation.js');
+
 vi.mock('../../src/lib/mailer.js', () => ({
   sendMail: (msg: unknown) => sendMail(msg),
   isMailConfigured: () => true,
@@ -150,6 +153,8 @@ describe('POST /api/auth/reset-password', () => {
 });
 
 describe('sessions after a password change', () => {
+  beforeEach(async () => { (await import('../../src/lib/token-revocation.js')).clearRevocationCache(); });
+
   it('refuses a sign-in token issued before the change', async () => {
     const changedAt = new Date();
     mockPrisma.user.findUnique.mockResolvedValue({ ...USER, passwordChangedAt: changedAt });

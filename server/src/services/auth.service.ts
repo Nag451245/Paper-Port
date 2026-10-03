@@ -122,6 +122,7 @@ export interface UserProfile {
   virtualCapital: number;
   role: string;
   isActive: boolean;
+  status: string;
   createdAt: Date;
 }
 
@@ -134,6 +135,7 @@ function toProfile(user: User): UserProfile {
     virtualCapital: Number(user.virtualCapital),
     role: user.role,
     isActive: user.isActive,
+    status: user.status ?? 'ACTIVE',
     createdAt: user.createdAt,
   };
 }
@@ -198,11 +200,13 @@ export class AuthService {
     this.encKey = env.ENCRYPTION_KEY;
   }
 
-  async register(input: RegisterInput): Promise<{ user: UserProfile; userId: string }> {
+  async register(input: RegisterInput): Promise<{ user: UserProfile; userId: string; pending: boolean }> {
     const existing = await this.prisma.user.findUnique({ where: { email: input.email } });
     if (existing) {
       throw new AuthError('Email already registered', 409);
     }
+    // New accounts wait for the administrator; the administrator's own account does not.
+    const isAdmin = input.email.trim().toLowerCase() === env.ADMIN_EMAIL.toLowerCase();
 
     const passwordHash = await bcrypt.hash(input.password, SALT_ROUNDS);
 
@@ -213,6 +217,9 @@ export class AuthService {
         fullName: input.fullName,
         riskAppetite: input.riskAppetite ?? 'MODERATE',
         virtualCapital: input.virtualCapital ?? 1000000,
+        role: isAdmin ? 'ADMIN' : 'LEARNER',
+        status: isAdmin ? 'ACTIVE' : 'PENDING',
+        isActive: isAdmin,
         portfolios: {
           create: {
             name: 'Default Portfolio',
@@ -224,7 +231,7 @@ export class AuthService {
       },
     });
 
-    return { user: toProfile(user), userId: user.id };
+    return { user: toProfile(user), userId: user.id, pending: !isAdmin };
   }
 
   /**
@@ -348,6 +355,12 @@ export class AuthService {
 
     // Checked only after the password verifies — reporting "deactivated" to an
     // unauthenticated caller would confirm which emails have accounts.
+    if (user.status === 'PENDING') {
+      throw new AuthError("Your account is waiting for the administrator's approval. You can sign in once it is approved.", 403);
+    }
+    if (user.status === 'BLOCKED') {
+      throw new AuthError('This account has been blocked by the administrator.', 403);
+    }
     if (!user.isActive) {
       throw new AuthError('Account is deactivated', 403);
     }

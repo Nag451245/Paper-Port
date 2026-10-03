@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { authenticate, requireAdmin } from '../middleware/auth.js';
 import {
   isEngineAvailable,
   engineHealth,
@@ -31,17 +32,16 @@ import {
 } from '../lib/rust-engine.js';
 
 export async function engineRoutes(app: FastifyInstance) {
-  const publicPaths = ['/status'];
+  // Matched against the route pattern (never the raw URL, which a query string can pad).
+  const publicRoutes = new Set([`${app.prefix}/status`]);
 
-  app.addHook('onRequest', async (request, reply) => {
-    const routePath = request.routeOptions?.url ?? request.url;
-    if (publicPaths.includes(routePath)) return;
-    try {
-      await request.jwtVerify();
-    } catch {
-      throw app.httpErrors.unauthorized('Invalid or missing token');
-    }
+  app.addHook('preHandler', async (request, reply) => {
+    if (publicRoutes.has(request.routeOptions?.url ?? '')) return;
+    await authenticate(request, reply);
   });
+
+  // Engine controls act on the engine shared by every user: administrator only.
+  const adminOnly = { preHandler: [requireAdmin] };
 
   app.get('/status', async () => {
     const available = isEngineAvailable();
@@ -130,14 +130,14 @@ export async function engineRoutes(app: FastifyInstance) {
   });
 
   // Kill switch
-  app.post('/kill-switch', async () => {
+  app.post('/kill-switch', adminOnly, async () => {
     if (!isEngineAvailable()) {
       throw app.httpErrors.serviceUnavailable('Engine not available');
     }
     return engineKillSwitch(true);
   });
 
-  app.post('/kill-switch/off', async () => {
+  app.post('/kill-switch/off', adminOnly, async () => {
     if (!isEngineAvailable()) {
       throw app.httpErrors.serviceUnavailable('Engine not available');
     }
@@ -145,7 +145,7 @@ export async function engineRoutes(app: FastifyInstance) {
   });
 
   // Audit log
-  app.get('/audit-log', async () => {
+  app.get('/audit-log', adminOnly, async () => {
     if (!isEngineAvailable()) {
       throw app.httpErrors.serviceUnavailable('Engine not available');
     }
@@ -154,14 +154,14 @@ export async function engineRoutes(app: FastifyInstance) {
 
   // ── OMS Routes ──
 
-  app.post('/oms/orders', async (req) => {
+  app.post('/oms/orders', adminOnly, async (req) => {
     if (!isEngineAvailable()) {
       throw app.httpErrors.serviceUnavailable('Engine not available');
     }
     return engineOMSSubmitOrder(req.body as any);
   });
 
-  app.get('/oms/orders', async (req) => {
+  app.get('/oms/orders', adminOnly, async (req) => {
     if (!isEngineAvailable()) {
       throw app.httpErrors.serviceUnavailable('Engine not available');
     }
@@ -169,7 +169,7 @@ export async function engineRoutes(app: FastifyInstance) {
     return engineOMSOrders(query.strategy_id);
   });
 
-  app.post('/oms/orders/:orderId/modify', async (req) => {
+  app.post('/oms/orders/:orderId/modify', adminOnly, async (req) => {
     if (!isEngineAvailable()) {
       throw app.httpErrors.serviceUnavailable('Engine not available');
     }
@@ -178,7 +178,7 @@ export async function engineRoutes(app: FastifyInstance) {
     return engineOMSModifyOrder(orderId, body ?? {});
   });
 
-  app.post('/oms/orders/:orderId/cancel', async (req) => {
+  app.post('/oms/orders/:orderId/cancel', adminOnly, async (req) => {
     if (!isEngineAvailable()) {
       throw app.httpErrors.serviceUnavailable('Engine not available');
     }
@@ -186,14 +186,14 @@ export async function engineRoutes(app: FastifyInstance) {
     return engineOMSCancelOrder(orderId);
   });
 
-  app.post('/oms/cancel-all', async () => {
+  app.post('/oms/cancel-all', adminOnly, async () => {
     if (!isEngineAvailable()) {
       throw app.httpErrors.serviceUnavailable('Engine not available');
     }
     return engineOMSCancelAll();
   });
 
-  app.post('/oms/reconcile', async () => {
+  app.post('/oms/reconcile', adminOnly, async () => {
     if (!isEngineAvailable()) {
       throw app.httpErrors.serviceUnavailable('Engine not available');
     }
@@ -217,7 +217,7 @@ export async function engineRoutes(app: FastifyInstance) {
     return engineAlertCounts();
   });
 
-  app.post('/alerts/:alertId/acknowledge', async (req) => {
+  app.post('/alerts/:alertId/acknowledge', adminOnly, async (req) => {
     if (!isEngineAvailable()) {
       throw app.httpErrors.serviceUnavailable('Engine not available');
     }
@@ -234,7 +234,7 @@ export async function engineRoutes(app: FastifyInstance) {
     return engineBrokerStatus();
   });
 
-  app.post('/broker/init-session', async () => {
+  app.post('/broker/init-session', adminOnly, async () => {
     if (!isEngineAvailable()) {
       throw app.httpErrors.serviceUnavailable('Engine not available');
     }

@@ -38,10 +38,10 @@ echo "   was: $PREV"
 echo "   now: $(git log --oneline -1)"
 
 echo "== [2/8] Back up the database"
-mkdir -p ~/backups
-DB_URL=$(grep -E '^DATABASE_URL=' server/.env | cut -d= -f2- | tr -d '"' | sed 's/?.*//')
-pg_dump "$DB_URL" | gzip > ~/backups/db-$(date +%F-%H%M).sql.gz
-ls -lh ~/backups | tail -1
+chmod +x deploy/backup-db.sh
+deploy/backup-db.sh
+# Nightly at 02:00 server time, keeping 14 days (installed once, kept up to date).
+( crontab -l 2>/dev/null | grep -v 'backup-db.sh' || true ; echo "0 2 * * * $APP/deploy/backup-db.sh >> $HOME/backups/backup.log 2>&1" ) | crontab -
 
 echo "== [3/8] Rust engine: test, build, swap in"
 source ~/.cargo/env
@@ -70,6 +70,13 @@ rm -rf node_modules
 
 echo "== [7/8] Restart"
 cd "$APP"
+# Internal services listen on the server only; nginx (443) is the public entry.
+if grep -q '^HOST=.*0.0.0.0' server/.env 2>/dev/null; then
+  sed -i 's/^HOST=.*/HOST="127.0.0.1"/' server/.env && echo "  API now listens on 127.0.0.1 only"
+fi
+if pm2 jlist 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const p=JSON.parse(s).find(x=>x.name==="ml-service");process.exit(p&&String(p.pm2_env.args).includes("0.0.0.0")?0:1)})'; then
+  pm2 delete ml-service >/dev/null && pm2 start ecosystem.config.cjs --only ml-service >/dev/null && pm2 save >/dev/null && echo "  ML service now listens on 127.0.0.1 only"
+fi
 # Rotate PM2 logs so they cannot fill the disk again (unrotated logs once reached
 # 14 GB and stopped SSH logins). Installed once; settings re-applied every deploy.
 pm2 describe pm2-logrotate >/dev/null 2>&1 || pm2 install pm2-logrotate >/dev/null 2>&1 || echo "  (could not install pm2-logrotate)"

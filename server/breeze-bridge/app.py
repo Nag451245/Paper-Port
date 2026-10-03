@@ -1354,6 +1354,17 @@ def _aggregate_bars(bars, minutes, session_start=(9, 15)):
     return out
 
 
+# Real-money orders. This app paper-trades; placing, changing or cancelling a
+# real ICICI order needs an explicit LIVE_ORDERS_ENABLED=true in the server
+# environment, so no configuration slip can trade the owner's account.
+LIVE_ORDERS_REFUSAL = ("Real ICICI orders are disabled. Set LIVE_ORDERS_ENABLED=true in the "
+                       "server environment only if you have decided to trade real money.")
+
+
+def live_orders_enabled():
+    return os.environ.get("LIVE_ORDERS_ENABLED", "").strip().lower() == "true"
+
+
 def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None, exchange="NSE",
                         product=None, expiry=None, strike=None, right=None):
     """Fetch historical candles via Breeze, for cash, futures or an option contract.
@@ -1844,6 +1855,9 @@ class BreezeHandler(BaseHTTPRequestHandler):
                 self.send_json(result, 200 if result.get("success") else 500)
 
             elif path == "/order/place":
+                if not live_orders_enabled():
+                    self.send_json({"error": LIVE_ORDERS_REFUSAL}, 403)
+                    return
                 if breeze_instance is None:
                     self.send_json({"error": "Breeze session not active"}, 503)
                     return
@@ -1878,6 +1892,9 @@ class BreezeHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": str(e)}, 500)
 
             elif path == "/order/modify":
+                if not live_orders_enabled():
+                    self.send_json({"error": LIVE_ORDERS_REFUSAL}, 403)
+                    return
                 if breeze_instance is None:
                     self.send_json({"error": "Breeze session not active"}, 503)
                     return
@@ -1894,6 +1911,9 @@ class BreezeHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": str(e)}, 500)
 
             elif path == "/order/cancel":
+                if not live_orders_enabled():
+                    self.send_json({"error": LIVE_ORDERS_REFUSAL}, 403)
+                    return
                 if breeze_instance is None:
                     self.send_json({"error": "Breeze session not active"}, 503)
                     return
