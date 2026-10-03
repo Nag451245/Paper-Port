@@ -38,6 +38,10 @@ struct StrategyResult {
     #[serde(default)]
     unlimited_loss: bool,
     probability_of_profit: f64,
+    /// True when the figures above are after the charges passed in (tells the
+    /// server this engine build understands fixed_cost / exercise_stt).
+    #[serde(default)]
+    charges_applied: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -227,6 +231,7 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
         unlimited_profit,
         unlimited_loss,
         probability_of_profit: round4(pop.clamp(0.0, 1.0)),
+        charges_applied: config.fixed_cost.is_some() || config.exercise_stt.is_some(),
     };
 
     serde_json::to_value(result).map_err(|e| e.to_string())

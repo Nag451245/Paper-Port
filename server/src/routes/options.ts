@@ -182,6 +182,15 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
         exercise_stt: rates.sttOptionExercise,
       }) as any;
 
+      // An engine build older than the charges change ignores them: use the
+      // TypeScript figures (same maths) so nothing is ever shown before charges.
+      if (!result.charges_applied) {
+        result.payoff_diagram = analysis.curve.map(p => ({ price: p.spot, pnl: p.pnl }));
+        Object.assign(result, {
+          max_profit: analysis.maxProfit, max_loss: analysis.maxLoss, breakeven_points: analysis.breakevens,
+          probability_of_profit: analysis.pop, unlimited_profit: analysis.unlimitedProfit, unlimited_loss: analysis.unlimitedLoss,
+        });
+      }
       return {
         source: 'rust',
         payoffCurve: (result.payoff_diagram ?? []).map((p: any) => ({ spot: p.price, pnl: Math.round(p.pnl * 100) / 100 })),
