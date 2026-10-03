@@ -225,6 +225,43 @@ export const marketApi = {
 };
 
 // ─── Options Strategy ─────────────────────────────────────────────
+/** Statutory and broker charge rates in force on a day (fractions of turnover, brokerage in rupees). */
+export interface FnoRates {
+  sttOptionSell: number; sttOptionExercise: number; sttFutureSell: number;
+  exchangeOption: number; exchangeFuture: number; stampOptionBuy: number; stampFutureBuy: number;
+  sebi: number; gst: number; brokeragePerOrder: number;
+}
+
+export interface LabLeg {
+  type: 'CE' | 'PE'; action: 'BUY' | 'SELL'; lots: number;
+  strikeMode: 'atm' | 'premium'; offset: number; premium?: number;
+}
+export interface LabBacktestParams {
+  underlying: string; from: string; to: string; expiryKind: 'weekly' | 'monthly';
+  entryDaysBefore: number; entryTime: string; exitDaysBefore: number; exitTime: string; holdToExpiry: boolean;
+  legs: LabLeg[]; lotSize: number;
+  target?: { kind: 'pct' | 'rupees'; value: number }; stop?: { kind: 'pct' | 'rupees'; value: number };
+  slippagePct: number; brokeragePerOrder: number;
+}
+export interface LabJob { id: string; kind: 'backtest' | 'replay'; state: 'running' | 'done' | 'failed'; progress: { done: number; total: number; message: string }; result?: any; error?: string }
+/** [epoch seconds (bar start), open, high, low, close, volume] */
+export type LabBar = [number, number, number, number, number, number];
+export interface ReplayDay {
+  underlying: string; day: string; expiry: string; step: number; atm: number; spotSource: 'index' | 'parity';
+  spot: LabBar[]; chain: { strike: number; ce: LabBar[]; pe: LabBar[] }[]; daysToExpiry: number; rates: FnoRates;
+}
+
+export const optionsLabApi = {
+  coverage: (underlying: string) =>
+    api.get<{ underlyings: string[]; expiries: string[]; savedExpiries: { expiry: string; contracts: number }[]; budget: { used: number; limit: number; day: string }; today: string; maxCycles: number }>('/options-lab/coverage', { params: { underlying } }),
+  startBacktest: (p: LabBacktestParams) => api.post<{ jobId: string }>('/options-lab/backtests', p),
+  startReplay: (underlying: string, day: string, each?: number) => api.post<{ jobId: string }>('/options-lab/replay', { underlying, day, each }),
+  job: (id: string) => api.get<LabJob>(`/options-lab/jobs/${id}`),
+  backtests: () => api.get<any[]>('/options-lab/backtests'),
+  backtest: (id: string) => api.get<any>(`/options-lab/backtests/${id}`),
+  deleteBacktest: (id: string) => api.delete(`/options-lab/backtests/${id}`),
+};
+
 export interface VolContext {
   symbol: string;
   atmIv: number | null;

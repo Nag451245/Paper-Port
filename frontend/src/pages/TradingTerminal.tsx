@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { portfolioApi, tradingApi, marketApi } from '@/services/api';
 import { createChart, ColorType, CandlestickSeries, type IChartApi, type ISeriesApi, type CandlestickData, type Time } from 'lightweight-charts';
+import CandleCountdown from '@/components/trading/CandleCountdown';
 import { TIMEFRAMES, timeframeSpec, isIntraday, aggregate, applyTick, type Timeframe, type ChartBar, type RawBar } from '@/lib/candles';
 import { useLivePrice } from '@/hooks/useLivePrice';
 import { useTradeUpdates } from '@/hooks/useTradeUpdates';
@@ -502,6 +503,7 @@ export default function TradingTerminal() {
                   {t.label}
                 </button>
               ))}
+              {timeframeSpec(timeframe).minutes && <CandleCountdown minutes={timeframeSpec(timeframe).minutes!} />}
               {chartLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-400 ml-1" />}
             </div>
             <button onClick={fetchAll} className="ml-auto md:ml-0 p-1.5 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors" title="Refresh data">

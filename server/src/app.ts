@@ -14,6 +14,7 @@ import { watchlistRoutes } from './routes/watchlist.js';
 import { aiRoutes } from './routes/ai.js';
 import { intelligenceRoutes } from './routes/intelligence.js';
 import { backtestRoutes } from './routes/backtest.js';
+import { optionsLabRoutes } from './routes/options-lab.js';
 import { botRoutes } from './routes/bots.js';
 import { notificationRoutes } from './routes/notifications.js';
 import { alertRoutes } from './routes/alerts.js';
@@ -340,6 +341,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(aiRoutes, { prefix: '/api/ai' });
   await app.register(intelligenceRoutes, { prefix: '/api/intelligence' });
   await app.register(backtestRoutes, { prefix: '/api/backtest' });
+  await app.register(optionsLabRoutes, { prefix: '/api/options-lab' });
   await app.register(botRoutes, { prefix: '/api/bots' });
   await app.register(notificationRoutes, { prefix: '/api/notifications' });
   await app.register(alertRoutes, { prefix: '/api/alerts' });

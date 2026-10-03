@@ -441,6 +441,13 @@ export function stopDaemon(): void {
   teardownDaemon();
 }
 
+/** Multi-leg options backtest on past option prices (engine/src/options_backtest.rs). */
+export async function engineOptionsBacktest(data: unknown): Promise<unknown> {
+  const res = await runEngine('options_backtest', data);
+  if (!res.success) throw new Error(res.error ?? 'Options backtest failed');
+  return res.data;
+}
+
 export async function engineBacktest(data: unknown): Promise<unknown> {
   const res = await runEngine('backtest', data);
   if (!res.success) throw new Error(res.error ?? 'Backtest failed');

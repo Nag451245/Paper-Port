@@ -204,6 +204,9 @@ export class OptionHistory {
     try { await this.spend(); } catch (err) { return { bars: have ? slice(have.bars) : [], fresh: false, error: (err as Error).message }; }
     const res = await this.market.breezeOptionHistory(U, expiry, strike, type, fetchFrom, fetchTo, '5minute');
     if (res.error) {
+      // A request that never reached ICICI (not connected, bridge down) does not count.
+      const b = this.budget();
+      writeAtomic(path.join(this.dir, 'budget.json'), JSON.stringify({ day: b.day, used: Math.max(0, b.used - 1) }));
       log.warn({ contract: `${U} ${expiry} ${strike}${type}`, error: res.error }, 'Option history not fetched');
       return { bars: have ? slice(have.bars) : [], fresh: false, error: res.error };
     }
@@ -269,6 +272,12 @@ export class OptionHistory {
       if (result && result >= from && result <= to) found.add(result);
     }
     return { expiries: [...found].sort(), unchecked, error };
+  }
+
+  /** The index's own 5-minute candles for one day (empty when no source has them). */
+  async indexBars(u: string, day: string): Promise<OptBar[]> {
+    const bars = await this.market.getHistory(u.toUpperCase(), '5minute', day, day).catch(() => [] as HistoricalBar[]);
+    return bars.map(toOptBar).filter((b) => barDay(b[0]) === day);
   }
 
   /**

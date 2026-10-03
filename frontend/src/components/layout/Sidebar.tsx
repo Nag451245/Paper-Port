@@ -25,8 +25,7 @@ import {
   LayoutGrid,
   X,
   TrendingUp,
-  UserCog,
-} from 'lucide-react';
+  UserCog, FlaskRound } from 'lucide-react';
 
 const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', color: 'from-amber-500 to-yellow-500' },
@@ -40,6 +39,7 @@ const navItems = [
   { to: '/portfolio', icon: Briefcase, label: 'Portfolio', color: 'from-indigo-500 to-purple-500' },
   { to: '/heatmap', icon: Flame, label: 'Heat Map', color: 'from-amber-500 to-orange-500' },
   { to: '/strategy-builder', icon: Layers, label: 'Strategy Builder', color: 'from-violet-500 to-purple-500' },
+  { to: '/options-lab', icon: FlaskRound, label: 'Options Lab', color: 'from-indigo-500 to-sky-500' },
   { to: '/option-chain', icon: Grid3X3, label: 'Option Chain', color: 'from-sky-500 to-blue-500' },
   { to: '/fno-analytics', icon: BarChart3, label: 'F&O Analytics', color: 'from-teal-500 to-cyan-500' },
   { to: '/learning', icon: GraduationCap, label: 'Learning AI', color: 'from-fuchsia-500 to-pink-500' },
