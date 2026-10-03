@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
+import { isStaleBuildError, reloadForNewBuild } from '@/lib/stale-build';
 import { AlertTriangle, RefreshCw, Home } from 'lucide-react';
 
 interface Props {
@@ -23,6 +24,8 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
+    // The site was updated while this tab was open: load the new version instead of showing an error.
+    if (isStaleBuildError(error) && reloadForNewBuild()) return;
     this.setState({ errorInfo });
     console.error('[ErrorBoundary]', error.message, errorInfo.componentStack);
   }

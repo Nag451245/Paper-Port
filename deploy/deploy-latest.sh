@@ -66,6 +66,13 @@ echo "== [6/8] Frontend"
 cd "$APP/frontend"
 npm ci
 npx vite build --outDir dist-new --emptyOutDir
+# A tab opened before this deploy still asks for the old build's page files
+# ("Failed to fetch dynamically imported module"). Keep them for a week; new
+# files are never overwritten (names carry a content hash).
+if [ -d dist/assets ]; then
+  cp -an dist/assets/. dist-new/assets/ 2>/dev/null || true
+  find dist-new/assets -type f -mtime +7 -delete
+fi
 rm -rf dist-old; if [ -d dist ]; then mv dist dist-old; fi; mv dist-new dist; rm -rf dist-old
 rm -rf node_modules
 

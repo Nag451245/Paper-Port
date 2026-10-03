@@ -434,6 +434,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     } catch (err) { app.log.warn(`[ExitPlans] ${(err as Error).message}`); }
   });
 
+  // FII/DII: save each trading day's figures (NSE publishes ~18:00–19:00 IST) for the trend chart.
+  orchestrator.scheduleAlways('45 13,15 * * 1-5', async () => {
+    try {
+      const { MarketDataService } = await import('./services/market-data.service.js');
+      await new MarketDataService().getFIIDII();
+    } catch (err) { app.log.warn(`[FII/DII] ${(err as Error).message}`); }
+  });
+
   // Telegram stock alerts — scored every 5 min; the service itself only sends 09:30–15:20 IST.
   orchestrator.scheduleMarketDay('*/5 3-10 * * 1-5', async () => {
     try { await getStockAlerts(getPrisma()).run(); } catch (err) { app.log.warn(`[StockAlerts] ${(err as Error).message}`); }

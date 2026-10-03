@@ -7,6 +7,7 @@ import { env } from '../config.js';
 import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
 import { istDateStr, istDaysAgo } from '../lib/ist.js';
+import { latestFiiDii } from '../lib/fii-dii.js';
 import { parseInstrumentSymbol, isDerivativeSymbol, type InstrumentSpec } from '../lib/instrument.js';
 import { getUpstox } from './upstox.service.js';
 import { getMarketMovers } from './market-movers.service.js';
@@ -1299,67 +1300,21 @@ export class MarketDataService {
     return { value: 0, change: 0, changePercent: 0 };
   }
 
+  /** FII/DII net flows (₹ crore) from NSE; the last saved day when NSE does not answer; zeros only when nothing is known. */
   async getFIIDII() {
     const cacheKey = 'market:fii-dii';
-
     if (this.cache) {
       const cached = await this.cache.get<any>(cacheKey);
       if (cached) return cached;
     }
-
-    const empty = {
-      date: istDateStr(),
-      fiiBuy: 0, fiiSell: 0, fiiNet: 0,
-      diiBuy: 0, diiSell: 0, diiNet: 0,
-    };
-
-    // Primary: NSE FII/DII activity
-    try {
-      const res = await this.nseFetch('https://www.nseindia.com/api/fiidiiActivity/WDM');
-      if (res.ok) {
-        const data = await res.json() as any;
-        const fii = (data ?? []).find((r: any) => (r.category ?? '').toLowerCase().includes('fii') || (r.category ?? '').toLowerCase().includes('fpi'));
-        const dii = (data ?? []).find((r: any) => (r.category ?? '').toLowerCase().includes('dii'));
-        if (fii || dii) {
-          const result = {
-            date: fii?.date ?? dii?.date ?? empty.date,
-            fiiBuy: Number(fii?.buyValue ?? 0),
-            fiiSell: Number(fii?.sellValue ?? 0),
-            fiiNet: Number(fii?.netValue ?? 0),
-            diiBuy: Number(dii?.buyValue ?? 0),
-            diiSell: Number(dii?.sellValue ?? 0),
-            diiNet: Number(dii?.netValue ?? 0),
-          };
-          if (this.cache) await this.cache.set(cacheKey, result, 600);
-          return result;
-        }
-      }
-    } catch { /* NSE failed */ }
-
-    // Fallback: MoneyControl / NSDL
-    try {
-      const res = await this.nseFetch('https://www.nseindia.com/api/fiidiiActivity');
-      if (res.ok) {
-        const data = await res.json() as any;
-        if (data?.fpiDayData || data?.diiDayData) {
-          const fpi = data.fpiDayData ?? {};
-          const dii = data.diiDayData ?? {};
-          const result = {
-            date: fpi.date ?? dii.date ?? empty.date,
-            fiiBuy: Number(fpi.buyValue ?? 0),
-            fiiSell: Number(fpi.sellValue ?? 0),
-            fiiNet: Number(fpi.netValue ?? 0),
-            diiBuy: Number(dii.buyValue ?? 0),
-            diiSell: Number(dii.sellValue ?? 0),
-            diiNet: Number(dii.netValue ?? 0),
-          };
-          if (this.cache) await this.cache.set(cacheKey, result, 600);
-          return result;
-        }
-      }
-    } catch { /* fallback failed */ }
-
-    return empty;
+    const day = await latestFiiDii((url) => this.nseJson(url));
+    if (!day) {
+      return { date: istDateStr(), fiiBuy: 0, fiiSell: 0, fiiNet: 0, diiBuy: 0, diiSell: 0, diiNet: 0, unavailable: true };
+    }
+    // Callers do arithmetic on these: a source without DII (NSDL) reads as 0 here, flagged.
+    const result = { ...day, diiBuy: day.diiBuy ?? 0, diiSell: day.diiSell ?? 0, diiNet: day.diiNet ?? 0, diiMissing: day.diiNet == null };
+    if (this.cache) await this.cache.set(cacheKey, result, day.stale ? 60 : 600);
+    return result;
   }
 
   async getAvailableExpiries(symbol: string): Promise<{ expiries: string[]; sessionError?: boolean; message?: string }> {

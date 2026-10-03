@@ -1,4 +1,11 @@
 import { vi } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
+// Saved market data (candle lake, option prices, FII/DII history) goes to a
+// throwaway folder, never the developer's real one.
+if (!process.env.MARKET_DATA_DIR) process.env.MARKET_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-test-data-'));
 
 process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
 process.env.REDIS_URL = '';

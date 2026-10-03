@@ -141,7 +141,10 @@ function FIIDIITab() {
   const diiNet = num(data?.diiNet ?? data?.dii_net);
   const niftyPrice = num(data?.niftyPrice);
   const niftyChangePct = num(data?.niftyChangePct);
-  const hasData = fiiNet !== 0 || diiNet !== 0;
+  // No figures = no cards: zeros would read as "net buyers".
+  const hasData = data?.fiiNet != null && !data?.unavailable;
+  const diiKnown = data?.diiNet != null;
+  const source = data?.sourceLabel as string | undefined;
   const message = data?.message;
   const date = data?.date ?? '';
 
@@ -157,23 +160,29 @@ function FIIDIITab() {
         <div>
           <h2 className="text-base font-semibold text-slate-800">FII / DII Cash Market Activity</h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Foreign & Domestic Institutional Investors — Daily net flows (₹ Cr)
-            {date && <span className="ml-2 text-slate-500">· {new Date(date).toLocaleDateString('en-IN', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</span>}
+            Foreign & Domestic Institutional Investors — Daily net flows (₹ Cr){source && <span className="ml-1">· source: {source}</span>}
+            {date && <span className="ml-2 text-slate-500">· for {new Date(date).toLocaleDateString('en-IN', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</span>}
           </p>
         </div>
         <RefreshButton onClick={load} lastUpdated={lastUpdated} />
       </div>
 
-      {message && !hasData && (
+      {message && (
         <div className="flex items-center gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 text-xs">
           <AlertCircle className="w-4 h-4 flex-shrink-0" />
           <span>{message}</span>
         </div>
       )}
 
+      {hasData && <>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <FlowCard label="FII/FPI Net" value={fiiNet} />
-        <FlowCard label="DII Net" value={diiNet} />
+        {diiKnown ? <FlowCard label="DII Net" value={diiNet} /> : (
+          <div className="rounded-lg border border-slate-200 p-3">
+            <p className="text-[10px] text-slate-400 uppercase font-medium mb-1">DII Net</p>
+            <p className="text-sm text-slate-400">Not published by NSDL</p>
+          </div>
+        )}
         {niftyPrice > 0 && (
           <div className="rounded-lg border border-slate-200 p-3">
             <p className="text-[10px] text-slate-400 uppercase font-medium mb-1">NIFTY 50</p>
@@ -199,18 +208,19 @@ function FIIDIITab() {
         <div className={`rounded-lg border p-4 ${fiiNet >= 0 ? 'border-emerald-200 bg-emerald-50/30' : 'border-red-200 bg-red-50/30'}`}>
           <h3 className="text-xs font-semibold text-slate-500 uppercase mb-2">FII/FPI (Foreign Investors)</h3>
           <p className={`text-2xl font-bold font-mono ${fiiNet >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-            {fiiNet >= 0 ? '+' : ''}₹{Math.abs(fiiNet).toLocaleString('en-IN', { maximumFractionDigits: 0 })} Cr
+            {fiiNet >= 0 ? '+' : '-'}₹{Math.abs(fiiNet).toLocaleString('en-IN', { maximumFractionDigits: 0 })} Cr
           </p>
           <p className="text-xs text-slate-400 mt-1">{fiiNet >= 0 ? 'Net Buyers — Bullish signal' : 'Net Sellers — Bearish pressure'}</p>
         </div>
-        <div className={`rounded-lg border p-4 ${diiNet >= 0 ? 'border-emerald-200 bg-emerald-50/30' : 'border-red-200 bg-red-50/30'}`}>
+        {diiKnown && <div className={`rounded-lg border p-4 ${diiNet >= 0 ? 'border-emerald-200 bg-emerald-50/30' : 'border-red-200 bg-red-50/30'}`}>
           <h3 className="text-xs font-semibold text-slate-500 uppercase mb-2">DII (Domestic Investors)</h3>
           <p className={`text-2xl font-bold font-mono ${diiNet >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-            {diiNet >= 0 ? '+' : ''}₹{Math.abs(diiNet).toLocaleString('en-IN', { maximumFractionDigits: 0 })} Cr
+            {diiNet >= 0 ? '+' : '-'}₹{Math.abs(diiNet).toLocaleString('en-IN', { maximumFractionDigits: 0 })} Cr
           </p>
           <p className="text-xs text-slate-400 mt-1">{diiNet >= 0 ? 'Net Buyers — Supporting market' : 'Net Sellers — Reducing exposure'}</p>
-        </div>
+        </div>}
       </div>
+      </>}
 
       {trendData.length > 1 && (
         <div className="rounded-lg border border-slate-200 p-4">
@@ -666,7 +676,7 @@ function FlowCard({ label, value }: { label: string; value: number; positive?: b
       <div className="flex items-center gap-1.5">
         <Icon className={`w-3.5 h-3.5 ${color}`} />
         <p className={`text-lg font-bold font-mono ${color}`}>
-          {value >= 0 ? '+' : ''}₹{Math.abs(value).toLocaleString('en-IN', { maximumFractionDigits: 0 })} Cr
+          {value >= 0 ? '+' : '-'}₹{Math.abs(value).toLocaleString('en-IN', { maximumFractionDigits: 0 })} Cr
         </p>
       </div>
     </div>

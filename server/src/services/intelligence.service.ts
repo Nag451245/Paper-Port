@@ -8,6 +8,7 @@ import { activeUpstoxToken } from '../lib/upstox-session.js';
 import { getUpstox } from './upstox.service.js';
 import { getExpiryCalendar } from './expiry-calendar.service.js';
 import { cleanCredential } from '../lib/credential-text.js';
+import { latestFiiDii, readFiiDiiHistory } from '../lib/fii-dii.js';
 
 const CACHE_TTL = 120;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -142,25 +143,6 @@ async function yahooChartBatch(symbols: string[]): Promise<Map<string, { price: 
   return results;
 }
 
-async function niftyTraderFiiDii(): Promise<any> {
-  try {
-    const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), 10000);
-    const res = await fetch('https://webapi.niftytrader.in/webapi/Resource/fii-dii-activity-data', {
-      headers: { 'User-Agent': UA, 'Accept': 'application/json' },
-      signal: ac.signal,
-    });
-    clearTimeout(t);
-    if (!res.ok) return null;
-    const json = await res.json();
-    if (json?.result === 1 && json?.resultData?.fii_dii_data) {
-      return json.resultData.fii_dii_data;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
 
 export class IntelligenceService {
   private cache: CacheService | null;
@@ -184,76 +166,29 @@ export class IntelligenceService {
   // ── FII / DII (NiftyTrader API — primary) ──
 
   async getFIIDII() {
-    return this.cached('intel:fii-dii', async () => {
-      // Primary: NiftyTrader API (reliable, returns recent data)
-      try {
-        const rows = await niftyTraderFiiDii();
-        if (rows && rows.length > 0) {
-          const latest = rows[0];
-          return {
-            date: latest.created_at?.split('T')[0] ?? new Date().toISOString().split('T')[0],
-            fiiNet: latest.fii_net_value ?? 0,
-            diiNet: latest.dii_net_value ?? 0,
-            fiiBuy: latest.fii_buy_value ?? 0,
-            fiiSell: latest.fii_sell_value ?? 0,
-            diiBuy: latest.dii_buy_value ?? 0,
-            diiSell: latest.dii_sell_value ?? 0,
-            niftyPrice: latest.last_trade_price ?? 0,
-            niftyChange: latest.change_value ?? 0,
-            niftyChangePct: latest.change_per ?? 0,
-            source: 'niftytrader',
-          };
-        }
-      } catch { /* fall through */ }
-
-      // Fallback: NSE
-      try {
-        const data = await nseFetch('https://www.nseindia.com/api/fiidiiTradeReact');
-        if (data && Array.isArray(data)) {
-          const fii = data.find((d: any) => d.category === 'FII/FPI *');
-          const dii = data.find((d: any) => d.category === 'DII *');
-          if (fii || dii) {
-            return {
-              date: fii?.date || new Date().toISOString().split('T')[0],
-              fiiNet: parseFloat(fii?.netValue ?? '0') * 100,
-              diiNet: parseFloat(dii?.netValue ?? '0') * 100,
-              fiiBuy: parseFloat(fii?.buyValue ?? '0') * 100,
-              fiiSell: parseFloat(fii?.sellValue ?? '0') * 100,
-              diiBuy: parseFloat(dii?.buyValue ?? '0') * 100,
-              diiSell: parseFloat(dii?.sellValue ?? '0') * 100,
-              source: 'nse',
-            };
-          }
-        }
-      } catch { /* fall through */ }
-
+    // Only real figures are cached; a failed read is retried on the next request.
+    const key = 'intel:fii-dii';
+    const hit = this.cache ? await this.cache.get<any>(key) : null;
+    if (hit) return hit;
+    const day = await latestFiiDii(nseFetch);
+    if (!day) {
       return {
-        date: new Date().toISOString().split('T')[0],
-        fiiNet: 0, diiNet: 0,
-        fiiBuy: 0, fiiSell: 0,
-        diiBuy: 0, diiSell: 0,
-        message: 'FII/DII data temporarily unavailable.',
+        date: null, fiiNet: null, diiNet: null, fiiBuy: null, fiiSell: null, diiBuy: null, diiSell: null,
+        message: 'FII/DII figures are not available right now (NSE and NSDL did not answer). Try again in a few minutes.',
       };
-    });
+    }
+    const result = day.stale
+      ? { ...day, message: `No official source answered just now; these are the figures for ${day.date}, the last day saved.` }
+      : day.diiNet == null
+        ? { ...day, message: 'NSE did not answer, so these foreign-investor figures are from NSDL, which does not publish DII.' }
+        : day;
+    if (this.cache) await this.cache.set(key, result, day.stale ? 60 : CACHE_TTL * 5);
+    return result;
   }
 
   async getFIIDIITrend(days = 30) {
-    return this.cached(`intel:fii-dii-trend:${days}`, async () => {
-      // NiftyTrader returns ~30 days of historical FII/DII data
-      try {
-        const rows = await niftyTraderFiiDii();
-        if (rows && rows.length > 0) {
-          return rows.slice(0, days).reverse().map((r: any) => ({
-            date: r.created_at?.split('T')[0] ?? '',
-            fiiNet: r.fii_net_value ?? 0,
-            diiNet: r.dii_net_value ?? 0,
-            niftyPrice: r.last_trade_price ?? 0,
-            niftyChange: r.change_per ?? 0,
-          }));
-        }
-      } catch { /* fallback */ }
-      return [];
-    });
+    // Built from the daily figures saved by getFIIDII (and the evening job).
+    return readFiiDiiHistory().slice(-days).map((d) => ({ date: d.date, fiiNet: d.fiiNet, diiNet: d.diiNet }));
   }
 
   // ── Options ──

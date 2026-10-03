@@ -239,8 +239,12 @@ describe('MarketDataService', () => {
   describe('getFIIDII', () => {
     it('should return default values when no data available', async () => {
       (mockCache.get as any).mockResolvedValue(null);
+      // No official source answers (NSE, NSDL) and nothing was saved before.
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline'));
+      vi.spyOn(service, 'nseJson').mockResolvedValue(null);
 
       const result = await service.getFIIDII();
+      vi.restoreAllMocks();
 
       expect(result.fiiBuy).toBe(0);
       expect(result.date).toBeTruthy();
