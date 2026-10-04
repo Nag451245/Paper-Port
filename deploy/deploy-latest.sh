@@ -95,9 +95,21 @@ pm2 describe pm2-logrotate >/dev/null 2>&1 || pm2 install pm2-logrotate >/dev/nu
 pm2 set pm2-logrotate:max_size 50M >/dev/null 2>&1 || true
 pm2 set pm2-logrotate:retain 7 >/dev/null 2>&1 || true
 pm2 set pm2-logrotate:compress true >/dev/null 2>&1 || true
-# Stop copies of the four services that this PM2 is not running. They are left
-# behind when a PM2 daemon dies: they keep the ports and run old code, while
-# PM2's own copy fails to start and is restarted over and over (219 times once).
+# One manager per service. This VM once had the API started by BOTH systemd and
+# PM2: at boot the systemd copy took port 8000 first and kept running old code,
+# PM2's copy was restarted 222 times, and after a deploy the two swapped roles.
+#  - API: PM2 runs it (memory limits, logs), so a systemd unit for it is switched off.
+#  - Engine, bridge, ML service: if a systemd unit runs one, that unit keeps it
+#    and is restarted here to load the new code; otherwise PM2 runs it.
+#  - Anything else found running outside both is a leftover and is stopped.
+for unit_file in $(grep -ls 'server/dist/index.js' /etc/systemd/system/*.service 2>/dev/null || true); do
+  unit=$(basename "$unit_file")
+  case "$unit" in pm2-*) continue ;; esac
+  echo "  The API was also being started by systemd ($unit): switching that copy off, PM2 runs the API"
+  sudo systemctl disable --now "$unit" >/dev/null 2>&1 || echo "  (could not switch off $unit)"
+done
+unit_of() { awk -F/ '$NF ~ /[.]service$/ { print $NF; exit }' "/proc/$1/cgroup" 2>/dev/null; }
+SYSTEMD_RUNS=""
 PM2_PID=$(cat ~/.pm2/pm2.pid 2>/dev/null || true)
 under_pm2() {                   # is this process PM2's, directly or through a parent?
   local p=$1 n=0
@@ -115,10 +127,26 @@ while read -r pid cmd; do
     *) continue ;;
   esac
   case "$(sudo readlink "/proc/$pid/cwd" 2>/dev/null || true)" in "$APP"/server*|"$APP"/engine*) ;; *) continue ;; esac
-  if [ -z "$PM2_PID" ] || ! under_pm2 "$pid"; then
-    echo "  Stopping a leftover copy outside PM2: pid $pid  $cmd"
-    STRAYS="$STRAYS $pid"
+  if [ -n "$PM2_PID" ] && under_pm2 "$pid"; then continue; fi
+  unit=$(unit_of "$pid")
+  case "$unit" in pm2-*) unit="" ;; esac
+  if [ -n "$unit" ]; then
+    case "$cmd" in
+      *dist/index.js*)
+        echo "  The API was also being started by systemd ($unit): switching that copy off, PM2 runs the API"
+        sudo systemctl disable --now "$unit" >/dev/null 2>&1 || echo "  (could not switch off $unit)" ;;
+      *)
+        case "$cmd" in *capital-guard-engine*) svc=rust-engine ;; *uvicorn*) svc=ml-service ;; *) svc=breeze-bridge ;; esac
+        case " $SYSTEMD_RUNS " in *" $svc "*) ;; *)
+          echo "  $svc is run by systemd ($unit): restarting it to load the new code"
+          sudo systemctl restart "$unit" || echo "  (could not restart $unit)"
+          SYSTEMD_RUNS="$SYSTEMD_RUNS $svc" ;;
+        esac ;;
+    esac
+    continue
   fi
+  echo "  Stopping a leftover copy outside PM2: pid $pid  $cmd"
+  STRAYS="$STRAYS $pid"
 done < <(ps -eo pid=,args=)
 if [ -n "$STRAYS" ]; then
   sudo kill $STRAYS 2>/dev/null || true
@@ -131,8 +159,9 @@ if ! pm2 restart all --update-env; then
   echo "  PM2 had nothing to restart: starting the services from ecosystem.config.cjs"
   pm2 start ecosystem.config.cjs
 fi
-# All four services belong to PM2, so they restart on a crash and after a reboot.
+# Every service has an owner, so it restarts on a crash and after a reboot.
 for svc in capital-guard-api rust-engine breeze-bridge ml-service; do
+  case " $SYSTEMD_RUNS " in *" $svc "*) pm2 delete "$svc" >/dev/null 2>&1 || true; continue ;; esac
   pm2 describe "$svc" >/dev/null 2>&1 && continue
   case "$svc" in
     breeze-bridge) [ -x server/breeze-bridge/venv/bin/python ] || { echo "  ($svc is not installed on this machine: skipped)"; continue; } ;;
