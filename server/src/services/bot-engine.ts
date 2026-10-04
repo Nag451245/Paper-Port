@@ -897,6 +897,7 @@ export class BotEngine {
       const moverMap = new Map(uniqueSymbols.map(m => [m.symbol, m]));
 
       let signals: MarketScanSignal[] = [];
+      const noCandles: string[] = [];
 
       if (this.rustAvailable) {
         // --- Rust engine path ---
@@ -918,6 +919,7 @@ export class BotEngine {
             const bars = await this.marketData.getHistory(
               mover.symbol, '5m', fromDate, toDate, userId,
             );
+            if (completedBars(bars).length < 26) noCandles.push(mover.symbol);
             if (completedBars(bars).length >= 26) {
               candleData.push({
                 symbol: mover.symbol,
@@ -931,8 +933,10 @@ export class BotEngine {
                 full: completedBars(bars),
               });
             }
-          } catch { /* skip */ }
+          } catch { noCandles.push(mover.symbol); }
         }
+        // A mover with no candles cannot be analysed. Say so: it used to vanish.
+        if (noCandles.length) log.warn({ count: noCandles.length, symbols: noCandles.slice(0, 40) }, 'Market scan: movers skipped, no 5-minute candles');
 
         if (candleData.length > 0) {
           const scanInput = candleData.map(d => ({ symbol: d.symbol, candles: d.candles }));
@@ -1056,7 +1060,7 @@ export class BotEngine {
           botId: 'scanner',
           botName: 'Market Scanner',
           activityType: 'scan_complete',
-          summary: `Scanned ${uniqueSymbols.length} stocks in ${dur}s — ${signals.length} signal(s) found${topSigs ? `: ${topSigs}` : ''}`,
+          summary: `Scanned ${uniqueSymbols.length - noCandles.length} of ${uniqueSymbols.length} movers in ${dur}s — ${signals.length} signal(s) found${topSigs ? `: ${topSigs}` : ''}${noCandles.length ? ` · no candles for ${noCandles.slice(0, 8).join(', ')}${noCandles.length > 8 ? ` and ${noCandles.length - 8} more` : ''}` : ''}`,
           details: { scannedCount: uniqueSymbols.length, signalCount: signals.length, durationSec: dur, topSignals: topSigs },
         });
       }

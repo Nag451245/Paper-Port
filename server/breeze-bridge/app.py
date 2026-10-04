@@ -182,6 +182,31 @@ def _build_symbol_map():
         print(f"[Breeze Bridge] Unmapped tickers: {', '.join(unmapped[:30])}")
 
 
+_isec_code_cache = {}   # NSE ticker -> ICICI code, or None when ICICI does not list it
+
+
+def _lookup_isec_code(sym):
+    """ICICI's own code for an NSE ticker, from ICICI's security master.
+
+    ICICI names stocks with its own short codes (TATASTEEL is TATSTE). Only the
+    F&O names were mapped by hand, so every other stock was sent under its NSE
+    ticker and came back with no candles and no quote.
+    """
+    if sym in _isec_code_cache:
+        return _isec_code_cache[sym]
+    code = None
+    try:
+        if breeze_instance:
+            info = breeze_instance.get_names(exchange_code="NSE", stock_code=sym)
+            if isinstance(info, dict) and str(info.get("exchange_stock_code", "")).strip().upper() == sym:
+                code = str(info.get("isec_stock_code") or "").strip().upper() or None
+    except Exception as e:
+        print(f"[Breeze Bridge] ICICI code lookup failed for {sym}: {e}")
+        return None            # not remembered: the next request tries again
+    _isec_code_cache[sym] = code
+    return code
+
+
 def _resolve_stock_code(symbol):
     """Translate standard NSE ticker to ICICI Breeze stock_code for NFO."""
     sym = symbol.upper()
@@ -189,6 +214,9 @@ def _resolve_stock_code(symbol):
         return _HARDCODED_BREEZE_CODES[sym]
     if sym in _dynamic_nfo_codes:
         return sym
+    code = _lookup_isec_code(sym)
+    if code:
+        return code
     print(f"[Breeze Bridge] WARNING: No Breeze code mapping for '{sym}', using as-is")
     return sym
 
@@ -204,7 +232,7 @@ def _resolve_cash_code(symbol):
         nfo_code = _HARDCODED_BREEZE_CODES[sym]
         if nfo_code in _nse_cash_codes:
             return nfo_code
-    return sym
+    return _lookup_isec_code(sym) or sym
 
 
 def _cache_get(key):

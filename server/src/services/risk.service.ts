@@ -517,8 +517,8 @@ export class RiskService {
       //
       // 'COM' is deliberately absent: MarginCalculator has no commodity rate,
       // and inventing one would be picking a risk number. Commodity and futures
-      // positions are blocked upstream by lib/margin-guard.ts until a real
-      // SPAN + exposure model exists, so nothing reaches here mis-margined.
+      // positions are margined on the order path by lib/margin.ts (an estimate of
+      // SPAN + exposure), not here.
       let contractSegment: 'EQ' | 'FO' | 'CD' = 'EQ';
       let contractExchange = 'NSE';
       try {

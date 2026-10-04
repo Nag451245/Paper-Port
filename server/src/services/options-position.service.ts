@@ -346,8 +346,8 @@ export class OptionsPositionService {
       totalPnl += legPnl;
 
       // Short-option margin approximation, retained only so the figure is not
-      // blank. It is NOT SPAN: lib/margin-guard.ts blocks opening short options
-      // precisely because this system cannot compute their margin.
+      // blank. It is NOT SPAN; orders are margined by lib/margin.ts.
+      // This figure is display only.
       let marginReq = 0;
       if (pos.side === 'SHORT') {
         const otmAmount = resolved.optionType === 'CE'

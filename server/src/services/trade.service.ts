@@ -87,7 +87,6 @@ import {
   expiryToDate,
   type InstrumentSpec,
 } from '../lib/instrument.js';
-import { checkMarginSupported } from '../lib/margin-guard.js';
 import { FailureRegistryService } from './failure-registry.service.js';
 
 interface ExecutionSimulation {
@@ -450,38 +449,9 @@ export class TradeService {
       );
     }
 
-    // ── Margin guard ───────────────────────────────────────────────────────
-    // Checked before any broker interaction, order row, or capital reservation.
-    // This system cannot yet compute SPAN + exposure, and the flat-percentage
-    // fallback understates short-option margin by roughly sixty times, so a
-    // paper equity curve built on it would be fiction. See lib/margin-guard.ts.
+    // Sold options and futures are margined by lib/margin.ts (see planMargin):
+    // an order the cash cannot cover is refused there, like any other.
     const contract = this.contractFields({ ...input, exchange });
-
-    // How much of this contract is held LONG, so the guard can tell a closing
-    // SELL from a new short. Without this, buying a call — which IS allowed —
-    // would leave no way to sell it again through the normal order path.
-    let heldLongQty = 0;
-    if (input.side === 'SELL') {
-      const existingLongForGuard = await this.prisma.position.findFirst({
-        where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'LONG', status: 'OPEN' },
-        select: { qty: true },
-      });
-      heldLongQty = existingLongForGuard?.qty ?? 0;
-    }
-
-    const marginVerdict = checkMarginSupported({
-      instrumentType: contract.instrumentType,
-      side: input.side,
-      symbol: input.symbol,
-      exchange,
-      qty: input.qty,
-      reducingQty: heldLongQty,
-    });
-    if (!marginVerdict.allowed) {
-      log.warn({ symbol: input.symbol, side: input.side, instrumentType: contract.instrumentType },
-        'Order blocked — margin not modelled for this instrument');
-      throw new TradeError(marginVerdict.reason!, 400);
-    }
 
     // ── Known-failure check ────────────────────────────────────────────────
     // Refuse an order whose shape has already failed in a way that cannot
