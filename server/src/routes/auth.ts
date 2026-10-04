@@ -13,7 +13,7 @@ const registerSchema = z.object({
   password: z.string().min(8, 'Password must be at least 8 characters'),
   fullName: z.string().min(1, 'Full name is required'),
   riskAppetite: z.enum(['CONSERVATIVE', 'MODERATE', 'AGGRESSIVE']).optional(),
-  virtualCapital: z.number().positive().optional(),
+  virtualCapital: z.number().positive().max(1_00_00_000).optional(),
 });
 
 const loginSchema = z.object({
@@ -24,7 +24,7 @@ const loginSchema = z.object({
 const updateProfileSchema = z.object({
   fullName: z.string().min(1).optional(),
   riskAppetite: z.enum(['CONSERVATIVE', 'MODERATE', 'AGGRESSIVE']).optional(),
-  virtualCapital: z.number().positive().optional(),
+  virtualCapital: z.number().positive().max(1_00_00_000).optional(),
 });
 
 // The ICICI login ID, password and TOTP secret are deliberately NOT accepted

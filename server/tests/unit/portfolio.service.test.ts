@@ -164,6 +164,35 @@ describe('PortfolioService', () => {
     });
   });
 
+  describe('capital and open positions', () => {
+    it('reports capital in use and free, and splits open positions into profit and loss after closing charges', async () => {
+      mockPrisma.portfolio.findUnique.mockResolvedValue({
+        id: 'p1', userId: 'user1', initialCapital: 1_000_000, currentNav: 700_000, autoTopUp: true, autoToppedUp: 50_000,
+        positions: [
+          { symbol: 'AAA', exchange: 'NSE', side: 'LONG', qty: 100, avgEntryPrice: 1000 },   // ₹1,00,000 in, now 1100
+          { symbol: 'BBB', exchange: 'NSE', side: 'LONG', qty: 100, avgEntryPrice: 2000 },   // ₹2,00,000 in, now 1900
+          { symbol: 'CCC', exchange: 'NSE', side: 'LONG', qty: 10, avgEntryPrice: 50 },      // no price
+        ],
+      });
+      mockPrisma.trade.findMany.mockResolvedValue([]);
+      const s = await service.getSummary('p1', 'user1', { AAA: 1100, BBB: 1900, CCC: 0 });
+
+      expect(s.capital).toBe(1_000_000);
+      expect(s.capitalUsed).toBe(300_500);
+      expect(s.capitalFree).toBe(700_000);
+      expect(s.openPositions.count).toBe(3);
+      expect(s.openPositions.inProfit.count).toBe(1);
+      expect(s.openPositions.inLoss.count).toBe(1);
+      expect(s.openPositions.unpriced).toBe(1);
+      // +₹10,000 and -₹10,000 before charges; each is a little lower after the cost of selling.
+      expect(s.openPositions.inProfit.amount).toBeLessThan(10_000);
+      expect(s.openPositions.inProfit.amount).toBeGreaterThan(9_700);
+      expect(s.openPositions.inLoss.amount).toBeLessThan(-10_000);
+      expect(s.openPositions.net).toBeCloseTo(-s.openPositions.exitCharges, 1);
+      expect(s.autoTopUp).toEqual({ enabled: true, added: 50_000, limit: 50_00_000, manualLimit: 1_00_00_000 });
+    });
+  });
+
   describe('getRiskMetrics', () => {
     it('should return zero metrics when no trades', async () => {
       mockPrisma.portfolio.findUnique.mockResolvedValue({
@@ -224,8 +253,16 @@ describe('PortfolioService', () => {
       // newNav = 2000000 + 0 = 2000000
       expect(mockPrisma.portfolio.update).toHaveBeenCalledWith({
         where: { id: 'p1' },
-        data: { initialCapital: 2000000, currentNav: 2000000 },
+        data: { initialCapital: 2000000, currentNav: 2000000, autoToppedUp: 0 },
       });
+    });
+
+    it('refuses more than ₹1 crore, and can switch the automatic top-up off without touching the capital', async () => {
+      mockPrisma.portfolio.findUnique.mockResolvedValue({ id: 'p1', userId: 'user1', initialCapital: 1000000, currentNav: 1000000, positions: [] });
+      await expect(service.updateCapital('p1', 'user1', 1_00_00_001)).rejects.toThrow(/at most/);
+      mockPrisma.portfolio.update.mockResolvedValue({ id: 'p1' });
+      await service.updateCapital('p1', 'user1', undefined, false);
+      expect(mockPrisma.portfolio.update).toHaveBeenLastCalledWith({ where: { id: 'p1' }, data: { autoTopUp: false } });
     });
   });
 });

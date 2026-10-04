@@ -107,6 +107,10 @@ model Portfolio {
   initialCapital Decimal  @default(1000000) @map("initial_capital")
   currentNav     Decimal  @default(1000000) @map("current_nav")
   isDefault      Boolean  @default(false) @map("is_default")
+  /// Add capital automatically (up to ₹50 lakh in total) when the user's own order needs it
+  autoTopUp      Boolean  @default(true) @map("auto_top_up")
+  /// Rupees added automatically so far (already included in initialCapital)
+  autoToppedUp   Decimal  @default(0) @map("auto_topped_up")
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 

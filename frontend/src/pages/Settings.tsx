@@ -191,6 +191,11 @@ export default function Settings() {
         setSaving(false);
         return;
       }
+      if (cap > 1_00_00_000) {
+        setSaveError('Capital can be at most ₹1 crore (₹1,00,00,000).');
+        setSaving(false);
+        return;
+      }
 
       if (!portfolioId) {
         setSaveError('No portfolio found. Please reload the page.');
@@ -489,7 +494,9 @@ export default function Settings() {
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
               />
               <p className="text-xs text-slate-400 mt-1">
-                Current: ₹{Number(virtualCapital || 0).toLocaleString('en-IN')}
+                Current: ₹{Number(virtualCapital || 0).toLocaleString('en-IN')}. You can set up to ₹1 crore here.
+                When an order you place needs more than you have, capital is added automatically up to ₹50 lakh
+                (switch this off on the Dashboard: Portfolio card, Capital tab).
               </p>
             </div>
           </section>

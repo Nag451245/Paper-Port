@@ -47,6 +47,21 @@ export interface PortfolioSummary {
   currentValue: number;
   availableMargin: number;
   usedMargin: number;
+  /** Capital and how much of it is in use */
+  capital: number;
+  capitalUsed: number;
+  capitalFree: number;
+  capitalUsedPct: number;
+  /** Open positions split by profit and loss, after the cost of closing them now */
+  openPositions?: {
+    count: number;
+    inProfit: { count: number; amount: number };
+    inLoss: { count: number; amount: number };
+    unpriced: number;
+    net: number;
+    exitCharges: number;
+  };
+  autoTopUp?: { enabled: boolean; added: number; limit: number; manualLimit: number };
 }
 
 export interface RiskMetrics {

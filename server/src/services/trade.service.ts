@@ -67,6 +67,9 @@ export interface PlaceOrderInput {
 }
 
 import { calculateCosts, resolveInstrumentKind, type CostBreakdown } from '../lib/costs.js';
+import { autoTopUpAmount, AUTO_TOPUP_LIMIT, MANUAL_CAPITAL_LIMIT } from '../lib/capital.js';
+
+const CAPITAL_HINT = `Raise the capital in Settings (up to ₹${MANUAL_CAPITAL_LIMIT.toLocaleString('en-IN')}).`;
 import {
   parseInstrumentSymbol,
   segmentForExchange,
@@ -510,7 +513,7 @@ export class TradeService {
     }
 
     // STRICT CAPITAL ENFORCEMENT: Never exceed declared initial capital
-    const declaredCapital = Number(portfolio.initialCapital);
+    let declaredCapital = Number(portfolio.initialCapital);
     const currentNav = Number(portfolio.currentNav);
     const totalInvested = await this.getTotalInvestedValue(input.portfolioId);
 
@@ -795,7 +798,7 @@ export class TradeService {
     // Capital checks must use the quantity we will actually be charged for
     // (effectiveQty), not the requested qty — see handleFill below.
     const totalValue = fillPrice * effectiveQty + costs.totalCost;
-    const availableCash = Number(portfolio.currentNav);
+    let availableCash = Number(portfolio.currentNav);
 
     // STRICT: Total invested + new order must never exceed declared capital
     if (input.side === 'BUY') {
@@ -803,9 +806,10 @@ export class TradeService {
         where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'SHORT', status: 'OPEN' },
       });
       if (!existingShort) {
+        ({ availableCash, declaredCapital } = await this.autoTopUp(portfolio, input, totalValue, availableCash, declaredCapital, totalInvested));
         if (totalValue > availableCash) {
           throw new TradeError(
-            `Insufficient capital. Need ₹${totalValue.toFixed(0)} but only ₹${availableCash.toFixed(0)} available.`,
+            `Insufficient capital. Need ₹${totalValue.toFixed(0)} but only ₹${availableCash.toFixed(0)} available. ${CAPITAL_HINT}`,
             400,
           );
         }
@@ -823,9 +827,10 @@ export class TradeService {
       });
       if (!existingLong) {
         const marginRequired = this.shortMarginRequired(fillPrice, effectiveQty, exchange) + costs.totalCost;
+        ({ availableCash, declaredCapital } = await this.autoTopUp(portfolio, input, marginRequired, availableCash, declaredCapital, totalInvested));
         if (marginRequired > availableCash) {
           throw new TradeError(
-            `Insufficient margin for short. Need ₹${marginRequired.toFixed(0)} but only ₹${availableCash.toFixed(0)} available.`,
+            `Insufficient margin for short. Need ₹${marginRequired.toFixed(0)} but only ₹${availableCash.toFixed(0)} available. ${CAPITAL_HINT}`,
             400,
           );
         }
@@ -1024,6 +1029,38 @@ export class TradeService {
       lotSize: position.lotSize ?? null,
       product: position.product ?? null,
     };
+  }
+
+  /**
+   * Add capital when an order the user placed themselves needs more than the
+   * portfolio has, if the portfolio allows it (see lib/capital.ts: ₹50,000
+   * steps, never beyond ₹50 lakh in total). Bots and the AI agent never
+   * trigger it: how much money they may use is the user's decision.
+   */
+  private async autoTopUp(
+    portfolio: { id: string; userId: string; autoTopUp?: boolean | null },
+    input: { strategyTag?: string; symbol: string },
+    need: number, cash: number, capital: number, invested: number,
+  ): Promise<{ availableCash: number; declaredCapital: number }> {
+    const same = { availableCash: cash, declaredCapital: capital };
+    const shortfall = Math.max(need - cash, invested + need - capital);
+    const byUser = !input.strategyTag || /^(STRAT:|STRATEGY$|MANUAL)/.test(input.strategyTag);
+    if (shortfall <= 0 || !byUser || portfolio.autoTopUp === false) return same;
+    const amount = autoTopUpAmount(capital, shortfall);
+    if (amount <= 0) return same;
+    await this.prisma.portfolio.update({
+      where: { id: portfolio.id },
+      data: { initialCapital: { increment: amount }, currentNav: { increment: amount }, autoToppedUp: { increment: amount } },
+    });
+    log.info({ portfolioId: portfolio.id, amount, capital: capital + amount, symbol: input.symbol }, 'Capital topped up automatically for an order');
+    await this.prisma.notification.create({
+      data: {
+        userId: portfolio.userId, type: 'info', title: 'Capital added automatically',
+        message: `₹${amount.toLocaleString('en-IN')} was added so your ${input.symbol} order could go through. ` +
+          `Capital is now ₹${(capital + amount).toLocaleString('en-IN')} (automatic limit ₹${AUTO_TOPUP_LIMIT.toLocaleString('en-IN')}). Profit and loss are unchanged.`,
+      },
+    }).catch(() => { /* the notice is a courtesy; the order must not fail on it */ });
+    return { availableCash: cash + amount, declaredCapital: capital + amount };
   }
 
   private shortMarginRequired(price: number, qty: number, exchange: string): number {

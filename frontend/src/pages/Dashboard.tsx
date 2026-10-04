@@ -18,9 +18,11 @@ import { tradingApi } from '@/services/api';
 import { formatINR } from '@/lib/utils';
 import { liveSocket } from '@/services/websocket';
 import { StrategyBadge } from '@/components/trading/StatusBadge';
+import CapitalPanel from '@/components/dashboard/CapitalPanel';
 
 export default function Dashboard() {
-  const { portfolios, summary, isLoading: portfolioLoading, fetchPortfolios } = usePortfolioStore();
+  const { portfolios, summary, activePortfolio, isLoading: portfolioLoading, fetchPortfolios, selectPortfolio } = usePortfolioStore();
+  const [portfolioTab, setPortfolioTab] = useState<'summary' | 'capital'>('summary');
   const { status, briefing, fetchStatus, fetchBriefing } = useAIAgentStore();
   const { vix, indices, watchlists, fetchWatchlists, fetchVIX, fetchIndices } = useMarketDataStore();
   const [todayTrades, setTodayTrades] = useState<any[]>([]);
@@ -138,8 +140,18 @@ export default function Dashboard() {
         <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm card-hover p-5 animate-slide-up" style={{ animationDelay: '0ms' }}>
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Portfolio Summary</h2>
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500 to-yellow-500 flex items-center justify-center">
-              <TrendingUp className="w-4 h-4 text-white" />
+            <div className="flex items-center gap-2">
+              <div className="flex rounded-lg bg-slate-100 p-0.5 text-[11px]">
+                {(['summary', 'capital'] as const).map((t) => (
+                  <button key={t} onClick={() => setPortfolioTab(t)}
+                    className={`px-2.5 py-1 rounded-md capitalize ${portfolioTab === t ? 'bg-white shadow-sm font-semibold text-slate-800' : 'text-slate-500'}`}>
+                    {t}
+                  </button>
+                ))}
+              </div>
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500 to-yellow-500 flex items-center justify-center">
+                <TrendingUp className="w-4 h-4 text-white" />
+              </div>
             </div>
           </div>
           {/* Spinner only before the first load: background refreshes (every order or
@@ -154,6 +166,9 @@ export default function Dashboard() {
               <p className="text-sm text-slate-500">No portfolios yet.</p>
               <p className="text-xs text-slate-400 mt-1">Create a portfolio to start tracking your investments.</p>
             </div>
+          ) : portfolioTab === 'capital' && summary ? (
+            <CapitalPanel summary={summary} portfolioId={activePortfolio?.id ?? null}
+              onChanged={() => { if (activePortfolio) selectPortfolio(activePortfolio.id, true); }} />
           ) : (
             <div className="space-y-3">
               <div>
@@ -180,6 +195,17 @@ export default function Dashboard() {
                   </p>
                 </div>
               </div>
+              {summary?.capital != null && (
+                <button onClick={() => setPortfolioTab('capital')} className="w-full text-left bg-slate-50 hover:bg-slate-100 rounded-xl p-2.5 transition">
+                  <div className="flex justify-between text-xs text-slate-500">
+                    <span>Capital in use {formatINR(summary.capitalUsed)}</span>
+                    <span>free {formatINR(summary.capitalFree)}</span>
+                  </div>
+                  <div className="h-1.5 rounded-full bg-slate-200 overflow-hidden mt-1.5">
+                    <div className="h-full bg-teal-500" style={{ width: `${Math.min(100, Math.max(0, summary.capitalUsedPct))}%` }} />
+                  </div>
+                </button>
+              )}
             </div>
           )}
         </div>

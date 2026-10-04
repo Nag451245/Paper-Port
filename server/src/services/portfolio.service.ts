@@ -2,6 +2,9 @@ import { PrismaClient, type Prisma } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
 import { istDateStr, istMidnight } from '../lib/ist.js';
 import { calculateCosts, resolveInstrumentKind } from '../lib/costs.js';
+import { AUTO_TOPUP_LIMIT, MANUAL_CAPITAL_LIMIT } from '../lib/capital.js';
+
+const r2 = (n: number) => Math.round(n * 100) / 100;
 
 export interface PortfolioSummary {
   totalNav: number;
@@ -14,6 +17,22 @@ export interface PortfolioSummary {
   currentValue: number;
   availableMargin: number;
   usedMargin: number;
+  /** Capital and how much of it is in use. */
+  capital: number;
+  capitalUsed: number;
+  capitalFree: number;
+  capitalUsedPct: number;
+  /** Open positions split into those in profit and those in loss, after the cost of closing them now. */
+  openPositions: {
+    count: number;
+    inProfit: { count: number; amount: number };
+    inLoss: { count: number; amount: number };
+    /** Positions with no price right now (left out of the split) */
+    unpriced: number;
+    net: number;
+    exitCharges: number;
+  };
+  autoTopUp: { enabled: boolean; added: number; limit: number; manualLimit: number };
 }
 
 export class PortfolioService {
@@ -109,6 +128,8 @@ export class PortfolioService {
 
     let investedValue = 0;
     let unrealizedPnl = 0;
+    const inProfit = { count: 0, amount: 0 }, inLoss = { count: 0, amount: 0 };
+    let unpriced = 0, exitCharges = 0;
 
     for (const pos of openPositions) {
       const entryPrice = Number(pos.avgEntryPrice);
@@ -121,9 +142,18 @@ export class PortfolioService {
 
       const ltp = ltpMap.get(pos.symbol) ?? 0;
       if (ltp > 0) {
-        unrealizedPnl += pos.side === 'SHORT'
-          ? (entryPrice - ltp) * pos.qty
-          : (ltp - entryPrice) * pos.qty;
+        const move = pos.side === 'SHORT' ? (entryPrice - ltp) * pos.qty : (ltp - entryPrice) * pos.qty;
+        unrealizedPnl += move;
+        // What the position is worth to the user now: its move less the charges to close it.
+        const exchange = pos.exchange ?? 'NSE';
+        const cost = calculateCosts(pos.qty, ltp, pos.side === 'SHORT' ? 'BUY' : 'SELL', exchange,
+          resolveInstrumentKind(exchange, pos.symbol)).totalCost;
+        exitCharges += cost;
+        const bucket = move - cost >= 0 ? inProfit : inLoss;
+        bucket.count += 1;
+        bucket.amount += move - cost;
+      } else {
+        unpriced += 1;
       }
     }
 
@@ -161,6 +191,24 @@ export class PortfolioService {
       currentValue: totalNav,
       availableMargin: availableCash,
       usedMargin: investedValue,
+      capital: initialCapital,
+      capitalUsed: r2(investedValue),
+      capitalFree: r2(availableCash),
+      capitalUsedPct: investedValue + availableCash > 0 ? r2((investedValue / (investedValue + Math.max(0, availableCash))) * 100) : 0,
+      openPositions: {
+        count: openPositions.length,
+        inProfit: { count: inProfit.count, amount: r2(inProfit.amount) },
+        inLoss: { count: inLoss.count, amount: r2(inLoss.amount) },
+        unpriced,
+        net: r2(inProfit.amount + inLoss.amount),
+        exitCharges: r2(exitCharges),
+      },
+      autoTopUp: {
+        enabled: (portfolio as any).autoTopUp !== false,
+        added: Number((portfolio as any).autoToppedUp ?? 0),
+        limit: AUTO_TOPUP_LIMIT,
+        manualLimit: MANUAL_CAPITAL_LIMIT,
+      },
     };
   }
 
@@ -345,8 +393,18 @@ export class PortfolioService {
       .map(([date, totalPnl]) => ({ date, totalPnl: Number(totalPnl.toFixed(2)) }));
   }
 
-  async updateCapital(portfolioId: string, userId: string, virtualCapital: number) {
+  /**
+   * Set the capital (at most ₹1 crore) and/or switch the automatic top-up on
+   * or off. Setting the capital by hand clears the "added automatically" tally.
+   */
+  async updateCapital(portfolioId: string, userId: string, virtualCapital?: number, autoTopUp?: boolean) {
     const portfolio = await this.getById(portfolioId, userId);
+    if (virtualCapital == null) {
+      return this.prisma.portfolio.update({ where: { id: portfolio.id }, data: { autoTopUp: autoTopUp ?? true } });
+    }
+    if (virtualCapital > MANUAL_CAPITAL_LIMIT) {
+      throw new PortfolioError(`Capital can be at most ₹${MANUAL_CAPITAL_LIMIT.toLocaleString('en-IN')}.`, 400);
+    }
 
     const oldCapital = Number(portfolio.initialCapital);
     const oldNav = Number(portfolio.currentNav);
@@ -358,6 +416,8 @@ export class PortfolioService {
       data: {
         initialCapital: virtualCapital,
         currentNav: newNav,
+        autoToppedUp: 0,
+        ...(autoTopUp != null ? { autoTopUp } : {}),
       },
     });
   }

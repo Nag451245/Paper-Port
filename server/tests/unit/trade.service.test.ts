@@ -129,6 +129,36 @@ describe('TradeService', () => {
       expect(mockPrisma.position.create).toHaveBeenCalled();
     });
 
+    it('adds capital automatically (₹50,000 steps) when an order placed by the user needs it, but never for a bot', async () => {
+      const short = { id: 'p1', userId: 'user1', currentNav: 10_000, initialCapital: 1_000_000, autoTopUp: true };
+      mockPrisma.portfolio.findUnique.mockResolvedValue(short);
+      mockPrisma.portfolio.update.mockResolvedValue({});
+      (mockPrisma as any).notification = { create: vi.fn().mockResolvedValue({}) };
+      mockPrisma.order.create.mockResolvedValue({ id: 'order-9', symbol: 'RELIANCE', side: 'BUY', orderType: 'MARKET', qty: 10, status: 'PENDING' });
+      mockPrisma.order.findUnique
+        .mockResolvedValueOnce({ id: 'order-9', symbol: 'RELIANCE', status: 'PENDING', qty: 10, filledQty: 0 })
+        .mockResolvedValueOnce({ id: 'order-9', symbol: 'RELIANCE', status: 'SUBMITTED', qty: 10, filledQty: 0, avgFillPrice: null })
+        .mockResolvedValueOnce({ id: 'order-9', symbol: 'RELIANCE', status: 'SUBMITTED', qty: 10, filledQty: 0 })
+        .mockResolvedValue({ id: 'order-9', symbol: 'RELIANCE', side: 'BUY', orderType: 'MARKET', qty: 10, status: 'FILLED' });
+      mockPrisma.position.findFirst.mockResolvedValue(null);
+      mockPrisma.position.create.mockResolvedValue({ id: 'pos-9', symbol: 'RELIANCE', qty: 10, avgEntryPrice: 2500 });
+      mockPrisma.order.update.mockResolvedValue({});
+      const order = { portfolioId: 'p1', symbol: 'RELIANCE', side: 'BUY' as const, orderType: 'MARKET' as const, qty: 10, price: 2500, instrumentToken: 't' };
+
+      // ~₹25,000 needed, ₹10,000 in cash: ₹50,000 is added to capital and cash alike.
+      await service.placeOrder('user1', order);
+      expect(mockPrisma.portfolio.update).toHaveBeenCalledWith({
+        where: { id: 'p1' },
+        data: { initialCapital: { increment: 50_000 }, currentNav: { increment: 50_000 }, autoToppedUp: { increment: 50_000 } },
+      });
+
+      mockPrisma.portfolio.update.mockClear();
+      await expect(service.placeOrder('user1', { ...order, strategyTag: 'BOT:momentum' })).rejects.toThrow(/Insufficient capital/);
+      mockPrisma.portfolio.findUnique.mockResolvedValue({ ...short, autoTopUp: false });
+      await expect(service.placeOrder('user1', order)).rejects.toThrow(/Insufficient capital.*Raise the capital/);
+      expect(mockPrisma.portfolio.update).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ autoToppedUp: expect.anything() }) }));
+    });
+
     it('should throw 404 for non-existent portfolio', async () => {
       mockPrisma.portfolio.findUnique.mockResolvedValue(null);
 

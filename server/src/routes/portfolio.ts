@@ -5,14 +5,16 @@ import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
 import { MetricsService } from '../services/metrics.service.js';
 import { MarketDataService } from '../services/market-data.service.js';
+import { MANUAL_CAPITAL_LIMIT } from '../lib/capital.js';
 
 const createSchema = z.object({
   name: z.string().min(1),
-  initial_capital: z.number().positive().optional().default(1000000),
+  initial_capital: z.number().positive().max(MANUAL_CAPITAL_LIMIT, 'Capital can be at most ₹1 crore').optional().default(1000000),
 });
 
 const updateCapitalSchema = z.object({
-  virtual_capital: z.number().positive(),
+  virtual_capital: z.number().positive().max(MANUAL_CAPITAL_LIMIT, 'Capital can be at most ₹1 crore').optional(),
+  auto_top_up: z.boolean().optional(),
 });
 
 export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
@@ -226,7 +228,10 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
     try {
       const { portfolioId } = request.params as { portfolioId: string };
       const userId = getUserId(request);
-      const portfolio = await service.updateCapital(portfolioId, userId, parsed.data.virtual_capital);
+      if (parsed.data.virtual_capital == null && parsed.data.auto_top_up == null) {
+        return reply.code(400).send({ error: 'Nothing to change' });
+      }
+      const portfolio = await service.updateCapital(portfolioId, userId, parsed.data.virtual_capital, parsed.data.auto_top_up);
       return reply.send(portfolio);
     } catch (err) {
       if (err instanceof PortfolioError) return reply.code(err.statusCode).send({ error: err.message });

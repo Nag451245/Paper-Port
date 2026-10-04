@@ -35,6 +35,12 @@ function parseSummary(raw: any, fallbackNav: number): PortfolioSummary {
     currentValue: Number(raw.currentValue ?? raw.totalNav ?? fallbackNav),
     availableMargin: Number(raw.availableMargin ?? raw.available_margin ?? fallbackNav),
     usedMargin: Number(raw.usedMargin ?? raw.used_margin ?? 0),
+    capital: Number(raw.capital ?? 0),
+    capitalUsed: Number(raw.capitalUsed ?? raw.usedMargin ?? 0),
+    capitalFree: Number(raw.capitalFree ?? raw.availableMargin ?? fallbackNav),
+    capitalUsedPct: Number(raw.capitalUsedPct ?? 0),
+    openPositions: raw.openPositions,
+    autoTopUp: raw.autoTopUp,
   };
 }
 

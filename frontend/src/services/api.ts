@@ -109,6 +109,10 @@ export const portfolioApi = {
 
   updateCapital: (id: string, virtualCapital: number) =>
     api.put(`/portfolio/${id}/capital`, { virtual_capital: virtualCapital }),
+
+  /** Add capital automatically (up to 50 lakh) when an order the user places needs it. */
+  setAutoTopUp: (id: string, enabled: boolean) =>
+    api.put(`/portfolio/${id}/capital`, { auto_top_up: enabled }),
 };
 
 // ─── Orders & Trades ─────────────────────────────────────────────
