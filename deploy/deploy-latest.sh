@@ -95,13 +95,53 @@ pm2 describe pm2-logrotate >/dev/null 2>&1 || pm2 install pm2-logrotate >/dev/nu
 pm2 set pm2-logrotate:max_size 50M >/dev/null 2>&1 || true
 pm2 set pm2-logrotate:retain 7 >/dev/null 2>&1 || true
 pm2 set pm2-logrotate:compress true >/dev/null 2>&1 || true
+# Stop copies of the four services that this PM2 is not running. They are left
+# behind when a PM2 daemon dies: they keep the ports and run old code, while
+# PM2's own copy fails to start and is restarted over and over (219 times once).
+PM2_PID=$(cat ~/.pm2/pm2.pid 2>/dev/null || true)
+under_pm2() {                   # is this process PM2's, directly or through a parent?
+  local p=$1 n=0
+  while [ -n "$p" ] && [ "$p" -gt 1 ] && [ $n -lt 8 ]; do
+    [ "$p" = "$PM2_PID" ] && return 0
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' '); n=$((n + 1))
+  done
+  return 1
+}
+STRAYS=""
+while read -r pid cmd; do
+  [ -n "$pid" ] || continue
+  case "$cmd" in
+    *dist/index.js*|*capital-guard-engine*|*python*app.py*|*uvicorn*) ;;
+    *) continue ;;
+  esac
+  case "$(sudo readlink "/proc/$pid/cwd" 2>/dev/null || true)" in "$APP"/server*|"$APP"/engine*) ;; *) continue ;; esac
+  if [ -z "$PM2_PID" ] || ! under_pm2 "$pid"; then
+    echo "  Stopping a leftover copy outside PM2: pid $pid  $cmd"
+    STRAYS="$STRAYS $pid"
+  fi
+done < <(ps -eo pid=,args=)
+if [ -n "$STRAYS" ]; then
+  sudo kill $STRAYS 2>/dev/null || true
+  sleep 3
+  sudo kill -9 $STRAYS 2>/dev/null || true
+fi
 # Restart everything this user's PM2 runs. If PM2 has lost its list (it then
 # restarts nothing and the old code keeps running), start from the config.
 if ! pm2 restart all --update-env; then
   echo "  PM2 had nothing to restart: starting the services from ecosystem.config.cjs"
   pm2 start ecosystem.config.cjs
-  pm2 save >/dev/null || true
 fi
+# All four services belong to PM2, so they restart on a crash and after a reboot.
+for svc in capital-guard-api rust-engine breeze-bridge ml-service; do
+  pm2 describe "$svc" >/dev/null 2>&1 && continue
+  case "$svc" in
+    breeze-bridge) [ -x server/breeze-bridge/venv/bin/python ] || { echo "  ($svc is not installed on this machine: skipped)"; continue; } ;;
+    ml-service)    [ -x server/ml-service/venv/bin/python ]    || { echo "  ($svc is not installed on this machine: skipped)"; continue; } ;;
+  esac
+  echo "  $svc was not under PM2: adding it"
+  pm2 start ecosystem.config.cjs --only "$svc" >/dev/null || echo "  (could not start $svc)"
+done
+pm2 save >/dev/null || true
 sudo systemctl reload nginx
 sleep 15
 pm2 status

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Shield,
   AlertTriangle,
@@ -97,87 +97,81 @@ export default function RiskDashboard() {
   const [stopLossPositions, setStopLossPositions] = useState<StopLossPosition[]>([]);
   const [killSwitch, setKillSwitch] = useState<KillSwitchStatus>({ active: false, activatedAt: null, reason: null });
   const [circuitBreaker, setCircuitBreaker] = useState<any>(null);
-  const [, setComprehensive] = useState<any>(null);
   const [killLoading, setKillLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const { alerts, dismissAlert } = useRiskAlerts(10);
 
+  const busy = useRef(false);
   const fetchRiskData = useCallback(async () => {
+    if (busy.current) return;                // the last refresh is still on its way
+    busy.current = true;
     setLoading(true);
     setError(null);
     try {
-      const [compRes, dailyRes, varRes, marginRes, slRes, ksRes] = await Promise.allSettled([
-        riskApi.comprehensive(),
-        riskApi.dailySummary(),
-        riskApi.var(0.95, 1),
-        riskApi.margin(),
-        riskApi.stopLossStatus(),
-        riskApi.killSwitchStatus(),
+      // Each card fills in as its own answer arrives; a slow one (Value at Risk
+      // reads a year of prices) no longer holds back the rest of the page.
+      const part = (call: Promise<{ data: any }>, apply: (data: any) => void) => call.then((r) => apply(r.data)).catch(() => {});
+      await Promise.all([
+        part(riskApi.dailySummary(), (d) => {
+          setLoading(false);
+          setDailySummary({
+            dayPnl: num(d.dayPnl ?? d.todayPnl ?? d.pnl),
+            dayPnlPercent: num(d.dayPnlPercent ?? d.pnlPercent),
+            openPositions: num(d.openPositions ?? d.positionCount),
+            totalExposure: num(d.totalExposure ?? d.exposure),
+            maxDrawdown: num(d.maxDrawdown ?? d.dayDrawdownPct),
+            dailyLossLimit: num(d.dailyLossLimit ?? d.lossLimit),
+            dailyLossUsed: num(d.dailyLossUsed ?? d.lossUsed),
+            positionCount: num(d.positionCount ?? d.openPositions),
+            avgWinRate: num(d.avgWinRate ?? d.winRate),
+            tradeCount: num(d.tradeCount ?? d.trades),
+          });
+          if (d.circuitBreakerActive != null || d.consecutiveLosses != null) {
+            setCircuitBreaker((prev: any) => ({
+              ...prev,
+              triggered: !!d.circuitBreakerActive,
+              consecutiveLosses: num(d.consecutiveLosses),
+              reason: d.circuitBreakerActive ? `Daily drawdown exceeded limit` : null,
+              largestPositionPct: num(d.largestPositionPct),
+            }));
+          }
+        }),
+        part(riskApi.var(0.95, 1), (v) => {
+          setVarData({
+            var95: num(v.var95 ?? v.var ?? v.valueAtRisk),
+            var99: num(v.var99),
+            expectedShortfall: num(v.expectedShortfall ?? v.cvar),
+            portfolioValue: num(v.portfolioValue ?? v.totalValue),
+            basis: typeof v.basis === 'string' ? v.basis : undefined,
+          });
+        }),
+        part(riskApi.margin(), (m) => {
+          setMarginData({
+            totalMarginUsed: num(m.totalMarginUsed ?? m.used),
+            totalMarginAvailable: num(m.totalMarginAvailable ?? m.available),
+            utilizationPercent: num(m.utilizationPercent ?? m.utilization),
+            positions: Array.isArray(m.positions) ? m.positions : [],
+          });
+        }),
+        part(riskApi.stopLossStatus(), (sl) => {
+          setStopLossPositions(Array.isArray(sl.positions ?? sl) ? (sl.positions ?? sl) : []);
+          if (sl.circuitBreaker) {
+            setCircuitBreaker((prev: any) => ({ ...prev, ...sl.circuitBreaker }));
+          }
+        }),
+        part(riskApi.killSwitchStatus(), (ks) => {
+          setKillSwitch({
+            active: !!(ks.killSwitchActive ?? ks.active),
+            activatedAt: ks.activatedAt ?? null,
+            reason: ks.reason ?? null,
+          });
+        }),
       ]);
-
-      if (compRes.status === 'fulfilled') setComprehensive(compRes.value.data);
-      if (dailyRes.status === 'fulfilled') {
-        const d = dailyRes.value.data;
-        setDailySummary({
-          dayPnl: num(d.dayPnl ?? d.todayPnl ?? d.pnl),
-          dayPnlPercent: num(d.dayPnlPercent ?? d.pnlPercent),
-          openPositions: num(d.openPositions ?? d.positionCount),
-          totalExposure: num(d.totalExposure ?? d.exposure),
-          maxDrawdown: num(d.maxDrawdown ?? d.dayDrawdownPct),
-          dailyLossLimit: num(d.dailyLossLimit ?? d.lossLimit),
-          dailyLossUsed: num(d.dailyLossUsed ?? d.lossUsed),
-          positionCount: num(d.positionCount ?? d.openPositions),
-          avgWinRate: num(d.avgWinRate ?? d.winRate),
-          tradeCount: num(d.tradeCount ?? d.trades),
-        });
-        if (d.circuitBreakerActive != null || d.consecutiveLosses != null) {
-          setCircuitBreaker((prev: any) => ({
-            ...prev,
-            triggered: !!d.circuitBreakerActive,
-            consecutiveLosses: num(d.consecutiveLosses),
-            reason: d.circuitBreakerActive ? `Daily drawdown exceeded limit` : null,
-            largestPositionPct: num(d.largestPositionPct),
-          }));
-        }
-      }
-      if (varRes.status === 'fulfilled') {
-        const v = varRes.value.data;
-        setVarData({
-          var95: num(v.var95 ?? v.var ?? v.valueAtRisk),
-          var99: num(v.var99),
-          expectedShortfall: num(v.expectedShortfall ?? v.cvar),
-          portfolioValue: num(v.portfolioValue ?? v.totalValue),
-          basis: typeof v.basis === 'string' ? v.basis : undefined,
-        });
-      }
-      if (marginRes.status === 'fulfilled') {
-        const m = marginRes.value.data;
-        setMarginData({
-          totalMarginUsed: num(m.totalMarginUsed ?? m.used),
-          totalMarginAvailable: num(m.totalMarginAvailable ?? m.available),
-          utilizationPercent: num(m.utilizationPercent ?? m.utilization),
-          positions: Array.isArray(m.positions) ? m.positions : [],
-        });
-      }
-      if (slRes.status === 'fulfilled') {
-        const sl = slRes.value.data;
-        setStopLossPositions(Array.isArray(sl.positions ?? sl) ? (sl.positions ?? sl) : []);
-        if (sl.circuitBreaker) {
-          setCircuitBreaker((prev: any) => ({ ...prev, ...sl.circuitBreaker }));
-        }
-      }
-      if (ksRes.status === 'fulfilled') {
-        const ks = ksRes.value.data;
-        setKillSwitch({
-          active: !!(ks.killSwitchActive ?? ks.active),
-          activatedAt: ks.activatedAt ?? null,
-          reason: ks.reason ?? null,
-        });
-      }
     } catch (err: any) {
       setError(err?.response?.data?.error ?? err?.message ?? 'Failed to load risk data');
     } finally {
+      busy.current = false;
       setLoading(false);
     }
   }, []);

@@ -86,6 +86,9 @@ export interface RiskCheck {
   warnings: string[];
 }
 
+/** Daily closes by symbol and day, shared across requests (see RiskService.dailyCloses). */
+const closesCache = new Map<string, { at: number; closes: { day: string; close: number }[] }>();
+
 export class RiskService {
   private targetTracker: TargetTracker;
   private marginCalculator: MarginCalculatorService;
@@ -95,11 +98,23 @@ export class RiskService {
   livePrices: () => Record<string, number> = () => ({});
   /** Daily closes of a symbol, oldest first — the candle store by default; replaceable in tests. */
   dailyCloses: (symbol: string, from: string, to: string) => Promise<{ day: string; close: number }[]> = async (symbol, from, to) => {
+    // A year of daily closes changes once a day: keep it for six hours, shared by
+    // every user, so the Risk page does not re-read 15 histories on each visit.
+    const key = `${symbol}:${to}`;
+    const hit = closesCache.get(key);
+    if (hit && Date.now() - hit.at < 6 * 3_600_000) return hit.closes;
     const { MarketDataService } = await import('./market-data.service.js');
     this.market ??= new MarketDataService();
     const bars = await this.market.getHistory(symbol, '1day', from, to);
-    return bars.map((b: any) => ({ day: String(b.timestamp).slice(0, 10), close: Number(b.close) })).filter((b: any) => b.close > 0);
+    const closes = bars.map((b: any) => ({ day: String(b.timestamp).slice(0, 10), close: Number(b.close) })).filter((b: any) => b.close > 0);
+    if (closes.length) {
+      if (closesCache.size > 2_000) closesCache.clear();
+      closesCache.set(key, { at: Date.now(), closes });
+    }
+    return closes;
   };
+  /** Value at Risk per user, kept for a few minutes: the page asks for it twice at once. */
+  private varCache = new Map<string, { at: number; value: Promise<any> }>();
   private market: any = null;
   private valuations = new Map<string, { at: number; value: Promise<Valuation> }>();
 
@@ -719,7 +734,17 @@ export class RiskService {
    * Options are left out (their value does not move one-for-one with the
    * underlying) and are counted in `excluded`.
    */
-  async getPortfolioVaR(userId: string, confidenceLevel = 0.95, holdingDays = 1): Promise<{
+  async getPortfolioVaR(userId: string, confidenceLevel = 0.95, holdingDays = 1): Promise<Awaited<ReturnType<RiskService['computePortfolioVaR']>>> {
+    const key = `${userId}:${confidenceLevel}:${holdingDays}`;
+    const hit = this.varCache.get(key);
+    if (hit && Date.now() - hit.at < 5 * 60_000) return hit.value;
+    const value = this.computePortfolioVaR(userId, confidenceLevel, holdingDays);
+    this.varCache.set(key, { at: Date.now(), value });
+    value.catch(() => this.varCache.delete(key));
+    return value;
+  }
+
+  private async computePortfolioVaR(userId: string, confidenceLevel = 0.95, holdingDays = 1): Promise<{
     parametricVaR: number;
     historicalVaR: number;
     var95: number;
