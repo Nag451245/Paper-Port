@@ -28,13 +28,16 @@ interface ChatResult {
 let _botEngineRef: any = null;
 let _cachedServices: { targetTracker: TargetTracker; eodReview: EODReviewService; riskService: RiskService; aiAgentService: AIAgentService; guardianService: GuardianService } | null = null;
 
+/** Live prices from the feed (set when the routes are registered), so figures match the Dashboard. */
+let livePriceSource: () => Record<string, number> = () => ({});
+
 function getServices() {
   if (!_cachedServices) {
     const prisma = getPrisma();
     _cachedServices = {
       targetTracker: new TargetTracker(prisma),
       eodReview: new EODReviewService(prisma),
-      riskService: new RiskService(prisma),
+      riskService: Object.assign(new RiskService(prisma), { livePrices: () => livePriceSource() }),
       aiAgentService: new AIAgentService(prisma),
       guardianService: new GuardianService(prisma),
     };
@@ -478,6 +481,7 @@ async function fetchBridgeCandles(symbol: string): Promise<Array<{ open: number;
 }
 
 export default async function commandCenterRoutes(app: FastifyInstance) {
+  livePriceSource = () => (app as any).priceFeedService?.getAllLastPrices?.() ?? {};
   const { targetTracker, eodReview, riskService } = getServices();
 
   if ((app as any).botEngine) setBotEngineRef((app as any).botEngine);

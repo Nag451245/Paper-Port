@@ -8,6 +8,7 @@ import { wsHub } from '../lib/websocket.js';
 import { DecisionAuditService } from './decision-audit.service.js';
 import { createChildLogger } from '../lib/logger.js';
 import { istDateStr, istMidnight, istMinutesSinceMidnight, parseHHMM } from '../lib/ist.js';
+import { ValuationService } from './valuation.service.js';
 import { parseInstrumentSymbol, settlementType, type SettlementType } from '../lib/instrument.js';
 import { calculateCosts, resolveInstrumentKind } from '../lib/costs.js';
 
@@ -299,28 +300,16 @@ export class IntradayManager {
   ): Promise<{ unrealizedPnl: number; staleCount: number }> {
     if (positions.length === 0) return { unrealizedPnl: 0, staleCount: 0 };
 
-    const marks = await Promise.allSettled(
-      positions.map(p => this.marketData.getQuote(p.symbol, p.exchange ?? 'NSE')),
-    );
-
-    let unrealizedPnl = 0;
-    let staleCount = 0;
-
-    for (let i = 0; i < positions.length; i++) {
-      const p = positions[i];
-      const settled = marks[i];
-      const ltp = settled.status === 'fulfilled' ? Number((settled.value as any)?.ltp ?? 0) : 0;
-
-      if (ltp > 0) {
-        const entry = Number(p.avgEntryPrice);
-        unrealizedPnl += p.side === 'LONG'
-          ? (ltp - entry) * p.qty
-          : (entry - ltp) * p.qty;
-      } else {
-        staleCount++;
-        unrealizedPnl += Number(p.unrealizedPnl ?? 0);
-      }
-    }
+    // The one valuation every page uses (services/valuation.service.ts): a fresh
+    // quote for each position, the price saved on it when a quote cannot be had.
+    // `staleCount` is how many were not priced fresh, so the caller can warn.
+    const v = await new ValuationService(this.prisma, (symbol, exchange) => this.marketData.getQuote(symbol, exchange), () => true)
+      .forPortfolio({ id: '', initialCapital: 0, currentNav: 0 }, undefined, positions as any[]);
+    // A position with neither a fresh nor a saved price keeps its last recorded
+    // gain or loss: a breaker must never read a dead feed as a flat book.
+    const unrealizedPnl = v.positions.reduce((sum, p, i) =>
+      sum + (p.priceSource === 'entry' ? Number(positions[i].unrealizedPnl ?? 0) : p.pnl), 0);
+    const staleCount = v.positions.filter((p) => p.priceSource !== 'live').length;
 
     return { unrealizedPnl, staleCount };
   }
@@ -346,7 +335,6 @@ export class IntradayManager {
 
       const openPositions = await this.prisma.position.findMany({
         where: { portfolioId: pf.id, status: 'OPEN' },
-        select: { id: true, symbol: true, exchange: true, side: true, qty: true, avgEntryPrice: true, unrealizedPnl: true },
       });
 
       const { unrealizedPnl, staleCount } = await this.computeLiveUnrealized(openPositions);

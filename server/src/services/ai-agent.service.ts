@@ -5,10 +5,10 @@ import { chatCompletion, chatCompletionJSON } from '../lib/openai.js';
 import { TradeService } from './trade.service.js';
 import { MarketDataService } from './market-data.service.js';
 import { OrderManagementService } from './oms.service.js';
-import { engineRisk, isEngineAvailable } from '../lib/rust-engine.js';
+import { isEngineAvailable } from '../lib/rust-engine.js';
 import { OptionsService, calculateMaxPain, calculateIVPercentile } from './options.service.js';
 import { ExitCoordinator } from './exit-coordinator.service.js';
-import { istDateStr } from '../lib/ist.js';
+import { istDateStr, istMidnight } from '../lib/ist.js';
 import { DecisionAuditService } from './decision-audit.service.js';
 import { MarketCalendar } from './market-calendar.js';
 
@@ -586,122 +586,70 @@ Respond in JSON format:
       const portfolio = await this.prisma.portfolio.findFirst({ where: { userId } });
       if (!portfolio) return this.defaultCapitalRules();
 
-      const nav = Number(portfolio.currentNav);
-      const initCap = Number(portfolio.initialCapital);
-      const drawdownPct = initCap > 0 ? ((initCap - nav) / initCap) * 100 : 0;
+      // Every figure here comes from the one valuation the Dashboard and the Risk
+      // page use (services/valuation.service.ts). Free cash used to stand in for
+      // net worth, so money held in positions counted as a "drawdown".
+      const { RiskService } = await import('./risk.service.js');
+      const risk = new RiskService(this.prisma);
+      const v = await risk.valuation(userId);
+      const initCap = v.capital;
+      const netWorth = v.netWorth;
+      const positions = v.positions;
+      const drawdownPct = initCap > 0 ? (Math.max(0, initCap - netWorth) / initCap) * 100 : 0;
+      const largest = positions.reduce((mx, p) => Math.max(mx, p.marketValue), 0);
+      const singlePosPct = netWorth > 0 ? (largest / netWorth) * 100 : 0;
+      const funds = v.capitalInUse + Math.max(0, v.cash);
+      const inUsePct = funds > 0 ? (v.capitalInUse / funds) * 100 : 0;
 
-      const positions = await this.prisma.position.findMany({
-        where: { portfolioId: portfolio.id, status: 'OPEN' },
-      });
-
-      const totalExposure = positions.reduce((s, p) => s + Math.abs(Number(p.qty) * Number(p.avgEntryPrice)), 0);
-      const maxSinglePos = positions.reduce((mx, p) => Math.max(mx, Math.abs(Number(p.qty) * Number(p.avgEntryPrice))), 0);
-      const singlePosPct = nav > 0 ? (maxSinglePos / nav) * 100 : 0;
-      const exposurePct = nav > 0 ? (totalExposure / nav) * 100 : 0;
-
-      const todayStart = new Date();
-      todayStart.setHours(0, 0, 0, 0);
-      const todayTrades = await this.prisma.trade.count({
-        where: { portfolioId: portfolio.id, exitTime: { gte: todayStart } },
-      });
-
-      const todayPnl = await this.prisma.trade.findMany({
-        where: { portfolioId: portfolio.id, exitTime: { gte: todayStart } },
+      const today = await this.prisma.trade.findMany({
+        where: { portfolioId: portfolio.id, exitTime: { gte: istMidnight() } },
         select: { netPnl: true },
       });
-      const dayLoss = todayPnl.reduce((s, t) => s + Math.min(0, Number(t.netPnl)), 0);
-      const dayLossPct = initCap > 0 ? Math.abs(dayLoss / initCap) * 100 : 0;
+      const todayTrades = today.length;
+      const dayNet = today.reduce((sum, t) => sum + Number(t.netPnl), 0);
+      const dayLossPct = initCap > 0 ? (Math.max(0, -dayNet) / initCap) * 100 : 0;
 
-      let rustRisk: { sharpe_ratio: number; var_95: number; max_drawdown_percent: number; volatility: number; sortino_ratio: number } | null = null;
-      if (positions.length > 0) {
-        const returns = positions.map(p => {
-          const entry = Number(p.avgEntryPrice);
-          const pnl = Number(p.unrealizedPnl);
-          return entry > 0 ? pnl / (entry * Number(p.qty)) : 0;
-        });
-
-        if (isEngineAvailable()) {
-          try {
-            rustRisk = await engineRisk({ returns, initial_capital: initCap }) as any;
-          } catch { /* fall through to JS */ }
-        }
-
-        if (!rustRisk) {
-          const n = returns.length;
-          const mean = returns.reduce((s, r) => s + r, 0) / n;
-          const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / n;
-          const std = Math.sqrt(variance);
-          const negRet = returns.filter(r => r < 0);
-          const downDev = Math.sqrt(negRet.length > 0 ? negRet.reduce((s, r) => s + r * r, 0) / negRet.length : 0);
-          const sorted = [...returns].sort((a, b) => a - b);
-          const varIdx = Math.floor(0.05 * n);
-          let peak = initCap, maxDd = 0, nav = initCap;
-          for (const r of returns) {
-            nav *= (1 + r);
-            if (nav > peak) peak = nav;
-            const dd = (peak - nav) / peak;
-            if (dd > maxDd) maxDd = dd;
-          }
-          rustRisk = {
-            sharpe_ratio: Math.round((std > 0 ? (mean / std) * Math.sqrt(252) : 0) * 100) / 100,
-            sortino_ratio: Math.round((downDev > 0 ? (mean / downDev) * Math.sqrt(252) : 0) * 100) / 100,
-            var_95: Math.round((varIdx < sorted.length ? -sorted[varIdx] * initCap : 0) * 100) / 100,
-            max_drawdown_percent: Math.round(maxDd * 10000) / 100,
-            volatility: Math.round(std * Math.sqrt(252) * 10000) / 100,
-          };
-        }
-      }
+      const [varOut, daily] = await Promise.all([
+        risk.getPortfolioVaR(userId).catch(() => null),
+        risk.getDailyRiskSummary(userId).catch(() => null),
+      ]);
 
       const rules: Array<{ id: string; name: string; status: string; detail: string }> = [
-        { id: 'max-daily-loss', name: 'Max Daily Loss (2%)', status: dayLossPct > 2 ? 'red' : dayLossPct > 1 ? 'amber' : 'green', detail: `Today's loss: ${dayLossPct.toFixed(2)}% of capital` },
-        { id: 'position-sizing', name: 'Position Sizing (5% max)', status: singlePosPct > 5 ? 'red' : singlePosPct > 3 ? 'amber' : 'green', detail: `Largest position: ${singlePosPct.toFixed(1)}% of NAV` },
-        { id: 'exposure', name: 'Total Exposure', status: exposurePct > 80 ? 'red' : exposurePct > 50 ? 'amber' : 'green', detail: `${exposurePct.toFixed(0)}% capital deployed across ${positions.length} positions` },
-        { id: 'drawdown-circuit', name: 'Drawdown Circuit (10%)', status: drawdownPct > 10 ? 'red' : drawdownPct > 5 ? 'amber' : 'green', detail: `Current drawdown: ${drawdownPct.toFixed(2)}%` },
+        { id: 'max-daily-loss', name: 'Max Daily Loss (2%)', status: dayLossPct > 2 ? 'red' : dayLossPct > 1 ? 'amber' : 'green', detail: `Closed trades today: ${dayNet >= 0 ? '+' : '-'}₹${Math.abs(dayNet).toFixed(0)} (${dayLossPct.toFixed(2)}% of capital lost)` },
+        { id: 'position-sizing', name: 'Position Sizing (5% max)', status: singlePosPct > 5 ? 'red' : singlePosPct > 3 ? 'amber' : 'green', detail: `Largest position: ${singlePosPct.toFixed(1)}% of net worth` },
+        { id: 'exposure', name: 'Capital In Use', status: inUsePct > 80 ? 'red' : inUsePct > 50 ? 'amber' : 'green', detail: `${inUsePct.toFixed(0)}% of capital in use across ${positions.length} positions` },
+        { id: 'drawdown-circuit', name: 'Drawdown Circuit (10%)', status: drawdownPct > 10 ? 'red' : drawdownPct > 5 ? 'amber' : 'green', detail: `Net worth is ${drawdownPct.toFixed(2)}% below capital` },
         { id: 'overtrading-guard', name: 'Overtrading Guard (20/day)', status: todayTrades > 20 ? 'red' : todayTrades > 10 ? 'amber' : 'green', detail: `${todayTrades} trades today` },
       ];
 
-      if (rustRisk) {
-        rules.push(
-          {
-            id: 'sharpe-ratio',
-            name: 'Sharpe Ratio',
-            status: rustRisk.sharpe_ratio < 0 ? 'red' : rustRisk.sharpe_ratio < 1 ? 'amber' : 'green',
-            detail: `Sharpe: ${rustRisk.sharpe_ratio.toFixed(2)} | Sortino: ${rustRisk.sortino_ratio.toFixed(2)}`,
-          },
-          {
-            id: 'var-95',
-            name: 'Value at Risk (95%)',
-            status: rustRisk.var_95 > initCap * 0.03 ? 'red' : rustRisk.var_95 > initCap * 0.015 ? 'amber' : 'green',
-            detail: `VaR(95%): ₹${rustRisk.var_95.toFixed(0)} | Volatility: ${rustRisk.volatility.toFixed(1)}%`,
-          },
-          {
-            id: 'rust-drawdown',
-            name: 'Statistical Drawdown',
-            status: rustRisk.max_drawdown_percent > 10 ? 'red' : rustRisk.max_drawdown_percent > 5 ? 'amber' : 'green',
-            detail: `Max drawdown: ${rustRisk.max_drawdown_percent.toFixed(2)}% (Rust engine)`,
-          },
-        );
+      // Measured, not assumed: the same Value at Risk and drawdown as the Risk page.
+      if (varOut && varOut.days > 0 && netWorth > 0) {
+        const pct = (varOut.var95 / netWorth) * 100;
+        rules.push({
+          id: 'var-95',
+          name: 'Value at Risk (95%)',
+          status: pct > 3 ? 'red' : pct > 1.5 ? 'amber' : 'green',
+          detail: `A worse day than -₹${varOut.var95.toFixed(0)} (${pct.toFixed(2)}% of net worth) came about 1 day in 20 over the last ${varOut.days} trading days`,
+        });
+      }
+      if (daily) {
+        rules.push({
+          id: 'max-drawdown',
+          name: 'Largest Fall (closed trades)',
+          status: daily.maxDrawdown > 10 ? 'red' : daily.maxDrawdown > 5 ? 'amber' : 'green',
+          detail: `Largest fall from a high: ${daily.maxDrawdown.toFixed(2)}% of capital`,
+        });
       }
 
-      const fnoExposure = positions
-        .filter(p => p.symbol.includes('CE') || p.symbol.includes('PE') || p.exchange === 'NFO')
-        .reduce((s, p) => s + Math.abs(Number(p.qty) * Number(p.avgEntryPrice)), 0);
-      const fnoExposurePct = nav > 0 ? (fnoExposure / nav) * 100 : 0;
-
-      rules.push(
-        {
-          id: 'fno-exposure',
-          name: 'F&O Exposure (30% max)',
-          status: fnoExposurePct > 30 ? 'red' : fnoExposurePct > 20 ? 'amber' : 'green',
-          detail: `F&O exposure: ${fnoExposurePct.toFixed(1)}% of NAV (₹${fnoExposure.toFixed(0)})`,
-        },
-        {
-          id: 'fno-greeks-limit',
-          name: 'Options Greeks Limit',
-          status: 'green',
-          detail: `Net delta exposure within limits`,
-        },
-      );
+      const isFno = (p: { symbol: string; exchange: string }) => ['NFO', 'BFO', 'MCX'].includes(p.exchange) || /\d(CE|PE)$|FUT$/.test(p.symbol);
+      const fnoInUse = positions.filter(isFno).reduce((sum, p) => sum + p.capitalInUse, 0);
+      const fnoPct = netWorth > 0 ? (fnoInUse / netWorth) * 100 : 0;
+      rules.push({
+        id: 'fno-exposure',
+        name: 'F&O Capital (30% max)',
+        status: fnoPct > 30 ? 'red' : fnoPct > 20 ? 'amber' : 'green',
+        detail: `F&O positions tie up ${fnoPct.toFixed(1)}% of net worth (₹${fnoInUse.toFixed(0)})`,
+      });
 
       return rules;
     } catch {
