@@ -11,7 +11,7 @@ export default function OptionsLab() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold text-slate-800">Options Lab</h1>
-          <p className="text-sm text-slate-500">NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY and SENSEX options on real past prices from ICICI. Every profit and loss is after charges.</p>
+          <p className="text-sm text-slate-500">NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY and SENSEX options on real past prices from your broker (ICICI Breeze or Upstox). Every profit and loss is after charges.</p>
         </div>
         <div className="flex rounded-xl bg-slate-100 p-1 text-sm">
           {([['backtest', 'Backtest', FlaskConical], ['replay', 'Replay a day', History]] as const).map(([id, name, Icon]) => (

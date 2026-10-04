@@ -20,7 +20,7 @@ export function fakeMarket(expiries: Set<string>, opts: { fail?: boolean; holida
     }));
   return {
     calls,
-    breezeOptionHistory: vi.fn(async (u: string, expiry: string, strike: number, type: 'CE' | 'PE', from: string, to: string) => {
+    optionContractHistory: vi.fn(async (u: string, expiry: string, strike: number, type: 'CE' | 'PE', from: string, to: string) => {
       calls.push(`${u} ${expiry} ${strike}${type}`);
       if (opts.fail) return { bars: [], error: 'ICICI Breeze is not connected' };
       if (!expiries.has(expiry)) return { bars: [] };

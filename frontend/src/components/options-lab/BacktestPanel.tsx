@@ -101,9 +101,9 @@ export default function BacktestPanel() {
           </div>
           <p className="text-[10px] text-slate-500">
             {saved.length
-              ? <>Prices saved for {saved.length} {p.underlying} expiries ({saved[0].expiry} to {saved[saved.length - 1].expiry}); other dates are fetched from ICICI as needed.</>
-              : <>No {p.underlying} option prices saved yet: the first run fetches them from ICICI (Breeze must be connected).</>}
-            {coverage?.budget && <> ICICI requests today: {coverage.budget.used} of {coverage.budget.limit}.</>}
+              ? <>Prices saved for {saved.length} {p.underlying} expiries ({saved[0].expiry} to {saved[saved.length - 1].expiry}); other dates are fetched from your broker as needed.</>
+              : <>No {p.underlying} option prices saved yet: the first run fetches them from your broker (ICICI Breeze, or Upstox for contracts still trading).</>}
+            {coverage?.budget && <> Broker requests today: {coverage.budget.used} of {coverage.budget.limit}.</>}
           </p>
 
           <div className="grid grid-cols-2 gap-2">

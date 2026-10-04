@@ -134,7 +134,7 @@ export default function ReplayPanel() {
           {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />} Load day
         </button>
         <p className="col-span-2 sm:col-span-5 text-[10px] text-slate-400">
-          Any past trading day ICICI has prices for. The first load of a day fetches every contract shown (about a second each); after that it opens at once.
+          Any past trading day your broker has prices for (ICICI Breeze for expired contracts). The first load of a day fetches every contract shown (about a second each); after that it opens at once.
         </p>
       </div>
       {job?.state === 'running' && <JobProgress job={job} />}
@@ -177,7 +177,7 @@ export default function ReplayPanel() {
               </div>
               <SpotChart candles={candles} key={`${data.day}-${tf}`} />
               {data.spotSource === 'parity' && (
-                <p className="text-[10px] text-slate-400 mt-1">ICICI had no index candles for this day, so the index is worked out from the {data.atm} call and put (strike + call − put).</p>
+                <p className="text-[10px] text-slate-400 mt-1">The broker had no index candles for this day, so the index is worked out from the {data.atm} call and put (strike + call − put).</p>
               )}
             </div>
 

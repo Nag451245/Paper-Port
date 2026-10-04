@@ -9,7 +9,7 @@ export default function JobProgress({ job }: { job: LabJob }) {
         <div className={`h-full bg-indigo-500 transition-all ${pct == null ? 'animate-pulse w-1/3' : ''}`} style={pct == null ? undefined : { width: `${pct}%` }} />
       </div>
       <p className="mt-1.5 text-[10px] text-indigo-500">
-        The first run over a period fetches each contract from ICICI (about one a second); later runs use the saved prices.
+        The first run over a period fetches each contract from your broker (about one a second); later runs use the saved prices.
       </p>
     </div>
   );

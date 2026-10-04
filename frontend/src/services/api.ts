@@ -410,6 +410,8 @@ export const brokersApi = {
   setActive: (broker: BrokerId) => api.post<BrokerList>('/brokers/active', { broker }),
   upstoxLogin: () => api.get<{ loginUrl: string; redirectUri: string }>('/brokers/upstox/login'),
   upstoxRequestToken: () => api.post<{ message: string }>('/brokers/upstox/request-token'),
+  /** Today's Upstox access token pasted by the user (like ICICI's daily session token). */
+  upstoxSession: (accessToken: string) => api.post<BrokerList>('/brokers/upstox/session', { accessToken }),
 };
 
 // ─── Replay Lab (manual backtesting) ──────────────────────────────

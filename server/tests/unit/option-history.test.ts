@@ -38,7 +38,7 @@ describe('OptionHistory', () => {
     const b = await h.contract('NIFTY', '2026-09-29', 22400, 'CE', '2026-09-25', '2026-09-29');
     expect(a.fresh).toBe(true);
     expect(b.fresh).toBe(false);
-    expect(m.breezeOptionHistory).toHaveBeenCalledTimes(1);
+    expect(m.optionContractHistory).toHaveBeenCalledTimes(1);
     expect(new Set(b.bars.map((x) => barDay(x[0])))).toEqual(new Set(['2026-09-25', '2026-09-28', '2026-09-29']));
     expect(h.budget().used).toBe(1);
   });
@@ -49,7 +49,7 @@ describe('OptionHistory', () => {
     const r = await h.contract('NIFTY', '2026-09-29', 22400, 'CE', '2026-09-24', '2026-09-29');
     expect(r.error).toMatch(/not connected/);
     await h.contract('NIFTY', '2026-09-29', 22400, 'CE', '2026-09-24', '2026-09-29');
-    expect(m.breezeOptionHistory).toHaveBeenCalledTimes(2);
+    expect(m.optionContractHistory).toHaveBeenCalledTimes(2);
     expect(h.budget().used).toBe(0);                            // failed requests are not counted
   });
 

@@ -2,8 +2,8 @@
  * Past prices of index option contracts, for the options backtester and the
  * options Replay.
  *
- * Source: ICICI Breeze (5-minute candles, expired contracts included), one
- * contract per request. Each contract is fetched once and kept as a gzipped
+ * Source: the connected broker — ICICI Breeze, else Upstox — as 5-minute
+ * candles, one contract per request (expired contracts: Breeze, or Upstox Plus). Each contract is fetched once and kept as a gzipped
  * JSON file, so a second backtest over the same period makes no requests:
  *   <MARKET_DATA_DIR>/options/<UNDERLYING>/<YYYY-MM-DD expiry>/<STRIKE><CE|PE>.json.gz
  *   <MARKET_DATA_DIR>/options/<UNDERLYING>/expiries.json   expiry dates found so far
@@ -48,7 +48,7 @@ interface ExpiryFile {
   checked: Record<string, string | null>;
 }
 
-type Market = Pick<MarketDataService, 'breezeOptionHistory' | 'getHistory'>;
+type Market = Pick<MarketDataService, 'optionContractHistory' | 'getHistory'>;
 
 const DAY = 86_400_000;
 const addDays = (d: string, n: number) => new Date(Date.parse(`${d}T00:00:00Z`) + n * DAY).toISOString().slice(0, 10);
@@ -202,7 +202,7 @@ export class OptionHistory {
     const fetchFrom = have ? [from, have.from].sort()[0] : from;
     const fetchTo = [expiry, today].sort()[0];
     try { await this.spend(); } catch (err) { return { bars: have ? slice(have.bars) : [], fresh: false, error: (err as Error).message }; }
-    const res = await this.market.breezeOptionHistory(U, expiry, strike, type, fetchFrom, fetchTo, '5minute');
+    const res = await this.market.optionContractHistory(U, expiry, strike, type, fetchFrom, fetchTo, '5minute');
     if (res.error) {
       // A request that never reached ICICI (not connected, bridge down) does not count.
       const b = this.budget();

@@ -68,6 +68,22 @@ describe('BrokerAccountsService', () => {
     expect(prisma.user.update).toHaveBeenCalledWith({ where: { id: 'u1' }, data: { activeBroker: 'upstox' } });
   });
 
+  it('accepts a pasted Upstox token only when Upstox confirms it and it is the linked account', async () => {
+    const token = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.pasted';
+    // Upstox does not recognise it.
+    await expect(new BrokerAccountsService(prisma, vi.fn() as any, upstoxAs(null)).saveUpstoxToken('u1', token)).rejects.toThrow(/did not accept/);
+    // It belongs to someone else's Upstox account.
+    prisma.brokerAccount.findUnique.mockResolvedValue({ id: 'a1', brokerUserId: 'UPX123' });
+    await expect(new BrokerAccountsService(prisma, vi.fn() as any, upstoxAs('OTHER9')).saveUpstoxToken('u1', token)).rejects.toThrow(/different Upstox account/);
+    expect(prisma.brokerAccount.upsert).not.toHaveBeenCalled();
+    // The linked account: stored encrypted, until 3:30 AM, and Upstox becomes the data source.
+    await new BrokerAccountsService(prisma, vi.fn() as any, upstoxAs('UPX123')).saveUpstoxToken('u1', `  ${token}\n`);
+    const saved = prisma.brokerAccount.upsert.mock.calls[0][0].update;
+    expect(saved.encryptedAccessToken).not.toContain('pasted');
+    expect(saved.tokenExpiresAt).toBeInstanceOf(Date);
+    expect(prisma.user.update).toHaveBeenCalledWith({ where: { id: 'u1' }, data: { activeBroker: 'upstox' } });
+  });
+
   it('refuses a callback whose state was never issued or is already used', async () => {
     const svc = new BrokerAccountsService(prisma, vi.fn() as any, upstoxAs(null));
     await expect(svc.upstoxCallback('code', 'made-up-state')).rejects.toThrow(/expired/);

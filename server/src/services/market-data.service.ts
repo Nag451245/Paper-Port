@@ -8,7 +8,7 @@ import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
 import { istDateStr, istDaysAgo } from '../lib/ist.js';
 import { latestFiiDii } from '../lib/fii-dii.js';
-import { parseInstrumentSymbol, isDerivativeSymbol, type InstrumentSpec } from '../lib/instrument.js';
+import { parseInstrumentSymbol, isDerivativeSymbol, type InstrumentSpec, buildOptionSymbol } from '../lib/instrument.js';
 import { getUpstox } from './upstox.service.js';
 import { getMarketMovers } from './market-movers.service.js';
 import { lakeInterval, readBars as readLakeBars } from '../lib/candle-lake.js';
@@ -1929,10 +1929,35 @@ export class MarketDataService {
   }
 
   /**
-   * Candles for one option contract straight from ICICI Breeze (expired ones
-   * too), telling "the contract had no trades" (bars: []) apart from "could not
-   * fetch" (error set), so callers can cache the first and retry the second.
+   * Candles for one option contract (expired ones too) from whichever broker
+   * is connected: ICICI Breeze first, then Upstox. Tells "the contract had no
+   * trades" (bars: []) apart from "could not fetch" (error set), so callers
+   * can cache the first and retry the second.
    */
+  async optionContractHistory(
+    underlying: string, expiry: string, strike: number, type: 'CE' | 'PE',
+    fromDate: string, toDate: string, interval = '5minute', userId?: string,
+  ): Promise<{ bars: HistoricalBar[]; error?: string }> {
+    const breeze = await this.breezeOptionHistory(underlying, expiry, strike, type, fromDate, toDate, interval);
+    if (!breeze.error) return breeze;
+    const token = await this.upstoxToken(userId);
+    if (!token) {
+      return { bars: [], error: `${breeze.error}. Connect ICICI Breeze or log in with Upstox in Settings.` };
+    }
+    try {
+      const bars = await getUpstox().history(token, buildOptionSymbol(underlying, expiry, strike, type), interval, fromDate, toDate,
+        ['SENSEX', 'BANKEX'].includes(underlying.toUpperCase()) ? 'BFO' : 'NFO');
+      if (bars.length) return { bars };
+    } catch { /* reported below */ }
+    // Upstox answers "nothing" for a failure as well as for no trades, so an
+    // empty answer is never treated as "this contract did not trade".
+    return {
+      bars: [],
+      error: 'Upstox returned no prices for this contract. Contracts that have already expired need an Upstox Plus plan; ICICI Breeze serves them without one.',
+    };
+  }
+
+  /** One option contract straight from ICICI Breeze. */
   async breezeOptionHistory(
     underlying: string, expiry: string, strike: number, type: 'CE' | 'PE',
     fromDate: string, toDate: string, interval = '5minute',

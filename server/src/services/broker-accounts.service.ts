@@ -190,6 +190,31 @@ export class BrokerAccountsService {
   }
 
   /**
+   * Save today's Upstox access token pasted by the user (the developer page's
+   * "Generate" button gives one), the same way ICICI's daily session token is
+   * pasted. Upstox itself must confirm the token, and it must belong to the
+   * Upstox account already linked here, if any.
+   */
+  async saveUpstoxToken(userId: string, accessToken: string): Promise<void> {
+    const token = accessToken.replace(/s+/g, '');
+    if (token.length < 20) throw new BrokerError('That does not look like an Upstox access token.');
+    const brokerUserId = await this.upstox.profileUserId(token);
+    if (!brokerUserId) throw new BrokerError('Upstox did not accept this token. Generate a new one on the Upstox developer page (tokens expire at 3:30 AM).');
+    const a = await this.prisma.brokerAccount.findUnique({ where: { userId_broker: { userId, broker: 'upstox' } } });
+    if (a?.brokerUserId && a.brokerUserId !== brokerUserId) {
+      throw new BrokerError('This token belongs to a different Upstox account than the one linked here. Remove Upstox and set it up again to switch accounts.');
+    }
+    const data = { encryptedAccessToken: this.enc(token), tokenExpiresAt: nextUpstoxExpiry(), brokerUserId };
+    await this.prisma.brokerAccount.upsert({
+      where: { userId_broker: { userId, broker: 'upstox' } },
+      create: { userId, broker: 'upstox', ...data },
+      update: data,
+    });
+    await this.prisma.user.update({ where: { id: userId }, data: { activeBroker: 'upstox' } });
+    tokenCache.clear();
+  }
+
+  /**
    * Ask Upstox to send this user an approval request (Upstox app and WhatsApp).
    * When they approve, Upstox posts the day's token to the notifier webhook, so
    * no password, PIN or 2FA secret is ever stored here.

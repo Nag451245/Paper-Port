@@ -28,12 +28,23 @@ export default function BrokerSection() {
   // both twice, and reading must not depend on the cleanup having happened.
   const [returned] = useState(readReturn);
   useEffect(() => {
-    if (returned.broker) window.history.replaceState(null, '', window.location.pathname);
-  }, [returned.broker]);
+    if (!returned.broker) return;
+    window.history.replaceState(null, '', window.location.pathname);
+    // The broker's login ran in a popup: tell the main window and close it
+    // (window.close does nothing when this is the main window).
+    if (returned.status === 'connected') {
+      const channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('broker-session') : null;
+      channel?.postMessage('connected');
+      channel?.close();
+      const t = setTimeout(() => window.close(), 1500);
+      return () => clearTimeout(t);
+    }
+  }, [returned.broker, returned.status]);
   const [list, setList] = useState<BrokerList | null>(null);
   const [selected, setSelected] = useState<BrokerId>(returned.broker ?? 'breeze');
   const [form, setForm] = useState<Partial<Record<BrokerField, string>>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const [dayToken, setDayToken] = useState('');
   const [error, setError] = useState<string | null>(
     returned.status === 'error' ? returned.message || 'Broker login failed.' : null,
   );
@@ -46,6 +57,20 @@ export default function BrokerSection() {
       .then(({ data }) => { setList(data); if (!returned.broker) setSelected(data.active); })
       .catch(() => setError('Could not load brokers.'));
   }, [returned.broker]);
+
+  // A login finished in the popup: show the new session here.
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return;
+    const channel = new BroadcastChannel('broker-session');
+    channel.onmessage = () => {
+      brokersApi.list().then(({ data }) => {
+        setList(data);
+        setError(null);
+        setSuccess('Logged in. Today\'s session is saved.');
+      }).catch(() => {});
+    };
+    return () => channel.close();
+  }, []);
 
   const run = async (label: string, action: () => Promise<{ data: BrokerList } | void>, done?: string) => {
     setBusy(label); setError(null); setSuccess(null);
@@ -185,11 +210,14 @@ export default function BrokerSection() {
               title={broker.saved ? '' : 'Save the API key and secret first'}
               onClick={() => run('login', async () => {
                 const { data } = await brokersApi.upstoxLogin();
-                window.location.href = data.loginUrl;            // Upstox's own login page
+                // Upstox's own login page, in a popup like the ICICI one; this tab if popups are blocked.
+                const popup = window.open(data.loginUrl, 'broker-login', 'width=520,height=780');
+                if (!popup) window.location.href = data.loginUrl;
+                else setSuccess('Finish the Upstox login in the popup. The session saves by itself.');
               })}
               className="px-4 py-2 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-sm font-semibold rounded-lg disabled:opacity-50 flex items-center gap-1.5">
               {busy === 'login' ? <Loader2 className="w-4 h-4 animate-spin" /> : <LogIn className="w-4 h-4" />}
-              {broker.connected ? 'Log in again' : `Log in with ${broker.name}`}
+              {broker.connected ? 'Log in again (popup)' : 'Generate Session Popup'}
             </button>
           )}
 
@@ -227,7 +255,36 @@ export default function BrokerSection() {
           )}
         </div>
 
-        {broker.connected && broker.tokenExpiresAt && broker.id !== 'breeze' && (
+        {broker.id === 'upstox' && (
+          <div className="border-t border-slate-200 pt-3 space-y-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Daily session</p>
+            <p className={`text-xs font-medium flex items-center gap-1.5 ${broker.connected ? 'text-emerald-600' : 'text-amber-600'}`}>
+              {broker.connected ? <CheckCircle className="w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}
+              {broker.connected && broker.tokenExpiresAt
+                ? `Session active until ${new Date(broker.tokenExpiresAt).toLocaleString('en-IN')}`
+                : 'No session today: quotes, option chains and Options Lab need one. Use the popup above, your phone, or paste a token.'}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <input
+                type="password" autoComplete="off" value={dayToken} onChange={(e) => setDayToken(e.target.value)}
+                placeholder="Or paste today's access token from the Upstox developer page"
+                className="flex-1 min-w-[220px] px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+              />
+              <button
+                disabled={!!busy || !dayToken.trim()}
+                onClick={() => run('session', async () => { const r = await brokersApi.upstoxSession(dayToken.trim()); setDayToken(''); return r; }, 'Session saved. Upstox now supplies your market data.')}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold rounded-lg disabled:opacity-50">
+                {busy === 'session' ? <Loader2 className="w-4 h-4 animate-spin inline" /> : 'Save Session'}
+              </button>
+            </div>
+            <p className="text-[11px] text-slate-400">
+              Upstox sessions end at 3:30 AM every day. Past option prices for Options Lab come from Upstox only for
+              contracts that are still trading; expired ones need an Upstox Plus plan (ICICI Breeze serves them without one).
+            </p>
+          </div>
+        )}
+
+        {broker.connected && broker.tokenExpiresAt && broker.id !== 'breeze' && broker.id !== 'upstox' && (
           <p className="text-[11px] text-slate-400">Logged in until {new Date(broker.tokenExpiresAt).toLocaleString('en-IN')}.</p>
         )}
       </div>

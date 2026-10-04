@@ -96,7 +96,7 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
       return reply.send({
         symbol: sym.data,
         expiries: result.expiries,
-        ...(result.sessionError ? { sessionError: true, message: 'Breeze API session not configured. Please enter your ICICI Breeze session key in Settings.' } : {}),
+        ...(result.sessionError ? { sessionError: true, message: 'No broker session is active. Connect ICICI Breeze or log in with Upstox in Settings.' } : {}),
       });
     } catch {
       return reply.send({ symbol: sym.data, expiries: [] });

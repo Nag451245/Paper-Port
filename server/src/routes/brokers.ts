@@ -56,6 +56,16 @@ export async function brokerRoutes(app: FastifyInstance): Promise<void> {
     } catch (err) { return fail(reply, err); }
   });
 
+  // Today's access token pasted by the user (like ICICI's daily session token).
+  app.post('/upstox/session', { preHandler: [authenticate] }, async (request, reply) => {
+    const body = z.object({ accessToken: z.string().min(1).max(4000) }).safeParse(request.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Paste the access token.' });
+    try {
+      await service.saveUpstoxToken(getUserId(request), body.data.accessToken);
+      return reply.send(await service.list(getUserId(request)));
+    } catch (err) { return fail(reply, err); }
+  });
+
   // Daily login without a browser: Upstox asks the user to approve on their phone.
   app.post('/upstox/request-token', { preHandler: [authenticate] }, async (request, reply) => {
     try {

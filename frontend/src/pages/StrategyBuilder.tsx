@@ -735,16 +735,16 @@ export default function StrategyBuilder() {
             <AlertTriangle className="w-5 h-5 text-amber-600" />
           </div>
           <div>
-            <h3 className="text-sm font-bold text-amber-800 mb-1">Breeze API Session Required</h3>
+            <h3 className="text-sm font-bold text-amber-800 mb-1">Broker session required</h3>
             <p className="text-xs text-amber-700 leading-relaxed mb-3">
-              Option chain data requires a valid ICICI Breeze API session. Please enter your session key to access live option chain data, expiry dates, and strategy building features.
+              Option chains, expiry dates and strategy building need today&apos;s session with your broker: ICICI Breeze or Upstox. Sessions end overnight, so this is a once-a-day step.
             </p>
             <div className="flex items-center gap-3">
               <a
                 href="/settings"
                 className="inline-flex items-center gap-2 px-4 py-2 bg-amber-600 text-white text-xs font-semibold rounded-lg hover:bg-amber-500 transition shadow-sm"
               >
-                Go to Settings — Enter Breeze Session Key
+                Go to Settings — connect ICICI Breeze or Upstox
               </a>
               <button
                 onClick={() => { setSessionError(false); }}
