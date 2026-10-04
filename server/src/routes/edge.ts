@@ -8,7 +8,7 @@ import { istDateStr } from '../lib/ist.js';
 import type { ServerOrchestrator } from '../services/server-orchestrator.js';
 import { getShadowBook, gateMode } from '../services/shadow-book.service.js';
 import { getCandleLakeSync } from '../services/candle-lake-sync.service.js';
-import { capitalBlocked } from '../lib/margin.js';
+import { ValuationService } from '../services/valuation.service.js';
 import { EVIDENCE_RULE, INTRADAY_COST } from '../lib/shadow-math.js';
 
 export async function edgeRoutes(app: FastifyInstance) {
@@ -170,19 +170,9 @@ export async function edgeRoutes(app: FastifyInstance) {
     const initialCapital = portfolio ? Number(portfolio.initialCapital) : 1000000;
     const cashNav = portfolio ? Number(portfolio.currentNav) : initialCapital;
 
-    let investedValue = 0;
-    let unrealizedPnl = 0;
-    if (portfolio) {
-      const openPositions = await prisma.position.findMany({
-        where: { portfolioId: portfolio.id, status: 'OPEN' },
-        select: { side: true, qty: true, avgEntryPrice: true, unrealizedPnl: true, exchange: true, marginBlocked: true },
-      });
-      for (const pos of openPositions) {
-        investedValue += capitalBlocked(pos);
-        unrealizedPnl += Number(pos.unrealizedPnl ?? 0);
-      }
-    }
-    const totalNav = cashNav + investedValue + unrealizedPnl;
+    // Net worth from the one valuation every page uses.
+    const valued = portfolio ? await new ValuationService(prisma).forPortfolio(portfolio).catch(() => null) : null;
+    const totalNav = valued ? valued.netWorth : cashNav;
     const totalRealizedPnl = trades.reduce((s: number, t: any) => s + Number(t.netPnl), 0);
     const totalReturn = initialCapital > 0 ? (totalRealizedPnl / initialCapital) * 100 : 0;
 
@@ -217,7 +207,7 @@ export async function edgeRoutes(app: FastifyInstance) {
         totalTrades: trades.length,
         totalReturn: Number(totalReturn.toFixed(2)),
         realizedPnl: Number(totalRealizedPnl.toFixed(2)),
-        unrealizedPnl: Number(unrealizedPnl.toFixed(2)),
+        unrealizedPnl: valued ? valued.openPnl : 0,
         winRate: Number(winRate.toFixed(1)),
         profitFactor: Number(profitFactor.toFixed(2)),
         maxDrawdown: Number(maxDD.toFixed(2)),

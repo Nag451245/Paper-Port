@@ -5,8 +5,8 @@ import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
 import { MetricsService } from '../services/metrics.service.js';
 import { MarketDataService } from '../services/market-data.service.js';
-import { capitalBlocked } from '../lib/margin.js';
 import { MANUAL_CAPITAL_LIMIT } from '../lib/capital.js';
+import { ValuationService } from '../services/valuation.service.js';
 
 const createSchema = z.object({
   name: z.string().min(1),
@@ -27,96 +27,34 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
   app.get('/consolidated/summary', async (request, reply) => {
     const userId = getUserId(request);
     const prisma = getPrisma();
-
     const portfolios = await prisma.portfolio.findMany({
       where: { userId },
-      include: {
-        positions: { where: { status: 'OPEN' }, select: { symbol: true, qty: true, avgEntryPrice: true, side: true, exchange: true, marginBlocked: true } },
-        _count: { select: { trades: true } },
-      },
+      include: { _count: { select: { trades: true } } },
     });
-
-    const portfolioIds = portfolios.map(p => p.id);
-
-    let totalCapital = 0, totalCash = 0, totalInvestedValue = 0, totalOpenPositions = 0, totalTrades = 0;
-    for (const p of portfolios) {
-      totalCapital += Number(p.initialCapital);
-      totalCash += Number(p.currentNav);
-      totalOpenPositions += p.positions.length;
-      totalTrades += p._count.trades;
-      for (const pos of p.positions) {
-        totalInvestedValue += capitalBlocked(pos);
-      }
-    }
-    const marketData = new MarketDataService();
-    let totalUnrealizedPnl = 0;
-
-    const allPositions = portfolios.flatMap(p => p.positions);
-    const uniqueSymbols = [...new Set(allPositions.map(pos => pos.symbol))];
-    const ltpMap = new Map<string, number>();
-    const priceFeed = (app as any).priceFeedService;
-    const priceCache = priceFeed?.getAllLastPrices?.() ?? {};
-
-    for (const sym of uniqueSymbols) {
-      if (priceCache[sym] && priceCache[sym] > 0) {
-        ltpMap.set(sym, priceCache[sym]);
-      } else {
-        try {
-          const quote = await Promise.race([
-            marketData.getQuote(sym, 'NSE'),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5_000)),
-          ]) as any;
-          if (quote.ltp > 0) ltpMap.set(sym, Number(quote.ltp));
-        } catch { /* skip */ }
-      }
-    }
-
-    for (const pos of allPositions) {
-      const entryPrice = Number(pos.avgEntryPrice);
-      const ltp = ltpMap.get(pos.symbol) ?? 0;
-      if (ltp > 0) {
-        totalUnrealizedPnl += pos.side === 'SHORT'
-          ? (entryPrice - ltp) * pos.qty
-          : (ltp - entryPrice) * pos.qty;
-      }
-    }
-
-    const totalNav = totalCash + totalInvestedValue + totalUnrealizedPnl;
-    const totalPnl = totalNav - totalCapital;
+    // The same valuation the Dashboard and the Risk page use.
+    const live = (app as any).priceFeedService?.getAllLastPrices?.() ?? {};
+    const v = await new ValuationService(prisma).forUser(userId, live);
 
     return reply.send({
       portfolioCount: portfolios.length,
-      totalCapital: Number(totalCapital.toFixed(2)),
-      totalNav: Number(totalNav.toFixed(2)),
-      totalPnl: Number(totalPnl.toFixed(2)),
-      totalPnlPct: totalCapital > 0 ? Number(((totalPnl / totalCapital) * 100).toFixed(2)) : 0,
-      totalOpenPositions,
-      totalTrades,
-      portfolios: portfolios.map(p => {
-        let pInvested = 0;
-        let pUnrealizedPnl = 0;
-        for (const pos of p.positions) {
-          const ep = Number(pos.avgEntryPrice);
-          pInvested += capitalBlocked(pos);
-          const ltp = ltpMap.get(pos.symbol) ?? 0;
-          if (ltp > 0) {
-            pUnrealizedPnl += pos.side === 'SHORT'
-              ? (ep - ltp) * pos.qty
-              : (ltp - ep) * pos.qty;
-          }
-        }
-        const pCash = Number(p.currentNav);
-        const pCapital = Number(p.initialCapital);
-        const pNav = pCash + pInvested + pUnrealizedPnl;
-        const pTotalPnl = pNav - pCapital;
+      totalCapital: v.capital,
+      totalNav: v.netWorth,
+      totalPnl: v.totalPnl,
+      totalPnlPct: v.totalPnlPct,
+      totalOpenPositions: v.positions.length,
+      totalTrades: portfolios.reduce((n, p) => n + p._count.trades, 0),
+      portfolios: portfolios.map((p) => {
+        const own = v.positions.filter((x) => x.portfolioId === p.id);
+        const capital = Number(p.initialCapital);
+        const nav = Number(p.currentNav) + own.reduce((t, x) => t + x.capitalInUse + x.pnl, 0);
         return {
           id: p.id,
           name: p.name,
           isDefault: p.isDefault,
-          capital: pCapital,
-          nav: Number(pNav.toFixed(2)),
-          pnl: Number(pTotalPnl.toFixed(2)),
-          openPositions: p.positions.length,
+          capital,
+          nav: Number(nav.toFixed(2)),
+          pnl: Number((nav - capital).toFixed(2)),
+          openPositions: own.length,
           trades: p._count.trades,
         };
       }),

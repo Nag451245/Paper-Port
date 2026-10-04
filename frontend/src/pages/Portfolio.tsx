@@ -90,7 +90,9 @@ export default function PortfolioPage() {
 
   useEffect(() => {
     if (positions.length === 0) return;
-    const symbols = [...new Set(positions.map((p: any) => p.symbol))];
+    // Rows normally arrive already priced by the server (the same valuation as
+    // the totals); only rows without a price are looked up here.
+    const symbols = [...new Set(positions.filter((p: any) => !(Number(p.lastPrice) > 0)).map((p: any) => p.symbol))];
     symbols.forEach((sym) => {
       marketApi.quote(sym)
         .then(({ data }) => {
@@ -318,7 +320,7 @@ export default function PortfolioPage() {
                 const uPnl = safeNum(pos.unrealizedPnl ?? pos.unrealized_pnl);
                 const avgPrice = safeNum(pos.avgEntryPrice ?? pos.avg_entry_price);
                 const qty = safeNum(pos.qty ?? pos.quantity);
-                const ltp = ltpMap[pos.symbol] || 0;
+                const ltp = safeNum(pos.lastPrice) || ltpMap[pos.symbol] || 0;
                 const rawPnlPct = avgPrice > 0 && ltp > 0 ? ((ltp - avgPrice) / avgPrice) * 100 : 0;
                 const pnlPct = pos.side === 'SHORT' ? -rawPnlPct : rawPnlPct;
                 const tag = pos.strategyTag ?? pos.strategy_tag ?? pos.strategy;

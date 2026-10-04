@@ -132,6 +132,11 @@ model Position {
   /// of a spread, or the other sold leg of a straddle). Closing that one
   /// raises this position's margin to the unprotected figure.
   marginLinkId    String?  @map("margin_link_id")
+  /// The last price this position was valued at, and when. Kept so every page
+  /// shows the same figure and a failed price lookup never drops the position
+  /// from the totals; frozen at the close until the market reopens.
+  lastPrice       Decimal? @map("last_price")
+  lastPriceAt     DateTime? @map("last_price_at")
   openedAt        DateTime @default(now()) @map("opened_at")
   closedAt        DateTime? @map("closed_at")
 

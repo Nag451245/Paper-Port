@@ -8,7 +8,8 @@ import { PositionLimitsService } from './position-limits.service.js';
 import { MetricsService } from './metrics.service.js';
 import { parseInstrumentSymbol } from '../lib/instrument.js';
 import { capitalBlocked } from '../lib/margin.js';
-import { istMidnight } from '../lib/ist.js';
+import { istMidnight, istDateStr } from '../lib/ist.js';
+import { ValuationService, type Valuation } from './valuation.service.js';
 
 const log = createChildLogger('RiskService');
 
@@ -89,6 +90,32 @@ export class RiskService {
   private targetTracker: TargetTracker;
   private marginCalculator: MarginCalculatorService;
   private positionLimits: PositionLimitsService;
+
+  /** Live prices from the feed, when the caller has them (set by the routes). */
+  livePrices: () => Record<string, number> = () => ({});
+  /** Daily closes of a symbol, oldest first — the candle store by default; replaceable in tests. */
+  dailyCloses: (symbol: string, from: string, to: string) => Promise<{ day: string; close: number }[]> = async (symbol, from, to) => {
+    const { MarketDataService } = await import('./market-data.service.js');
+    this.market ??= new MarketDataService();
+    const bars = await this.market.getHistory(symbol, '1day', from, to);
+    return bars.map((b: any) => ({ day: String(b.timestamp).slice(0, 10), close: Number(b.close) })).filter((b: any) => b.close > 0);
+  };
+  private market: any = null;
+  private valuations = new Map<string, { at: number; value: Promise<Valuation> }>();
+
+  /**
+   * The user's money, added up once (services/valuation.service.ts) and shared
+   * by every figure on the Risk page and by the Dashboard. Kept for a few
+   * seconds because the page asks for several figures at the same moment.
+   */
+  valuation(userId: string): Promise<Valuation> {
+    const hit = this.valuations.get(userId);
+    if (hit && Date.now() - hit.at < 5_000) return hit.value;
+    const value = new ValuationService(this.prisma).forUser(userId, this.livePrices());
+    this.valuations.set(userId, { at: Date.now(), value });
+    value.catch(() => this.valuations.delete(userId));
+    return value;
+  }
 
   constructor(private prisma: PrismaClient) {
     this.targetTracker = new TargetTracker(prisma);
@@ -613,20 +640,17 @@ export class RiskService {
     const dailyLossLimit = capital * (DEFAULT_CONFIG.maxDailyDrawdownPct / 100);
     const dailyLossUsed = Math.min(dayPnl, 0);
 
-    const positions = await this.prisma.position.findMany({
-      where: { portfolioId: { in: portfolioIds }, status: 'OPEN' },
-      select: { symbol: true, qty: true, avgEntryPrice: true },
-    });
-
-    let totalExposure = 0;
+    // Open positions at today's valuation price — the same valuation as the Dashboard.
+    const v = await this.valuation(userId);
+    const positions = v.positions;
+    const totalExposure = v.marketValue;
     let largestPosition: { symbol: string; value: number } | null = null;
     for (const p of positions) {
-      const val = Number(p.avgEntryPrice) * p.qty;
-      totalExposure += val;
-      if (!largestPosition || val > largestPosition.value) {
-        largestPosition = { symbol: p.symbol, value: val };
+      if (!largestPosition || p.marketValue > largestPosition.value) {
+        largestPosition = { symbol: p.symbol, value: p.marketValue };
       }
     }
+
     const largestPositionPct = (largestPosition && capital > 0)
       ? (largestPosition.value / capital) * 100 : 0;
 
@@ -638,6 +662,18 @@ export class RiskService {
       take: 50,
       select: { netPnl: true },
     });
+    // Largest fall from a running high of closed-trade profit, as % of capital.
+    const history = await this.prisma.trade.findMany({
+      where: { portfolioId: { in: portfolioIds } }, orderBy: { exitTime: 'asc' }, select: { netPnl: true },
+    });
+    let running = 0, peak = 0, deepest = 0;
+    for (const t of history ?? []) {
+      running += Number(t.netPnl);
+      peak = Math.max(peak, running);
+      deepest = Math.max(deepest, peak - running);
+    }
+    const maxDrawdownPct = capital > 0 ? (deepest / capital) * 100 : 0;
+
     const winCount = recentTrades.filter(t => Number(t.netPnl) > 0).length;
     const avgWinRate = recentTrades.length > 0 ? (winCount / recentTrades.length) * 100 : 0;
 
@@ -659,7 +695,7 @@ export class RiskService {
       dayDrawdownPct,
       openPositions: positions.length,
       totalExposure: Number(totalExposure.toFixed(2)),
-      maxDrawdown: Number(dayDrawdownPct.toFixed(3)),
+      maxDrawdown: Number(maxDrawdownPct.toFixed(2)),
       dailyLossLimit: Number(dailyLossLimit.toFixed(2)),
       dailyLossUsed: Number(dailyLossUsed.toFixed(2)),
       tradeCount: todayTrades.length,
@@ -672,6 +708,17 @@ export class RiskService {
     };
   }
 
+  /**
+   * Value at Risk by historical simulation: take today's open positions, apply
+   * each of the last ~250 trading days' actual price moves to them, and read
+   * off how bad the worst days would have been. No assumed volatilities: the
+   * figures come from the positions' own price history, and positions that
+   * tend to fall together count together.
+   *   var95 / var99 — the loss exceeded on 5% / 1% of those days
+   *   expectedShortfall — the average loss on the worst 5% of days
+   * Options are left out (their value does not move one-for-one with the
+   * underlying) and are counted in `excluded`.
+   */
   async getPortfolioVaR(userId: string, confidenceLevel = 0.95, holdingDays = 1): Promise<{
     parametricVaR: number;
     historicalVaR: number;
@@ -680,101 +727,72 @@ export class RiskService {
     expectedShortfall: number;
     portfolioValue: number;
     positions: Array<{ symbol: string; value: number; weight: number; dailyVol: number }>;
+    days: number;
+    excluded: number;
+    basis: string;
   }> {
-    const emptyResult = { parametricVaR: 0, historicalVaR: 0, var95: 0, var99: 0, expectedShortfall: 0, portfolioValue: 0, positions: [] as Array<{ symbol: string; value: number; weight: number; dailyVol: number }> };
-    const portfolios = await this.prisma.portfolio.findMany({ where: { userId }, select: { id: true, currentNav: true } });
-    if (!portfolios.length) return emptyResult;
-
-    const portfolio = portfolios[0];
-    const nav = Number(portfolio.currentNav);
-
-    const openPositions = await this.prisma.position.findMany({
-      where: { portfolioId: portfolio.id, status: 'OPEN' },
-    });
-
-    if (openPositions.length === 0) return { ...emptyResult, portfolioValue: nav };
-
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-    const recentTrades = await this.prisma.trade.findMany({
-      where: { portfolioId: portfolio.id, exitTime: { gte: thirtyDaysAgo } },
-      select: { symbol: true, netPnl: true, exitTime: true },
-      orderBy: { exitTime: 'asc' },
-    });
-
-    const posDetails: Array<{ symbol: string; value: number; weight: number; dailyVol: number }> = [];
-    let totalPositionValue = 0;
-
-    for (const pos of openPositions) {
-      const value = Number(pos.avgEntryPrice) * pos.qty;
-      totalPositionValue += value;
-    }
-
-    for (const pos of openPositions) {
-      const value = Number(pos.avgEntryPrice) * pos.qty;
-      const weight = totalPositionValue > 0 ? value / totalPositionValue : 0;
-
-      const symbolTrades = recentTrades.filter(t => t.symbol === pos.symbol);
-      let dailyVol: number;
-      if (symbolTrades.length >= 5) {
-        const returns = symbolTrades.map(t => Number(t.netPnl) / value);
-        const mean = returns.reduce((s, r) => s + r, 0) / returns.length;
-        const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / returns.length;
-        dailyVol = Math.sqrt(variance);
-      } else {
-        const sector = SECTOR_MAP[pos.symbol] ?? 'Other';
-        const sectorVols: Record<string, number> = {
-          Banking: 0.018, IT: 0.016, Energy: 0.020, FMCG: 0.012,
-          Pharma: 0.017, Auto: 0.019, Metals: 0.025, Finance: 0.022,
-          Other: 0.020,
-        };
-        dailyVol = sectorVols[sector] ?? 0.020;
-      }
-
-      posDetails.push({ symbol: pos.symbol, value, weight, dailyVol });
-    }
-
-    const zScores: Record<number, number> = { 0.90: 1.282, 0.95: 1.645, 0.99: 2.326 };
-
-    const computeVaR = (z: number): number => {
-      const portfolioVolSq = posDetails.reduce((sum, p) => sum + (p.weight * p.dailyVol) ** 2, 0);
-      const portfolioVol = Math.sqrt(portfolioVolSq) * Math.sqrt(holdingDays);
-      return z * portfolioVol * totalPositionValue;
+    const v = await this.valuation(userId);
+    const empty = {
+      parametricVaR: 0, historicalVaR: 0, var95: 0, var99: 0, expectedShortfall: 0, portfolioValue: v.netWorth,
+      positions: [] as Array<{ symbol: string; value: number; weight: number; dailyVol: number }>,
+      days: 0, excluded: 0, basis: 'No open positions.',
     };
+    if (!v.positions.length) return empty;
 
-    const z = zScores[confidenceLevel] ?? 1.645;
-    const parametricVaR = computeVaR(z);
-    const var95 = computeVaR(1.645);
-    const var99 = computeVaR(2.326);
-
-    const dailyPnls = await this.prisma.dailyPnlRecord.findMany({
-      where: { userId },
-      orderBy: { date: 'desc' },
-      take: 60,
-      select: { netPnl: true },
-    });
-
-    let historicalVaR = parametricVaR;
-    let expectedShortfall = var95 * 1.2;
-    if (dailyPnls.length >= 10) {
-      const sortedLosses = dailyPnls.map(d => Number(d.netPnl)).sort((a, b) => a - b);
-      const idx = Math.floor((1 - confidenceLevel) * sortedLosses.length);
-      historicalVaR = Math.abs(sortedLosses[idx] ?? parametricVaR);
-
-      const idx95 = Math.floor(0.05 * sortedLosses.length);
-      const tailLosses = sortedLosses.slice(0, Math.max(idx95, 1));
-      expectedShortfall = Math.abs(tailLosses.reduce((s, v) => s + v, 0) / tailLosses.length);
+    const to = istDateStr();
+    const from = istDateStr(new Date(Date.now() - 380 * 86_400_000));
+    const held: { symbol: string; exposure: number; returns: Map<string, number> }[] = [];
+    let excluded = 0;
+    await Promise.all(v.positions.map(async (p) => {
+      let symbol = p.symbol;
+      try {
+        const spec = parseInstrumentSymbol(p.symbol, p.exchange);
+        if (spec.instrumentType === 'OPTIONS') { excluded++; return; }
+        if (spec.instrumentType === 'FUTURES') symbol = spec.underlying;
+      } catch { /* a plain share */ }
+      const closes = await Promise.race([
+        this.dailyCloses(symbol, from, to),
+        new Promise<{ day: string; close: number }[]>((resolve) => setTimeout(() => resolve([]), 8_000)),
+      ]).catch(() => []);
+      if (closes.length < 61) { excluded++; return; }
+      const returns = new Map<string, number>();
+      for (let i = 1; i < closes.length; i++) returns.set(closes[i].day, closes[i].close / closes[i - 1].close - 1);
+      held.push({ symbol: p.symbol, exposure: (p.side === 'SHORT' ? -1 : 1) * p.marketValue, returns });
+    }));
+    if (!held.length) {
+      return { ...empty, excluded, basis: 'Not enough price history for the open positions yet.' };
     }
+
+    // The portfolio's gain or loss on each past day, had today's positions been held.
+    const days = [...new Set(held.flatMap((h) => [...h.returns.keys()]))].sort().slice(-250);
+    const pnl = days.map((d) => held.reduce((sum, h) => sum + h.exposure * (h.returns.get(d) ?? 0), 0));
+    const sorted = [...pnl].sort((a, b) => a - b);
+    const scale = Math.sqrt(Math.max(1, holdingDays));
+    const lossAt = (tail: number) => Math.max(0, -sorted[Math.min(sorted.length - 1, Math.floor(tail * sorted.length))]) * scale;
+    const worst = sorted.slice(0, Math.max(1, Math.floor(0.05 * sorted.length)));
+    const expectedShortfall = Math.max(0, -worst.reduce((a, b) => a + b, 0) / worst.length) * scale;
+    const var95 = lossAt(0.05), var99 = lossAt(0.01);
+
+    const gross = held.reduce((sum, h) => sum + Math.abs(h.exposure), 0);
+    const positions = held.map((h) => {
+      const r = days.map((d) => h.returns.get(d) ?? 0);
+      const mean = r.reduce((a, b) => a + b, 0) / r.length;
+      const vol = Math.sqrt(r.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, r.length - 1));
+      return { symbol: h.symbol, value: Math.abs(h.exposure), weight: gross > 0 ? Math.abs(h.exposure) / gross : 0, dailyVol: Number(vol.toFixed(4)) };
+    });
 
     return {
-      parametricVaR: Number(parametricVaR.toFixed(2)),
-      historicalVaR: Number(historicalVaR.toFixed(2)),
+      parametricVaR: Number((confidenceLevel >= 0.99 ? var99 : var95).toFixed(2)),
+      historicalVaR: Number((confidenceLevel >= 0.99 ? var99 : var95).toFixed(2)),
       var95: Number(var95.toFixed(2)),
       var99: Number(var99.toFixed(2)),
       expectedShortfall: Number(expectedShortfall.toFixed(2)),
-      portfolioValue: nav,
-      positions: posDetails,
+      portfolioValue: v.netWorth,
+      positions,
+      days: days.length,
+      excluded,
+      basis: `Today's positions put through the actual price moves of the last ${days.length} trading days.` +
+        (excluded ? ` ${excluded} position(s) left out (options, or too little price history).` : ''),
     };
   }
 
@@ -835,34 +853,23 @@ export class RiskService {
       shortPositions: [] as Array<{ symbol: string; marginBlocked: number }>,
       warning: null as string | null,
     };
-    const portfolios = await this.prisma.portfolio.findMany({ where: { userId }, select: { id: true, initialCapital: true, currentNav: true } });
-    if (!portfolios.length) return emptyResult;
+    const v = await this.valuation(userId);
+    if (!v.capital && !v.positions.length) return emptyResult;
 
-    const capital = Number(portfolios[0].currentNav);
-    const shorts = await this.prisma.position.findMany({
-      where: { portfolioId: portfolios[0].id, status: 'OPEN', side: 'SHORT' },
-    });
-
-    let totalMarginUsed = 0;
-    const shortPositions: Array<{ symbol: string; marginBlocked: number }> = [];
-    const positions: Array<{ symbol: string; marginUsed: number; marginPercent: number }> = [];
-
-    for (const pos of shorts) {
-      const marginBlocked = capitalBlocked(pos);
-      totalMarginUsed += marginBlocked;
-      shortPositions.push({ symbol: pos.symbol, marginBlocked: Number(marginBlocked.toFixed(2)) });
-    }
-
+    // Capital in use is what every open position ties up — bought or sold — out
+    // of cash + capital in use. (This used to count sold positions only, against
+    // free cash, so it disagreed with the Dashboard.)
+    const totalMarginUsed = v.capitalInUse;
+    const capital = v.cash + v.capitalInUse;
+    const totalMarginAvailable = Math.max(0, v.cash);
     const utilizationPct = capital > 0 ? (totalMarginUsed / capital) * 100 : 0;
-    const totalMarginAvailable = Math.max(0, capital - totalMarginUsed);
-
-    for (const sp of shortPositions) {
-      positions.push({
-        symbol: sp.symbol,
-        marginUsed: sp.marginBlocked,
-        marginPercent: capital > 0 ? Number(((sp.marginBlocked / capital) * 100).toFixed(1)) : 0,
-      });
-    }
+    const positions = [...v.positions].sort((x, y) => y.capitalInUse - x.capitalInUse).map((p) => ({
+      symbol: p.symbol,
+      marginUsed: p.capitalInUse,
+      marginPercent: capital > 0 ? Number(((p.capitalInUse / capital) * 100).toFixed(1)) : 0,
+    }));
+    const shortPositions = v.positions.filter((p) => p.side === 'SHORT')
+      .map((p) => ({ symbol: p.symbol, marginBlocked: p.capitalInUse }));
 
     let warning: string | null = null;
     if (utilizationPct > DEFAULT_CONFIG.marginUtilizationLimitPct) {

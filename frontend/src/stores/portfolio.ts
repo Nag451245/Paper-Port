@@ -41,6 +41,7 @@ function parseSummary(raw: any, fallbackNav: number): PortfolioSummary {
     capitalUsedPct: Number(raw.capitalUsedPct ?? 0),
     openPositions: raw.openPositions,
     autoTopUp: raw.autoTopUp,
+    pricedAt: raw.pricedAt,
   };
 }
 

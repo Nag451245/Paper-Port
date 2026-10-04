@@ -9,6 +9,7 @@ import { getPrisma } from '../lib/prisma.js';
 import { buildOptionSymbol } from '../lib/instrument.js';
 import { MarketDataService } from '../services/market-data.service.js';
 import { StrategyExitPlanService } from '../services/strategy-exit-plan.service.js';
+import { ValuationService } from '../services/valuation.service.js';
 
 const placeOrderSchema = z.object({
   portfolio_id: z.string().uuid(),
@@ -166,7 +167,15 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
     const userId = getUserId(request);
     const query = request.query as { strategy_tag?: string };
     const positions = await service.listPositions(userId, query.strategy_tag);
-    return reply.send(positions);
+    // Each row carries the price and gain or loss from the one valuation the
+    // Dashboard and Risk page use, so the rows add up to the totals shown there.
+    const live = (app as any).priceFeedService?.getAllLastPrices?.() ?? {};
+    const valued = await new ValuationService(getPrisma()).forUser(userId, live).catch(() => null);
+    const byId = new Map((valued?.positions ?? []).map((p) => [p.id, p]));
+    return reply.send(positions.map((p) => {
+      const v = byId.get(p.id);
+      return v ? { ...p, lastPrice: v.price, unrealizedPnl: v.pnl, priceSource: v.priceSource, capitalInUse: v.capitalInUse } : p;
+    }));
   });
 
   app.get('/strategies', async (request, reply) => {

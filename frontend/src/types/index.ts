@@ -62,6 +62,8 @@ export interface PortfolioSummary {
     exitCharges: number;
   };
   autoTopUp?: { enabled: boolean; added: number; limit: number; manualLimit: number };
+  /** When these figures were worked out (ISO time) */
+  pricedAt?: string;
 }
 
 export interface RiskMetrics {

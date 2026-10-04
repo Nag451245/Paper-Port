@@ -20,6 +20,8 @@ export async function riskRoutes(app: FastifyInstance): Promise<void> {
   const prisma = getPrisma();
   const oms = (app as any).oms;
   const riskService = new RiskService(prisma);
+  // Live prices from the feed, so the Risk page values positions as the Dashboard does.
+  riskService.livePrices = () => (app as any).priceFeedService?.getAllLastPrices?.() ?? {};
   const optionsService = new OptionsPositionService(prisma);
   const intradayManager = new IntradayManager(prisma, oms);
   const auditService = new DecisionAuditService(prisma);

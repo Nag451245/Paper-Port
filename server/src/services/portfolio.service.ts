@@ -4,6 +4,7 @@ import { istDateStr, istMidnight } from '../lib/ist.js';
 import { calculateCosts, resolveInstrumentKind } from '../lib/costs.js';
 import { capitalBlocked } from '../lib/margin.js';
 import { AUTO_TOPUP_LIMIT, MANUAL_CAPITAL_LIMIT } from '../lib/capital.js';
+import { ValuationService } from './valuation.service.js';
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -34,13 +35,18 @@ export interface PortfolioSummary {
     exitCharges: number;
   };
   autoTopUp: { enabled: boolean; added: number; limit: number; manualLimit: number };
+  /** When these figures were worked out */
+  pricedAt: string;
 }
 
 export class PortfolioService {
   private marketData: MarketDataService;
 
+  private valuation: ValuationService;
+
   constructor(private prisma: PrismaClient) {
     this.marketData = new MarketDataService();
+    this.valuation = new ValuationService(prisma, (symbol, exchange) => this.marketData.getQuote(symbol, exchange));
   }
 
   async list(userId: string) {
@@ -81,124 +87,48 @@ export class PortfolioService {
    */
   async getSummary(portfolioId: string, userId: string, priceCache?: Record<string, number>): Promise<PortfolioSummary> {
     const portfolio = await this.getById(portfolioId, userId);
-    const initialCapital = Number(portfolio.initialCapital);
-    const availableCash = Number(portfolio.currentNav);
-    const openPositions = (portfolio as any).positions ?? [];
+    // Every money figure comes from the one valuation (services/valuation.service.ts),
+    // the same one the Risk page and the all-portfolios summary use.
+    const v = await this.valuation.forPortfolio(portfolio, priceCache, (portfolio as any).positions);
 
-    const todayStart = istMidnight();
+    const todayTrades = await this.prisma.trade.findMany({
+      where: { portfolioId, exitTime: { gte: istMidnight() } },
+      select: { netPnl: true },
+    });
+    // Day P&L is realised-only: the result of trades actually closed today. It is
+    // the figure the daily loss limit and the circuit breaker act on (see
+    // RiskService.getDailyRiskSummary); open-position movement is `unrealizedPnl`.
+    const dayPnl = todayTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
+    const dayPnlBase = v.netWorth > 0 ? v.netWorth : v.capital;
 
-    const uncachedPositions = priceCache
-      ? openPositions.filter((pos: any) => !(pos.symbol in priceCache) || priceCache[pos.symbol] <= 0)
-      : openPositions;
-
-    const [todayTrades, ltpResults] = await Promise.all([
-      this.prisma.trade.findMany({
-        where: { portfolioId, exitTime: { gte: todayStart } },
-        select: { netPnl: true },
-      }),
-      Promise.allSettled(
-        uncachedPositions.map(async (pos: any) => {
-          try {
-            const quote = await Promise.race([
-              this.marketData.getQuote(pos.symbol, pos.exchange ?? 'NSE'),
-              new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5_000)),
-            ]) as any;
-            return { symbol: pos.symbol, ltp: Number(quote.ltp ?? 0) };
-          } catch {
-            return { symbol: pos.symbol, ltp: 0 };
-          }
-        })
-      ),
-    ]);
-
-    const todayRealizedPnl = todayTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
-
-    const ltpMap = new Map<string, number>();
-
-    if (priceCache) {
-      for (const [sym, ltp] of Object.entries(priceCache)) {
-        if (ltp > 0) ltpMap.set(sym, ltp);
-      }
-    }
-
-    for (const r of ltpResults) {
-      if (r.status === 'fulfilled' && r.value.ltp > 0) {
-        ltpMap.set(r.value.symbol, r.value.ltp);
-      }
-    }
-
-    let investedValue = 0;
-    let unrealizedPnl = 0;
-    const inProfit = { count: 0, amount: 0 }, inLoss = { count: 0, amount: 0 };
-    let unpriced = 0, exitCharges = 0;
-
-    for (const pos of openPositions) {
-      const entryPrice = Number(pos.avgEntryPrice);
-      // What the position ties up: its cost if bought outright, its margin if sold or a future.
-      investedValue += capitalBlocked(pos);
-
-      const ltp = ltpMap.get(pos.symbol) ?? 0;
-      if (ltp > 0) {
-        const move = pos.side === 'SHORT' ? (entryPrice - ltp) * pos.qty : (ltp - entryPrice) * pos.qty;
-        unrealizedPnl += move;
-        // What the position is worth to the user now: its move less the charges to close it.
-        const exchange = pos.exchange ?? 'NSE';
-        const cost = calculateCosts(pos.qty, ltp, pos.side === 'SHORT' ? 'BUY' : 'SELL', exchange,
-          resolveInstrumentKind(exchange, pos.symbol)).totalCost;
-        exitCharges += cost;
-        const bucket = move - cost >= 0 ? inProfit : inLoss;
-        bucket.count += 1;
-        bucket.amount += move - cost;
-      } else {
-        unpriced += 1;
-      }
-    }
-
-    const totalNav = availableCash + investedValue + unrealizedPnl;
-
-    // Total P&L is mark-to-market: realized plus open-position movement.
-    // (A portfolio holding a large unrealized winner must not report zero.)
-    const totalPnl = totalNav - initialCapital;
-
-    // Day P&L is realized-only — the P&L of trades actually closed today.
-    //
-    // It previously added `unrealizedPnl`, which is the *lifetime* gain on open
-    // positions, not today's movement: a position opened months ago sitting on
-    // +50k added 50k to "today" every day forever. Computing a true
-    // mark-to-market day P&L needs a previous-close reference the schema does
-    // not yet populate (see PerformanceSnapshot, currently unused).
-    //
-    // Realized-only also matches RiskService.getDailyRiskSummary and
-    // TargetTracker.computeTodayPnl, which drive the daily loss limit and the
-    // circuit breaker — so the number on the dashboard is the same number that
-    // halts trading. Open-position movement is reported separately as
-    // `unrealizedPnl`. This was the original REG-002 fix; see
-    // tests/regression/regression-bugs.test.ts.
-    const dayPnl = todayRealizedPnl;
-    const dayPnlBase = totalNav > 0 ? totalNav : initialCapital;
+    const priced = v.positions.filter((p) => p.priceSource !== 'entry');
+    const after = (p: (typeof priced)[number]) => p.pnl - p.exitCost;
+    const winners = priced.filter((p) => after(p) >= 0);
+    const losers = priced.filter((p) => after(p) < 0);
+    const sum = (rows: typeof priced) => r2(rows.reduce((s, p) => s + after(p), 0));
 
     return {
-      totalNav,
+      totalNav: v.netWorth,
       dayPnl: Number(dayPnl.toFixed(2)),
       dayPnlPercent: dayPnlBase > 0 ? (dayPnl / dayPnlBase) * 100 : 0,
-      totalPnl: Number(totalPnl.toFixed(2)),
-      totalPnlPercent: initialCapital > 0 ? (totalPnl / initialCapital) * 100 : 0,
-      unrealizedPnl,
-      investedValue,
-      currentValue: totalNav,
-      availableMargin: availableCash,
-      usedMargin: investedValue,
-      capital: initialCapital,
-      capitalUsed: r2(investedValue),
-      capitalFree: r2(availableCash),
-      capitalUsedPct: investedValue + availableCash > 0 ? r2((investedValue / (investedValue + Math.max(0, availableCash))) * 100) : 0,
+      totalPnl: v.totalPnl,
+      totalPnlPercent: v.capital > 0 ? (v.totalPnl / v.capital) * 100 : 0,
+      unrealizedPnl: v.openPnl,
+      investedValue: v.capitalInUse,
+      currentValue: v.netWorth,
+      availableMargin: v.cash,
+      usedMargin: v.capitalInUse,
+      capital: v.capital,
+      capitalUsed: v.capitalInUse,
+      capitalFree: v.cash,
+      capitalUsedPct: v.capitalInUse + v.cash > 0 ? r2((v.capitalInUse / (v.capitalInUse + Math.max(0, v.cash))) * 100) : 0,
       openPositions: {
-        count: openPositions.length,
-        inProfit: { count: inProfit.count, amount: r2(inProfit.amount) },
-        inLoss: { count: inLoss.count, amount: r2(inLoss.amount) },
-        unpriced,
-        net: r2(inProfit.amount + inLoss.amount),
-        exitCharges: r2(exitCharges),
+        count: v.positions.length,
+        inProfit: { count: winners.length, amount: sum(winners) },
+        inLoss: { count: losers.length, amount: sum(losers) },
+        unpriced: v.unpriced,
+        net: r2(sum(winners) + sum(losers)),
+        exitCharges: r2(priced.reduce((s, p) => s + p.exitCost, 0)),
       },
       autoTopUp: {
         enabled: (portfolio as any).autoTopUp !== false,
@@ -206,6 +136,7 @@ export class PortfolioService {
         limit: AUTO_TOPUP_LIMIT,
         manualLimit: MANUAL_CAPITAL_LIMIT,
       },
+      pricedAt: v.asOf,
     };
   }
 

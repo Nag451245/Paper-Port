@@ -59,6 +59,7 @@ interface VaRData {
   var99: number;
   expectedShortfall: number;
   portfolioValue: number;
+  basis?: string;
 }
 
 interface MarginData {
@@ -147,6 +148,7 @@ export default function RiskDashboard() {
           var99: num(v.var99),
           expectedShortfall: num(v.expectedShortfall ?? v.cvar),
           portfolioValue: num(v.portfolioValue ?? v.totalValue),
+          basis: typeof v.basis === 'string' ? v.basis : undefined,
         });
       }
       if (marginRes.status === 'fulfilled') {
@@ -270,9 +272,9 @@ export default function RiskDashboard() {
           <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
             <MetricCard icon={DollarSign} label="Day P&L" value={fmtINR(dayPnl)} sub={`${dayPnl >= 0 ? '+' : ''}${(dailySummary?.dayPnlPercent ?? 0).toFixed(2)}%`} color={dayPnl >= 0 ? 'emerald' : 'red'} />
             <MetricCard icon={Crosshair} label="Open Positions" value={String(dailySummary?.openPositions ?? 0)} sub={`${dailySummary?.tradeCount ?? 0} trades today`} color="blue" />
-            <MetricCard icon={BarChart3} label="Exposure" value={fmtINR(dailySummary?.totalExposure ?? 0)} sub="Total market exposure" color="indigo" />
-            <MetricCard icon={TrendingDown} label="Max Drawdown" value={`${(dailySummary?.maxDrawdown ?? 0).toFixed(2)}%`} sub="Peak to trough" color={Math.abs(dailySummary?.maxDrawdown ?? 0) > 5 ? 'red' : 'amber'} />
-            <MetricCard icon={Gauge} label="Margin Used" value={`${marginPct.toFixed(1)}%`} sub={fmtINR(marginData?.totalMarginUsed ?? 0)} color={marginPct > 80 ? 'red' : marginPct > 50 ? 'amber' : 'emerald'} />
+            <MetricCard icon={BarChart3} label="Positions Value" value={fmtINR(dailySummary?.totalExposure ?? 0)} sub="Open positions at current prices" color="indigo" />
+            <MetricCard icon={TrendingDown} label="Max Drawdown" value={`${(dailySummary?.maxDrawdown ?? 0).toFixed(2)}%`} sub="Largest fall, closed trades" color={Math.abs(dailySummary?.maxDrawdown ?? 0) > 5 ? 'red' : 'amber'} />
+            <MetricCard icon={Gauge} label="Capital In Use" value={`${marginPct.toFixed(1)}%`} sub={fmtINR(marginData?.totalMarginUsed ?? 0)} color={marginPct > 80 ? 'red' : marginPct > 50 ? 'amber' : 'emerald'} />
             <MetricCard icon={Activity} label="Win Rate" value={`${(dailySummary?.avgWinRate ?? 0).toFixed(1)}%`} sub="Recent trades" color="teal" />
           </div>
 
@@ -317,12 +319,12 @@ export default function RiskDashboard() {
                     <div className="p-3 bg-slate-50 rounded-lg">
                       <p className="text-[10px] text-slate-400 uppercase font-medium">VaR (95%)</p>
                       <p className="text-lg font-bold text-red-600">{fmtINR(Math.abs(varData.var95))}</p>
-                      <p className="text-[10px] text-slate-400">{varData.portfolioValue ? `${((Math.abs(varData.var95) / varData.portfolioValue) * 100).toFixed(2)}% of portfolio` : ''}</p>
+                      <p className="text-[10px] text-slate-400">{varData.portfolioValue ? `${((Math.abs(varData.var95) / varData.portfolioValue) * 100).toFixed(2)}% of net worth · 1 day in 20` : ''}</p>
                     </div>
                     <div className="p-3 bg-slate-50 rounded-lg">
                       <p className="text-[10px] text-slate-400 uppercase font-medium">VaR (99%)</p>
                       <p className="text-lg font-bold text-red-600">{fmtINR(Math.abs(varData.var99))}</p>
-                      <p className="text-[10px] text-slate-400">Worst-case scenario</p>
+                      <p className="text-[10px] text-slate-400">1 day in 100</p>
                     </div>
                   </div>
                   <div className="p-3 bg-slate-50 rounded-lg flex justify-between items-center">
@@ -331,10 +333,11 @@ export default function RiskDashboard() {
                       <p className="text-sm font-bold text-red-600">{fmtINR(Math.abs(varData.expectedShortfall))}</p>
                     </div>
                     <div className="text-right">
-                      <p className="text-[10px] text-slate-400 uppercase font-medium">Portfolio Value</p>
+                      <p className="text-[10px] text-slate-400 uppercase font-medium">Net Worth</p>
                       <p className="text-sm font-bold text-slate-800">{fmtINR(varData.portfolioValue)}</p>
                     </div>
                   </div>
+                  {varData.basis && <p className="text-[10px] text-slate-400 leading-snug">{varData.basis} Not a forecast.</p>}
                 </div>
               ) : (
                 <p className="text-center text-slate-400 text-sm py-6">No VaR data available</p>
@@ -348,7 +351,7 @@ export default function RiskDashboard() {
             <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
               <h3 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-2">
                 <Gauge className="w-4 h-4 text-amber-500" />
-                Margin Utilization
+                Capital In Use
               </h3>
               {marginData ? (
                 <div className="space-y-3">
@@ -359,8 +362,8 @@ export default function RiskDashboard() {
                     />
                   </div>
                   <div className="flex justify-between text-xs text-slate-500">
-                    <span>Used: {fmtINR(marginData.totalMarginUsed)}</span>
-                    <span>Available: {fmtINR(marginData.totalMarginAvailable)}</span>
+                    <span>In use: {fmtINR(marginData.totalMarginUsed)}</span>
+                    <span>Free cash: {fmtINR(marginData.totalMarginAvailable)}</span>
                   </div>
                   {marginData.positions.length > 0 && (
                     <div className="space-y-1.5 max-h-32 overflow-y-auto">

@@ -195,6 +195,11 @@ export default function Dashboard() {
                   </p>
                 </div>
               </div>
+              {(summary?.openPositions?.unpriced ?? 0) > 0 && (
+                <p className="text-[11px] text-amber-600">
+                  {summary!.openPositions!.unpriced} open position{summary!.openPositions!.unpriced === 1 ? ' has' : 's have'} no price right now and {summary!.openPositions!.unpriced === 1 ? 'is' : 'are'} shown at cost.
+                </p>
+              )}
               {summary?.capital != null && (
                 <button onClick={() => setPortfolioTab('capital')} className="w-full text-left bg-slate-50 hover:bg-slate-100 rounded-xl p-2.5 transition">
                   <div className="flex justify-between text-xs text-slate-500">
