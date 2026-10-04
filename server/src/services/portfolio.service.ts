@@ -2,6 +2,7 @@ import { PrismaClient, type Prisma } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
 import { istDateStr, istMidnight } from '../lib/ist.js';
 import { calculateCosts, resolveInstrumentKind } from '../lib/costs.js';
+import { capitalBlocked } from '../lib/margin.js';
 import { AUTO_TOPUP_LIMIT, MANUAL_CAPITAL_LIMIT } from '../lib/capital.js';
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
@@ -133,12 +134,8 @@ export class PortfolioService {
 
     for (const pos of openPositions) {
       const entryPrice = Number(pos.avgEntryPrice);
-      if (pos.side === 'LONG') {
-        investedValue += entryPrice * pos.qty;
-      } else {
-        const rate = (pos.exchange ?? 'NSE') === 'MCX' ? 0.10 : (pos.exchange ?? 'NSE') === 'CDS' ? 0.05 : 0.25;
-        investedValue += entryPrice * pos.qty * rate;
-      }
+      // What the position ties up: its cost if bought outright, its margin if sold or a future.
+      investedValue += capitalBlocked(pos);
 
       const ltp = ltpMap.get(pos.symbol) ?? 0;
       if (ltp > 0) {
@@ -450,12 +447,7 @@ export class PortfolioService {
     let openEntryCosts = 0;
     for (const pos of openPositions) {
       const entryPrice = Number(pos.avgEntryPrice);
-      if (pos.side === 'LONG') {
-        lockedCapital += entryPrice * pos.qty;
-      } else {
-        const rate = pos.exchange === 'MCX' ? 0.10 : pos.exchange === 'CDS' ? 0.05 : 0.25;
-        lockedCapital += entryPrice * pos.qty * rate;
-      }
+      lockedCapital += capitalBlocked(pos);
 
       const entrySide = pos.side === 'LONG' ? 'BUY' : 'SELL';
       const ec = calculateCosts(

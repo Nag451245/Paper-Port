@@ -38,14 +38,15 @@ describe('analyzeStrategy', () => {
   ];
 
   it('short straddle: full credit less charges at the strike, unlimited loss, exact breakevens', () => {
-    const a = analyzeStrategy(straddle, 22421.95, { days: 3, sigma: 0.146, fixedCost: 100 });
+    const a = analyzeStrategy(straddle, 22421.95, { days: 3, sigma: 0.146, fixedCost: 100, underlying: 'NIFTY' });
     expect(a.maxProfit).toBeCloseTo(259.7 * 65 - 100, 1);
     expect(a.unlimitedLoss).toBe(true);
     expect(a.unlimitedProfit).toBe(false);
     expect(a.breakevens[0]).toBeCloseTo(22400 - (259.7 * 65 - 100) / 65, 1);
     expect(a.pop).toBeGreaterThan(0.3);
     expect(a.pop).toBeLessThan(0.8);
-    expect(a.margin).toBeCloseTo(22421.95 * 65 * 0.15, 0);
+    // The call in full (11.5%), the put only the 2% exposure margin: about ₹1.97 lakh.
+    expect(a.margin).toBeCloseTo(22421.95 * 65 * (0.115 + 0.02), 0);
   });
 
   it('expected P&L turns negative for a seller when the market moves more than the options priced in', () => {
@@ -55,16 +56,18 @@ describe('analyzeStrategy', () => {
     expect(wild.expectedPnl).toBeLessThan(0);
   });
 
-  it('iron condor: bounded both ways, margin is the max loss', () => {
+  it('iron condor: bounded both ways, margin is what the legs block when placed', () => {
     const condor = [
       { type: 'PE' as const, action: 'BUY' as const, strike: 90, qty: 1, premium: 1 },
       { type: 'PE' as const, action: 'SELL' as const, strike: 95, qty: 1, premium: 3 },
       { type: 'CE' as const, action: 'SELL' as const, strike: 105, qty: 1, premium: 3 },
       { type: 'CE' as const, action: 'BUY' as const, strike: 110, qty: 1, premium: 1 },
     ];
-    const a = analyzeStrategy(condor, 100, { days: 10, sigma: 0.2 });
+    const a = analyzeStrategy(condor, 100, { days: 10, sigma: 0.2, underlying: 'NIFTY' });
     expect([a.maxProfit, a.maxLoss, a.unlimitedLoss, a.unlimitedProfit]).toEqual([4, -1, false, false]);
-    expect(a.margin).toBe(1);
+    // Bought legs cost 2. The sold put is 5% out of the money, so alone it blocks 6.5 —
+    // less than a spread would (5-point gap + 2 exposure); the sold call then adds only exposure (2).
+    expect(a.margin).toBe(10.5);
   });
 });
 

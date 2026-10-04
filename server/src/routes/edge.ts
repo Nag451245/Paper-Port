@@ -8,6 +8,7 @@ import { istDateStr } from '../lib/ist.js';
 import type { ServerOrchestrator } from '../services/server-orchestrator.js';
 import { getShadowBook, gateMode } from '../services/shadow-book.service.js';
 import { getCandleLakeSync } from '../services/candle-lake-sync.service.js';
+import { capitalBlocked } from '../lib/margin.js';
 import { EVIDENCE_RULE, INTRADAY_COST } from '../lib/shadow-math.js';
 
 export async function edgeRoutes(app: FastifyInstance) {
@@ -174,11 +175,10 @@ export async function edgeRoutes(app: FastifyInstance) {
     if (portfolio) {
       const openPositions = await prisma.position.findMany({
         where: { portfolioId: portfolio.id, status: 'OPEN' },
-        select: { side: true, qty: true, avgEntryPrice: true, unrealizedPnl: true },
+        select: { side: true, qty: true, avgEntryPrice: true, unrealizedPnl: true, exchange: true, marginBlocked: true },
       });
       for (const pos of openPositions) {
-        const entry = Number(pos.avgEntryPrice);
-        investedValue += pos.side === 'LONG' ? entry * pos.qty : entry * pos.qty * 0.25;
+        investedValue += capitalBlocked(pos);
         unrealizedPnl += Number(pos.unrealizedPnl ?? 0);
       }
     }

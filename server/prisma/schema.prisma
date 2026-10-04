@@ -125,6 +125,13 @@ model Position {
   stopLoss        Decimal? @map("stop_loss")
   target          Decimal?
   strategyTag     String?  @map("strategy_tag")
+  /// Rupees of margin blocked for this position (sold positions and futures).
+  /// Null = opened before margins were stored: the old flat rule applies.
+  marginBlocked   Decimal? @map("margin_blocked")
+  /// The position whose presence lowered this one's margin (the bought option
+  /// of a spread, or the other sold leg of a straddle). Closing that one
+  /// raises this position's margin to the unprotected figure.
+  marginLinkId    String?  @map("margin_link_id")
   openedAt        DateTime @default(now()) @map("opened_at")
   closedAt        DateTime? @map("closed_at")
 

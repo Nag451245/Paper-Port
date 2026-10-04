@@ -64,10 +64,21 @@ export interface PlaceOrderInput {
    * orders.client_order_id, so it holds under concurrency too.
    */
   clientOrderId?: string;
+  /** Internal: margin worked out before the order was accepted (null = paid in full). */
+  marginPlan?: MarginPlan | null;
+  /** Internal: price of the underlying when the order was placed, for margin sums. */
+  underlyingSpot?: number | null;
 }
+
+/** Margin to block per unit when a position opens, and the position that lowered it (if any). */
+export interface MarginPlan { perUnit: number; linkId: string | null }
 
 import { calculateCosts, resolveInstrumentKind, type CostBreakdown } from '../lib/costs.js';
 import { autoTopUpAmount, AUTO_TOPUP_LIMIT, MANUAL_CAPITAL_LIMIT } from '../lib/capital.js';
+import {
+  capitalBlocked, legacyShortMargin, futuresMargin, nakedOptionMargin, spreadMargin, exposureMargin,
+  isIndexUnderlying,
+} from '../lib/margin.js';
 
 const CAPITAL_HINT = `Raise the capital in Settings (up to ₹${MANUAL_CAPITAL_LIMIT.toLocaleString('en-IN')}).`;
 import {
@@ -288,22 +299,12 @@ export class TradeService {
     try {
       const openPositions = await this.prisma.position.findMany({
         where: { portfolioId, status: 'OPEN' },
-        select: { avgEntryPrice: true, qty: true, side: true, exchange: true },
+        select: { avgEntryPrice: true, qty: true, side: true, exchange: true, marginBlocked: true },
       });
 
       if (!openPositions || !Array.isArray(openPositions)) return 0;
 
-      let total = 0;
-      for (const pos of openPositions) {
-        const entryPrice = Number(pos.avgEntryPrice);
-        if (pos.side === 'LONG') {
-          total += entryPrice * pos.qty;
-        } else {
-          const rate = pos.exchange === 'MCX' ? 0.10 : pos.exchange === 'CDS' ? 0.05 : 0.25;
-          total += entryPrice * pos.qty * rate;
-        }
-      }
-      return total;
+      return openPositions.reduce((total: number, pos: any) => total + capitalBlocked(pos), 0);
     } catch {
       return 0;
     }
@@ -797,7 +798,7 @@ export class TradeService {
 
     // Capital checks must use the quantity we will actually be charged for
     // (effectiveQty), not the requested qty — see handleFill below.
-    const totalValue = fillPrice * effectiveQty + costs.totalCost;
+    const fullValue = fillPrice * effectiveQty + costs.totalCost;
     let availableCash = Number(portfolio.currentNav);
 
     // STRICT: Total invested + new order must never exceed declared capital
@@ -806,6 +807,12 @@ export class TradeService {
         where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'SHORT', status: 'OPEN' },
       });
       if (!existingShort) {
+        // Futures are bought on margin; everything else is paid for in full.
+        input.underlyingSpot = await this.underlyingSpot(input);
+        input.marginPlan = await this.planMargin(input, fillPrice, effectiveQty);
+        const totalValue = input.marginPlan
+          ? input.marginPlan.perUnit * effectiveQty + costs.totalCost
+          : fullValue;
         ({ availableCash, declaredCapital } = await this.autoTopUp(portfolio, input, totalValue, availableCash, declaredCapital, totalInvested));
         if (totalValue > availableCash) {
           throw new TradeError(
@@ -825,8 +832,25 @@ export class TradeService {
       const existingLong = await this.prisma.position.findFirst({
         where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'LONG', status: 'OPEN' },
       });
+      if (existingLong) {
+        // Selling an option that protects a sold one leaves that one unprotected:
+        // the extra margin must be there before the sale is accepted.
+        input.underlyingSpot = await this.underlyingSpot(input);
+        const extra = await this.dependentsShortfall(existingLong.id, input.underlyingSpot);
+        if (extra > 0) {
+          ({ availableCash, declaredCapital } = await this.autoTopUp(portfolio, input, extra, availableCash, declaredCapital, totalInvested));
+          if (extra > availableCash) {
+            throw new TradeError(
+              `This position protects another one you have sold. Selling it needs ₹${extra.toFixed(0)} more margin and only ₹${availableCash.toFixed(0)} is free. Close the sold position first. ${CAPITAL_HINT}`,
+              400,
+            );
+          }
+        }
+      }
       if (!existingLong) {
-        const marginRequired = this.shortMarginRequired(fillPrice, effectiveQty, exchange) + costs.totalCost;
+        input.underlyingSpot = await this.underlyingSpot(input);
+        input.marginPlan = await this.planMargin(input, fillPrice, effectiveQty);
+        const marginRequired = (input.marginPlan?.perUnit ?? legacyShortMargin(fillPrice, 1, exchange)) * effectiveQty + costs.totalCost;
         ({ availableCash, declaredCapital } = await this.autoTopUp(portfolio, input, marginRequired, availableCash, declaredCapital, totalInvested));
         if (marginRequired > availableCash) {
           throw new TradeError(
@@ -1064,8 +1088,102 @@ export class TradeService {
   }
 
   private shortMarginRequired(price: number, qty: number, exchange: string): number {
-    const rate = exchange === 'MCX' ? 0.10 : exchange === 'CDS' ? 0.05 : 0.25;
-    return price * qty * rate;
+    return legacyShortMargin(price, qty, exchange);
+  }
+
+  /** Price of the underlying for margin sums (options only); null when it cannot be had quickly. */
+  private async underlyingSpot(input: PlaceOrderInput): Promise<number | null> {
+    const c = this.contractFields(input);
+    if (c.instrumentType !== 'OPTIONS' || !c.underlying) return null;
+    try {
+      const quote = await Promise.race([
+        this.marketData.getQuote(c.underlying, isIndexUnderlying(c.underlying) || c.segment !== 'COM' ? 'NSE' : 'MCX'),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3_000)),
+      ]);
+      return Number(quote.ltp) > 0 ? Number(quote.ltp) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Margin for opening `qty` of this order (see lib/margin.ts), or null when
+   * the order is simply paid for (buying shares or options).
+   * A sold option is cheaper to hold when a bought option of the same type and
+   * expiry protects it, or when it pairs with a sold option of the other type;
+   * `linkId` records which position that is.
+   */
+  private async planMargin(input: PlaceOrderInput, price: number, qty: number, db?: any): Promise<MarginPlan | null> {
+    const prisma = db ?? this.prisma;
+    const exchange = (input.exchange ?? 'NSE').toUpperCase();
+    const c = this.contractFields(input);
+    if (c.instrumentType === 'FUTURES') {
+      return { perUnit: futuresMargin(price, 1, exchange, c.underlying), linkId: null };
+    }
+    if (input.side !== 'SELL') return null;
+    if (c.instrumentType !== 'OPTIONS' || !c.optionType || !c.strike) {
+      return { perUnit: legacyShortMargin(price, 1, exchange), linkId: null };
+    }
+
+    const short = {
+      underlying: c.underlying, exchange, optionType: c.optionType as 'CE' | 'PE', strike: Number(c.strike), qty,
+      spot: input.underlyingSpot ?? null,
+    };
+    let best = { total: nakedOptionMargin(short), linkId: null as string | null };
+    try {
+      const related: any[] = await prisma.position.findMany({
+        where: { portfolioId: input.portfolioId, status: 'OPEN', underlying: c.underlying, expiry: c.expiry, instrumentType: 'OPTIONS' },
+      });
+      // How much of each position already supports another one.
+      const used = new Map<string, number>();
+      for (const p of related) if (p.marginLinkId) used.set(p.marginLinkId, (used.get(p.marginLinkId) ?? 0) + p.qty);
+      for (const p of related) {
+        if (p.qty - (used.get(p.id) ?? 0) < qty) continue;
+        let total: number | null = null;
+        if (p.side === 'LONG' && p.optionType === c.optionType) total = spreadMargin(short, Number(p.strike));
+        else if (p.side === 'SHORT' && p.optionType !== c.optionType && !p.marginLinkId && p.marginBlocked != null) total = exposureMargin(short);
+        if (total != null && total < best.total) best = { total, linkId: p.id };
+      }
+    } catch { /* no related positions readable: the unprotected figure stands */ }
+    return { perUnit: best.total / qty, linkId: best.linkId };
+  }
+
+  /** Open sold options whose margin was lowered by `positionId`, with what each needs once it is gone. */
+  private async dependents(positionId: string, spot: number | null | undefined, db?: any) {
+    const prisma = db ?? this.prisma;
+    let rows: any[] = [];
+    try {
+      rows = await prisma.position.findMany({ where: { marginLinkId: positionId, status: 'OPEN' } });
+    } catch { return []; }
+    return (rows ?? []).map((d: any) => {
+      const naked = d.optionType && d.strike != null
+        ? nakedOptionMargin({ underlying: d.underlying, exchange: d.exchange, optionType: d.optionType, strike: Number(d.strike), qty: d.qty, spot: spot ?? null })
+        : Number(d.marginBlocked ?? 0);
+      return { id: d.id as string, extra: Math.max(0, naked - Number(d.marginBlocked ?? 0)) };
+    });
+  }
+
+  private async dependentsShortfall(positionId: string, spot: number | null | undefined): Promise<number> {
+    return (await this.dependents(positionId, spot)).reduce((sum, d) => sum + d.extra, 0);
+  }
+
+  /**
+   * `positionId` is closing: the sold options it protected now stand alone, so
+   * raise their margin to the unprotected figure and take it from cash.
+   */
+  private async releaseMarginLinks(portfolioId: string, positionId: string, spot: number | null | undefined, db?: any): Promise<void> {
+    const prisma = db ?? this.prisma;
+    const deps = await this.dependents(positionId, spot, prisma);
+    let total = 0;
+    for (const d of deps) {
+      await prisma.position.update({ where: { id: d.id }, data: { marginLinkId: null, marginBlocked: { increment: d.extra } } });
+      total += d.extra;
+    }
+    if (total > 0) {
+      const portfolio = await prisma.portfolio.findUnique({ where: { id: portfolioId } });
+      if (portfolio) await this.safeUpdateNav(portfolioId, Number(portfolio.currentNav), -total, prisma);
+      log.info({ portfolioId, positionId, extra: total }, 'Protection closed: margin raised on the sold options it covered');
+    }
   }
 
   /**
@@ -1176,21 +1294,27 @@ export class TradeService {
       const remainingQty = existingShort.qty - coverQty;
       const prevRealized = Number(existingShort.realizedPnl ?? 0);
       const cumulativeRealized = prevRealized + netPnl;
+      // Release exactly what was blocked for the covered part (the old flat
+      // rule for positions opened before margins were stored).
+      const stored = existingShort.marginBlocked != null ? Number(existingShort.marginBlocked) : null;
+      const marginReleased = stored != null
+        ? stored * (coverQty / existingShort.qty)
+        : this.shortMarginRequired(entryPrice, coverQty, input.exchange ?? 'NSE');
       if (remainingQty <= 0) {
         await prisma.position.update({
           where: { id: existingShort.id },
           data: { status: 'CLOSED', realizedPnl: cumulativeRealized, closedAt: new Date() },
         });
+        await this.releaseMarginLinks(input.portfolioId, existingShort.id, input.underlyingSpot, prisma);
       } else {
         await prisma.position.update({
           where: { id: existingShort.id },
-          data: { qty: remainingQty, realizedPnl: cumulativeRealized },
+          data: { qty: remainingQty, realizedPnl: cumulativeRealized, ...(stored != null ? { marginBlocked: stored - marginReleased } : {}) },
         });
       }
 
       const portfolio = await prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
       if (portfolio) {
-        const marginReleased = this.shortMarginRequired(entryPrice, coverQty, input.exchange ?? 'NSE');
         const cashChange = marginReleased + exitOnlyPnl;
         await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), cashChange, prisma);
       }
@@ -1222,6 +1346,10 @@ export class TradeService {
       where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'LONG', status: 'OPEN' },
     });
 
+    // Futures are bought on margin (the plan); shares and options are paid in full (no plan).
+    const plan = input.marginPlan !== undefined ? input.marginPlan : await this.planMargin(input, fillPrice, qty, prisma);
+    const margin = plan ? plan.perUnit * qty : null;
+
     if (existingLong) {
       const oldQty = existingLong.qty;
       const oldAvg = Number(existingLong.avgEntryPrice);
@@ -1230,7 +1358,11 @@ export class TradeService {
 
       await prisma.position.update({
         where: { id: existingLong.id },
-        data: { qty: newQty, avgEntryPrice: newAvg },
+        data: {
+          qty: newQty, avgEntryPrice: newAvg,
+          // Added to a margined position only; one bought outright before stays paid in full.
+          ...(margin != null && existingLong.marginBlocked != null ? { marginBlocked: Number(existingLong.marginBlocked) + margin } : {}),
+        },
       });
       await prisma.order.update({ where: { id: orderId }, data: { positionId: existingLong.id } });
     } else {
@@ -1246,6 +1378,7 @@ export class TradeService {
           strategyTag: input.strategyTag,
           stopLoss: input.stopLoss ?? null,
           target: input.target ?? null,
+          ...(margin != null ? { marginBlocked: margin } : {}),
           ...this.contractFields(input),
         },
       });
@@ -1254,7 +1387,8 @@ export class TradeService {
 
     const portfolio = await prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
     if (portfolio) {
-      const purchaseCost = fillPrice * qty + costs.totalCost;
+      const onMargin = margin != null && (!existingLong || existingLong.marginBlocked != null);
+      const purchaseCost = (onMargin ? margin! : fillPrice * qty) + costs.totalCost;
       await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), -purchaseCost, prisma);
     }
   }
@@ -1308,6 +1442,8 @@ export class TradeService {
       const remainingQty = existingLong.qty - closeQty;
       const prevRealized = Number(existingLong.realizedPnl ?? 0);
       const cumulativeRealized = prevRealized + netPnl;
+      const stored = existingLong.marginBlocked != null ? Number(existingLong.marginBlocked) : null;
+      const marginReleased = stored != null ? stored * (closeQty / existingLong.qty) : 0;
       if (remainingQty <= 0) {
         await prisma.position.update({
           where: { id: existingLong.id },
@@ -1316,13 +1452,18 @@ export class TradeService {
       } else {
         await prisma.position.update({
           where: { id: existingLong.id },
-          data: { qty: remainingQty, realizedPnl: cumulativeRealized },
+          data: { qty: remainingQty, realizedPnl: cumulativeRealized, ...(stored != null ? { marginBlocked: stored - marginReleased } : {}) },
         });
       }
+      // Whatever this position protected now stands alone.
+      await this.releaseMarginLinks(input.portfolioId, existingLong.id, input.underlyingSpot, prisma);
 
       const portfolio = await prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
       if (portfolio) {
-        const saleProceeds = fillPrice * closeQty - exitCost;
+        // Paid in full: the sale proceeds come back. On margin (futures): the margin and the gain or loss.
+        const saleProceeds = stored != null
+          ? marginReleased + grossPnl - exitCost
+          : fillPrice * closeQty - exitCost;
         await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), saleProceeds, prisma);
       }
 
@@ -1356,6 +1497,8 @@ export class TradeService {
     const existingShort = await prisma.position.findFirst({
       where: { portfolioId: input.portfolioId, symbol: input.symbol, side: 'SHORT', status: 'OPEN' },
     });
+    const plan = input.marginPlan ?? await this.planMargin({ ...input, side: 'SELL' }, fillPrice, qty, prisma);
+    const marginBlocked = (plan?.perUnit ?? this.shortMarginRequired(fillPrice, 1, input.exchange ?? 'NSE')) * qty;
 
     const MAX_SHORT_QTY = 10_000;
 
@@ -1372,7 +1515,12 @@ export class TradeService {
 
       await prisma.position.update({
         where: { id: existingShort.id },
-        data: { qty: newQty, avgEntryPrice: newAvg },
+        data: {
+          qty: newQty, avgEntryPrice: newAvg,
+          marginBlocked: (existingShort.marginBlocked != null
+            ? Number(existingShort.marginBlocked)
+            : this.shortMarginRequired(oldAvg, oldQty, input.exchange ?? 'NSE')) + marginBlocked,
+        },
       });
       await prisma.order.update({ where: { id: orderId }, data: { positionId: existingShort.id } });
     } else {
@@ -1391,6 +1539,8 @@ export class TradeService {
           strategyTag: input.strategyTag,
           stopLoss: input.stopLoss ?? null,
           target: input.target ?? null,
+          marginBlocked,
+          marginLinkId: plan?.linkId ?? null,
           ...this.contractFields(input),
         },
       });
@@ -1399,7 +1549,6 @@ export class TradeService {
 
     const portfolio = await prisma.portfolio.findUnique({ where: { id: input.portfolioId } });
     if (portfolio) {
-      const marginBlocked = this.shortMarginRequired(fillPrice, qty, input.exchange ?? 'NSE');
       const cashChange = -(marginBlocked + costs.totalCost);
       await this.safeUpdateNav(input.portfolioId, Number(portfolio.currentNav), cashChange, prisma);
     }
@@ -1527,6 +1676,19 @@ export class TradeService {
 
   async exitStrategyLegs(userId: string, positionIds: string[]) {
     const results: { positionId: string; success: boolean; message: string; pnl?: number }[] = [];
+
+    // Close the protected (sold) legs before the legs that protect them, so no
+    // leg is ever left unprotected halfway through — the order a trader would use.
+    try {
+      const rows: any[] = await this.prisma.position.findMany({
+        where: { id: { in: positionIds } }, select: { id: true, side: true, marginLinkId: true },
+      });
+      const rank = (id: string) => {
+        const p = rows?.find((r) => r.id === id);
+        return !p ? 1 : p.marginLinkId ? 0 : p.side === 'SHORT' ? 1 : 2;
+      };
+      positionIds = [...positionIds].sort((a, b) => rank(a) - rank(b));
+    } catch { /* keep the given order */ }
 
     for (const posId of positionIds) {
       try {
@@ -1721,12 +1883,20 @@ export class TradeService {
 
     const portfolio = await this.prisma.portfolio.findUnique({ where: { id: position.portfolioId } });
     if (portfolio) {
+      const stored = (position as any).marginBlocked != null ? Number((position as any).marginBlocked) : null;
       let cashChange: number;
       if (position.side === 'LONG') {
-        cashChange = exitPrice * position.qty - exitCosts.totalCost;
+        // Paid in full: the sale proceeds. On margin (futures): the margin and the gain or loss.
+        cashChange = stored != null ? stored + exitOnlyPnl : exitPrice * position.qty - exitCosts.totalCost;
       } else {
-        const marginReleased = this.shortMarginRequired(entryPrice, position.qty, position.exchange);
+        const marginReleased = stored ?? this.shortMarginRequired(entryPrice, position.qty, position.exchange);
         cashChange = marginReleased + exitOnlyPnl;
+      }
+      // Sold options this position protected now stand alone: their margin goes up.
+      const leaning = await this.dependents(position.id, null);
+      if (leaning.length) {
+        const spot = await this.underlyingSpot({ symbol: position.symbol, exchange: position.exchange } as PlaceOrderInput);
+        await this.releaseMarginLinks(position.portfolioId, position.id, spot);
       }
 
       await this.safeUpdateNav(position.portfolioId, Number(portfolio.currentNav), cashChange);
@@ -1878,7 +2048,11 @@ export class TradeService {
             where: { portfolioId: order.portfolioId, symbol: order.symbol, side: 'LONG', status: 'OPEN' },
           });
           if (!existingLong) {
-            const marginRequired = this.shortMarginRequired(fillPrice, order.qty, order.exchange) + costs.totalCost;
+            const plan = await this.planMargin({
+              portfolioId: order.portfolioId, symbol: order.symbol, side: 'SELL', orderType: order.orderType as any,
+              qty: order.qty, instrumentToken: order.instrumentToken, exchange: order.exchange as any,
+            }, fillPrice, order.qty).catch(() => null);
+            const marginRequired = (plan?.perUnit ?? this.shortMarginRequired(fillPrice, 1, order.exchange)) * order.qty + costs.totalCost;
             if (marginRequired > availableCash) {
               if (this.oms) {
                 await this.oms.rejectOrder(order.id, 'Insufficient margin for SELL');

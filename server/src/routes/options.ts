@@ -159,7 +159,7 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
     const avgIv = ivs.length ? ivs.reduce((a, b) => a + b, 0) / ivs.length : 0.2;
     const analysis = analyzeStrategy(legs, spotPrice, {
       days, sigma: avgIv, sigmaEv: parsed.data.realizedVol, rf: riskFreeRate,
-      fixedCost: entry.totalCost, exerciseStt: rates.sttOptionExercise,
+      fixedCost: entry.totalCost, exerciseStt: rates.sttOptionExercise, underlying: parsed.data.symbol,
     });
     const expected = { expectedPnl: analysis.expectedPnl, expectedPnlBasis: parsed.data.realizedVol ? 'realised' : 'implied' };
 
@@ -202,8 +202,10 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
         breakevens: result.breakeven_points ?? [],
         probabilityOfProfit: result.probability_of_profit ?? 0,
         riskRewardRatio: result.risk_metrics?.risk_reward_ratio ?? 0,
-        capitalRequired: result.risk_metrics?.capital_required ?? 0,
-        marginRequired: result.risk_metrics?.margin_required ?? 0,
+        // What placing these legs would tie up, by the rules the order engine
+        // applies (lib/margin.ts) — it knows an index from a stock; the engine does not.
+        capitalRequired: analysis.margin,
+        marginRequired: analysis.margin,
         // The engine counts premium paid as positive; here + means credit received (as below).
         netPremium: -(result.risk_metrics?.net_premium ?? 0),
         strategyName: result.strategy_name ?? 'Custom',
@@ -451,6 +453,7 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
         const an = analyzeStrategy(strategy.legs, spot, {
           days: daysToExpiry, sigma, sigmaEv: parsed.data.realizedVol,
           fixedCost: entry.totalCost, exerciseStt: rates.sttOptionExercise, range: [spot * 0.85, spot * 1.15], points: 60,
+          underlying: symbol,
         });
         const greeks = calculateStrategyGreeks(strategy.legs, spot, daysToExpiry / 365, sigma, 0.065);
         const evPerMargin = an.margin > 0 ? an.expectedPnl / an.margin : 0;

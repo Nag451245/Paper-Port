@@ -56,7 +56,6 @@ import {
   computeLocalPayoff,
   pnlOnDate,
   ivFraction,
-  INDEX_SET,
   SCENARIOS,
   STRATEGY_TEMPLATES,
   QUICK_STRATEGIES,
@@ -902,7 +901,7 @@ export default function StrategyBuilder() {
                       const hasSpread = sellLegs.length > 0 && buyLegs.length > 0;
                       return (
                         <p className="text-[8px] text-purple-500 mt-0.5">
-                          {sellLegs.length === 0 ? 'Premium paid' : hasSpread ? 'Spread margin' : `SPAN+Exp (${INDEX_SET.has(symbol) ? '~15%' : '~25%'})`}
+                          {sellLegs.length === 0 ? 'Premium paid' : hasSpread ? 'Spread margin + premium' : 'Margin blocked (estimate)'}
                         </p>
                       );
                     })()}

@@ -160,28 +160,40 @@ pub fn compute(data: serde_json::Value) -> Result<serde_json::Value, String> {
     let has_sells = config.legs.iter().any(|l| l.quantity < 0);
     let has_buys = config.legs.iter().any(|l| l.quantity > 0);
 
-    let (capital_required, margin_required) = if !has_sells {
-        // Buy-only: just the premium paid
-        (buy_premium, 0.0)
-    } else if has_buys && !unlimited_loss && max_loss < 0.0 {
-        // Hedged strategy (spreads, condors): SEBI spread benefit applies
-        // Margin ≈ max loss of the strategy
-        let spread_margin = max_loss.abs();
-        (spread_margin, spread_margin)
-    } else {
-        // Naked short or unbounded risk: SPAN + exposure margin, ~15% of notional.
-        // Short calls and short puts cannot both lose at once, so with nothing
-        // bought (straddle, strangle) only the larger side is charged.
-        let side = |kind: &str| -> f64 {
-            config.legs.iter()
-                .filter(|l| l.quantity < 0 && l.option_type == kind)
-                .map(|l| config.spot * l.quantity.unsigned_abs() as f64 * 0.15)
-                .sum()
-        };
-        let span_margin = if has_buys { side("call") + side("put") } else { side("call").max(side("put")) };
-        let total = span_margin + buy_premium;
-        (total, span_margin)
+    // Margin a broker would block, by the same rules the paper-trading server
+    // applies when the legs are placed (server/src/lib/margin.ts):
+    //   a sold option alone: 11.5% of the underlying less the out-of-the-money
+    //     amount, never under 6%;
+    //   protected by a bought option of the same type: the strike gap + 2% exposure;
+    //   a sold call and a sold put together: the second adds only the 2% exposure.
+    // Bought options are paid for in full on top of that.
+    let _ = has_buys;
+    let spot = config.spot;
+    let units = |l: &Leg| l.quantity.unsigned_abs() as f64;
+    let naked = |l: &Leg| -> f64 {
+        let otm = if l.option_type == "call" { (l.strike - spot).max(0.0) } else { (spot - l.strike).max(0.0) };
+        (0.115 * spot - otm).max(0.06 * spot) * units(l)
     };
+    let exposure = |l: &Leg| 0.02 * spot * units(l);
+    let mut margin_required = 0.0;
+    let (mut naked_call, mut naked_put) = (false, false);
+    for l in config.legs.iter().filter(|l| l.quantity < 0) {
+        let is_call = l.option_type == "call";
+        let protected: Option<f64> = config.legs.iter()
+            .filter(|b| b.quantity > 0 && b.option_type == l.option_type && units(b) >= units(l))
+            .map(|b| {
+                let gap = if is_call { b.strike - l.strike } else { l.strike - b.strike };
+                gap.max(0.0) * units(l) + exposure(l)
+            })
+            .fold(None, |best: Option<f64>, x| Some(best.map_or(x, |b| b.min(x))));
+        let alone = naked(l);
+        margin_required += match protected {
+            Some(p) if p < alone => p,
+            _ if (is_call && naked_put) || (!is_call && naked_call) => exposure(l),
+            _ => { if is_call { naked_call = true } else { naked_put = true }; alone }
+        };
+    }
+    let capital_required = if has_sells { margin_required + buy_premium } else { buy_premium };
 
     let rr = if !unlimited_loss && !unlimited_profit && max_loss.abs() > 0.01 {
         (max_profit / max_loss.abs()).min(99.0)
@@ -330,7 +342,7 @@ mod tests {
         let r = run(json!([
             {"option_type":"call","strike":100.0,"premium":5.0,"quantity":-10}
         ]), 100.0);
-        let expected_span = 100.0 * 10.0 * 0.15;
+        let expected_span = 100.0 * 10.0 * 0.115;                // at the money: 11.5% of the underlying
         assert!((r.risk_metrics.margin_required - expected_span).abs() < 1.0,
             "naked margin should be ~{}, got {}", expected_span, r.risk_metrics.margin_required);
     }
@@ -366,9 +378,11 @@ mod tests {
             {"option_type":"call","strike":110.0,"premium":1.0,"quantity":1}
         ]), 100.0);
         assert!(r.max_loss.is_finite() && r.max_loss < 0.0);
-        assert!((r.risk_metrics.capital_required - r.max_loss.abs()).abs() < 0.5,
-            "condor margin should equal |maxLoss|={}, got capital={}",
-            r.max_loss.abs(), r.risk_metrics.capital_required);
+        // The sold put is 5% out of the money: alone it blocks 6.5, less than a spread
+        // would (5-point gap + 2.0 exposure). The sold call then adds only exposure (2.0).
+        // The bought legs cost 2.0 on top.
+        assert!((r.risk_metrics.margin_required - 8.5).abs() < 0.01, "margin {}", r.risk_metrics.margin_required);
+        assert!((r.risk_metrics.capital_required - 10.5).abs() < 0.01, "capital {}", r.risk_metrics.capital_required);
     }
 
     #[test]
@@ -494,8 +508,9 @@ mod tests {
         assert!(r.probability_of_profit > 0.3 && r.probability_of_profit < 0.8, "pop {}", r.probability_of_profit);
         // Theta per day in rupees: a few thousand, not hundreds of thousands.
         assert!(r.greeks_summary.net_theta > 500.0 && r.greeks_summary.net_theta < 20000.0, "theta {}", r.greeks_summary.net_theta);
-        // Only one side of a straddle can lose: ~15% of one side's notional.
-        assert!((r.risk_metrics.margin_required - 22421.95 * 65.0 * 0.15).abs() < 1.0);
+        // Only one side of a straddle can lose: the call (slightly in the money) in
+        // full, the put just the 2% exposure margin.
+        assert!((r.risk_metrics.margin_required - 22421.95 * 65.0 * (0.115 + 0.02)).abs() < 1.0);
     }
 
     #[test]

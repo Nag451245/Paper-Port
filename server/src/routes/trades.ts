@@ -329,7 +329,10 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
 
       const results: { leg: number; order: any; error?: string }[] = [];
 
-      for (let i = 0; i < legs.length; i++) {
+      // Buy the protecting legs first, as a trader would: a sold option placed
+      // after its protection is margined as a spread, not as a naked sale.
+      const order = legs.map((_, i) => i).sort((a, b) => Number(legs[a].action === 'SELL') - Number(legs[b].action === 'SELL'));
+      for (const i of order) {
         const leg = legs[i];
         // Same grammar as before, but built by the shared helper so the format
         // lives in exactly one place.
@@ -355,6 +358,7 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
           results.push({ leg: i + 1, order: null, error: msg });
         }
       }
+      results.sort((x, y) => x.leg - y.leg);                   // reported in the order the legs were given
 
       // A leg that came back REJECTED/CANCELLED without throwing is just as
       // absent from the structure as one that threw, so it counts against the

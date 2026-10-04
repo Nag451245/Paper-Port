@@ -7,6 +7,7 @@ import { MarginCalculatorService } from './margin-calculator.service.js';
 import { PositionLimitsService } from './position-limits.service.js';
 import { MetricsService } from './metrics.service.js';
 import { parseInstrumentSymbol } from '../lib/instrument.js';
+import { capitalBlocked } from '../lib/margin.js';
 import { istMidnight } from '../lib/ist.js';
 
 const log = createChildLogger('RiskService');
@@ -847,9 +848,7 @@ export class RiskService {
     const positions: Array<{ symbol: string; marginUsed: number; marginPercent: number }> = [];
 
     for (const pos of shorts) {
-      const entryPrice = Number(pos.avgEntryPrice);
-      const rate = pos.exchange === 'MCX' ? 0.10 : pos.exchange === 'CDS' ? 0.05 : 0.25;
-      const marginBlocked = entryPrice * pos.qty * rate;
+      const marginBlocked = capitalBlocked(pos);
       totalMarginUsed += marginBlocked;
       shortPositions.push({ symbol: pos.symbol, marginBlocked: Number(marginBlocked.toFixed(2)) });
     }

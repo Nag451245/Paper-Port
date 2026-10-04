@@ -131,11 +131,14 @@ describe('POST /execute-strategy — partial-fill reporting', () => {
 
     expect(body.results).toHaveLength(4);
     expect(body.totalLegs).toBe(4);
-    expect(body.results[0].order.id).toBe('o1');
-    expect(body.results[1]).toMatchObject({ leg: 2, order: null, error: 'margin rejected' });
-    // The symbols identify which contracts are actually open.
+    // Bought legs are placed first (so the sold ones are margined as spreads):
+    // the 23600 put, then the 24400 call (which fails here), then the two sales.
     const symbols = placeOrder.mock.calls.map((c: any) => c[1].symbol);
-    expect(symbols[0]).toBe('NIFTY2026082823800PE');
+    expect(symbols).toEqual(['NIFTY2026082823600PE', 'NIFTY2026082824400CE', 'NIFTY2026082823800PE', 'NIFTY2026082824200CE']);
+    // Results come back in the order the legs were given.
+    expect(body.results.map((r: any) => r.leg)).toEqual([1, 2, 3, 4]);
+    expect(body.results[1].order.id).toBe('o1');
+    expect(body.results[3]).toMatchObject({ leg: 4, order: null, error: 'margin rejected' });
   });
 
   it('reports a total failure as not-created rather than 201 with zero legs', async () => {

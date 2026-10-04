@@ -5,6 +5,7 @@ import { authenticate, getUserId } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
 import { MetricsService } from '../services/metrics.service.js';
 import { MarketDataService } from '../services/market-data.service.js';
+import { capitalBlocked } from '../lib/margin.js';
 import { MANUAL_CAPITAL_LIMIT } from '../lib/capital.js';
 
 const createSchema = z.object({
@@ -30,7 +31,7 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
     const portfolios = await prisma.portfolio.findMany({
       where: { userId },
       include: {
-        positions: { where: { status: 'OPEN' }, select: { symbol: true, qty: true, avgEntryPrice: true, side: true, exchange: true } },
+        positions: { where: { status: 'OPEN' }, select: { symbol: true, qty: true, avgEntryPrice: true, side: true, exchange: true, marginBlocked: true } },
         _count: { select: { trades: true } },
       },
     });
@@ -44,13 +45,7 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
       totalOpenPositions += p.positions.length;
       totalTrades += p._count.trades;
       for (const pos of p.positions) {
-        const entryPrice = Number(pos.avgEntryPrice);
-        if (pos.side === 'LONG') {
-          totalInvestedValue += entryPrice * pos.qty;
-        } else {
-          const rate = pos.exchange === 'MCX' ? 0.10 : pos.exchange === 'CDS' ? 0.05 : 0.25;
-          totalInvestedValue += entryPrice * pos.qty * rate;
-        }
+        totalInvestedValue += capitalBlocked(pos);
       }
     }
     const marketData = new MarketDataService();
@@ -102,12 +97,7 @@ export async function portfolioRoutes(app: FastifyInstance): Promise<void> {
         let pUnrealizedPnl = 0;
         for (const pos of p.positions) {
           const ep = Number(pos.avgEntryPrice);
-          if (pos.side === 'LONG') {
-            pInvested += ep * pos.qty;
-          } else {
-            const rate = pos.exchange === 'MCX' ? 0.10 : pos.exchange === 'CDS' ? 0.05 : 0.25;
-            pInvested += ep * pos.qty * rate;
-          }
+          pInvested += capitalBlocked(pos);
           const ltp = ltpMap.get(pos.symbol) ?? 0;
           if (ltp > 0) {
             pUnrealizedPnl += pos.side === 'SHORT'

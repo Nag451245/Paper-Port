@@ -30,6 +30,8 @@ export interface AnalyzeOptions {
   exerciseStt?: number;
   range?: [number, number];
   points?: number;
+  /** For the margin estimate: index options are margined at a lower rate than stock options. */
+  underlying?: string;
 }
 
 export interface Analysis {
@@ -45,9 +47,11 @@ export interface Analysis {
   expectedPnl: number;
   /** + = credit received. */
   netPremium: number;
-  /** Rough exchange margin: premium for buys, max loss for hedged positions, ~15% of notional per naked side. */
+  /** Capital the position ties up: bought options paid in full plus the margin on sold ones (lib/margin.ts). */
   margin: number;
 }
+
+import { strategyMargin } from './margin.js';
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -112,13 +116,9 @@ export function analyzeStrategy(legs: MathLeg[], spot: number, o: AnalyzeOptions
   const maxProfit = Math.max(...cp);
   const maxLoss = Math.min(...cp);
   const buyPremium = legs.filter((l) => l.action === 'BUY').reduce((s, l) => s + l.premium * l.qty, 0);
-  const hasSells = legs.some((l) => l.action === 'SELL');
-  const hasBuys = legs.some((l) => l.action === 'BUY');
-  const side = (type: 'CE' | 'PE') => legs.filter((l) => l.action === 'SELL' && l.type === type)
-    .reduce((s, l) => s + spot * l.qty * 0.15, 0);
-  const margin = !hasSells ? buyPremium
-    : hasBuys && netCalls >= 0 && maxLoss < 0 ? Math.abs(maxLoss)
-      : (hasBuys ? side('CE') + side('PE') : Math.max(side('CE'), side('PE'))) + buyPremium;
+  // What placing these legs ties up: bought options paid in full, plus the
+  // margin on the sold ones (the same rules the order engine applies).
+  const margin = buyPremium + strategyMargin(legs, spot, o.underlying);
 
   const lowR = o.range?.[0] ?? spot * 0.8, highR = o.range?.[1] ?? spot * 1.2, pts = o.points ?? 100;
   const xs = [...new Set([...Array.from({ length: pts + 1 }, (_, i) => lowR + ((highR - lowR) * i) / pts),
