@@ -108,7 +108,7 @@ for unit_file in $(grep -ls 'server/dist/index.js' /etc/systemd/system/*.service
   echo "  The API was also being started by systemd ($unit): switching that copy off, PM2 runs the API"
   sudo systemctl disable --now "$unit" >/dev/null 2>&1 || echo "  (could not switch off $unit)"
 done
-unit_of() { awk -F/ '$NF ~ /[.]service$/ { print $NF; exit }' "/proc/$1/cgroup" 2>/dev/null; }
+unit_of() { awk -F/ '$NF ~ /[.]service$/ { print $NF; exit }' "/proc/$1/cgroup" 2>/dev/null || true; }
 SYSTEMD_RUNS=""
 PM2_PID=$(cat ~/.pm2/pm2.pid 2>/dev/null || true)
 under_pm2() {                   # is this process PM2's, directly or through a parent?
