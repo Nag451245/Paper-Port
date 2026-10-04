@@ -95,7 +95,13 @@ pm2 describe pm2-logrotate >/dev/null 2>&1 || pm2 install pm2-logrotate >/dev/nu
 pm2 set pm2-logrotate:max_size 50M >/dev/null 2>&1 || true
 pm2 set pm2-logrotate:retain 7 >/dev/null 2>&1 || true
 pm2 set pm2-logrotate:compress true >/dev/null 2>&1 || true
-pm2 restart all --update-env
+# Restart everything this user's PM2 runs. If PM2 has lost its list (it then
+# restarts nothing and the old code keeps running), start from the config.
+if ! pm2 restart all --update-env; then
+  echo "  PM2 had nothing to restart: starting the services from ecosystem.config.cjs"
+  pm2 start ecosystem.config.cjs
+  pm2 save >/dev/null || true
+fi
 sudo systemctl reload nginx
 sleep 15
 pm2 status
@@ -104,17 +110,62 @@ echo "== [8/8] Health"
 # Confirm the API answering is the build just deployed, not a leftover copy
 # (e.g. one started by a second PM2 run under sudo) still holding the port.
 WANT=$(git rev-parse --short HEAD)
+api_version() {
+  { curl -sf -m 5 http://127.0.0.1:8000/health || true; } | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);console.log(j.version+" "+j.status+" pid "+j.pid)}catch{console.log("none")}})'
+}
+wait_for_version() {            # up to ~60 s for the API to answer with the new build
+  for i in $(seq 1 20); do
+    GOT=$(api_version)
+    [ "${GOT%% *}" = "$WANT" ] && return 0
+    sleep 3
+  done
+  return 1
+}
+listener_pid() { sudo ss -ltnpH 'sport = :8000' 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2; }
+
 GOT=none
-for i in $(seq 1 20); do
-  GOT=$( { curl -sf -m 5 http://127.0.0.1:8000/health || true; } | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);console.log(j.version+" "+j.status+" pid "+j.pid)}catch{console.log("none")}})')
-  [ "${GOT%% *}" = "$WANT" ] && break
-  sleep 3
-done
+if ! wait_for_version; then
+  # An older copy of the API is still answering. Find the process holding the
+  # port; if it is not the one this PM2 runs, it is a leftover: stop it and
+  # start the new build.
+  HOLDER=$(listener_pid || true)
+  MINE=$(pm2 pid capital-guard-api 2>/dev/null || true)
+  echo "  The API is still answering as: $GOT (wanted $WANT)"
+  if [ -n "$HOLDER" ] && [ "$HOLDER" != "$MINE" ]; then
+    echo "  Port 8000 is held by another process (PM2's API pid: ${MINE:-none}):"
+    ps -o user=,pid=,ppid=,lstart=,cmd= -p "$HOLDER" 2>/dev/null | sed 's/^/     /' || true
+    PARENT=$(ps -o ppid= -p "$HOLDER" 2>/dev/null | tr -d ' ' || true)
+    [ -n "$PARENT" ] && { echo "  started by:"; ps -o user=,pid=,cmd= -p "$PARENT" 2>/dev/null | sed 's/^/     /' || true; }
+    if ps -o cmd= -p "$HOLDER" 2>/dev/null | grep -q 'dist/index.js'; then
+      echo "  It is an old copy of this app: stopping it and starting the new build"
+      sudo kill "$HOLDER" 2>/dev/null || true
+      sleep 3
+      sudo kill -9 "$HOLDER" 2>/dev/null || true
+      pm2 restart capital-guard-api --update-env >/dev/null 2>&1 || pm2 start ecosystem.config.cjs --only capital-guard-api >/dev/null
+      pm2 save >/dev/null || true
+    fi
+  elif [ -n "$MINE" ] && [ "$MINE" != "0" ]; then
+    echo "  PM2's own API process did not pick up the new build: re-registering it"
+    pm2 delete capital-guard-api >/dev/null 2>&1 || true
+    pm2 start ecosystem.config.cjs --only capital-guard-api >/dev/null
+    pm2 save >/dev/null || true
+  fi
+  wait_for_version || true
+fi
+
 echo "  API answering: $GOT (deployed $WANT)"
 if [ "${GOT%% *}" != "$WANT" ]; then
-  echo "  !! The API on port 8000 is NOT the version just deployed."
-  echo "  !! Process listening on 8000:"; sudo ss -ltnp 2>/dev/null | grep ':8000 ' || echo "     (none)"
-  echo "  !! PM2's API pid: $(pm2 pid capital-guard-api 2>/dev/null || echo none)"
+  echo
+  echo "  ############################################################"
+  echo "  #  NOT LIVE: the server is still running the OLD code.      #"
+  echo "  #  The website files were updated, the API was not.         #"
+  echo "  ############################################################"
+  echo "  Process listening on 8000:"; sudo ss -ltnp 2>/dev/null | grep ':8000 ' || echo "     (none)"
+  echo "  PM2's API pid: $(pm2 pid capital-guard-api 2>/dev/null || echo none)"
+  echo "  Every PM2 on this machine:"; ps -eo user,pid,lstart,cmd | grep -i 'PM2 v' | grep -v grep | sed 's/^/     /' || true
+  echo "  Last lines of the API log:"; pm2 logs capital-guard-api --lines 15 --nostream 2>/dev/null | tail -20 | sed 's/^/     /' || true
+  echo "  Send these lines to whoever maintains the app."
+  exit 1
 fi
 echo
 echo "Deployed $(git log --oneline -1)"

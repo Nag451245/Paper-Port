@@ -64,6 +64,10 @@ export interface PortfolioSummary {
   autoTopUp?: { enabled: boolean; added: number; limit: number; manualLimit: number };
   /** When these figures were worked out (ISO time) */
   pricedAt?: string;
+  /** Profit or loss of every closed trade, after its charges */
+  realizedPnl?: number;
+  /** Charges already paid on positions still open */
+  openCharges?: number;
 }
 
 export interface RiskMetrics {

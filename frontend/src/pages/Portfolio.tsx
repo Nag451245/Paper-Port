@@ -28,6 +28,7 @@ import { usePortfolioStore } from '@/stores/portfolio';
 import { portfolioApi, marketApi } from '@/services/api';
 import type { RiskMetrics } from '@/types';
 import { formatINR as sharedFormatINR } from '@/lib/utils';
+import FundsStatement from '@/components/portfolio/FundsStatement';
 
 const SECTOR_COLORS = ['#4f46e5', '#22c55e', '#eab308', '#ef4444', '#a855f7', '#06b6d4', '#f97316', '#ec4899'];
 
@@ -163,40 +164,47 @@ export default function PortfolioPage() {
               <p className="text-lg font-bold">{(activePortfolio as any).name || 'Default'}</p>
             </div>
             <div>
-              <p className="text-xs text-indigo-200 uppercase">Total NAV</p>
+              <p className="text-xs text-indigo-200 uppercase">Net worth</p>
               <p className="text-lg font-bold font-mono">₹{formatINR(nav)}</p>
             </div>
             <div>
-              <p className="text-xs text-indigo-200 uppercase">Initial Capital</p>
+              <p className="text-xs text-indigo-200 uppercase">Capital</p>
               <p className="text-lg font-bold font-mono">₹{formatINR(initCap)}</p>
             </div>
             <div>
-              <p className="text-xs text-indigo-200 uppercase">Realized P&L</p>
+              <p className="text-xs text-indigo-200 uppercase">Total P&L (closed + open)</p>
               <p className={`text-lg font-bold font-mono ${totalPnl >= 0 ? '' : 'text-red-200'}`}>
                 {totalPnl >= 0 ? '+' : ''}₹{formatINR(totalPnl)}
                 <span className="text-xs ml-1">({totalPnlPct >= 0 ? '+' : ''}{totalPnlPct.toFixed(2)}%)</span>
               </p>
             </div>
             <div>
-              <p className="text-xs text-indigo-200 uppercase">Unrealized P&L</p>
+              <p className="text-xs text-indigo-200 uppercase">Open positions P&L</p>
               <p className={`text-lg font-bold font-mono ${unrealizedPnl >= 0 ? '' : 'text-red-200'}`}>
                 {unrealizedPnl >= 0 ? '+' : ''}₹{formatINR(unrealizedPnl)}
               </p>
             </div>
             <div>
-              <p className="text-xs text-indigo-200 uppercase">Today's P&L (realized)</p>
+              <p className="text-xs text-indigo-200 uppercase">Today (closed trades)</p>
               <p className={`text-lg font-bold font-mono ${dayPnl >= 0 ? '' : 'text-red-200'}`}>
                 {dayPnl >= 0 ? '+' : ''}₹{formatINR(dayPnl)}
                 <span className="text-xs ml-1">({dayPnlPct >= 0 ? '+' : ''}{dayPnlPct.toFixed(2)}%)</span>
               </p>
             </div>
             <div>
-              <p className="text-xs text-indigo-200 uppercase">Invested / Free Cash</p>
+              <p className="text-xs text-indigo-200 uppercase">In positions / Free cash</p>
               <p className="text-sm font-bold font-mono">
                 ₹{formatINR(investedValue)} <span className="text-indigo-200">/</span> ₹{formatINR(availableMargin)}
               </p>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* The same figures as a statement that adds up: where the money is, and how it got there. */}
+      {summary?.capital != null && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+          <FundsStatement summary={summary} columns />
         </div>
       )}
 

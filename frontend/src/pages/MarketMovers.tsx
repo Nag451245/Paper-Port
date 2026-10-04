@@ -31,7 +31,16 @@ function remember(key: string, value: string) {
 export default function MarketMovers() {
   const navigate = useNavigate();
   const [exchange, setExchange] = useState<'NSE' | 'BSE'>(() => remembered('movers.exchange', 'NSE'));
-  const [kind, setKind] = useState<MoverKind>(() => remembered('movers.kind', 'gainers'));
+  // One list, or a price list together with Volume Gainers (stocks on both).
+  const [kinds, setKinds] = useState<MoverKind[]>(() => {
+    const saved = remembered<string>('movers.kinds', remembered<string>('movers.kind', 'gainers')).split(',')
+      .filter((k): k is MoverKind => KINDS.some((x) => x.id === k));
+    return saved.length ? saved : ['gainers'];
+  });
+  const price = kinds.find((k) => k !== 'volume');
+  const both = kinds.length > 1;
+  const kind: MoverKind = price ?? 'volume';
+  const [counts, setCounts] = useState<{ price: number; volume: number } | null>(null);
   const [group, setGroup] = useState<string | undefined>(undefined);
   const [data, setData] = useState<MoversResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -40,15 +49,30 @@ export default function MarketMovers() {
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
     try {
-      const { data: res } = await marketApi.movers({ exchange, kind, group, count: 50 });
-      setData(res);
+      if (!both) {
+        const { data: res } = await marketApi.movers({ exchange, kind, group, count: 50 });
+        setData(res);
+        setCounts(null);
+      } else {
+        // Both lists in full, then only the stocks that are on each of them.
+        const [p, v] = await Promise.all([
+          marketApi.movers({ exchange, kind: price!, group, count: 200 }),
+          marketApi.movers({ exchange, kind: 'volume', count: 200 }),
+        ]);
+        const volume = new Map(v.data.rows.map((r) => [r.symbol, r]));
+        const rows = p.data.rows.filter((r) => volume.has(r.symbol))
+          .map((r) => ({ ...r, avgVolume: volume.get(r.symbol)!.avgVolume, volumeRatio: volume.get(r.symbol)!.volumeRatio, volume: volume.get(r.symbol)!.volume || r.volume }))
+          .sort((a, b) => (b.volumeRatio ?? 0) - (a.volumeRatio ?? 0));
+        setData({ ...p.data, rows, note: p.data.note ?? v.data.note });
+        setCounts({ price: p.data.rows.length, volume: v.data.rows.length });
+      }
       setError(null);
     } catch {
       setError('Could not load market movers. Try again in a moment.');
     } finally {
       if (!quiet) setLoading(false);
     }
-  }, [exchange, kind, group]);
+  }, [exchange, kind, group, both, price]);
 
   useEffect(() => { void load(); }, [load]);
   // Lists refresh on the server once a minute; follow along while the page is open.
@@ -58,11 +82,21 @@ export default function MarketMovers() {
   }, [load]);
 
   const pickExchange = (ex: 'NSE' | 'BSE') => { setExchange(ex); setGroup(undefined); remember('movers.exchange', ex); };
-  const pickKind = (k: MoverKind) => { setKind(k); remember('movers.kind', k); };
+  // Gainers and Losers exclude each other; Volume Gainers can be added to either.
+  const pickKind = (k: MoverKind) => {
+    const on = kinds.includes(k);
+    let next: MoverKind[];
+    if (k === 'volume') next = on ? kinds.filter((x) => x !== 'volume') : [...kinds, 'volume'];
+    else next = on ? kinds.filter((x) => x !== k) : [k, ...kinds.filter((x) => x === 'volume')];
+    if (!next.length) return;                                    // at least one list stays on
+    setKinds(next);
+    remember('movers.kinds', next.join(','));
+  };
   const open = (symbol: string) => navigate(`/terminal?symbol=${encodeURIComponent(symbol)}&exchange=${exchange}`);
 
   const rows = data?.rows ?? [];
-  const isVolume = kind === 'volume';
+  const isVolume = kinds.includes('volume');
+  const priceLabel = KINDS.find((x) => x.id === price)?.label;
 
   return (
     <div className="space-y-4">
@@ -75,7 +109,7 @@ export default function MarketMovers() {
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex gap-1.5 overflow-x-auto touch-pan-x" role="tablist" aria-label="List">
             {KINDS.map(({ id, label, short, icon: Icon }) => (
-              <button key={id} role="tab" aria-selected={kind === id} className={`${chip(kind === id)} flex items-center gap-1.5`} onClick={() => pickKind(id)}>
+              <button key={id} role="tab" aria-selected={kinds.includes(id)} className={`${chip(kinds.includes(id))} flex items-center gap-1.5`} onClick={() => pickKind(id)}>
                 <Icon className="w-3.5 h-3.5" /> <span className="sm:hidden">{short}</span><span className="hidden sm:inline">{label}</span>
               </button>
             ))}
@@ -90,7 +124,7 @@ export default function MarketMovers() {
           </div>
         </div>
 
-        {data && data.groups.length > 1 && !(isVolume && exchange === 'NSE') && (
+        {data && data.groups.length > 1 && !(kind === 'volume' && exchange === 'NSE') && (
           <div className="flex gap-1.5 overflow-x-auto touch-pan-x pb-0.5" aria-label="Group">
             {data.groups.map((g) => (
               <button key={g.id} className={chip(data.group === g.id)} onClick={() => setGroup(g.id)}>{g.label}</button>
@@ -98,6 +132,11 @@ export default function MarketMovers() {
           </div>
         )}
 
+        <p className="text-[11px] text-slate-500">
+          {both
+            ? <>Showing stocks that are on <b>both</b> lists: {priceLabel} and Volume Gainers{counts ? ` (${rows.length} of ${counts.price} and ${counts.volume})` : ''}, busiest first. Tap a selected list to turn it off.</>
+            : <>Tip: turn on Volume Gainers together with Price Gainers or Price Losers to see only the stocks moving on heavy volume.</>}
+        </p>
         {data && (
           <p className="text-[11px] text-slate-400">
             Source: {SOURCE_LABEL[data.source]}{data.asOf ? ` · as of ${data.asOf.includes('T') ? new Date(data.asOf).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : data.asOf}` : ''}
@@ -116,7 +155,7 @@ export default function MarketMovers() {
         {loading && !rows.length ? (
           <div className="flex items-center justify-center py-16"><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>
         ) : !rows.length ? (
-          <p className="text-center text-sm text-slate-400 py-16">No stocks in this list right now.</p>
+          <p className="text-center text-sm text-slate-400 py-16">{both ? 'No stock is on both lists right now.' : 'No stocks in this list right now.'}</p>
         ) : (
           <div className="overflow-x-auto touch-pan-x">
             <table className="w-full text-xs">

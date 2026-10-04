@@ -59,7 +59,7 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
     exchange: z.enum(['NSE', 'BSE']).default('NSE'),
     kind: z.enum(['gainers', 'losers', 'volume']).default('gainers'),
     group: z.string().max(20).optional(),
-    count: z.coerce.number().int().min(1).max(50).default(25),
+    count: z.coerce.number().int().min(1).max(200).default(25),
   });
 
   /** Price gainers, price losers and volume gainers for NSE or BSE. */

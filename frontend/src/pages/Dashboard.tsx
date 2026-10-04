@@ -19,6 +19,7 @@ import { formatINR } from '@/lib/utils';
 import { liveSocket } from '@/services/websocket';
 import { StrategyBadge } from '@/components/trading/StatusBadge';
 import CapitalPanel from '@/components/dashboard/CapitalPanel';
+import FundsStatement from '@/components/portfolio/FundsStatement';
 
 export default function Dashboard() {
   const { portfolios, summary, activePortfolio, isLoading: portfolioLoading, fetchPortfolios, selectPortfolio } = usePortfolioStore();
@@ -172,7 +173,7 @@ export default function Dashboard() {
           ) : (
             <div className="space-y-3">
               <div>
-                <p className="text-xs text-slate-500">Net Asset Value</p>
+                <p className="text-xs text-slate-500">Net worth</p>
                 <p className="text-2xl font-bold font-mono text-slate-900">{formatINR(summary?.totalNav ?? 0)}</p>
               </div>
               <div className="grid grid-cols-2 gap-3">
@@ -195,21 +196,11 @@ export default function Dashboard() {
                   </p>
                 </div>
               </div>
-              {(summary?.openPositions?.unpriced ?? 0) > 0 && (
-                <p className="text-[11px] text-amber-600">
-                  {summary!.openPositions!.unpriced} open position{summary!.openPositions!.unpriced === 1 ? ' has' : 's have'} no price right now and {summary!.openPositions!.unpriced === 1 ? 'is' : 'are'} shown at cost.
-                </p>
-              )}
+              {/* Every figure above, added up: free cash + positions ± open gain or loss = net worth. */}
               {summary?.capital != null && (
-                <button onClick={() => setPortfolioTab('capital')} className="w-full text-left bg-slate-50 hover:bg-slate-100 rounded-xl p-2.5 transition">
-                  <div className="flex justify-between text-xs text-slate-500">
-                    <span>Capital in use {formatINR(summary.capitalUsed)}</span>
-                    <span>free {formatINR(summary.capitalFree)}</span>
-                  </div>
-                  <div className="h-1.5 rounded-full bg-slate-200 overflow-hidden mt-1.5">
-                    <div className="h-full bg-teal-500" style={{ width: `${Math.min(100, Math.max(0, summary.capitalUsedPct))}%` }} />
-                  </div>
-                </button>
+                <div className="bg-slate-50 rounded-xl p-3">
+                  <FundsStatement summary={summary} />
+                </div>
               )}
             </div>
           )}

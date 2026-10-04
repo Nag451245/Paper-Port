@@ -37,6 +37,10 @@ export interface PortfolioSummary {
   autoTopUp: { enabled: boolean; added: number; limit: number; manualLimit: number };
   /** When these figures were worked out */
   pricedAt: string;
+  /** Profit or loss of every closed trade, after its charges */
+  realizedPnl: number;
+  /** Charges already paid on positions still open (so: totalPnl = realizedPnl + unrealizedPnl − openCharges) */
+  openCharges: number;
 }
 
 export class PortfolioService {
@@ -101,6 +105,12 @@ export class PortfolioService {
     const dayPnl = todayTrades.reduce((sum, t) => sum + Number(t.netPnl), 0);
     const dayPnlBase = v.netWorth > 0 ? v.netWorth : v.capital;
 
+    // How the total came about: closed trades (after their charges), the open
+    // positions' gain or loss, and the charges already paid to open them.
+    const closed = await this.prisma.trade.findMany({ where: { portfolioId }, select: { netPnl: true } });
+    const realizedPnl = r2((closed ?? []).reduce((sum, t) => sum + Number(t.netPnl), 0));
+    const openCharges = r2(realizedPnl + v.openPnl - v.totalPnl);
+
     const priced = v.positions.filter((p) => p.priceSource !== 'entry');
     const after = (p: (typeof priced)[number]) => p.pnl - p.exitCost;
     const winners = priced.filter((p) => after(p) >= 0);
@@ -137,6 +147,8 @@ export class PortfolioService {
         manualLimit: MANUAL_CAPITAL_LIMIT,
       },
       pricedAt: v.asOf,
+      realizedPnl,
+      openCharges,
     };
   }
 
