@@ -343,6 +343,45 @@ export interface VolContext {
   asOf: string;
 }
 
+export interface StrategyIdea {
+  id: string;
+  name: string;
+  family: string;
+  view: 'neutral' | 'bullish' | 'bearish';
+  kind: 'credit' | 'debit';
+  legs: { type: 'CE' | 'PE'; action: 'BUY' | 'SELL'; strike: number; qty: number; premium: number; iv: number | null; priced: 'bid' | 'ask' | 'last' }[];
+  netPremium: number;
+  maxProfit: number;
+  maxLoss: number;
+  breakevens: number[];
+  pop: number;
+  expectedPnl: number;
+  margin: number;
+  returnOnMargin: number;
+  rewardToRisk: number;
+  charges: number;
+  fit: 'with' | 'neutral' | 'against';
+  why: string[];
+  warnings: string[];
+  payoff: { spot: number; pnl: number }[];
+  blocked?: string;
+}
+
+export interface StrategyIdeas {
+  read: {
+    symbol: string; spot: number; days: number; atmIv: number | null; rv20: number | null;
+    verdict: string; trend: string; expectedMove: number | null; vixPercentile: number | null; summary: string[];
+  };
+  ideas: StrategyIdea[];
+  nearMisses: StrategyIdea[];
+  considered: number;
+  rejected: Record<string, number>;
+  message: string | null;
+  expiry: string | null;
+  lotSize: number;
+  qty: number;
+}
+
 export const optionsApi = {
   templates: () => api.get('/options/templates'),
 
@@ -352,6 +391,10 @@ export const optionsApi = {
 
   optimize: (symbol: string, expiry?: string, view?: string, opts: { lotSize?: number; lots?: number; maxLoss?: number; realizedVol?: number } = {}) =>
     api.post('/options/optimize', { symbol, expiry, view, ...opts }),
+
+  /** Defined-risk strategies worked out from the live chain, for the user to consider. */
+  ideas: (symbol: string, opts: { lots?: number; maxLoss?: number; netWorth?: number; expiry?: string } = {}) =>
+    api.get<StrategyIdeas>('/options/ideas', { params: { symbol, ...opts }, timeout: 45_000 }),
 
   volContext: (symbol: string, atmIv?: number) =>
     api.get<VolContext>('/options/vol-context', { params: { symbol, atmIv } }),

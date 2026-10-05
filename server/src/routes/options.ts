@@ -8,6 +8,7 @@ import { MarketDataService } from '../services/market-data.service.js';
 import { fnoRatesOn, optionOrderCharges, sumCharges } from '../lib/fno-charges.js';
 import { istDateStr } from '../lib/ist.js';
 import { analyzeStrategy, realisedVol } from '../lib/strategy-math.js';
+import { buildIdeas, type IdeasResult } from '../lib/strategy-ideas.js';
 
 const legSchema = z.object({
   type: z.enum(['CE', 'PE']),
@@ -281,6 +282,55 @@ export async function optionsRoutes(app: FastifyInstance): Promise<void> {
       vix,
       asOf: to,
     };
+  });
+
+  // Strategy ideas: defined-risk strategies built from the live chain for the
+  // user to consider. Read-only: placing one goes through execute-strategy.
+  const ideasCache = new Map<string, { at: number; value: IdeasResult & { expiry: string | null; lotSize: number; qty: number } }>();
+  app.get('/ideas', { preHandler: [authenticate] }, async (request, reply) => {
+    const q = z.object({
+      symbol: z.string().min(1).max(20).regex(/^[A-Za-z0-9&-]+$/),
+      expiry: z.string().max(12).optional(),
+      lots: z.coerce.number().int().positive().max(50).default(1),
+      maxLoss: z.coerce.number().positive().optional(),
+      netWorth: z.coerce.number().positive().optional(),
+    }).safeParse(request.query);
+    if (!q.success) return reply.code(400).send({ error: 'Validation failed', details: q.error.flatten().fieldErrors });
+    const symbol = q.data.symbol.toUpperCase();
+    const key = `${symbol}:${q.data.expiry ?? ''}:${q.data.lots}:${q.data.maxLoss ?? ''}:${q.data.netWorth ?? ''}`;
+    const hit = ideasCache.get(key);
+    if (hit && Date.now() - hit.at < 45_000) return reply.send(hit.value);
+
+    const market = new MarketDataService();
+    let chain: any;
+    try { chain = await market.getOptionsChain(symbol, q.data.expiry); } catch { chain = null; }
+    if (chain?.sessionError) return reply.code(503).send({ error: chain.message ?? 'No option data source is connected.' });
+    const spot = Number(chain?.spotPrice || chain?.underlyingValue) || 0;
+    if (!chain?.strikes?.length || !(spot > 0)) return reply.code(503).send({ error: `No option chain for ${symbol} right now. Try again in a moment.` });
+
+    const to = istDateStr();
+    const closes = (await market.getHistory(symbol, '1day', istDateStr(new Date(Date.now() - 150 * 86_400_000)), to).catch(() => []))
+      .map((b) => b.close).filter((v) => v > 0);
+    let vixPercentile: number | null = null;
+    if (VIX_UNDERLYINGS.has(symbol)) {
+      const vix = (await market.getHistory('INDIA VIX', '1day', istDateStr(new Date(Date.now() - 370 * 86_400_000)), to).catch(() => []))
+        .map((b) => b.close).filter((v) => v > 0);
+      if (vix.length >= 100) vixPercentile = Math.round((vix.filter((v) => v < vix[vix.length - 1]).length / vix.length) * 1000) / 10;
+    }
+    const expiry = chain.expiry ? String(chain.expiry).slice(0, 10) : null;
+    const days = expiry ? Math.max(0.1, (new Date(`${expiry}T15:30:00+05:30`).getTime() - Date.now()) / 86_400_000) : 7;
+    const lotSize = Number(chain.lotSize) || 1;
+    const qty = lotSize * q.data.lots;
+    const value = {
+      ...buildIdeas({
+        symbol, spot, strikes: chain.strikes, qty, days, rates: fnoRatesOn(to, { underlying: symbol }),
+        closes, rv20: realisedVol(closes, 20), vixPercentile, maxLoss: q.data.maxLoss, netWorth: q.data.netWorth,
+      }),
+      expiry, lotSize, qty,
+    };
+    if (ideasCache.size > 200) ideasCache.clear();
+    ideasCache.set(key, { at: Date.now(), value });
+    return reply.send(value);
   });
 
   // Strategy Optimizer: evaluate templates with live chain data
