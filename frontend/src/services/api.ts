@@ -116,7 +116,7 @@ export const portfolioApi = {
 };
 
 // ─── Orders & Trades ─────────────────────────────────────────────
-export interface StrategyLegInput { type: 'CE' | 'PE'; strike: number; action: 'BUY' | 'SELL'; qty: number; premium: number }
+export interface StrategyLegInput { type: 'CE' | 'PE'; strike: number; action: 'BUY' | 'SELL'; qty: number; premium: number; /** Contract week, YYYY-MM-DD */ expiry?: string }
 
 export interface StrategyLegData {
   positionId: string | null;
@@ -132,6 +132,8 @@ export interface StrategyLegData {
   iv: number | null;
   ivAssumed: boolean;
   marginBlocked: number | null;
+  /** This leg's contract week (YYYY-MM-DD) */
+  expiry: string | null;
   proposed?: boolean;
 }
 
@@ -140,7 +142,9 @@ export interface StrategyCardData {
   name: string;
   owner: 'user' | 'algo';
   underlying: string | null;
+  /** The nearest contract week among the legs, and all of them when they differ */
   expiry: string | null;
+  expiries: string[];
   daysToExpiry: number | null;
   spot: number | null;
   deployedAt: string;

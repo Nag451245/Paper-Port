@@ -201,6 +201,8 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
   const legSchema = z.object({
     type: z.enum(['CE', 'PE']), strike: z.number().positive(), action: z.enum(['BUY', 'SELL']),
     qty: z.number().int().positive(), premium: z.number().min(0),
+    /** Contract week of this leg (YYYY-MM-DD); the strategy's own when left out. */
+    expiry: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   });
 
   const strategyBook = async (userId: string, live: Record<string, number>, only?: string, extra?: z.infer<typeof legSchema>[]) => {

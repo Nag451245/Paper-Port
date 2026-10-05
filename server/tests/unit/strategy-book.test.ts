@@ -59,6 +59,32 @@ describe('strategy card', () => {
     expect(card.openPnl).toBe(455);                                 // the open legs' P&L is unchanged
   });
 
+  it('handles a leg added in a later week: the chart is read on the nearest expiry', () => {
+    const same = buildStrategyCard({ strategyTag: straddle[0].strategyTag, positions: straddle, valued, spot: 22_540, now });
+    const card = buildStrategyCard({
+      strategyTag: straddle[0].strategyTag, positions: straddle, valued, spot: 22_540, now,
+      extra: [{ type: 'CE', strike: 22_800, action: 'BUY', qty: 65, premium: 60, expiry: '2026-10-13' }],
+    });
+    expect(card.expiry).toBe('2026-10-06');                         // the nearest
+    expect(card.expiries).toEqual(['2026-10-06', '2026-10-13']);
+    expect(card.legs[2]).toMatchObject({ expiry: '2026-10-13', proposed: true });
+    expect(card.legs[2].days!).toBeGreaterThan(card.legs[0].days! + 6.9);
+    // The later call still has time value on the near expiry, so far above the
+    // strikes the position does better than the bare straddle, by more than the
+    // call's payoff alone would give.
+    const far = (c: typeof card) => c.payoff!.curve[c.payoff!.curve.length - 1];
+    const top = far(card).spot;
+    expect(far(card).atExpiry).toBeGreaterThan(same.payoff!.curve.find((p) => p.spot === top)?.atExpiry ?? -Infinity);
+    expect(far(card).atExpiry).toBeGreaterThan(-(top - 22_550) * 65 + (106 + 94) * 65 + ((top - 22_800) - 60) * 65);
+    expect(card.payoff!.unlimitedLoss).toBe(false);                 // the bought call covers the sold one
+    expect(card.payoff!.pop).toBeGreaterThan(0);
+    expect(card.payoff!.pop).toBeLessThanOrEqual(1);
+    expect(card.reading[0]).toMatch(/Legs expire on different dates/);
+    // Same-week strategies are untouched by this path.
+    expect(same.expiries).toEqual(['2026-10-06']);
+    expect(same.reading[0]).toBe('Expires tomorrow.');
+  });
+
   it('says so when there is no price for the underlying, instead of drawing a chart', () => {
     const card = buildStrategyCard({ strategyTag: 'BOT:condor', positions: straddle.map((p) => ({ ...p, strategyTag: 'BOT:condor' })), valued, spot: null, now });
     expect(card.owner).toBe('algo');
