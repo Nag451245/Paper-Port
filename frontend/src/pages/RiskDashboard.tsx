@@ -266,7 +266,7 @@ export default function RiskDashboard() {
           <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
             <MetricCard icon={DollarSign} label="Day P&L" value={fmtINR(dayPnl)} sub={`${dayPnl >= 0 ? '+' : ''}${(dailySummary?.dayPnlPercent ?? 0).toFixed(2)}%`} color={dayPnl >= 0 ? 'emerald' : 'red'} />
             <MetricCard icon={Crosshair} label="Open Positions" value={String(dailySummary?.openPositions ?? 0)} sub={`${dailySummary?.tradeCount ?? 0} trades today`} color="blue" />
-            <MetricCard icon={BarChart3} label="Positions Value" value={fmtINR(dailySummary?.totalExposure ?? 0)} sub="Open positions at current prices" color="indigo" />
+            <MetricCard icon={BarChart3} label="Market Exposure" value={fmtINR(dailySummary?.totalExposure ?? 0)} sub={`Size of open positions. Cash tied up: ${fmtINR(marginData?.totalMarginUsed ?? 0)} (sold positions need only margin)`} color="indigo" />
             <MetricCard icon={TrendingDown} label="Max Drawdown" value={`${(dailySummary?.maxDrawdown ?? 0).toFixed(2)}%`} sub="Largest fall, closed trades" color={Math.abs(dailySummary?.maxDrawdown ?? 0) > 5 ? 'red' : 'amber'} />
             <MetricCard icon={Gauge} label="Capital In Use" value={`${marginPct.toFixed(1)}%`} sub={fmtINR(marginData?.totalMarginUsed ?? 0)} color={marginPct > 80 ? 'red' : marginPct > 50 ? 'amber' : 'emerald'} />
             <MetricCard icon={Activity} label="Win Rate" value={`${(dailySummary?.avgWinRate ?? 0).toFixed(1)}%`} sub="Recent trades" color="teal" />

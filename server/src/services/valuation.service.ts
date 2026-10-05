@@ -45,6 +45,8 @@ export interface ValuedPosition {
   pnl: number;
   /** Charges to close the position at the valuation price */
   exitCost: number;
+  /** What opened it: empty or STRAT:/MANUAL = the user, anything else = the app */
+  strategyTag: string | null;
 }
 
 export interface Valuation {
@@ -171,7 +173,7 @@ export class ValuationService {
       const exchange = p.exchange ?? 'NSE';
       return {
         id: p.id, portfolioId: p.portfolioId, symbol: p.symbol, exchange, side: p.side, qty: p.qty, entry,
-        price, priceSource: source,
+        price, priceSource: source, strategyTag: p.strategyTag ?? null,
         capitalInUse: r2(capitalBlocked(p)),
         marketValue: r2(price * p.qty),
         pnl: r2((p.side === 'SHORT' ? entry - price : price - entry) * p.qty),

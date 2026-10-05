@@ -13,7 +13,7 @@ import { ValuationService } from '../services/valuation.service.js';
 
 const placeOrderSchema = z.object({
   portfolio_id: z.string().uuid(),
-  symbol: z.string().min(1),
+  symbol: z.string().min(1).max(60).regex(/^[A-Za-z0-9&._ -]+$/, 'Invalid symbol'),
   side: z.enum(['BUY', 'SELL']),
   order_type: z.enum(['MARKET', 'LIMIT', 'SL_M', 'SL_LIMIT', 'BRACKET', 'COVER', 'GTC', 'AMO']).default('MARKET'),
   qty: z.number().int().positive(),
@@ -305,7 +305,7 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
   app.post('/execute-strategy', async (request, reply) => {
     const strategySchema = z.object({
       portfolio_id: z.string().uuid(),
-      symbol: z.string().min(1),
+      symbol: z.string().min(1).max(60).regex(/^[A-Za-z0-9&._ -]+$/, 'Invalid symbol'),
       expiry: z.string().min(1),
       strategy_name: z.string().optional(),
       legs: z.array(z.object({

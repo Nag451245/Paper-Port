@@ -74,6 +74,7 @@ export interface PlaceOrderInput {
 export interface MarginPlan { perUnit: number; linkId: string | null }
 
 import { calculateCosts, resolveInstrumentKind, type CostBreakdown } from '../lib/costs.js';
+import { isUserPlaced } from '../lib/order-source.js';
 import { autoTopUpAmount, AUTO_TOPUP_LIMIT, MANUAL_CAPITAL_LIMIT } from '../lib/capital.js';
 import {
   capitalBlocked, legacyShortMargin, futuresMargin, nakedOptionMargin, spreadMargin, exposureMargin,
@@ -587,7 +588,10 @@ export class TradeService {
     }
 
     // ── Risk gate — FAILS CLOSED ──────────────────────────────────────────
-    try {
+    // These are the bots' discipline rules (loss pauses, position, sector and
+    // target limits). An order the user places is limited by funds and the kill
+    // switch, as at a broker: a bad run by the bots must not lock the user out.
+    if (!isUserPlaced(input.strategyTag)) try {
       const orderValue = fillPrice * input.qty;
 
       const targetRisk = await this.riskService.enforceTargetRisk(userId, orderValue, input.symbol, input.side);
@@ -1038,7 +1042,7 @@ export class TradeService {
   ): Promise<{ availableCash: number; declaredCapital: number }> {
     const same = { availableCash: cash, declaredCapital: capital };
     const shortfall = Math.max(need - cash, invested + need - capital);
-    const byUser = !input.strategyTag || /^(STRAT:|STRATEGY$|MANUAL)/.test(input.strategyTag);
+    const byUser = isUserPlaced(input.strategyTag);
     if (shortfall <= 0 || !byUser || portfolio.autoTopUp === false) return same;
     const amount = autoTopUpAmount(capital, shortfall);
     if (amount <= 0) return same;

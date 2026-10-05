@@ -44,6 +44,7 @@ function parseSummary(raw: any, fallbackNav: number): PortfolioSummary {
     pricedAt: raw.pricedAt,
     realizedPnl: raw.realizedPnl != null ? Number(raw.realizedPnl) : undefined,
     openCharges: raw.openCharges != null ? Number(raw.openCharges) : undefined,
+    bySource: raw.bySource ?? undefined,
   };
 }
 

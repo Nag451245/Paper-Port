@@ -162,7 +162,7 @@ describe('order idempotency', () => {
     const key = 'idem-key-rejected';
     prisma.portfolio.findMany.mockRejectedValue(new Error('db down')); // trips the fail-closed risk gate
 
-    await expect(svc.placeOrder('user1', { ...ORDER, clientOrderId: key })).rejects.toThrow(TradeError);
+    await expect(svc.placeOrder('user1', { ...ORDER, clientOrderId: key, strategyTag: 'AI_BOT' })).rejects.toThrow(TradeError);
 
     const reservation = [...prisma._orders.values()].find(o => o.clientOrderId === key);
     expect(reservation).toBeDefined();

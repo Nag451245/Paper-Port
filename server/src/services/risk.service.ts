@@ -89,6 +89,8 @@ export interface RiskCheck {
 /** Daily closes by symbol and day, shared across requests (see RiskService.dailyCloses). */
 const closesCache = new Map<string, { at: number; closes: { day: string; close: number }[] }>();
 
+import { ALGO_ONLY } from '../lib/order-source.js';
+
 export class RiskService {
   private targetTracker: TargetTracker;
   private marginCalculator: MarginCalculatorService;
@@ -207,6 +209,11 @@ export class RiskService {
     }
   }
 
+  /**
+   * The bots' pre-trade rules. They count the bots' own trades and positions
+   * only (ALGO_ONLY): what the user trades by hand neither uses up the bots'
+   * limits nor pauses them, and is not checked here at all (see TradeService).
+   */
   async preTradeCheck(
     userId: string,
     symbol: string,
@@ -223,7 +230,8 @@ export class RiskService {
     // Rule 0: Check consecutive-loss pause (hard 30-min block)
     const pauseState = await this.checkConsecutiveLossPause(userId);
     if (pauseState.paused && pauseState.pauseUntil) {
-      violations.push(`Trading paused until ${pauseState.pauseUntil.toLocaleTimeString('en-IN')} (${pauseState.consecutiveLosses} consecutive losses)`);
+      const until = pauseState.pauseUntil.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+      violations.push(`Bot trading paused until ${until} IST (${pauseState.consecutiveLosses} losses in a row)`);
       return { allowed: false, violations, warnings };
     }
 
@@ -259,6 +267,7 @@ export class RiskService {
       where: {
         portfolioId: portfolio.id,
         status: 'OPEN',
+        ...ALGO_ONLY,
       },
     });
 
@@ -271,6 +280,7 @@ export class RiskService {
       where: {
         portfolioId: portfolio.id,
         status: 'OPEN',
+        ...ALGO_ONLY,
         symbol,
       },
     });
@@ -287,6 +297,7 @@ export class RiskService {
       where: {
         portfolioId: portfolio.id,
         exitTime: { gte: todayStart },
+        ...ALGO_ONLY,
       },
       select: { netPnl: true },
     });
@@ -308,7 +319,7 @@ export class RiskService {
     {
       const newSector = SECTOR_MAP[symbol] ?? 'Other';
       const existingPositions = await this.prisma.position.findMany({
-        where: { portfolioId: portfolio.id, status: 'OPEN' },
+        where: { portfolioId: portfolio.id, status: 'OPEN', ...ALGO_ONLY },
         select: { symbol: true },
       });
 
@@ -333,7 +344,7 @@ export class RiskService {
     // Rule 6b: Pairwise return correlation — reject if new position is too correlated with existing
     {
       const existingPositions = await this.prisma.position.findMany({
-        where: { portfolioId: portfolio.id, status: 'OPEN' },
+        where: { portfolioId: portfolio.id, status: 'OPEN', ...ALGO_ONLY },
         select: { symbol: true },
       });
 
@@ -346,7 +357,7 @@ export class RiskService {
 
         for (const sym of allSymbols) {
           const trades = await this.prisma.trade.findMany({
-            where: { portfolioId: portfolio.id, symbol: sym, exitTime: { gte: thirtyDaysAgo } },
+            where: { portfolioId: portfolio.id, symbol: sym, exitTime: { gte: thirtyDaysAgo }, ...ALGO_ONLY },
             select: { netPnl: true },
             orderBy: { exitTime: 'asc' },
           });
@@ -377,7 +388,7 @@ export class RiskService {
     // Rule 7: Portfolio heat — total open exposure as % of capital
     {
       const allOpen = await this.prisma.position.findMany({
-        where: { portfolioId: portfolio.id, status: 'OPEN' },
+        where: { portfolioId: portfolio.id, status: 'OPEN', ...ALGO_ONLY },
         select: { avgEntryPrice: true, qty: true },
       });
       const totalExposure = allOpen.reduce((s, p) => s + Number(p.avgEntryPrice) * p.qty, 0) + orderValue;
@@ -393,7 +404,7 @@ export class RiskService {
     {
       const newSectorForValue = SECTOR_MAP[symbol] ?? 'Other';
       const sectorPositions = await this.prisma.position.findMany({
-        where: { portfolioId: portfolio.id, status: 'OPEN' },
+        where: { portfolioId: portfolio.id, status: 'OPEN', ...ALGO_ONLY },
         select: { symbol: true, avgEntryPrice: true, qty: true },
       });
       let sectorValue = orderValue;
@@ -438,7 +449,7 @@ export class RiskService {
     // Rule 11: Simultaneous risk budget — total open risk must stay under limit
     {
       const allOpen = await this.prisma.position.findMany({
-        where: { portfolioId: portfolio.id, status: 'OPEN' },
+        where: { portfolioId: portfolio.id, status: 'OPEN', ...ALGO_ONLY },
         select: { avgEntryPrice: true, qty: true },
       });
       const currentRisk = allOpen.reduce((s, p) =>
@@ -452,7 +463,7 @@ export class RiskService {
 
     // Rule 12: Consecutive loss circuit breakers
     const recentTrades = await this.prisma.trade.findMany({
-      where: { portfolioId: portfolio.id, exitTime: { gte: todayStart } },
+      where: { portfolioId: portfolio.id, exitTime: { gte: todayStart }, ...ALGO_ONLY },
       select: { netPnl: true, exitTime: true },
       orderBy: { exitTime: 'desc' },
     });
@@ -1127,12 +1138,13 @@ export class RiskService {
    * Returns the pause end time if active, null if trading is allowed.
    */
   private pauseUntilMap = new Map<string, Date>();
+  private pauseLosses = new Map<string, number>();
 
   async checkConsecutiveLossPause(userId: string): Promise<{ paused: boolean; pauseUntil: Date | null; consecutiveLosses: number }> {
     // Check if an existing pause is still active
     const existingPause = this.pauseUntilMap.get(userId);
     if (existingPause && existingPause.getTime() > Date.now()) {
-      return { paused: true, pauseUntil: existingPause, consecutiveLosses: 0 };
+      return { paused: true, pauseUntil: existingPause, consecutiveLosses: this.pauseLosses.get(userId) ?? 0 };
     }
     // Clear expired pause
     if (existingPause) this.pauseUntilMap.delete(userId);
@@ -1143,11 +1155,12 @@ export class RiskService {
     });
     if (portfolios.length === 0) return { paused: false, pauseUntil: null, consecutiveLosses: 0 };
 
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    const nowIST = new Date(Date.now() + 5.5 * 3600_000);
+    const todayStart = new Date(Date.UTC(nowIST.getUTCFullYear(), nowIST.getUTCMonth(), nowIST.getUTCDate()) - 5.5 * 3600_000);
 
+    // The bots' own trades only: the user's losses do not pause the bots.
     const recentTrades = await this.prisma.trade.findMany({
-      where: { portfolioId: portfolios[0].id, exitTime: { gte: todayStart } },
+      where: { portfolioId: portfolios[0].id, exitTime: { gte: todayStart }, ...ALGO_ONLY },
       select: { netPnl: true },
       orderBy: { exitTime: 'desc' },
     });
@@ -1161,6 +1174,7 @@ export class RiskService {
     if (consecutiveLosses >= DEFAULT_CONFIG.consecutiveLossPauseCount) {
       const pauseUntil = new Date(Date.now() + 30 * 60_000);
       this.pauseUntilMap.set(userId, pauseUntil);
+      this.pauseLosses.set(userId, consecutiveLosses);
       log.warn({ userId, consecutiveLosses, pauseUntil }, 'CIRCUIT BREAKER: 30-min pause activated');
       return { paused: true, pauseUntil, consecutiveLosses };
     }

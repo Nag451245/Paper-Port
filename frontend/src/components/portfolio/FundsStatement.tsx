@@ -1,9 +1,18 @@
 import { formatINR } from '@/lib/utils';
-import type { PortfolioSummary } from '@/types';
+import type { PortfolioSummary, SourceFigures } from '@/types';
 
 const money = (n: number) => formatINR(Math.abs(n));
 const signed = (n: number) => `${n >= 0 ? '+' : '−'}${money(n)}`;
 const tone = (n: number) => (n > 0 ? 'text-emerald-600' : n < 0 ? 'text-red-600' : 'text-slate-700');
+
+const plain = () => 'text-slate-700';
+const SPLIT_ROWS: [string, (f: SourceFigures) => string, (f: SourceFigures) => string][] = [
+  ['Open positions', (f) => String(f.openCount), plain],
+  ['Cash tied up', (f) => money(f.capitalInUse), plain],
+  ['Open gain or loss', (f) => signed(f.openPnl), (f) => tone(f.openPnl)],
+  ['Closed today', (f) => signed(f.closedToday), (f) => tone(f.closedToday)],
+  ['Closed, all time', (f) => signed(f.closedTotal), (f) => tone(f.closedTotal)],
+];
 
 function Row({ label, value, cls = 'text-slate-700', hint, total }: { label: string; value: string; cls?: string; hint?: string; total?: boolean }) {
   return (
@@ -45,6 +54,30 @@ export default function FundsStatement({ summary, columns = false }: { summary: 
               hint="Brokerage and taxes already paid to open the positions you still hold" />
           )}
           <Row label="Net worth" value={money(summary.totalNav)} total />
+        </div>
+      )}
+      {summary.bySource && (
+        <div className={columns ? 'md:col-span-2' : ''}>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Your trades and the app's trades</p>
+          <table className="w-full">
+            <thead>
+              <tr className="text-slate-400">
+                <th className="text-left font-normal" />
+                <th className="text-right font-medium text-slate-600">You</th>
+                <th className="text-right font-medium text-slate-600">Algo (bots)</th>
+              </tr>
+            </thead>
+            <tbody className="font-mono">
+              {SPLIT_ROWS.map(([label, show, cls]) => (
+                <tr key={label}>
+                  <td className="text-left font-sans text-slate-500 py-0.5">{label}</td>
+                  <td className={`text-right whitespace-nowrap ${cls(summary.bySource!.user)}`}>{show(summary.bySource!.user)}</td>
+                  <td className={`text-right whitespace-nowrap ${cls(summary.bySource!.algo)}`}>{show(summary.bySource!.algo)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="text-[11px] text-slate-400 mt-1">The bots' loss pauses and limits count only the Algo column and never block your own orders.</p>
         </div>
       )}
       {unpriced > 0 && (

@@ -486,10 +486,22 @@ describe('TradeService', () => {
   // disabled every limit at once. The suite passed throughout.
   // ══════════════════════════════════════════════════════════════════════
   describe('risk gate', () => {
+    // The risk gate holds the bots' rules, so these are orders placed by a bot.
     const marketOrder = {
       portfolioId: 'p1', symbol: 'RELIANCE', side: 'BUY',
-      orderType: 'MARKET', qty: 10, instrumentToken: 'RELIANCE',
+      orderType: 'MARKET', qty: 10, instrumentToken: 'RELIANCE', strategyTag: 'AI_BOT',
     } as any;
+
+    it('does not apply bot rules to an order the user places', async () => {
+      const preTrade = vi.spyOn((service as any).riskService, 'preTradeCheck')
+        .mockResolvedValue({ allowed: false, violations: ['Bot trading paused'], warnings: [] });
+      const target = vi.spyOn((service as any).riskService, 'enforceTargetRisk');
+      await service.placeOrder('user1', { ...marketOrder, strategyTag: undefined }).catch((err: Error) => {
+        expect(err.message).not.toMatch(/Risk check failed|Risk gate|rejected for safety/);
+      });
+      expect(preTrade).not.toHaveBeenCalled();
+      expect(target).not.toHaveBeenCalled();
+    });
 
     beforeEach(() => {
       mockPrisma.portfolio.findUnique.mockResolvedValue({

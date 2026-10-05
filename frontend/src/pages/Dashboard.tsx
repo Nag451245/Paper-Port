@@ -228,7 +228,7 @@ export default function Dashboard() {
             <div className="bg-slate-50 rounded-xl p-2.5">
               <p className="text-xs text-slate-500">Uptime</p>
               <p className="text-sm font-mono text-slate-600">
-                {status?.uptime ? `${Math.floor(status.uptime / 3600)}h ${Math.floor((status.uptime % 3600) / 60)}m` : '—'}
+                {status?.uptime ? `${Math.floor(status.uptime / 3_600_000)}h ${Math.floor((status.uptime % 3_600_000) / 60_000)}m` : '—'}
               </p>
             </div>
             <div className={`rounded-xl p-2.5 ${status?.rustEngine ? 'bg-orange-50 border border-orange-200' : 'bg-slate-50'}`}>

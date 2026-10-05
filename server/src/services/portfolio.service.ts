@@ -1,3 +1,4 @@
+import { isUserPlaced } from '../lib/order-source.js';
 import { PrismaClient, type Prisma } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
 import { istDateStr, istMidnight } from '../lib/ist.js';
@@ -41,6 +42,8 @@ export interface PortfolioSummary {
   realizedPnl: number;
   /** Charges already paid on positions still open (so: totalPnl = realizedPnl + unrealizedPnl − openCharges) */
   openCharges: number;
+  /** The same account split by who placed the trade: the user, or the app's bots */
+  bySource: Record<'user' | 'algo', { openCount: number; capitalInUse: number; openPnl: number; closedToday: number; closedTotal: number }>;
 }
 
 export class PortfolioService {
@@ -97,7 +100,7 @@ export class PortfolioService {
 
     const todayTrades = await this.prisma.trade.findMany({
       where: { portfolioId, exitTime: { gte: istMidnight() } },
-      select: { netPnl: true },
+      select: { netPnl: true, strategyTag: true },
     });
     // Day P&L is realised-only: the result of trades actually closed today. It is
     // the figure the daily loss limit and the circuit breaker act on (see
@@ -107,7 +110,7 @@ export class PortfolioService {
 
     // How the total came about: closed trades (after their charges), the open
     // positions' gain or loss, and the charges already paid to open them.
-    const closed = await this.prisma.trade.findMany({ where: { portfolioId }, select: { netPnl: true } });
+    const closed = await this.prisma.trade.findMany({ where: { portfolioId }, select: { netPnl: true, strategyTag: true } });
     const realizedPnl = r2((closed ?? []).reduce((sum, t) => sum + Number(t.netPnl), 0));
     const openCharges = r2(realizedPnl + v.openPnl - v.totalPnl);
 
@@ -117,7 +120,22 @@ export class PortfolioService {
     const losers = priced.filter((p) => after(p) < 0);
     const sum = (rows: typeof priced) => r2(rows.reduce((s, p) => s + after(p), 0));
 
+    // The same figures split by who placed the trade: you, or the app's bots.
+    const side = (mine: boolean) => {
+      const own = (tag?: string | null) => isUserPlaced(tag) === mine;
+      const open = v.positions.filter((p) => own(p.strategyTag));
+      const net = (rows: any[]) => r2((rows ?? []).filter((t) => own(t.strategyTag)).reduce((s, t) => s + Number(t.netPnl), 0));
+      return {
+        openCount: open.length,
+        capitalInUse: r2(open.reduce((s, p) => s + p.capitalInUse, 0)),
+        openPnl: r2(open.reduce((s, p) => s + p.pnl, 0)),
+        closedToday: net(todayTrades),
+        closedTotal: net(closed),
+      };
+    };
+
     return {
+      bySource: { user: side(true), algo: side(false) },
       totalNav: v.netWorth,
       dayPnl: Number(dayPnl.toFixed(2)),
       dayPnlPercent: dayPnlBase > 0 ? (dayPnl / dayPnlBase) * 100 : 0,

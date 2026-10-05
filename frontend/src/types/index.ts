@@ -68,6 +68,16 @@ export interface PortfolioSummary {
   realizedPnl?: number;
   /** Charges already paid on positions still open */
   openCharges?: number;
+  /** The same account split by who placed the trade */
+  bySource?: { user: SourceFigures; algo: SourceFigures };
+}
+
+export interface SourceFigures {
+  openCount: number;
+  capitalInUse: number;
+  openPnl: number;
+  closedToday: number;
+  closedTotal: number;
 }
 
 export interface RiskMetrics {
