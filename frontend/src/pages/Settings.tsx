@@ -102,8 +102,8 @@ export default function Settings() {
             setBreezeError(`${NOT_READY} ${res.data.detail ?? ''}`.trim());
             return;
           }
-          setBreezeSuccess('Breeze session saved. This window will close.');
-          setTimeout(() => window.close(), 1500);   // no-op if this is not the popup
+          setBreezeSuccess('ICICI session saved. Market data is connected for today.');
+          setTimeout(() => setBreezeSuccess(''), 8000);
         })
         .catch((err: any) => {
           setBreezeSuccess('');
@@ -186,13 +186,11 @@ export default function Settings() {
     setBreezeError('');
     setBreezeSuccess('');
     try {
+      // ICICI's login opens in this tab and returns here when done. (A popup
+      // that has been through ICICI's site cannot be closed by this page.)
       const { data } = await breezeApi.loginUrl();
-      const popup = window.open(data.login_url, 'breeze-login', 'width=520,height=780');
-      if (!popup) {
-        setBreezeError('Popup blocked by browser. Allow popups and try again.');
-      } else {
-        setBreezeSuccess('Complete ICICI login in popup. Session will auto-save after redirect.');
-      }
+      setBreezeSuccess('Taking you to the ICICI login…');
+      window.location.assign(data.login_url);
     } catch (err: any) {
       const msg = err?.response?.data?.error || err?.response?.data?.detail || 'Failed to open Breeze login';
       setBreezeError(msg);
@@ -396,7 +394,7 @@ export default function Settings() {
               ) : breezeStatus?.isConnected ? (
                 <>
                   <AlertCircle className="w-4 h-4 text-slate-400" />
-                  <span className="text-sm text-slate-500">Auto-Login Disabled — configured on the server, see below</span>
+                  <span className="text-sm text-slate-500">Automatic login is off. Log in to ICICI here once each trading day.</span>
                 </>
               ) : null}
               {breezeStatus?.autoLoginError && (
@@ -459,24 +457,24 @@ export default function Settings() {
               <div className="mt-4 pt-4 border-t border-slate-200">
                 <p className="text-xs font-semibold text-slate-600 mb-2 uppercase tracking-wide">Daily Session Token</p>
                 <p className="text-xs text-slate-400 mb-2">
-                  Preferred: Auto-generate from TOTP. If broker blocks automation, use popup fallback or paste manually.
+                  Log in to ICICI once each trading day. ICICI ends every session after about a day.
                 </p>
                 <div className="flex flex-wrap gap-2 mb-3">
-                  <button
+                  {breezeStatus?.canAutoLogin && <button
                     onClick={handleAutoSessionGenerate}
                     disabled={autoGeneratingSession || breezeConnecting}
                     className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {autoGeneratingSession ? <Loader2 className="w-4 h-4 animate-spin inline mr-2" /> : <RefreshCw className="w-4 h-4 inline mr-1" />}
                     Auto Generate Session
-                  </button>
+                  </button>}
                   <button
                     onClick={handleGenerateSessionPopup}
                     disabled={autoGeneratingSession || breezeConnecting}
                     className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {autoGeneratingSession ? <Loader2 className="w-4 h-4 animate-spin inline mr-2" /> : <ExternalLink className="w-4 h-4 inline mr-1" />}
-                    Generate Session Popup
+                    Log in to ICICI
                   </button>
                 </div>
                 <div className="flex gap-2">

@@ -619,7 +619,8 @@ export class AuthService {
     const hasLoginCredentials = (!!env.BREEZE_LOGIN_ID && !!env.BREEZE_LOGIN_PASSWORD)
       || (!!credential.encryptedLoginId && !!credential.encryptedLoginPassword);
     const hasTotp = !!env.BREEZE_TOTP_SECRET || !!credential.totpSecret;
-    const canAutoLogin = hasLoginCredentials && hasTotp;
+    const autoLoginOn = env.BREEZE_AUTO_LOGIN === 'true';
+    const canAutoLogin = autoLoginOn && hasLoginCredentials && hasTotp;
     return {
       configured: true,
       hasTotp,
@@ -627,8 +628,9 @@ export class AuthService {
       hasLoginCredentials,
       canAutoLogin,
       sessionExpiry: credential.sessionExpiresAt?.toISOString() ?? null,
-      lastAutoLoginAt: credential.lastAutoLoginAt?.toISOString() ?? null,
-      autoLoginError: credential.autoLoginError ?? null,
+      // An old failure is not news once automatic login is switched off.
+      lastAutoLoginAt: autoLoginOn ? credential.lastAutoLoginAt?.toISOString() ?? null : null,
+      autoLoginError: autoLoginOn ? credential.autoLoginError ?? null : null,
       updatedAt: credential.updatedAt.toISOString(),
     };
   }
@@ -679,6 +681,9 @@ export class AuthService {
   }
 
   async autoGenerateSession(userId: string): Promise<{ success: boolean; sessionExpiry: string; method: string }> {
+    if (env.BREEZE_AUTO_LOGIN !== 'true') {
+      throw new AuthError('Automatic ICICI login is switched off. Log in to ICICI from Settings once each trading day.', 400);
+    }
     const credential = await this.prisma.breezeCredential.findUnique({ where: { userId } });
     if (!credential) {
       throw new AuthError('Breeze credentials not configured. Save API key and secret first.', 400);

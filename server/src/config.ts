@@ -25,6 +25,10 @@ const envSchema = z.object({
   BREEZE_LOGIN_ID: z.string().default(''),
   BREEZE_LOGIN_PASSWORD: z.string().default(''),
   BREEZE_TOTP_SECRET: z.string().default(''),
+  // Automatic ICICI login is OFF unless this is exactly "true". ICICI answers the
+  // automated login with a CAPTCHA, and every new ICICI login ends the session
+  // the user opened by hand, so the two must not both be in play.
+  BREEZE_AUTO_LOGIN: z.string().default('false'),
   // Public address of the web app, used to build links in emails (password
   // reset). Never taken from the request's Host header, which a caller controls.
   // Defaults to the first CORS origin.
