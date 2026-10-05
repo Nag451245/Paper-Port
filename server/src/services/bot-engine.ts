@@ -1,3 +1,4 @@
+import { brokerAllowed, brokerMessage } from '../lib/broker-access.js';
 import type { PrismaClient } from '@prisma/client';
 import { chatCompletionJSON, getOpenAIStatus } from '../lib/openai.js';
 import { MarketDataService, type MarketMover, type HistoricalBar } from './market-data.service.js';
@@ -872,6 +873,7 @@ export class BotEngine {
     if (this.scanInProgress) return;
 
     if (!this.calendar.isMarketOpen()) return;
+    if (!(await brokerAllowed(userId, this.prisma)).allowed) return;
 
     this.scanInProgress = true;
 
@@ -1091,6 +1093,10 @@ export class BotEngine {
     try {
       if (this.isKilledForUser(userId)) {
         return { success: false, message: 'KILL SWITCH ACTIVE — trading halted' };
+      }
+      const gate = await brokerAllowed(userId, this.prisma);
+      if (!gate.allowed) {
+        return { success: false, message: `Bot trading is off for this account. ${brokerMessage(gate.broker)}` };
       }
 
       const exchange = this.detectExchange(symbol);

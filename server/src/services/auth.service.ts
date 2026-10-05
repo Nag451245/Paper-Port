@@ -1,3 +1,4 @@
+import { forgetBrokerState } from '../lib/broker-access.js';
 import bcrypt from 'bcryptjs';
 import { PrismaClient, type User } from '@prisma/client';
 type RiskAppetite = string;
@@ -590,6 +591,7 @@ export class AuthService {
       },
     });
 
+    forgetBrokerState(userId);
     // "Saved" and "prices are flowing" are different things: say which it is.
     return { success: true, dataReady: bridgeConsumedToken, detail: bridgeConsumedToken ? undefined : bridgeDetail };
   }

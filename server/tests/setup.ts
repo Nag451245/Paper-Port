@@ -9,6 +9,8 @@ if (!process.env.MARKET_DATA_DIR) process.env.MARKET_DATA_DIR = fs.mkdtempSync(p
 
 process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
 process.env.REDIS_URL = '';
+// Tests mock the database without broker rows; tests/unit/broker-access.test.ts exercises the rule itself.
+process.env.REQUIRE_OWN_BROKER = 'false';
 process.env.OPENAI_API_KEY = 'test-openai-key';
 process.env.BREEZE_API_KEY = 'test-breeze-key';
 process.env.BREEZE_SECRET_KEY = 'test-breeze-secret';

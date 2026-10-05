@@ -2,6 +2,7 @@ import { useState, useEffect, lazy, Suspense } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import TopBar from './TopBar';
+import BrokerPrompt from './BrokerPrompt';
 import { useGuardianStore } from '@/stores/guardian';
 
 const GuardianAvatar = lazy(() => import('@/components/guardian/GuardianAvatar'));
@@ -92,6 +93,7 @@ export default function AppShell() {
         style={{ paddingTop: 'calc(3.5rem + env(safe-area-inset-top, 0px))', paddingBottom: 'var(--mobile-nav-space)' }}
       >
         <div className="p-3 sm:p-4 lg:p-6 max-w-[1920px] mx-auto">
+          <BrokerPrompt />
           <Outlet />
         </div>
       </main>

@@ -1,3 +1,4 @@
+import { requireOwnBroker } from '../lib/broker-access.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { MarketDataService } from '../services/market-data.service.js';
@@ -13,6 +14,8 @@ const dateParam = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 export async function marketRoutes(app: FastifyInstance): Promise<void> {
   // Every route here runs on the owner's broker session: signed-in users only.
   app.addHook('preHandler', authenticate);
+  // Broker data is served only to an account whose own broker is connected.
+  app.addHook('preHandler', requireOwnBroker);
   const service = new MarketDataService();
 
   app.get('/quote/:symbol', async (request, reply) => {

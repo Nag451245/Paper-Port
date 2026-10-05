@@ -1,3 +1,4 @@
+import { requireOwnBroker } from '../lib/broker-access.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate } from '../middleware/auth.js';
@@ -43,6 +44,8 @@ const maxPainSchema = z.object({
 export async function optionsRoutes(app: FastifyInstance): Promise<void> {
   // Every route here runs on the owner's broker session: signed-in users only.
   app.addHook('preHandler', authenticate);
+  // Broker data is served only to an account whose own broker is connected.
+  app.addHook('preHandler', requireOwnBroker);
   const optionsService = new OptionsService(getPrisma());
 
   app.get('/templates', async () => {

@@ -12,6 +12,7 @@ import { StrategyExitPlanService } from '../services/strategy-exit-plan.service.
 import { ValuationService } from '../services/valuation.service.js';
 import { buildStrategyCard, isDerivativeGroup } from '../lib/strategy-book.js';
 import { isUserPlaced } from '../lib/order-source.js';
+import { brokerAllowed, brokerMessage } from '../lib/broker-access.js';
 
 const placeOrderSchema = z.object({
   portfolio_id: z.string().uuid(),
@@ -44,7 +45,15 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
 
   app.addHook('preHandler', authenticate);
 
+  const needsBroker = async (request: any, reply: any): Promise<boolean> => {
+    const gate = await brokerAllowed(getUserId(request));
+    if (gate.allowed) return false;
+    reply.code(403).send({ error: brokerMessage(gate.broker), brokerRequired: true, brokerState: gate.broker.state });
+    return true;
+  };
+
   app.post('/orders', async (request, reply) => {
+    if (await needsBroker(request, reply)) return;
     const parsed = placeOrderSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
@@ -378,6 +387,7 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
 
   // Execute a multi-leg options strategy
   app.post('/execute-strategy', async (request, reply) => {
+    if (await needsBroker(request, reply)) return;
     const strategySchema = z.object({
       portfolio_id: z.string().uuid(),
       symbol: z.string().min(1).max(60).regex(/^[A-Za-z0-9&._ -]+$/, 'Invalid symbol'),

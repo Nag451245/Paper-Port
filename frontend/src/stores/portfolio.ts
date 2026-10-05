@@ -68,12 +68,13 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
     try {
       const { data } = await portfolioApi.list();
       set({ portfolios: data });
+      // Keep the selected portfolio only if it is one of this account's.
       const current = state.activePortfolio;
       if (data.length > 0) {
-        const targetId = current ? current.id : data[0].id;
+        const targetId = current && data.some((p) => p.id === current.id) ? current.id : data[0].id;
         await get().selectPortfolio(targetId, true);
       } else {
-        set({ isLoading: false });
+        set({ activePortfolio: null, summary: null, positions: [], isLoading: false });
       }
     } catch {
       set({ isLoading: false });

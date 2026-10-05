@@ -48,6 +48,10 @@ api.interceptors.response.use(
       await new Promise((r) => setTimeout(r, wait * 1000));
       return api.request(cfg);
     }
+    // This account's own broker is not connected: let the page shell say so.
+    if (error.response?.status === 403 && error.response?.data?.brokerRequired && typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('broker-required'));
+    }
     if (error.response?.status === 401) {
       const url = error.config?.url || '';
       const isAuthEndpoint = url.includes('/auth/login') || url.includes('/auth/register');

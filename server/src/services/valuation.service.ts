@@ -27,6 +27,7 @@ import { calculateCosts, resolveInstrumentKind } from '../lib/costs.js';
 import { capitalBlocked } from '../lib/margin.js';
 import { MarketCalendar } from './market-calendar.js';
 import { MarketDataService } from './market-data.service.js';
+import { brokerAllowed } from '../lib/broker-access.js';
 
 export interface ValuedPosition {
   id: string;
@@ -97,22 +98,26 @@ export class ValuationService {
   /** Every portfolio of the user together. */
   async forUser(userId: string, live?: Record<string, number>): Promise<Valuation> {
     const portfolios = await this.prisma.portfolio.findMany({ where: { userId } });
-    return this.value(portfolios, live);
+    return this.value(portfolios, live, undefined, !(await brokerAllowed(userId, this.prisma)).allowed);
   }
 
   /** One portfolio; pass its open positions when they are already loaded. */
   async forPortfolio(
-    portfolio: { id: string; initialCapital: unknown; currentNav: unknown },
+    portfolio: { id: string; initialCapital: unknown; currentNav: unknown; userId?: string },
     live?: Record<string, number>, openPositions?: any[],
   ): Promise<Valuation> {
-    return this.value([portfolio], live, openPositions);
+    const offline = portfolio.userId ? !(await brokerAllowed(portfolio.userId, this.prisma)).allowed : false;
+    return this.value([portfolio], live, openPositions, offline);
   }
 
   private async value(
     portfolios: { id: string; initialCapital: unknown; currentNav: unknown }[],
     live: Record<string, number> = {},
     loaded?: any[],
+    /** The account's own broker is not connected: no live feed and no fresh quotes, only prices already saved. */
+    offline = false,
   ): Promise<Valuation> {
+    if (offline) live = {};
     const capital = portfolios.reduce((s, p) => s + Number(p.initialCapital), 0);
     const cash = portfolios.reduce((s, p) => s + Number(p.currentNav), 0);
     const open: any[] = loaded ?? (portfolios.length
@@ -136,7 +141,7 @@ export class ValuationService {
     const symbols = new Map<string, string>();
     for (const p of toFetch) symbols.set(p.symbol, p.exchange ?? 'NSE');
     const fetched = new Map<string, number>();
-    await Promise.all([...symbols].map(async ([symbol, exchange]) => {
+    if (!offline) await Promise.all([...symbols].map(async ([symbol, exchange]) => {
       try {
         const q = await Promise.race([
           this.quote(symbol, exchange),

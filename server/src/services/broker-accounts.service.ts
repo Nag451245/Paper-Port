@@ -3,6 +3,7 @@
  * ICICI Breeze keeps its own table and flow (auth.service); this covers the
  * others, plus the per-user "active broker" switch.
  */
+import { forgetBrokerState } from '../lib/broker-access.js';
 import type { PrismaClient } from '@prisma/client';
 import { env } from '../config.js';
 import { BROKERS, brokerInfo, type BrokerId, type CredentialField } from '../lib/brokers.js';
@@ -196,6 +197,7 @@ export class BrokerAccountsService {
    * Upstox account already linked here, if any.
    */
   async saveUpstoxToken(userId: string, accessToken: string): Promise<void> {
+    forgetBrokerState(userId);
     const token = accessToken.replace(/s+/g, '');
     if (token.length < 20) throw new BrokerError('That does not look like an Upstox access token.');
     const brokerUserId = await this.upstox.profileUserId(token);

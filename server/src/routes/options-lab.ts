@@ -1,3 +1,4 @@
+import { requireOwnBroker } from '../lib/broker-access.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate, getUserId } from '../middleware/auth.js';
@@ -39,6 +40,8 @@ const backtestSchema = z.object({
 
 export async function optionsLabRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', authenticate);
+  // Broker data is served only to an account whose own broker is connected.
+  app.addHook('preHandler', requireOwnBroker);
   const history = new OptionHistory(new MarketDataService());
   const lab = new OptionsLab(history, getPrisma());
 

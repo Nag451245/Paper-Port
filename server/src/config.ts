@@ -53,6 +53,10 @@ const envSchema = z.object({
   // Refuse to run automated trading unless a Redis leader lease can be held.
   // Recommended in any environment that might run more than one instance.
   REQUIRE_LEADER_LOCK: z.coerce.boolean().default(false),
+  // Each account gets broker data, new orders and bot trades only through its
+  // own broker login (see lib/broker-access.ts). Set to "false" to go back to
+  // sharing the owner's broker session with every signed-in account.
+  REQUIRE_OWN_BROKER: z.string().default('true'),
   // Local only: nginx is the public entry point and forwards to 127.0.0.1.
   HOST: z.string().default('127.0.0.1'),
   PORT: z.coerce.number().default(8000),
