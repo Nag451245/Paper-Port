@@ -3,7 +3,7 @@ import { chatCompletionJSON } from '../lib/openai.js';
 import { MarketDataService } from './market-data.service.js';
 import { isEngineAvailable, engineFeatureStore } from '../lib/rust-engine.js';
 import { createChildLogger } from '../lib/logger.js';
-import { istDateStr, istDaysAgo } from '../lib/ist.js';
+import { istDateStr, istDaysAgo, istMidnight } from '../lib/ist.js';
 
 const log = createChildLogger('MorningBoot');
 
@@ -49,9 +49,7 @@ export class MorningBoot {
   }
 
   private async processUserBoot(userId: string): Promise<number> {
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    yesterday.setHours(0, 0, 0, 0);
+    const yesterday = new Date(istMidnight().getTime() - 86_400_000);
 
     const latestInsight = await this.prisma.learningInsight.findFirst({
       where: { userId },

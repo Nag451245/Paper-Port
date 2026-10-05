@@ -8,7 +8,7 @@ import { PositionLimitsService } from './position-limits.service.js';
 import { MetricsService } from './metrics.service.js';
 import { parseInstrumentSymbol } from '../lib/instrument.js';
 import { capitalBlocked } from '../lib/margin.js';
-import { istMidnight, istDateStr } from '../lib/ist.js';
+import { istMidnight, istDateStr, istDayOfWeek } from '../lib/ist.js';
 import { ValuationService, type Valuation } from './valuation.service.js';
 
 const log = createChildLogger('RiskService');
@@ -984,9 +984,8 @@ export class RiskService {
     if (portfolios.length === 0) return 1.0;
     const capital = Number(portfolios[0].initialCapital);
 
-    const weekStart = new Date();
-    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
-    weekStart.setHours(0, 0, 0, 0);
+    // Sunday 00:00 IST of this week
+    const weekStart = new Date(istMidnight().getTime() - istDayOfWeek() * 86_400_000);
 
     const weekTrades = await this.prisma.trade.findMany({
       where: { portfolioId: portfolios[0].id, exitTime: { gte: weekStart } },
@@ -1049,8 +1048,7 @@ export class RiskService {
     if (portfolios.length === 0) return { triggered: false, closedCount: 0, dayLossPct: 0 };
 
     const capital = Number(portfolios[0].initialCapital);
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    const todayStart = istMidnight();
 
     const todayTrades = await this.prisma.trade.findMany({
       where: { portfolioId: portfolios[0].id, exitTime: { gte: todayStart } },

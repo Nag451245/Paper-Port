@@ -1,3 +1,4 @@
+import { istDateStr } from '../lib/ist.js';
 import type { PrismaClient } from '@prisma/client';
 import { chatCompletionJSON } from '../lib/openai.js';
 import { MarketDataService } from './market-data.service.js';
@@ -203,7 +204,7 @@ Symbols to analyze: ${symbols.join(', ')}`,
       const diiNet = (data as any).diiBuy - (data as any).diiSell;
 
       return {
-        date: new Date().toISOString().split('T')[0],
+        date: istDateStr(),
         fiiBuy: (data as any).fiiBuy ?? 0,
         fiiSell: (data as any).fiiSell ?? 0,
         fiiNet,

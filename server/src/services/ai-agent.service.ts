@@ -164,8 +164,7 @@ Respond in JSON:
 
   async getStatus(userId: string) {
     const config = await this.getConfig(userId);
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    const todayStart = istMidnight();
 
     const [todaySignals, todayTrades] = await Promise.all([
       this.prisma.aITradeSignal.count({ where: { userId, createdAt: { gte: todayStart } } }),
@@ -526,8 +525,7 @@ Respond in JSON format:
   }
 
   async getPostTradeBriefing(userId: string) {
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    const todayStart = istMidnight();
 
     const portfolios = await this.prisma.portfolio.findMany({
       where: { userId },

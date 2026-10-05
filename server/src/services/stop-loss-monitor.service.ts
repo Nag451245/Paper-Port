@@ -377,7 +377,8 @@ export class StopLossMonitor {
     );
 
     const now = new Date();
-    const currentTime = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+    // HH:MM in IST: exit times are market times, and the server clock is UTC.
+    const currentTime = now.toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false });
 
     // Batch-update unrealizedPnl for all monitored positions
     const pnlUpdates: Array<{ id: string; unrealizedPnl: number }> = [];

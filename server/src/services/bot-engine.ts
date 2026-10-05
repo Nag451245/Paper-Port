@@ -942,7 +942,7 @@ export class BotEngine {
           const scanInput = candleData.map(d => ({ symbol: d.symbol, candles: d.candles }));
           let rustSignals: ScanSignal[] = [];
           try {
-            const todayStr = new Date().toISOString().split('T')[0];
+            const todayStr = istDateStr();
             const result = await engineScan({ symbols: scanInput, aggressiveness: 'high', current_date: todayStr });
             rustSignals = result.signals ?? [];
             this.shadowBook.record(rustSignals).catch(() => {});
@@ -1973,7 +1973,7 @@ export class BotEngine {
       try {
         const candles = await this.marketData.getHistory(sig.symbol, '1d',
           new Date(Date.now() - 250 * 86400000).toISOString().split('T')[0],
-          new Date().toISOString().split('T')[0], undefined, 'NSE');
+          istDateStr(), undefined, 'NSE');
         const bars = candles.map((c: any) => ({
           timestamp: new Date(c.timestamp), open: c.open, high: c.high,
           low: c.low, close: c.close, volume: c.volume,
@@ -2348,7 +2348,7 @@ export class BotEngine {
 
       const candles = await this.marketData.getHistory(symbol, '1d',
         new Date(Date.now() - 250 * 86400000).toISOString().split('T')[0],
-        new Date().toISOString().split('T')[0], undefined, exchange);
+        istDateStr(), undefined, exchange);
 
       if (!candles || candles.length < 50) return null;
 
@@ -2956,7 +2956,7 @@ INSTRUCTIONS:
               aggressiveness: aggressiveness as any,
               strategy_params: Object.keys(agentStrategyParams).length > 0 ? agentStrategyParams : undefined,
               regime: engineRegime(agentRegime),
-              current_date: new Date().toISOString().split('T')[0],
+              current_date: istDateStr(),
             });
             rustSignals = scanResult.signals ?? [];
             this.shadowBook.record(rustSignals).catch(() => {});
@@ -3082,7 +3082,7 @@ INSTRUCTIONS:
 
     lines.push(`=== STOCK DATA ===`);
 
-    const toDate = new Date().toISOString().split('T')[0];
+    const toDate = istDateStr();
     const fromDate = new Date(Date.now() - 7 * 86_400_000).toISOString().split('T')[0];
 
     for (const sym of symbols.slice(0, MAX_CANDLE_SYMBOLS)) {

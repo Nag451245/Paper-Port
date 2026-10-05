@@ -1,3 +1,4 @@
+import { istMidnight } from '../lib/ist.js';
 import type { PrismaClient } from '@prisma/client';
 import { createChildLogger } from '../lib/logger.js';
 import { getPrisma } from '../lib/prisma.js';
@@ -341,8 +342,7 @@ function round(n: number): number {
 }
 
 function startOfDay(d: Date): Date {
-  const s = new Date(d);
-  s.setHours(0, 0, 0, 0);
+  const s = istMidnight(d);
   return s;
 }
 

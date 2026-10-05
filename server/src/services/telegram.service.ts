@@ -1,3 +1,4 @@
+import { istDateStr } from '../lib/ist.js';
 import type { PrismaClient } from '@prisma/client';
 import { engineScan, engineOptionsSignals, engineOptionsData, isEngineAvailable, enginePerformanceSummary, engineActiveStrategies } from '../lib/rust-engine.js';
 import { processCommandCenterChat } from '../routes/command-center.js';
@@ -366,7 +367,7 @@ export class TelegramService {
       const result = await engineScan({
         symbols: [{ symbol, candles }],
         aggressiveness: 'high',
-        current_date: new Date().toISOString().split('T')[0],
+        current_date: istDateStr(),
       });
 
       if (!result.signals || result.signals.length === 0) {
@@ -554,7 +555,7 @@ export class TelegramService {
   private async fetchCandles(symbol: string): Promise<Array<{ open: number; high: number; low: number; close: number; volume: number; timestamp: string }>> {
     try {
       const fromDate = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-      const toDate = new Date().toISOString().split('T')[0];
+      const toDate = istDateStr();
       const url = `${BRIDGE_URL}/historical/${encodeURIComponent(symbol)}?interval=5minute&from=${fromDate}&to=${toDate}`;
 
       const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });

@@ -1,3 +1,4 @@
+import { istMidnight } from '../lib/ist.js';
 import type { PrismaClient } from '@prisma/client';
 import { emit } from '../lib/event-bus.js';
 import { createChildLogger } from '../lib/logger.js';
@@ -267,8 +268,7 @@ export class OrderManagementService {
     cancelledToday: number;
     avgFillTimeMs: number;
   }> {
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    const todayStart = istMidnight();
 
     const [pending, submitted, filledToday, cancelledToday] = await Promise.all([
       this.prisma.order.count({ where: { status: 'PENDING' } }),

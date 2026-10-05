@@ -13,7 +13,7 @@ import { emit } from '../lib/event-bus.js';
 import { getPrisma } from '../lib/prisma.js';
 import { MarketMemoryService } from './market-memory.service.js';
 import { FeaturePipelineService } from './feature-pipeline.service.js';
-import { istDateStr, istDaysAgo, istHour, istDayOfWeek } from '../lib/ist.js';
+import { istDateStr, istDaysAgo, istHour, istDayOfWeek, istMidnight } from '../lib/ist.js';
 import { LessonsEngineService } from './lessons-engine.service.js';
 import { DecisionFusionService } from './decision-fusion.service.js';
 
@@ -261,8 +261,7 @@ export class LearningEngine {
   }
 
   private async processUserLearning(userId: string): Promise<void> {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const today = istMidnight();
 
     const todayEnd = new Date(today);
     todayEnd.setHours(23, 59, 59, 999);

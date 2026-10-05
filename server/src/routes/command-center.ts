@@ -324,7 +324,7 @@ Key intents:
           const candles = await fetchBridgeCandles(symbol);
           if (!candles || candles.length < 15) { responseContent = `Not enough data for ${symbol}. Check if the symbol is valid.`; break; }
           if (!isEngineAvailable()) { responseContent = 'Rust engine is offline.'; break; }
-          const result = await engineScan({ symbols: [{ symbol, candles }], aggressiveness: 'high', current_date: new Date().toISOString().split('T')[0] });
+          const result = await engineScan({ symbols: [{ symbol, candles }], aggressiveness: 'high', current_date: istDateStr() });
           if (!result.signals || result.signals.length === 0) {
             responseContent = `${symbol}: NEUTRAL — No strong signals. Range-bound or low momentum.`;
           } else {
@@ -465,7 +465,7 @@ Key intents:
 async function fetchBridgeCandles(symbol: string): Promise<Array<{ open: number; high: number; low: number; close: number; volume: number; timestamp: string }>> {
   try {
     const from = new Date(Date.now() - 5 * 86400000).toISOString().split('T')[0];
-    const to = new Date().toISOString().split('T')[0];
+    const to = istDateStr();
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 20_000);
     const res = await fetch(`${BRIDGE_URL}/historical/${encodeURIComponent(symbol)}?interval=5minute&from=${from}&to=${to}`, { signal: ac.signal });

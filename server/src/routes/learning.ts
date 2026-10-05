@@ -1,3 +1,4 @@
+import { istDateStr } from '../lib/ist.js';
 import type { FastifyInstance } from 'fastify';
 import type { MultipartFile } from '@fastify/multipart';
 import { getPrisma } from '../lib/prisma.js';
@@ -170,7 +171,7 @@ export async function learningRoutes(app: FastifyInstance): Promise<void> {
   app.get('/export', async (request, reply) => {
     const userId = getUserId(request);
     const gzBuffer = await learningStore.exportAll(userId, prisma);
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = istDateStr();
 
     return reply
       .header('Content-Type', 'application/gzip')

@@ -6,7 +6,7 @@ import { createRequire } from 'module';
 import { env } from '../config.js';
 import { createChildLogger } from '../lib/logger.js';
 import { emit } from '../lib/event-bus.js';
-import { istDateStr, istDaysAgo } from '../lib/ist.js';
+import { istDateStr, istDaysAgo, istMidnight } from '../lib/ist.js';
 import { latestFiiDii } from '../lib/fii-dii.js';
 import { parseInstrumentSymbol, isDerivativeSymbol, type InstrumentSpec, buildOptionSymbol } from '../lib/instrument.js';
 import { getUpstox } from './upstox.service.js';
@@ -1383,8 +1383,7 @@ export class MarketDataService {
         const data = await res.json() as any;
         const records = data?.records ?? data?.filtered ?? {};
         const raw: string[] = records?.expiryDates ?? [];
-        const now = new Date();
-        now.setHours(0, 0, 0, 0);
+        const now = istMidnight();
 
         const expiries = raw
           .map((d: string) => {
@@ -2434,8 +2433,7 @@ export class MarketDataService {
 
       console.log(`[Breeze Expiries] Got ${records.length} records, extracting unique expiry dates`);
 
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
+      const today = istMidnight();
 
       const expirySet = new Set<string>();
       for (const rec of records) {

@@ -35,8 +35,7 @@ export class PerformanceMetricsService {
 
   async computeDailyMetrics(userId: string, date?: Date): Promise<DailyMetrics> {
     const targetDate = date ?? new Date();
-    const dayStart = new Date(targetDate);
-    dayStart.setHours(0, 0, 0, 0);
+    const dayStart = istMidnight(targetDate);
     const dayEnd = new Date(dayStart);
     dayEnd.setHours(23, 59, 59, 999);
 

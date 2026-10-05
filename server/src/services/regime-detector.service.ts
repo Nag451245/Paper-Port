@@ -1,3 +1,4 @@
+import { istMidnight } from '../lib/ist.js';
 import type { PrismaClient } from '@prisma/client';
 import { createChildLogger } from '../lib/logger.js';
 import { isMLServiceAvailable, mlDetectRegime } from '../lib/ml-service-client.js';
@@ -377,8 +378,7 @@ export class RegimeDetectorService {
 
     try {
       const prisma = getPrisma();
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
+      const today = istMidnight();
 
       await prisma.regimeHistory.upsert({
         where: { date: today },
