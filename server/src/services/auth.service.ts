@@ -1,3 +1,5 @@
+import { runAs } from '../lib/account-context.js';
+import { bridgeFetch } from '../lib/bridge.js';
 import { forgetBrokerState } from '../lib/broker-access.js';
 import bcrypt from 'bcryptjs';
 import { PrismaClient, type User } from '@prisma/client';
@@ -527,12 +529,13 @@ export class AuthService {
     try {
       const bridgeBody = JSON.stringify({ api_key: apiKey, api_secret: secretKey, session_token: apiSession });
       console.log(`[Breeze Bridge] Attempting init at ${bridgeUrl}/init`);
-      const bridgeRes = await fetch(`${bridgeUrl}/init`, {
+      // On behalf of this account, so it never replaces another account's session.
+      const bridgeRes = await runAs(userId, () => bridgeFetch(`${bridgeUrl}/init`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: bridgeBody,
         signal: AbortSignal.timeout(60_000),
-      });
+      }));
       const bridgeResult = await bridgeRes.json() as { success: boolean; error?: string; session_key?: string };
       // Never log the result itself: it carries the session key.
       console.log(`[Breeze Bridge] Init ${bridgeResult.success ? 'succeeded' : `failed: ${bridgeResult.error ?? 'no reason given'}`}`);

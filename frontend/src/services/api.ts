@@ -517,6 +517,8 @@ export const brokersApi = {
   remove: (broker: BrokerId) => api.delete<BrokerList>(`/brokers/${broker}`),
   setActive: (broker: BrokerId) => api.post<BrokerList>('/brokers/active', { broker }),
   upstoxLogin: () => api.get<{ loginUrl: string; redirectUri: string }>('/brokers/upstox/login'),
+  /** Ask the administrator to support a broker that is not listed. */
+  request: (broker: string, note?: string) => api.post<{ ok: boolean }>('/brokers/request', { broker, note }),
   upstoxRequestToken: () => api.post<{ message: string }>('/brokers/upstox/request-token'),
   /** Today's Upstox access token pasted by the user (like ICICI's daily session token). */
   upstoxSession: (accessToken: string) => api.post<BrokerList>('/brokers/upstox/session', { accessToken }),

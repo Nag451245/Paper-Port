@@ -1,3 +1,4 @@
+import { currentAccount, runAs } from '../lib/account-context.js';
 import { brokerAllowed, brokerMessage } from '../lib/broker-access.js';
 import type { PrismaClient } from '@prisma/client';
 import { chatCompletionJSON, getOpenAIStatus } from '../lib/openai.js';
@@ -870,6 +871,8 @@ export class BotEngine {
   }
 
   private async runMarketScan(userId: string): Promise<void> {
+    // Runs as the account it is for, so its market data comes from that account's own broker.
+    if (currentAccount() !== userId) return runAs(userId, () => this.runMarketScan(userId));
     if (this.scanInProgress) return;
 
     if (!this.calendar.isMarketOpen()) return;
@@ -1090,6 +1093,7 @@ export class BotEngine {
     botId?: string,
     signalMeta?: { confidence?: number; indicators?: string; ltp?: number; signalSource?: string; stopLoss?: number; target?: number; execAlgo?: string; execSlices?: number },
   ): Promise<{ success: boolean; message: string }> {
+    if (currentAccount() !== userId) return runAs(userId, () => this.executeTrade(userId, symbol, direction, rationale, botId, signalMeta));
     try {
       if (this.isKilledForUser(userId)) {
         return { success: false, message: 'KILL SWITCH ACTIVE — trading halted' };
@@ -1688,6 +1692,7 @@ export class BotEngine {
 
   // ---- Rust-first bot cycle ----
   private async runBotCycle(botId: string, userId: string): Promise<void> {
+    if (currentAccount() !== userId) return runAs(userId, () => this.runBotCycle(botId, userId));
     if (this.cycleInProgress.has(botId)) return;
     this.cycleInProgress.add(botId);
     try {
@@ -2873,6 +2878,7 @@ INSTRUCTIONS:
 
   // ---- Agent cycle with Rust risk integration ----
   private async runAgentCycle(userId: string): Promise<void> {
+    if (currentAccount() !== userId) return runAs(userId, () => this.runAgentCycle(userId));
     try {
       if (!this.calendar.isMarketOpen()) {
         console.log(`[BotEngine] Agent: skipping cycle — market is closed`);

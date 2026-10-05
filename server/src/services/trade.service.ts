@@ -1,3 +1,4 @@
+import { runAs } from '../lib/account-context.js';
 import { PrismaClient } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
 import { MarketCalendar } from './market-calendar.js';
@@ -394,7 +395,12 @@ export class TradeService {
     return order;
   }
 
+  // Runs as the account it is for, so its market data comes from that account's own broker.
   async placeOrder(userId: string, input: PlaceOrderInput, skipMarketCheck = false) {
+    return runAs(userId, () => this.placeOrderAs(userId, input, skipMarketCheck));
+  }
+
+  private async placeOrderAs(userId: string, input: PlaceOrderInput, skipMarketCheck = false) {
     // ── Idempotency ────────────────────────────────────────────────────────
     // A retry — client timeout, proxy replay, bot re-tick after a slow cycle —
     // must not become a second live order. Callers that pass a clientOrderId
@@ -1653,6 +1659,10 @@ export class TradeService {
   }
 
   async exitStrategyLegs(userId: string, positionIds: string[]) {
+    return runAs(userId, () => this.exitStrategyLegsAs(userId, positionIds));
+  }
+
+  private async exitStrategyLegsAs(userId: string, positionIds: string[]) {
     const results: { positionId: string; success: boolean; message: string; pnl?: number }[] = [];
 
     // Close the protected (sold) legs before the legs that protect them, so no
@@ -1735,6 +1745,10 @@ export class TradeService {
   }
 
   async closePosition(positionId: string, userId: string, exitPrice: number) {
+    return runAs(userId, () => this.closePositionAs(positionId, userId, exitPrice));
+  }
+
+  private async closePositionAs(positionId: string, userId: string, exitPrice: number) {
     const position = await this.getPosition(positionId, userId);
 
     if (position.status !== 'OPEN') {

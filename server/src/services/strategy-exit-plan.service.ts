@@ -7,6 +7,7 @@
  * price, less the charges already paid on the strategy's orders and the
  * charges the closing orders would cost now.
  */
+import { currentAccount, runAs } from '../lib/account-context.js';
 import type { PrismaClient } from '@prisma/client';
 import { createChildLogger } from '../lib/logger.js';
 import { fnoRatesOn, optionOrderCharges } from '../lib/fno-charges.js';
@@ -36,6 +37,7 @@ export class StrategyExitPlanService {
 
   /** P&L after charges for one strategy (open and closed legs). */
   async pnl(userId: string, strategyTag: string): Promise<StrategyPnl> {
+    if (currentAccount() !== userId) return runAs(userId, () => this.pnl(userId, strategyTag));
     const portfolioIds = await this.portfolioIds(userId);
     const [positions, orders] = await Promise.all([
       this.prisma.position.findMany({ where: { portfolioId: { in: portfolioIds }, strategyTag } }),

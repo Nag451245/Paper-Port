@@ -1,3 +1,4 @@
+import { ownerAccountId } from '../lib/account-context.js';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { authenticate, getUserId } from '../middleware/auth.js';
@@ -81,6 +82,34 @@ export async function brokerRoutes(app: FastifyInstance): Promise<void> {
       await service.acceptUpstoxNotice((request.body ?? {}) as Record<string, string>);
     } catch { /* ignored: never reveal why */ }
     return reply.send({ status: 'received' });
+  });
+
+  // "My broker is not listed": tell the administrator which one is wanted.
+  // It is recorded as a notification on the administrator's account.
+  app.post('/request', { preHandler: [authenticate] }, async (request, reply) => {
+    const body = z.object({
+      broker: z.string().trim().min(2).max(60).regex(/^[\p{L}\p{N} .&()'-]+$/u, 'Use the broker name only'),
+      note: z.string().trim().max(500).optional(),
+    }).safeParse(request.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Enter the name of the broker (letters and numbers), and an optional note of up to 500 characters.' });
+    const prisma = getPrisma();
+    const userId = getUserId(request);
+    const ownerId = await ownerAccountId();
+    if (!ownerId) return reply.code(503).send({ error: 'There is no administrator account to send the request to.' });
+    const since = new Date(Date.now() - 86_400_000);
+    const recent = await prisma.notification.count({
+      where: { userId: ownerId, type: 'broker_request', createdAt: { gte: since }, metadata: { contains: userId } },
+    });
+    if (recent >= 3) return reply.code(429).send({ error: 'You have already sent three broker requests today. The administrator has them.' });
+    const who = await prisma.user.findUnique({ where: { id: userId }, select: { fullName: true, email: true } });
+    await prisma.notification.create({
+      data: {
+        userId: ownerId, type: 'broker_request', title: `Broker requested: ${body.data.broker}`,
+        message: `${who?.fullName ?? 'A user'} (${who?.email ?? userId}) asked for ${body.data.broker} to be supported.${body.data.note ? ` Note: ${body.data.note}` : ''}`,
+        metadata: JSON.stringify({ from: userId, broker: body.data.broker }),
+      },
+    });
+    return reply.send({ ok: true });
   });
 
   // Upstox redirects the browser here after login. No app session is needed:

@@ -138,14 +138,29 @@ class WebSocketHub {
     }
   }
 
-  broadcastPriceUpdate(symbol: string, data: { ltp: number; change: number; changePercent: number; volume: number; timestamp: string }): void {
+  broadcastPriceUpdate(symbol: string, data: { ltp: number; change: number; changePercent: number; volume: number; timestamp: string }, onlyUserId?: string): void {
     const subs = this.symbolSubscriptions.get(symbol);
     if (!subs || subs.size === 0) return;
     const payload = JSON.stringify({ type: 'price', symbol, ...data });
     for (const ws of subs) {
       const client = this.clients.get(ws);
-      if (client) this.safeSend(ws, client, payload);
+      // A price fetched with one account's broker goes to that account's tabs only.
+      if (client && (!onlyUserId || client.userId === onlyUserId)) this.safeSend(ws, client, payload);
     }
+  }
+
+  /** The symbols each signed-in account is watching. */
+  getSubscriptionsByUser(): Map<string, Set<string>> {
+    const out = new Map<string, Set<string>>();
+    for (const [symbol, subs] of this.symbolSubscriptions) {
+      for (const ws of subs) {
+        const userId = this.clients.get(ws)?.userId;
+        if (!userId) continue;
+        if (!out.has(userId)) out.set(userId, new Set());
+        out.get(userId)!.add(symbol);
+      }
+    }
+    return out;
   }
 
   broadcastToUser(userId: string, event: { type: string; [key: string]: unknown }): void {

@@ -1,3 +1,4 @@
+import { installAccountContext } from './lib/account-context.js';
 import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
@@ -82,6 +83,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     bodyLimit: 1_048_576, // 1 MB max body
     pluginTimeout: 120_000,
   });
+  // Every request carries the account it belongs to (see lib/account-context.ts).
+  installAccountContext(app);
 
   const authService = new AuthService(getPrisma(), env.JWT_SECRET);
   const oms = new OrderManagementService(getPrisma());

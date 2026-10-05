@@ -1,3 +1,4 @@
+import { credentialAccount } from '../lib/bridge.js';
 import { CacheService } from '../lib/redis.js';
 import { getPrisma } from '../lib/prisma.js';
 import { createHash, createDecipheriv } from 'crypto';
@@ -952,7 +953,7 @@ export class IntelligenceService {
 
   private async fetchOptionsChain(symbol: string): Promise<any> {
     // The user's chosen broker first, when it is Upstox (Greeks included).
-    const upstoxToken = await activeUpstoxToken();
+    const upstoxToken = await activeUpstoxToken(await credentialAccount());
     if (upstoxToken) {
       const chain = await getUpstox().optionChain(upstoxToken, symbol.toUpperCase());
       if (chain && chain.strikes.length > 0) {

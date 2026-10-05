@@ -1,3 +1,4 @@
+import { runAs } from '../lib/account-context.js';
 import { PrismaClient } from '@prisma/client';
 import { isUserPlaced } from '../lib/order-source.js';
 import { MarketDataService } from './market-data.service.js';
@@ -389,16 +390,19 @@ export class StopLossMonitor {
   private async runChecks(): Promise<void> {
     if (this.monitoredPositions.size === 0) return;
 
-    const symbols = [...new Set([...this.monitoredPositions.values()].map(p => p.config.symbol))];
+    // One price per account and symbol: each position is priced through its
+    // own account's broker, never through another account's.
+    const wanted = new Map<string, { userId: string; symbol: string }>();
+    for (const p of this.monitoredPositions.values()) wanted.set(`${p.config.userId}|${p.config.symbol}`, { userId: p.config.userId, symbol: p.config.symbol });
     const priceMap = new Map<string, number>();
 
     await Promise.allSettled(
-      symbols.map(async sym => {
+      [...wanted].map(([key, w]) => runAs(w.userId, async () => {
         try {
-          const quote = await this.marketData.getQuote(sym);
-          if (quote.ltp > 0) priceMap.set(sym, quote.ltp);
+          const quote = await this.marketData.getQuote(w.symbol);
+          if (quote.ltp > 0) priceMap.set(key, quote.ltp);
         } catch {}
-      })
+      }))
     );
 
     const now = new Date();
@@ -410,7 +414,7 @@ export class StopLossMonitor {
 
     for (const [posId, monitored] of this.monitoredPositions) {
       const { config } = monitored;
-      const ltp = priceMap.get(config.symbol);
+      const ltp = priceMap.get(`${config.userId}|${config.symbol}`);
       if (!ltp) continue;
 
       monitored.lastCheckedAt = now;

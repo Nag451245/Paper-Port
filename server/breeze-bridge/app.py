@@ -29,9 +29,62 @@ import io
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
-breeze_instance = None
+# ── One ICICI session per account ────────────────────────────────────────────
+# Each account on the server logs in to ICICI with its own keys. A request names
+# its account in the X-Account header; no header means the owner's account,
+# which is also what the bridge's own start-up work uses. A session is only
+# ever used for the account that created it.
+_sessions = {}                 # account key ("" = owner) -> {"instance": BreezeConnect, "expiry": datetime}
+_sessions_lock = threading.Lock()
+_request = threading.local()
+
+
+def _account_key():
+    return getattr(_request, "key", "") or ""
+
+
+def _use_account(raw):
+    """Set the account for the request this thread is serving."""
+    key = "".join(ch for ch in str(raw or "") if ch.isalnum() or ch == "-")[:64]
+    _request.key = key
+    return key
+
+
+class _CurrentSession:
+    """Stands in for the old single `breeze_instance`: every use goes to the
+    session of the account the current request belongs to."""
+
+    def _get(self):
+        entry = _sessions.get(_account_key())
+        return entry["instance"] if entry else None
+
+    def __bool__(self):
+        return self._get() is not None
+
+    def __getattr__(self, name):
+        instance = self._get()
+        if instance is None:
+            raise AttributeError(f"No ICICI session for this account (wanted .{name})")
+        return getattr(instance, name)
+
+
+breeze_instance = _CurrentSession()
+
+
+def _set_session(instance, expiry):
+    with _sessions_lock:
+        _sessions[_account_key()] = {"instance": instance, "expiry": expiry}
+
+
+def _clear_session():
+    with _sessions_lock:
+        _sessions.pop(_account_key(), None)
+
+
+def _session_expiry():
+    entry = _sessions.get(_account_key())
+    return entry["expiry"] if entry else None
 _api_executor = ThreadPoolExecutor(max_workers=8)
-session_expiry = None
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_FILE = os.path.join(SCRIPT_DIR, ".breeze_session.json")
 LOT_SIZE_FILE = os.path.join(SCRIPT_DIR, ".lot_sizes.json")
@@ -240,6 +293,7 @@ _quote_misses = {}   # quote key -> when ICICI last had no price for it
 
 
 def _cache_get(key):
+    key = f"{_account_key()}|{key}"
     with _response_cache_lock:
         entry = _response_cache.get(key)
         if entry and (datetime.now() - entry["at"]).total_seconds() < CACHE_TTL_SECONDS:
@@ -248,6 +302,7 @@ def _cache_get(key):
 
 
 def _cache_set(key, data):
+    key = f"{_account_key()}|{key}"
     with _response_cache_lock:
         _response_cache[key] = {"data": data, "at": datetime.now()}
         if len(_response_cache) > 600:
@@ -264,16 +319,21 @@ BREEZE_API_TIMEOUT = 15  # seconds — max wait for a single Breeze SDK call
 # other sources and a saved price), so they get a share and are refused first.
 CALLS_PER_MINUTE = int(os.environ.get("BREEZE_CALLS_PER_MINUTE", "90"))
 QUOTE_CALLS_PER_MINUTE = int(os.environ.get("BREEZE_QUOTE_CALLS_PER_MINUTE", "50"))
-_call_times = []
+_call_times_by_account = {}
+
+
+def _call_times():
+    return _call_times_by_account.setdefault(_account_key(), [])
 _call_lock = threading.Lock()
 _call_stats = {"day": None, "today": 0, "refused": 0, "timeouts": 0, "last_note": 0.0}
 
 
 def _calls_last_minute(now=None):
     now = now or time.time()
-    while _call_times and now - _call_times[0] > 60:
-        _call_times.pop(0)
-    return len(_call_times)
+    times = _call_times()
+    while times and now - times[0] > 60:
+        times.pop(0)
+    return len(times)
 
 
 def _take_call_slot(low):
@@ -285,7 +345,7 @@ def _take_call_slot(low):
         with _call_lock:
             used = _calls_last_minute(now)
             if used < (QUOTE_CALLS_PER_MINUTE if low else CALLS_PER_MINUTE):
-                _call_times.append(now)
+                _call_times().append(now)
                 day = datetime.now().strftime("%Y-%m-%d")
                 if _call_stats["day"] != day:
                     _call_stats.update(day=day, today=0, refused=0, timeouts=0)
@@ -536,6 +596,8 @@ def save_session_to_disk(api_key, api_secret, user_id, session_key):
     # variable. If that is unset, restore fails loudly and the session is
     # re-initialised through /session/init rather than silently reusing a
     # secret from disk.
+    if _account_key():
+        return                 # another account's session lives in memory only; the API re-attaches it
     try:
         fd = os.open(SESSION_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
@@ -551,7 +613,6 @@ def save_session_to_disk(api_key, api_secret, user_id, session_key):
 
 
 def restore_session_from_disk():
-    global breeze_instance, session_expiry
     if not os.path.exists(SESSION_FILE):
         return False
 
@@ -581,8 +642,7 @@ def restore_session_from_disk():
 
         ok, test = _test_breeze_instance(b)
         if ok:
-            breeze_instance = b
-            session_expiry = saved_at + timedelta(hours=23)
+            _set_session(b, saved_at + timedelta(hours=23))
             _build_symbol_map()
             print(f"[Breeze Bridge] Session restored from disk (user_id={data['user_id']})")
             return True
@@ -625,7 +685,6 @@ def init_breeze(api_key, api_secret, session_token):
     1. generate_session() — for raw apisession tokens from the login popup
     2. Direct session_key assignment — for already-exchanged tokens from DB
     """
-    global breeze_instance, session_expiry
     errors = []
 
     # Strategy 1: generate_session() (raw one-time token from login popup)
@@ -637,8 +696,7 @@ def init_breeze(api_key, api_secret, session_token):
 
         ok, test_result = _test_breeze_instance(b)
         if ok:
-            breeze_instance = b
-            session_expiry = datetime.now() + timedelta(hours=23)
+            _set_session(b, datetime.now() + timedelta(hours=23))
             _build_symbol_map()
             save_session_to_disk(api_key, api_secret, b.user_id, b.session_key)
             print(f"[Breeze Bridge] Session initialized via generate_session, user_id={b.user_id}")
@@ -664,8 +722,7 @@ def init_breeze(api_key, api_secret, session_token):
 
         ok, test_result = _test_breeze_instance(b2)
         if ok:
-            breeze_instance = b2
-            session_expiry = datetime.now() + timedelta(hours=23)
+            _set_session(b2, datetime.now() + timedelta(hours=23))
             _build_symbol_map()
             save_session_to_disk(api_key, api_secret, b2.user_id, b2.session_key)
             print(f"[Breeze Bridge] Session initialized via direct assignment, user_id={b2.user_id}")
@@ -679,7 +736,7 @@ def init_breeze(api_key, api_secret, session_token):
         print(f"[Breeze Bridge] {msg}")
         errors.append(msg)
 
-    breeze_instance = None
+    _clear_session()
     combined = " | ".join(errors)
     print(f"[Breeze Bridge] Both strategies failed: {combined}")
     return {"success": False, "error": combined}
@@ -1707,6 +1764,7 @@ class BreezeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
+            _use_account(self.headers.get("X-Account"))
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/")
             params = parse_qs(parsed.query)
@@ -1720,8 +1778,10 @@ class BreezeHandler(BaseHTTPRequestHandler):
             if path == "/health":
                 self.send_json({
                     "status": "ok",
-                    "session_active": breeze_instance is not None,
-                    "session_expiry": session_expiry.isoformat() if session_expiry else None,
+                    "session_active": bool(breeze_instance),
+                    "session_expiry": _session_expiry().isoformat() if _session_expiry() else None,
+                    "account": _account_key() or "owner",
+                    "sessions": len(_sessions),
                     "icici_calls": {
                         "last_minute": _calls_last_minute(),
                         "limit_per_minute": CALLS_PER_MINUTE,
@@ -1764,7 +1824,7 @@ class BreezeHandler(BaseHTTPRequestHandler):
 
             elif path.startswith("/order/status/"):
                 order_id = path.split("/")[-1]
-                if breeze_instance is None:
+                if not breeze_instance:
                     self.send_json({"error": "Breeze session not active"}, 503)
                     return
                 try:
@@ -1788,7 +1848,7 @@ class BreezeHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": str(e)}, 500)
 
             elif path == "/positions":
-                if breeze_instance is None:
+                if not breeze_instance:
                     self.send_json({"error": "Breeze session not active"}, 503)
                     return
                 try:
@@ -1810,7 +1870,7 @@ class BreezeHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": str(e), "positions": []}, 500)
 
             elif path == "/margin":
-                if breeze_instance is None:
+                if not breeze_instance:
                     self.send_json({"error": "Breeze session not active"}, 503)
                     return
                 try:
@@ -1833,7 +1893,7 @@ class BreezeHandler(BaseHTTPRequestHandler):
                 # could never return an LTP.
                 product_type = params.get("product_type", ["cash"])[0]
                 expiry = params.get("expiry", [None])[0]
-                if breeze_instance is None:
+                if not breeze_instance:
                     self.send_json({"error": "Breeze session not active"}, 503)
                     return
 
@@ -1841,7 +1901,7 @@ class BreezeHandler(BaseHTTPRequestHandler):
                 # memory, and a symbol ICICI could not price is not asked again
                 # for a minute. Every page and every bot asks for the same
                 # prices, and each used to cost up to three ICICI calls.
-                quote_key = f"quote:{symbol}:{exchange}:{product_type}:{expiry}"
+                quote_key = f"quote:{_account_key()}:{symbol}:{exchange}:{product_type}:{expiry}"
                 remembered = _cache_get(quote_key)
                 if remembered:
                     self.send_json(remembered)
@@ -1947,7 +2007,7 @@ class BreezeHandler(BaseHTTPRequestHandler):
                 from_date = params.get("from", [None])[0]
                 to_date = params.get("to", [None])[0]
                 exchange = params.get("exchange", ["NSE"])[0]
-                if breeze_instance is None:
+                if not breeze_instance:
                     self.send_json({"error": "Breeze session not active", "bars": []}, 503)
                     return
                 data = get_historical_data(
@@ -1972,6 +2032,7 @@ class BreezeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
+            _use_account(self.headers.get("X-Account"))
             if not self._check_auth():
                 return
 
@@ -1997,7 +2058,7 @@ class BreezeHandler(BaseHTTPRequestHandler):
                 if not live_orders_enabled():
                     self.send_json({"error": LIVE_ORDERS_REFUSAL}, 403)
                     return
-                if breeze_instance is None:
+                if not breeze_instance:
                     self.send_json({"error": "Breeze session not active"}, 503)
                     return
                 try:
@@ -2034,7 +2095,7 @@ class BreezeHandler(BaseHTTPRequestHandler):
                 if not live_orders_enabled():
                     self.send_json({"error": LIVE_ORDERS_REFUSAL}, 403)
                     return
-                if breeze_instance is None:
+                if not breeze_instance:
                     self.send_json({"error": "Breeze session not active"}, 503)
                     return
                 try:
@@ -2053,7 +2114,7 @@ class BreezeHandler(BaseHTTPRequestHandler):
                 if not live_orders_enabled():
                     self.send_json({"error": LIVE_ORDERS_REFUSAL}, 403)
                     return
-                if breeze_instance is None:
+                if not breeze_instance:
                     self.send_json({"error": "Breeze session not active"}, 503)
                     return
                 try:
@@ -2134,5 +2195,5 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _shutdown_handler)
     signal.signal(signal.SIGINT, _shutdown_handler)
 
-    print(f"[Breeze Bridge] Ready (threaded). Session active: {breeze_instance is not None}", flush=True)
+    print(f"[Breeze Bridge] Ready (threaded). Session active: {bool(breeze_instance)}", flush=True)
     server.serve_forever()

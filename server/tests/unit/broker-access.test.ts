@@ -92,6 +92,8 @@ describe('an account without its own broker is valued from saved prices only', (
 
     forgetBrokerState();
     const own = await new ValuationService(prisma({ sessionToken: 'x', sessionExpiresAt: null }), quote, open, () => now).forUser('u', { SBIN: 500 });
-    expect(own.positions[0]).toMatchObject({ price: 500, priceSource: 'live' });
+    // Connected to its own broker: a fresh quote through that broker (999), and still
+    // not the shared feed (500), which is priced through the owner's broker.
+    expect(own.positions[0]).toMatchObject({ price: 999, priceSource: 'live' });
   });
 });

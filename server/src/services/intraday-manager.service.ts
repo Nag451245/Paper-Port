@@ -1,3 +1,4 @@
+import { runAs } from '../lib/account-context.js';
 import { PrismaClient } from '@prisma/client';
 import { isUserPlaced } from '../lib/order-source.js';
 import { MarketDataService } from './market-data.service.js';
@@ -338,7 +339,7 @@ export class IntradayManager {
         where: { portfolioId: pf.id, status: 'OPEN' },
       });
 
-      const { unrealizedPnl, staleCount } = await this.computeLiveUnrealized(openPositions);
+      const { unrealizedPnl, staleCount } = await runAs(pf.userId, () => this.computeLiveUnrealized(openPositions));
 
       if (staleCount > 0) {
         // Loud on purpose: a breaker running on partially stale marks is a

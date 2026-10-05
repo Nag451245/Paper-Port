@@ -1,3 +1,5 @@
+import { accountScoped, bridgeAccountKey, bridgeFetch, credentialAccount } from '../lib/bridge.js';
+import { ownBrokerRequired } from '../lib/broker-access.js';
 import { CacheService, getRedis } from '../lib/redis.js';
 import { getPrisma } from '../lib/prisma.js';
 import { createHash, createDecipheriv } from 'crypto';
@@ -381,11 +383,12 @@ export class MarketDataService {
   private activeNseRequests = 0;
 
   constructor(cache?: CacheService) {
+    // Prices fetched with one account's broker login are not handed to another.
     if (cache) {
-      this.cache = cache;
+      this.cache = accountScoped(cache);
     } else {
       const redis = getRedis();
-      this.cache = redis ? new CacheService(redis) : null;
+      this.cache = redis ? accountScoped(new CacheService(redis)) : null;
     }
   }
 
@@ -397,7 +400,7 @@ export class MarketDataService {
       if (!bridgeActive) return null;
 
       const url = `${BREEZE_BRIDGE_URL}/quote/${encodeURIComponent(symbol)}?exchange=${encodeURIComponent(exchange)}`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+      const res = await bridgeFetch(url, { signal: AbortSignal.timeout(5000) });
       if (!res.ok) return null;
 
       const data = await res.json() as any;
@@ -715,7 +718,7 @@ export class MarketDataService {
     if (bids.length === 0 && asks.length === 0) {
       try {
         const bridgeUrl = BREEZE_BRIDGE_URL;
-        const res = await fetch(`${bridgeUrl}/quote/${encodeURIComponent(symbol)}?exchange=${exchange}`, {
+        const res = await bridgeFetch(`${bridgeUrl}/quote/${encodeURIComponent(symbol)}?exchange=${exchange}`, {
           signal: AbortSignal.timeout(5000),
         });
         if (res.ok) {
@@ -1129,7 +1132,7 @@ export class MarketDataService {
     const bridgeActive = await this.ensureBreezeBridgeSession();
     if (bridgeActive) {
       try {
-        const res = await fetch(`${BREEZE_BRIDGE_URL}/indices`, {
+        const res = await bridgeFetch(`${BREEZE_BRIDGE_URL}/indices`, {
           signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         });
         if (res.ok) {
@@ -1910,8 +1913,9 @@ export class MarketDataService {
 
   // ── Upstox: used only when a user has made it the active broker ──
 
-  private upstoxToken(userId?: string): Promise<string | null> {
-    return activeUpstoxToken(userId);
+  private async upstoxToken(userId?: string): Promise<string | null> {
+    // The account's own Upstox login; never another account's.
+    return activeUpstoxToken(userId ?? await credentialAccount());
   }
 
   private async fetchQuoteFromUpstox(symbol: string, exchange: string): Promise<MarketQuote | null> {
@@ -1967,7 +1971,7 @@ export class MarketDataService {
       expiry, strike: String(strike), right: type === 'PE' ? 'put' : 'call',
     });
     try {
-      const res = await fetch(`${BREEZE_BRIDGE_URL}/historical/${encodeURIComponent(underlying)}?${params}`, { signal: AbortSignal.timeout(90_000) });
+      const res = await bridgeFetch(`${BREEZE_BRIDGE_URL}/historical/${encodeURIComponent(underlying)}?${params}`, { signal: AbortSignal.timeout(90_000) });
       const data = await res.json().catch(() => null) as any;
       if (!res.ok || !data) return { bars: [], error: data?.error ?? `bridge answered ${res.status}` };
       if (data.error) return { bars: [], error: String(data.error) };
@@ -2016,7 +2020,7 @@ export class MarketDataService {
       const url = `${BREEZE_BRIDGE_URL}/historical/${encodeURIComponent(name)}?${params}`;
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), timeoutMs);
-      const res = await fetch(url, { signal: ac.signal });
+      const res = await bridgeFetch(url, { signal: ac.signal });
       clearTimeout(timer);
       if (!res.ok) return [];
 
@@ -2048,7 +2052,9 @@ export class MarketDataService {
         credential = await prisma.breezeCredential.findUnique({ where: { userId } });
       }
 
-      if (!credential) {
+      // With accounts kept apart there is no borrowing: an account without its
+      // own ICICI login gets none.
+      if (!credential && !(userId && ownBrokerRequired())) {
         credential = await prisma.breezeCredential.findFirst({
           where: { sessionToken: { not: null } },
           orderBy: { updatedAt: 'desc' },
@@ -2163,7 +2169,7 @@ export class MarketDataService {
 
     // Step 4: Check Python Breeze Bridge
     try {
-      const hRes = await fetch(`${BREEZE_BRIDGE_URL}/health`, { signal: AbortSignal.timeout(3_000) });
+      const hRes = await bridgeFetch(`${BREEZE_BRIDGE_URL}/health`, { signal: AbortSignal.timeout(3_000) });
       if (hRes.ok) {
         steps.pythonBridge = await hRes.json();
       } else {
@@ -2207,7 +2213,7 @@ export class MarketDataService {
 
   private async ensureBreezeBridgeSession(): Promise<boolean> {
     try {
-      const hRes = await fetch(`${BREEZE_BRIDGE_URL}/health`, { signal: AbortSignal.timeout(3_000) });
+      const hRes = await bridgeFetch(`${BREEZE_BRIDGE_URL}/health`, { signal: AbortSignal.timeout(3_000) });
       if (!hRes.ok) return false;
       const health = await hRes.json() as any;
       if (health.session_active === true) return true;
@@ -2219,22 +2225,26 @@ export class MarketDataService {
     }
   }
 
-  private _bridgeInitPromise: Promise<boolean> | null = null;
+  /** One attach at a time per account. */
+  private _bridgeInit = new Map<string, Promise<boolean>>();
 
   private async autoInitBreezeBridge(): Promise<boolean> {
-    if (this._bridgeInitPromise) return this._bridgeInitPromise;
+    const key = await bridgeAccountKey();
+    const running = this._bridgeInit.get(key);
+    if (running) return running;
 
-    this._bridgeInitPromise = this._doAutoInitBreezeBridge();
+    const attempt = this._doAutoInitBreezeBridge();
+    this._bridgeInit.set(key, attempt);
     try {
-      return await this._bridgeInitPromise;
+      return await attempt;
     } finally {
-      this._bridgeInitPromise = null;
+      this._bridgeInit.delete(key);
     }
   }
 
   private async _doAutoInitBreezeBridge(): Promise<boolean> {
     try {
-      const creds = await this.getAnyBreezeCredentials();
+      const creds = await this.getAnyBreezeCredentials(await credentialAccount());
       if (!creds) {
         log.info('Bridge has no session and no credentials in DB');
         return false;
@@ -2247,7 +2257,7 @@ export class MarketDataService {
         session_token: creds.sessionToken,
       });
 
-      const res = await fetch(`${BREEZE_BRIDGE_URL}/init`, {
+      const res = await bridgeFetch(`${BREEZE_BRIDGE_URL}/init`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body,
@@ -2278,7 +2288,7 @@ export class MarketDataService {
     const url = `${BREEZE_BRIDGE_URL}/option-chain/${encodeURIComponent(symbol)}${expiry ? `?expiry=${encodeURIComponent(expiry)}` : ''}`;
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 20_000);
-    const res = await fetch(url, { signal: ac.signal });
+    const res = await bridgeFetch(url, { signal: ac.signal });
     clearTimeout(timer);
     if (!res.ok) throw new Error(`Bridge returned ${res.status}`);
     const data = await res.json() as any;
@@ -2546,7 +2556,7 @@ export class MarketDataService {
       `${BREEZE_BRIDGE_URL}/quote/${encodeURIComponent(spec.underlying)}` +
       `?exchange=MCX&product_type=futures&expiry=${encodeURIComponent(expiryIso)}`;
 
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const res = await bridgeFetch(url, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) {
       throw new Error(`Cannot quote ${symbol}: bridge returned ${res.status}.`);
     }
@@ -2730,7 +2740,7 @@ export class MarketDataService {
       const url = `${BREEZE_BRIDGE_URL}/lot-sizes`;
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), 20_000);
-      const res = await fetch(url, { signal: ac.signal });
+      const res = await bridgeFetch(url, { signal: ac.signal });
       clearTimeout(timer);
       if (res.ok) {
         const data = await res.json() as any;

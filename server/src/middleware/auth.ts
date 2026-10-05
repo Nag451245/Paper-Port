@@ -1,3 +1,4 @@
+import { setRequestAccount } from '../lib/account-context.js';
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { accountRole, sessionProblem } from '../lib/token-revocation.js';
 
@@ -25,7 +26,9 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
   }
   if (problem) {
     reply.code(401).send({ error: problem });
+    return;
   }
+  setRequestAccount(sub);
 }
 
 /** Signed in AND the administrator. The role is read from the database, never trusted from the token. */

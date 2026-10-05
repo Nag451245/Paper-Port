@@ -22,12 +22,14 @@
  * Before this, a quote that timed out simply dropped that position's gain or
  * loss from the total, so the profit changed from one refresh to the next.
  */
+import { currentAccount, runAs } from '../lib/account-context.js';
 import type { PrismaClient } from '@prisma/client';
 import { calculateCosts, resolveInstrumentKind } from '../lib/costs.js';
 import { capitalBlocked } from '../lib/margin.js';
 import { MarketCalendar } from './market-calendar.js';
 import { MarketDataService } from './market-data.service.js';
-import { brokerAllowed } from '../lib/broker-access.js';
+import { brokerAllowed, ownBrokerRequired } from '../lib/broker-access.js';
+import { isOwnerWork } from '../lib/account-context.js';
 
 export interface ValuedPosition {
   id: string;
@@ -97,6 +99,8 @@ export class ValuationService {
 
   /** Every portfolio of the user together. */
   async forUser(userId: string, live?: Record<string, number>): Promise<Valuation> {
+    // Runs as the account it is for, so its market data comes from that account's own broker.
+    if (currentAccount() !== userId) return runAs(userId, () => this.forUser(userId, live));
     const portfolios = await this.prisma.portfolio.findMany({ where: { userId } });
     return this.value(portfolios, live, undefined, !(await brokerAllowed(userId, this.prisma)).allowed);
   }
@@ -106,6 +110,7 @@ export class ValuationService {
     portfolio: { id: string; initialCapital: unknown; currentNav: unknown; userId?: string },
     live?: Record<string, number>, openPositions?: any[],
   ): Promise<Valuation> {
+    if (portfolio.userId && currentAccount() !== portfolio.userId) return runAs(portfolio.userId, () => this.forPortfolio(portfolio, live, openPositions));
     const offline = portfolio.userId ? !(await brokerAllowed(portfolio.userId, this.prisma)).allowed : false;
     return this.value([portfolio], live, openPositions, offline);
   }
@@ -117,7 +122,9 @@ export class ValuationService {
     /** The account's own broker is not connected: no live feed and no fresh quotes, only prices already saved. */
     offline = false,
   ): Promise<Valuation> {
-    if (offline) live = {};
+    // The shared live feed is priced through the owner's broker: it is used for
+    // the owner's valuations only. Other accounts are priced through their own.
+    if (offline || (ownBrokerRequired() && !(await isOwnerWork()))) live = {};
     const capital = portfolios.reduce((s, p) => s + Number(p.initialCapital), 0);
     const cash = portfolios.reduce((s, p) => s + Number(p.currentNav), 0);
     const open: any[] = loaded ?? (portfolios.length

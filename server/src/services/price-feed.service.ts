@@ -1,3 +1,5 @@
+import { ownerAccountId, runAs } from '../lib/account-context.js';
+import { ownBrokerRequired } from '../lib/broker-access.js';
 import { PrismaClient } from '@prisma/client';
 import { MarketDataService } from './market-data.service.js';
 import { wsHub } from '../lib/websocket.js';
@@ -100,8 +102,41 @@ export class PriceFeedService {
   getTickStore(): TickStoreService { return this.tickStore; }
   getOrderBook(): OrderBookService { return this.orderBook; }
 
+  /** Last price sent to each other account's tabs, so only changes are sent. */
+  private otherLast = new Map<string, number>();
+  private otherLastRun = 0;
+
+  /**
+   * Accounts other than the owner: their watched symbols are priced through
+   * their own broker and sent to their own tabs. Nothing here feeds the
+   * server's shared price store.
+   */
+  private async tickOtherAccounts(ownerId: string, byUser: Map<string, Set<string>>): Promise<void> {
+    if (!this.calendar.isMarketOpen() && Date.now() - this.otherLastRun < 60_000) return;
+    this.otherLastRun = Date.now();
+    for (const [userId, symbols] of byUser) {
+      if (userId === ownerId) continue;
+      await runAs(userId, () => Promise.allSettled([...symbols].slice(0, 60).map(async (symbol) => {
+        const quote = await this.marketData.getQuote(symbol);
+        if (!(quote.ltp > 0)) return;
+        const key = `${userId}|${symbol}`;
+        if (this.otherLast.get(key) === quote.ltp) return;
+        this.otherLast.set(key, quote.ltp);
+        wsHub.broadcastPriceUpdate(symbol, {
+          ltp: quote.ltp, change: quote.change, changePercent: quote.changePercent, volume: quote.volume, timestamp: new Date().toISOString(),
+        }, userId);
+      })));
+    }
+    if (this.otherLast.size > 20_000) this.otherLast.clear();
+  }
+
   private async tick(): Promise<void> {
-    const subscribedSymbols = wsHub.getSubscribedSymbols();
+    // With accounts kept apart, the shared feed below is the owner's: it is
+    // priced through the owner's broker and goes to the owner's tabs.
+    const ownerId = ownBrokerRequired() ? await ownerAccountId() : null;
+    const byUser = ownerId ? wsHub.getSubscriptionsByUser() : null;
+    if (ownerId && byUser) await this.tickOtherAccounts(ownerId, byUser).catch(err => pfLog.warn({ err }, 'Per-account price tick failed'));
+    const subscribedSymbols = ownerId && byUser ? [...(byUser.get(ownerId) ?? [])] : wsHub.getSubscribedSymbols();
     if (subscribedSymbols.length === 0) return;
 
     // During non-market hours, reduce polling frequency
@@ -137,7 +172,7 @@ export class PriceFeedService {
                   timestamp: new Date().toISOString(),
                 };
 
-                wsHub.broadcastPriceUpdate(symbol, priceData);
+                wsHub.broadcastPriceUpdate(symbol, priceData, ownerId ?? undefined);
                 this.lastPrices.set(symbol, { ltp: quote.ltp, volume: quote.volume, timestamp: now });
 
                 this.dataPipeline?.publishTick(symbol, quote.ltp, quote.volume, now).catch(err => pfLog.warn({ err, symbol }, 'Failed to publish tick to pipeline'));

@@ -45,6 +45,8 @@ export default function BrokerSection() {
   const [form, setForm] = useState<Partial<Record<BrokerField, string>>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [dayToken, setDayToken] = useState('');
+  const [wanted, setWanted] = useState('');
+  const [wantedNote, setWantedNote] = useState('');
   const [error, setError] = useState<string | null>(
     returned.status === 'error' ? returned.message || 'Broker login failed.' : null,
   );
@@ -287,6 +289,36 @@ export default function BrokerSection() {
         {broker.connected && broker.tokenExpiresAt && broker.id !== 'breeze' && broker.id !== 'upstox' && (
           <p className="text-[11px] text-slate-400">Logged in until {new Date(broker.tokenExpiresAt).toLocaleString('en-IN')}.</p>
         )}
+      </div>
+
+      {/* A broker that is not in the list above */}
+      <div className="mt-4 rounded-xl border border-dashed border-slate-300 p-4 space-y-2">
+        <p className="text-sm font-semibold text-slate-700">Is your broker not listed?</p>
+        <p className="text-xs text-slate-500">
+          Each account uses its own broker for market data. If yours is not supported yet, tell the administrator which one you use.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <input value={wanted} onChange={(e) => setWanted(e.target.value)} placeholder="Broker name, e.g. Angel One" maxLength={60} aria-label="Broker name"
+            className="w-56 px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm text-slate-900 placeholder:text-slate-400" />
+          <input value={wantedNote} onChange={(e) => setWantedNote(e.target.value)} placeholder="Anything to add (optional)" maxLength={500} aria-label="Note for the administrator"
+            className="flex-1 min-w-[220px] px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm text-slate-900 placeholder:text-slate-400" />
+          <button
+            disabled={!!busy || wanted.trim().length < 2}
+            onClick={async () => {
+              setBusy('request'); setError(null); setSuccess(null);
+              try {
+                await brokersApi.request(wanted.trim(), wantedNote.trim() || undefined);
+                setSuccess(`Request sent: the administrator has been told you use ${wanted.trim()}.`);
+                setWanted(''); setWantedNote('');
+              } catch (err) {
+                setError((err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'The request could not be sent.');
+              }
+              setBusy(null);
+            }}
+            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-sm font-semibold rounded-lg disabled:opacity-50">
+            {busy === 'request' ? <Loader2 className="w-4 h-4 animate-spin inline" /> : 'Request this broker'}
+          </button>
+        </div>
       </div>
     </section>
   );
