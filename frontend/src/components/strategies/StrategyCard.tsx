@@ -65,7 +65,7 @@ function AddLeg({ card, portfolioId, onPreview, onDone }: {
     try {
       // The premium comes from the live option chain, never typed in.
       const { data } = await marketApi.optionsChain(card.underlying, card.expiry);
-      const row = ((data as { strikes?: Record<string, unknown>[] })?.strikes ?? []).find((r) => Number(r.strike) === k);
+      const row = ((data as unknown as { strikes?: Record<string, unknown>[] })?.strikes ?? []).find((r) => Number(r.strike) === k);
       const premium = Number(row?.[type === 'CE' ? 'callLTP' : 'putLTP']) || 0;
       if (!row || !(premium > 0)) { setError(`No price for the ${k} ${type} right now. Check the strike on the Option Chain page.`); setBusy(false); return; }
       const next: StrategyLegInput = { type, strike: k, action, qty: q, premium };
