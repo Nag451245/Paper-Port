@@ -859,6 +859,10 @@ export class TradeService {
         status: 'PENDING',
         filledQty: 0,
         avgFillPrice: null,
+        // Who placed it. Without this a limit order filled later by
+        // matchPendingOrders opened a position with no owner, which then
+        // counted as the user's own.
+        strategyTag: input.strategyTag ?? null,
         ...costs,
         ...contract,
         idealPrice: execSimResult?.idealPrice,
@@ -1260,7 +1264,7 @@ export class TradeService {
           netPnl,
           entryTime: existingShort.openedAt,
           exitTime: new Date(),
-          strategyTag: input.strategyTag,
+          strategyTag: existingShort.strategyTag ?? input.strategyTag,   // the trade belongs to whoever opened the position
           ...this.contractFieldsFromPosition(existingShort),
         },
       });
@@ -1408,7 +1412,7 @@ export class TradeService {
           netPnl,
           entryTime: existingLong.openedAt,
           exitTime: new Date(),
-          strategyTag: input.strategyTag,
+          strategyTag: existingLong.strategyTag ?? input.strategyTag,
           ...this.contractFieldsFromPosition(existingLong),
         },
       });
@@ -2058,7 +2062,13 @@ export class TradeService {
           price: fillPrice,
           instrumentToken: order.instrumentToken,
           exchange: order.exchange,
-        };
+          strategyTag: order.strategyTag ?? undefined,
+          expiry: order.expiry ?? undefined,
+          strike: order.strike != null ? Number(order.strike) : undefined,
+          optionType: (order.optionType as 'CE' | 'PE' | null) ?? undefined,
+          lotSize: order.lotSize ?? undefined,
+          product: order.product ?? undefined,
+        } as PlaceOrderInput;
 
         await this.handleFill(order.id, input, fillPrice, costs, order.qty);
         matched++;
