@@ -116,6 +116,51 @@ export const portfolioApi = {
 };
 
 // ─── Orders & Trades ─────────────────────────────────────────────
+export interface StrategyLegInput { type: 'CE' | 'PE'; strike: number; action: 'BUY' | 'SELL'; qty: number; premium: number }
+
+export interface StrategyLegData {
+  positionId: string | null;
+  symbol: string;
+  kind: 'CE' | 'PE' | 'FUT' | 'EQ';
+  strike: number | null;
+  side: 'LONG' | 'SHORT';
+  qty: number;
+  entry: number;
+  last: number | null;
+  pnl: number | null;
+  /** Implied volatility in percent */
+  iv: number | null;
+  ivAssumed: boolean;
+  marginBlocked: number | null;
+  proposed?: boolean;
+}
+
+export interface StrategyCardData {
+  strategyTag: string;
+  name: string;
+  owner: 'user' | 'algo';
+  underlying: string | null;
+  expiry: string | null;
+  daysToExpiry: number | null;
+  spot: number | null;
+  deployedAt: string;
+  legs: StrategyLegData[];
+  openPnl: number | null;
+  marginBlocked: number;
+  payoff: null | {
+    curve: { spot: number; atExpiry: number; today: number }[];
+    maxProfit: number; maxLoss: number; unlimitedProfit: boolean; unlimitedLoss: boolean;
+    breakevens: number[]; pop: number; margin: number;
+  };
+  greeks: null | { delta: number; gamma: number; theta: number; vega: number };
+  reading: string[];
+  note: string | null;
+  netPnl: number | null;
+  chargesPaid: number | null;
+  exitChargesEstimate: number | null;
+  exitPlan: { target: number | null; stop: number | null; exitAt: string | null } | null;
+}
+
 export const tradingApi = {
   placeOrder: (order: {
     portfolio_id: string;
@@ -149,6 +194,8 @@ export const tradingApi = {
     expiry: string;
     strategy_name?: string;
     legs: { type: 'CE' | 'PE'; strike: number; action: 'BUY' | 'SELL'; qty: number; premium?: number }[];
+    /** Add the legs to this open strategy (its tag) instead of starting a new one. */
+    add_to?: string;
     /** Close every leg automatically: P&L after charges reaches target / stop (rupees), or at exit_at (ISO time). */
     exit_plan?: { target?: number; stop?: number; exit_at?: string };
   }) =>
@@ -165,6 +212,16 @@ export const tradingApi = {
 
   cancelExitPlan: (strategyTag: string) =>
     api.delete('/trades/strategies/exit-plan', { params: { strategy_tag: strategyTag } }),
+
+  /** Open option and futures strategies with payoff, Greeks and a plain reading. */
+  strategyBook: () => api.get<StrategyCardData[]>('/trades/strategy-book'),
+
+  /** The same strategy with more legs added, before anything is placed. */
+  previewStrategyLegs: (strategyTag: string, legs: StrategyLegInput[]) =>
+    api.post<StrategyCardData>('/trades/strategy-book/preview', { strategy_tag: strategyTag, legs }),
+
+  setExitPlan: (strategyTag: string, plan: { target?: number; stop?: number; exit_at?: string }) =>
+    api.put('/trades/strategies/exit-plan', { strategy_tag: strategyTag, ...plan }),
 
   listTrades: (params?: { page?: number; limit?: number; from_date?: string; to_date?: string; symbol?: string }) =>
     api.get('/trades/trades', { params }),

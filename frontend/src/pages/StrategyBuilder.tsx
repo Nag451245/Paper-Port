@@ -1182,6 +1182,7 @@ export default function StrategyBuilder() {
                 <Layers className="w-3.5 h-3.5 text-white" />
               </div>
               <h2 className="text-sm font-semibold text-slate-700">Deployed Strategies</h2>
+              <a href="/my-strategies" onClick={(e) => e.stopPropagation()} className="text-xs font-semibold text-indigo-600 hover:underline">Payoff, Greeks and changes: My Strategies →</a>
               <span className="text-[10px] font-bold bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full">{deployedStrategies.length}</span>
             </div>
             <div className="flex items-center gap-2">

@@ -10,6 +10,8 @@ import { buildOptionSymbol } from '../lib/instrument.js';
 import { MarketDataService } from '../services/market-data.service.js';
 import { StrategyExitPlanService } from '../services/strategy-exit-plan.service.js';
 import { ValuationService } from '../services/valuation.service.js';
+import { buildStrategyCard, isDerivativeGroup } from '../lib/strategy-book.js';
+import { isUserPlaced } from '../lib/order-source.js';
 
 const placeOrderSchema = z.object({
   portfolio_id: z.string().uuid(),
@@ -195,6 +197,77 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
     return reply.send(withNet);
   });
 
+  // ── My Strategies: open option/futures strategies with payoff, Greeks and a reading ──
+  const legSchema = z.object({
+    type: z.enum(['CE', 'PE']), strike: z.number().positive(), action: z.enum(['BUY', 'SELL']),
+    qty: z.number().int().positive(), premium: z.number().min(0),
+  });
+
+  const strategyBook = async (userId: string, live: Record<string, number>, only?: string, extra?: z.infer<typeof legSchema>[]) => {
+    const groups = (await service.listActiveStrategies(userId))
+      .filter((g) => isDerivativeGroup(g.legs as any) && (!only || g.strategyTag === only));
+    if (groups.length === 0) return [];
+    const valued = await new ValuationService(getPrisma()).forUser(userId, live).catch(() => null);
+    const byId = new Map((valued?.positions ?? []).map((p) => [p.id, { price: p.price, pnl: p.pnl, priceSource: p.priceSource }]));
+    const plans = new Map((await exitPlans.plansFor(userId)).filter((p) => p.status === 'ACTIVE').map((p) => [p.strategyTag, p]));
+    // One spot lookup per underlying, however many strategies share it.
+    const spots = new Map<string, Promise<number | null>>();
+    const spotOf = (u: string | null) => {
+      if (!u) return Promise.resolve(null);
+      if (!spots.has(u)) spots.set(u, quotes.getQuote(u, 'NSE').then((q) => (Number(q.ltp) > 0 ? Number(q.ltp) : null)).catch(() => null));
+      return spots.get(u)!;
+    };
+    return Promise.all(groups.map(async (g) => {
+      const pnl = await exitPlans.pnl(userId, g.strategyTag).catch(() => null);
+      const probe = buildStrategyCard({ strategyTag: g.strategyTag, positions: g.legs as any, valued: byId, spot: null });
+      const card = buildStrategyCard({
+        strategyTag: g.strategyTag, positions: g.legs as any, valued: byId,
+        spot: await spotOf(probe.underlying), chargesPaid: pnl?.chargesPaid ?? 0, extra,
+      });
+      const plan = plans.get(g.strategyTag);
+      return {
+        ...card,
+        // When the exit-plan pricing has no quote, fall back to the valuation's
+        // prices (the ones in the leg table) rather than showing a false zero.
+        netPnl: pnl?.priced ? pnl.netPnl : card.openPnl != null ? Math.round((card.openPnl - (pnl?.chargesPaid ?? 0)) * 100) / 100 : null,
+        chargesPaid: pnl?.chargesPaid ?? null, exitChargesEstimate: pnl?.priced ? pnl.exitChargesEstimate : null,
+        exitPlan: plan ? { target: plan.targetRupees, stop: plan.stopRupees, exitAt: plan.exitAt } : null,
+      };
+    }));
+  };
+
+  app.get('/strategy-book', async (request, reply) => {
+    const live = (app as any).priceFeedService?.getAllLastPrices?.() ?? {};
+    return reply.send(await strategyBook(getUserId(request), live));
+  });
+
+  // What the strategy would look like with more legs, before anything is placed.
+  app.post('/strategy-book/preview', async (request, reply) => {
+    const parsed = z.object({ strategy_tag: z.string().min(1), legs: z.array(legSchema).min(1).max(6) }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
+    const live = (app as any).priceFeedService?.getAllLastPrices?.() ?? {};
+    const [card] = await strategyBook(getUserId(request), live, parsed.data.strategy_tag, parsed.data.legs);
+    if (!card) return reply.code(404).send({ error: 'No open positions for this strategy' });
+    return reply.send(card);
+  });
+
+  // Set or change the automatic exit of a strategy that is already open.
+  app.put('/strategies/exit-plan', async (request, reply) => {
+    const parsed = z.object({
+      strategy_tag: z.string().min(1),
+      target: z.number().positive().optional(),
+      stop: z.number().positive().optional(),
+      exit_at: z.string().datetime({ offset: true }).optional(),
+    }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
+    const { strategy_tag, target, stop, exit_at } = parsed.data;
+    if (target == null && stop == null && !exit_at) return reply.code(400).send({ error: 'Give a target, a stop or an exit time.' });
+    const userId = getUserId(request);
+    if ((await service.listPositions(userId, strategy_tag)).length === 0) return reply.code(404).send({ error: 'No open positions for this strategy' });
+    await exitPlans.setPlan(userId, strategy_tag, { target, stop, exitAt: exit_at ? new Date(exit_at) : undefined });
+    return reply.send({ ok: true });
+  });
+
   app.delete('/strategies/exit-plan', async (request, reply) => {
     const q = z.object({ strategy_tag: z.string().min(1) }).safeParse(request.query);
     if (!q.success) return reply.code(400).send({ error: 'strategy_tag is required' });
@@ -308,6 +381,8 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
       symbol: z.string().min(1).max(60).regex(/^[A-Za-z0-9&._ -]+$/, 'Invalid symbol'),
       expiry: z.string().min(1),
       strategy_name: z.string().optional(),
+      /** Add these legs to a strategy that is already open (its tag), instead of starting a new one. */
+      add_to: z.string().min(1).optional(),
       legs: z.array(z.object({
         type: z.enum(['CE', 'PE']),
         strike: z.number().positive(),
@@ -334,7 +409,15 @@ export async function tradeRoutes(app: FastifyInstance): Promise<void> {
       // Each placement gets its own tag (name + time), so two straddles placed
       // the same day are tracked, charged and exited separately.
       const placedAt = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-      const tag = `STRAT:${strategy_name || 'Custom'} · ${placedAt}`;
+      let tag = `STRAT:${strategy_name || 'Custom'} · ${placedAt}`;
+      const addTo = parsed.data.add_to;
+      if (addTo) {
+        // Only the user's own open strategy can be added to.
+        if (!isUserPlaced(addTo) || (await service.listPositions(userId, addTo)).length === 0) {
+          return reply.code(404).send({ error: 'That strategy is not open, or is not one you placed.' });
+        }
+        tag = addTo;
+      }
 
       const results: { leg: number; order: any; error?: string }[] = [];
 
