@@ -185,7 +185,7 @@ export default function OptionChain() {
         setSpotPrice(0);
         if (!silent) setError(data?.sessionError
           ? 'No option data source is connected. Connect ICICI Breeze or Upstox in Settings → Broker.'
-          : 'No option chain data available for this symbol.');
+          : data?.message || 'No option chain data available for this symbol.');
       }
     } catch {
       if (!silent) setError('Failed to fetch option chain data. Please try again.');

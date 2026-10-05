@@ -47,3 +47,8 @@ server/bin/
 
 # Learning data (runtime)
 learning/
+
+# Breeze bridge runtime files (session, call counts, lot sizes)
+server/breeze-bridge/.breeze_session*.json
+server/breeze-bridge/.breeze_calls.json
+server/breeze-bridge/.lot_sizes.json

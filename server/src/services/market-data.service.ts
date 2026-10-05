@@ -376,6 +376,8 @@ export function coversRange(bars: HistoricalBar[], fromDate: string, lastDay: st
 }
 
 export class MarketDataService {
+  /** When each quote last came back empty from every source (see getQuote). Per instance: each poller keeps its own. */
+  private quoteMisses = new Map<string, number>();
   private cache: CacheService | null;
   private cookies: string = '';
   private cookieExpiry: number = 0;
@@ -575,6 +577,11 @@ export class MarketDataService {
       const cached = await this.cache.get<MarketQuote>(cacheKey);
       if (cached && cached.ltp > 0) return cached;
     }
+    // No source could price this a moment ago: do not ask them all again yet.
+    // (A 3-second poller on an unpriceable symbol used to hit the broker every time.)
+    const missKey = `${await bridgeAccountKey()}|${cacheKey}`;
+    const missedAt = this.quoteMisses.get(missKey);
+    if (missedAt && Date.now() - missedAt < 20_000) return this.emptyQuote(symbol, exchange);
 
     // The user's chosen broker comes first when it is Upstox (Breeze is below).
     if (viaUpstox) {
@@ -658,6 +665,8 @@ export class MarketDataService {
       }
     } catch { /* Breeze historical fallback failed */ }
 
+    if (this.quoteMisses.size > 5_000) this.quoteMisses.clear();
+    this.quoteMisses.set(missKey, Date.now());
     return nseQuote ?? this.emptyQuote(symbol, exchange);
   }
 
@@ -1434,6 +1443,7 @@ export class MarketDataService {
     }
 
     // Primary: Python Breeze Bridge (official Python SDK — most reliable)
+    let brokerNote: string | undefined;
     const bridgeActive = await this.ensureBreezeBridgeSession();
     if (bridgeActive) {
       try {
@@ -1446,6 +1456,7 @@ export class MarketDataService {
         console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Bridge returned 0 strikes, trying fallbacks`);
       } catch (err) {
         console.log(`[OptionChain] ${symbol} → Breeze Python Bridge error: ${err}`);
+        if (/daily allowance|limit exceed/i.test(String((err as Error)?.message ?? err))) brokerNote = (err as Error).message;
       }
     }
 
@@ -1480,7 +1491,7 @@ export class MarketDataService {
     // All sources exhausted
     if (bridgeActive) {
       console.log(`[OptionChain] ${symbol} → Bridge active but all sources returned 0 strikes`);
-      return { symbol, strikes: [], expiry: expiry ?? '', expiries: [] };
+      return { symbol, strikes: [], expiry: expiry ?? '', expiries: [], ...(brokerNote ? { message: brokerNote, limitReached: true } : {}) };
     }
     console.log(`[OptionChain] ${symbol} → No Breeze bridge session, no fallback`);
     return { symbol, strikes: [], expiry: expiry ?? '', expiries: [], sessionError: true,

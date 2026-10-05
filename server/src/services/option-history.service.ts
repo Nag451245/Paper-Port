@@ -155,7 +155,7 @@ export class OptionHistory {
     private readonly dir = path.join(lakeDir(), 'options'),
     private readonly now: () => Date = () => new Date(),
     private readonly paceMs = 700,
-    private readonly dailyBudget = Number(process.env.OPTION_HISTORY_DAILY_CALLS) || 2500,
+    private readonly dailyBudget = Number(process.env.OPTION_HISTORY_DAILY_CALLS) || 600,   // shares ICICI's 1,500-a-day candle budget with the candle store
   ) {}
 
   private contractPath(u: string, expiry: string, strike: number, type: 'CE' | 'PE') {

@@ -319,13 +319,92 @@ BREEZE_API_TIMEOUT = 15  # seconds — max wait for a single Breeze SDK call
 # other sources and a saved price), so they get a share and are refused first.
 CALLS_PER_MINUTE = int(os.environ.get("BREEZE_CALLS_PER_MINUTE", "90"))
 QUOTE_CALLS_PER_MINUTE = int(os.environ.get("BREEZE_QUOTE_CALLS_PER_MINUTE", "50"))
+
+# ICICI also allows about 5,000 calls a DAY per account, and once that is used
+# up it answers every call "Limit exceed: API call per day" until the next day:
+# no option chains, no candles, no quotes. A per-minute cap alone still let the
+# day's allowance run out by mid-afternoon. So the day is budgeted too:
+#   - quotes get a share, spread evenly over the trading session, because the
+#     caller has other price sources and a saved price to fall back on;
+#   - candles (history) get a share;
+#   - the rest is kept for option chains and anything a person is waiting for.
+CALLS_PER_DAY = int(os.environ.get("BREEZE_CALLS_PER_DAY", "4500"))
+QUOTE_CALLS_PER_DAY = int(os.environ.get("BREEZE_QUOTE_CALLS_PER_DAY", "1500"))
+HISTORY_CALLS_PER_DAY = int(os.environ.get("BREEZE_HISTORY_CALLS_PER_DAY", "1500"))
+DAY_RESERVE = int(os.environ.get("BREEZE_DAY_RESERVE", "800"))      # kept back from quotes and candles
+CALLS_FILE = os.path.join(SCRIPT_DIR, ".breeze_calls.json")
+DAY_LIMIT_MESSAGE = ("ICICI's daily allowance of API calls for this account is used up. "
+                     "ICICI will serve data again after it resets overnight.")
+
 _call_times_by_account = {}
+_call_lock = threading.Lock()
+_day_by_account = {}          # account key -> today's counts
+_day_saved_at = [0.0]
 
 
 def _call_times():
     return _call_times_by_account.setdefault(_account_key(), [])
-_call_lock = threading.Lock()
-_call_stats = {"day": None, "today": 0, "refused": 0, "timeouts": 0, "last_note": 0.0}
+
+
+def _ist_now():
+    return datetime.utcnow() + timedelta(hours=5, minutes=30)
+
+
+def _load_day_counts():
+    try:
+        with open(CALLS_FILE, "r") as fh:
+            data = json.load(fh)
+        if data.get("day") == _ist_now().strftime("%Y-%m-%d"):
+            for key, counts in (data.get("accounts") or {}).items():
+                _day_by_account[key] = dict(counts, day=data["day"])
+    except Exception:
+        pass
+
+
+def _save_day_counts(force=False):
+    # The count must survive a restart, or every restart hands out a fresh day.
+    now = time.time()
+    if not force and now - _day_saved_at[0] < 15:
+        return
+    _day_saved_at[0] = now
+    try:
+        day = _ist_now().strftime("%Y-%m-%d")
+        accounts = {k: {x: v[x] for x in ("total", "quote", "history", "refused", "timeouts", "exhausted")}
+                    for k, v in _day_by_account.items() if v.get("day") == day}
+        with open(CALLS_FILE, "w") as fh:
+            json.dump({"day": day, "accounts": accounts}, fh)
+    except Exception as e:
+        print(f"[Breeze Bridge] Could not save the day's call count: {e}")
+
+
+def _day():
+    """Today's counts (IST day) for the account this request belongs to."""
+    today = _ist_now().strftime("%Y-%m-%d")
+    counts = _day_by_account.get(_account_key())
+    if not counts or counts.get("day") != today:
+        counts = {"day": today, "total": 0, "quote": 0, "history": 0, "refused": 0, "timeouts": 0, "exhausted": False}
+        _day_by_account[_account_key()] = counts
+    return counts
+
+
+def _limit_reached():
+    """ICICI has said the day's allowance is gone, or our own count says it is."""
+    counts = _day()
+    return bool(counts["exhausted"]) or counts["total"] >= CALLS_PER_DAY
+
+
+def _quote_minute_cap():
+    """Quotes allowed this minute: what is left of their share, spread over the
+    minutes left in the trading session (09:15-15:30 IST). A trickle outside it."""
+    counts = _day()
+    left = QUOTE_CALLS_PER_DAY - counts["quote"]
+    if left <= 0:
+        return 0
+    now = _ist_now()
+    minutes = now.hour * 60 + now.minute
+    if now.weekday() >= 5 or minutes < 555 or minutes >= 930:
+        return 1
+    return max(1, min(QUOTE_CALLS_PER_MINUTE, -(-left // max(1, 930 - minutes))))
 
 
 def _calls_last_minute(now=None):
@@ -336,44 +415,91 @@ def _calls_last_minute(now=None):
     return len(times)
 
 
-def _take_call_slot(low):
-    """Reserve one ICICI call. Quotes (low) are refused at their share; other
-    calls wait briefly for room, since an option chain is worth waiting for."""
-    deadline = time.time() + (0 if low else 12)
+def _quotes_last_minute(now):
+    times = _call_times_by_account.setdefault(_account_key() + "|quote", [])
+    while times and now - times[0] > 60:
+        times.pop(0)
+    return times
+
+
+def _take_call_slot(low, kind=None):
+    """Reserve one ICICI call, inside both the minute's and the day's budget.
+    Quotes are refused at their share; other calls wait briefly for room in the
+    minute, since an option chain is worth waiting for."""
+    kind = kind or ("quote" if low else "other")
+    deadline = time.time() + (0 if kind == "quote" else 12)
     while True:
         now = time.time()
         with _call_lock:
+            counts = _day()
+            # The day first: nothing is sent once it is gone, and quotes and
+            # candles stop early enough to leave the reserve for option chains.
+            day_ok = not counts["exhausted"] and counts["total"] < CALLS_PER_DAY
+            if day_ok and kind == "quote":
+                day_ok = counts["quote"] < QUOTE_CALLS_PER_DAY and counts["total"] < CALLS_PER_DAY - DAY_RESERVE
+            if day_ok and kind == "history":
+                day_ok = counts["history"] < HISTORY_CALLS_PER_DAY and counts["total"] < CALLS_PER_DAY - DAY_RESERVE
+            if not day_ok:
+                counts["refused"] += 1
+                if now - _note_at[0] > 60:
+                    _note_at[0] = now
+                    print(f"[Breeze Bridge] Day budget: holding back a {kind} call "
+                          f"(today {counts['total']}/{CALLS_PER_DAY}, quotes {counts['quote']}/{QUOTE_CALLS_PER_DAY}, "
+                          f"candles {counts['history']}/{HISTORY_CALLS_PER_DAY}, ICICI limit hit: {counts['exhausted']})", flush=True)
+                return False
             used = _calls_last_minute(now)
-            if used < (QUOTE_CALLS_PER_MINUTE if low else CALLS_PER_MINUTE):
+            quotes = _quotes_last_minute(now)
+            minute_ok = used < CALLS_PER_MINUTE and (kind != "quote" or len(quotes) < _quote_minute_cap())
+            if minute_ok:
                 _call_times().append(now)
-                day = datetime.now().strftime("%Y-%m-%d")
-                if _call_stats["day"] != day:
-                    _call_stats.update(day=day, today=0, refused=0, timeouts=0)
-                _call_stats["today"] += 1
+                counts["total"] += 1
+                if kind == "quote":
+                    quotes.append(now)
+                    counts["quote"] += 1
+                elif kind == "history":
+                    counts["history"] += 1
+                _save_day_counts()
                 return True
             if now >= deadline:
-                _call_stats["refused"] += 1
-                if now - _call_stats["last_note"] > 30:
-                    _call_stats["last_note"] = now
-                    print(f"[Breeze Bridge] Holding back ICICI calls: {used} in the last minute "
-                          f"({_call_stats['refused']} held back today)", flush=True)
+                counts["refused"] += 1
                 return False
         time.sleep(0.25)
 
 
-def _call_with_timeout(fn, *args, timeout=BREEZE_API_TIMEOUT, low=False, **kwargs):
+_note_at = [0.0]
+
+
+def _note_reply(result):
+    """ICICI's own word that the day is used up ends the day at once."""
+    try:
+        error = str(result.get("Error") or "") if isinstance(result, dict) else ""
+    except Exception:
+        return
+    if "limit exceed" in error.lower() and "per day" in error.lower():
+        counts = _day()
+        if not counts["exhausted"]:
+            counts["exhausted"] = True
+            print(f"[Breeze Bridge] ICICI says the day's API calls are used up ({error.strip()}). "
+                  f"No more calls will be sent for this account today.", flush=True)
+            _save_day_counts(force=True)
+
+
+def _call_with_timeout(fn, *args, timeout=BREEZE_API_TIMEOUT, low=False, kind=None, **kwargs):
     """Run a blocking Breeze SDK call with a timeout. Returns None on timeout,
-    or when the call was held back to stay under ICICI's limit."""
-    if not _take_call_slot(low):
+    or when the call was held back to stay under ICICI's limits."""
+    if not _take_call_slot(low, kind):
         return None
+    counts = _day()                       # in the request's thread: the right account
     future = _api_executor.submit(fn, *args, **kwargs)
     try:
-        return future.result(timeout=timeout)
+        result = future.result(timeout=timeout)
+        _note_reply(result)
+        return result
     except FuturesTimeoutError:
         # A call still waiting in the queue must not run later: nobody is
         # waiting for it any more, and it would only use up the limit.
         future.cancel()
-        _call_stats["timeouts"] += 1
+        counts["timeouts"] += 1
         print(f"[Breeze Bridge] API call timed out after {timeout}s")
         return None
     except Exception as e:
@@ -661,6 +787,8 @@ def _test_breeze_instance(b):
     that have nothing to do with the session (that strike no longer listed, a
     slow answer at the open). The account call needs no contract at all.
     """
+    if _limit_reached():
+        return True, {"note": "not test-called: the day's ICICI allowance is used up"}
     last = None
     checks = (
         lambda: _call_with_timeout(b.get_option_chain_quotes,
@@ -763,6 +891,8 @@ def _safe_int(val, default=0):
 def get_option_chain(symbol, expiry=None, right_filter=None):
     if not breeze_instance:
         return {"error": "Breeze session not initialized", "strikes": []}
+    if _limit_reached():
+        return {"error": DAY_LIMIT_MESSAGE, "strikes": [], "limitReached": True}
 
     cache_key = f"oc:{symbol}:{expiry}:{right_filter}"
     cached = _cache_get(cache_key)
@@ -1583,7 +1713,7 @@ def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None
             if i:
                 time.sleep(0.3)  # Breeze allows ~100 calls a minute
             result = _call_with_timeout(
-                breeze_instance.get_historical_data_v2,
+                breeze_instance.get_historical_data_v2, kind="history",
                 from_date=f"{w_from}T00:00:00.000Z",
                 to_date=f"{w_to}T23:59:59.000Z",
                 **kwargs,
@@ -1593,7 +1723,7 @@ def get_historical_data(symbol, interval="5minute", from_date=None, to_date=None
                 # Breeze's BSE code for the index is not certain: try the plain name once.
                 kwargs["stock_code"] = symbol.upper()
                 result = _call_with_timeout(
-                    breeze_instance.get_historical_data_v2,
+                    breeze_instance.get_historical_data_v2, kind="history",
                     from_date=f"{w_from}T00:00:00.000Z",
                     to_date=f"{w_to}T23:59:59.000Z",
                     **kwargs,
@@ -1663,7 +1793,7 @@ def get_live_indices():
         value, prev_close = 0.0, 0.0
         try:
             result = _call_with_timeout(
-                breeze_instance.get_quotes,
+                breeze_instance.get_quotes, low=True,
                 stock_code=cfg["code"],
                 exchange_code=cfg["exchange"],
                 product_type="others",
@@ -1685,7 +1815,7 @@ def get_live_indices():
         if value <= 0:
             try:
                 hist = _call_with_timeout(
-                    breeze_instance.get_historical_data_v2,
+                    breeze_instance.get_historical_data_v2, kind="history",
                     interval="1minute",
                     from_date=from_dt,
                     to_date=to_dt,
@@ -1785,9 +1915,13 @@ class BreezeHandler(BaseHTTPRequestHandler):
                     "icici_calls": {
                         "last_minute": _calls_last_minute(),
                         "limit_per_minute": CALLS_PER_MINUTE,
-                        "today": _call_stats["today"],
-                        "held_back_today": _call_stats["refused"],
-                        "timeouts_today": _call_stats["timeouts"],
+                        "today": _day()["total"],
+                        "limit_per_day": CALLS_PER_DAY,
+                        "quotes_today": _day()["quote"],
+                        "candles_today": _day()["history"],
+                        "held_back_today": _day()["refused"],
+                        "timeouts_today": _day()["timeouts"],
+                        "daily_limit_reached": _limit_reached(),
                     },
                 })
 
@@ -2147,6 +2281,7 @@ if __name__ == "__main__":
 
     print(f"[Breeze Bridge] Starting on http://127.0.0.1:{port}", flush=True)
 
+    _load_day_counts()
     try:
         restore_session_from_disk()
     except Exception as e:

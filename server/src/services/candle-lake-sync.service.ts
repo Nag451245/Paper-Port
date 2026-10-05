@@ -27,7 +27,9 @@ const log = createChildLogger('CandleLake');
 export const LAKE_LIMITS = {
   callGapMs: 1_200,
   /** Breeze allows 5,000 history calls a day; Upstox far more (2,000 per 30 minutes). */
-  dailyCalls: { breeze: 4_000, upstox: 20_000 },
+  // ICICI allows about 5,000 calls a day for everything. 4,000 here on its own
+  // used the day up by mid-afternoon; the bridge now gives candles 1,500 in all.
+  dailyCalls: { breeze: 900, upstox: 20_000 },
   windowDays: 28,
   /** Upstox's intraday history starts in January 2022. */
   intradayFloor: '2022-01-01',

@@ -105,6 +105,7 @@ export class PriceFeedService {
   /** Last price sent to each other account's tabs, so only changes are sent. */
   private otherLast = new Map<string, number>();
   private otherLastRun = 0;
+  private lastClosedTick = 0;
 
   /**
    * Accounts other than the owner: their watched symbols are priced through
@@ -141,9 +142,11 @@ export class PriceFeedService {
 
     // During non-market hours, reduce polling frequency
     if (!this.calendar.isMarketOpen()) {
+      // Once a minute when the market is closed, whether or not a price came
+      // back last time (it used to retry every 2 seconds when none did).
       const now = Date.now();
-      const lastTick = this.lastPrices.values().next().value?.timestamp ?? 0;
-      if (now - lastTick < 60_000) return;
+      if (now - this.lastClosedTick < 60_000) return;
+      this.lastClosedTick = now;
     }
 
     const batches: string[][] = [];
