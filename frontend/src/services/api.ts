@@ -493,8 +493,9 @@ export const breezeApi = {
         } as BreezeCredentialStatus,
       })),
 
+  // ICICI can take most of a minute to accept a session after a restart.
   saveSession: (sessionToken: string) =>
-    api.post<{ success: boolean }>('/auth/breeze-session', { session_token: sessionToken }),
+    api.post<{ success: boolean; dataReady?: boolean; detail?: string }>('/auth/breeze-session', { session_token: sessionToken }, { timeout: 90_000 }),
 
   autoSession: () =>
     api.post<{ success: boolean; sessionExpiry: string; method: string }>('/auth/breeze-session/auto', {}),

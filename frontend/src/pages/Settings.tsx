@@ -26,6 +26,8 @@ import BrokerSection from '@/components/settings/BrokerSection';
 
 type SettingsTab = 'config' | 'guide';
 
+const NOT_READY = 'The session was saved, but ICICI did not accept it for market data. Log in to ICICI again.';
+
 export default function Settings() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('config');
   const [breezeStatus, setBreezeStatus] = useState<BreezeCredentialStatus | null>(null);
@@ -85,14 +87,29 @@ export default function Settings() {
     const returned = params.get('breeze_session');
     if (returned || params.get('breeze') === 'saved') {
       window.history.replaceState(null, '', window.location.pathname);
-      (returned ? breezeApi.saveSession(returned) : Promise.resolve())
+      Promise.resolve()
         .then(() => {
-          setBreezeSuccess('Breeze session saved. This window will close.');
+          if (!returned) return null;
+          setBreezeSuccess('Saving the ICICI session. This can take up to a minute…');
+          return breezeApi.saveSession(returned);
+        })
+        .then((res) => {
           refresh();
           channel?.postMessage('saved');
+          // Saved, but ICICI's data service refused it: say so instead of "saved".
+          if (res && res.data.dataReady === false) {
+            setBreezeSuccess('');
+            setBreezeError(`${NOT_READY} ${res.data.detail ?? ''}`.trim());
+            return;
+          }
+          setBreezeSuccess('Breeze session saved. This window will close.');
           setTimeout(() => window.close(), 1500);   // no-op if this is not the popup
         })
-        .catch((err: any) => setBreezeError(err?.response?.data?.error || 'Could not save the Breeze session. Paste it below instead.'));
+        .catch((err: any) => {
+          setBreezeSuccess('');
+          // The login token works once, so pasting it again cannot help.
+          setBreezeError(err?.response?.data?.error || 'Could not save the Breeze session. Please log in to ICICI again from here.');
+        });
     }
     if (channel) channel.onmessage = () => {
       refresh();
@@ -130,12 +147,16 @@ export default function Settings() {
     setBreezeError('');
     setBreezeSuccess('');
     try {
-      await breezeApi.saveSession(sessionToken.trim());
-      setBreezeSuccess('Session token saved! Historical data and charts are now available.');
+      const saved = await breezeApi.saveSession(sessionToken.trim());
       setSessionToken('');
       const { data } = await breezeApi.status();
       setBreezeStatus(data);
-      setTimeout(() => setBreezeSuccess(''), 4000);
+      if (saved.data.dataReady === false) {
+        setBreezeError(`${NOT_READY} ${saved.data.detail ?? ''}`.trim());
+      } else {
+        setBreezeSuccess('Session token saved! Historical data and charts are now available.');
+        setTimeout(() => setBreezeSuccess(''), 4000);
+      }
     } catch (err: any) {
       const msg = err?.response?.data?.error || err?.response?.data?.detail || 'Failed to save session token';
       setBreezeError(msg);

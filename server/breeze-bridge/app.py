@@ -524,41 +524,45 @@ def restore_session_from_disk():
         b.get_stock_script_list()
         b.api_handler = ApificationBreeze(b)
 
-        test = _call_with_timeout(b.get_option_chain_quotes,
-            stock_code="NIFTY", exchange_code="NFO",
-            product_type="options", right="call", strike_price="24000",
-            timeout=10,
-        )
-        if test and test.get("Status") == 200:
+        ok, test = _test_breeze_instance(b)
+        if ok:
             breeze_instance = b
             session_expiry = saved_at + timedelta(hours=23)
             _build_symbol_map()
             print(f"[Breeze Bridge] Session restored from disk (user_id={data['user_id']})")
             return True
 
-        print(f"[Breeze Bridge] Restored session failed test call, removing file")
-        os.remove(SESSION_FILE)
+        print(f"[Breeze Bridge] Restored session did not answer ({test}); keeping the file, the API will re-attach it")
         return False
     except Exception as e:
-        print(f"[Breeze Bridge] Failed to restore session: {e}")
-        try:
-            os.remove(SESSION_FILE)
-        except OSError:
-            pass
+        print(f"[Breeze Bridge] Failed to restore session (file kept): {e}")
         return False
 
 
 def _test_breeze_instance(b):
-    """Make a test API call to verify the Breeze session works."""
-    try:
-        test = _call_with_timeout(b.get_option_chain_quotes,
+    """Is this Breeze session alive? Either of two independent calls proves it.
+
+    The option-chain call names one fixed contract, so it can fail for reasons
+    that have nothing to do with the session (that strike no longer listed, a
+    slow answer at the open). The account call needs no contract at all.
+    """
+    last = None
+    checks = (
+        lambda: _call_with_timeout(b.get_option_chain_quotes,
             stock_code="NIFTY", exchange_code="NFO",
             product_type="options", right="call", strike_price="24000",
-            timeout=10,
-        )
-        return test and test.get("Status") == 200, test
-    except Exception as e:
-        return False, {"error": str(e)}
+            timeout=10),
+        lambda: _call_with_timeout(b.get_funds, timeout=10),
+    )
+    for check in checks:
+        try:
+            result = check()
+            if result and result.get("Status") == 200:
+                return True, result
+            last = result
+        except Exception as e:
+            last = {"error": str(e)}
+    return False, last
 
 
 def init_breeze(api_key, api_secret, session_token):

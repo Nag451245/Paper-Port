@@ -507,7 +507,7 @@ export class AuthService {
     return { configured: true, updatedAt: credential.updatedAt };
   }
 
-  async saveSessionToken(userId: string, apiSession: string): Promise<{ success: boolean }> {
+  async saveSessionToken(userId: string, apiSession: string): Promise<{ success: boolean; dataReady: boolean; detail?: string }> {
     const credential = await this.prisma.breezeCredential.findUnique({ where: { userId } });
     if (!credential) {
       throw new AuthError('Breeze credentials not configured. Save API key and secret first.', 400);
@@ -520,6 +520,7 @@ export class AuthService {
     // The bridge calls generate_session() which exchanges the single-use token.
     // If the bridge succeeds, it returns the exchanged session_key for us to store.
     let bridgeConsumedToken = false;
+    let bridgeDetail: string | undefined;
     let realSessionToken = apiSession;
     const bridgeUrl = env.BREEZE_BRIDGE_URL.replace(/\/$/, '');
     try {
@@ -529,17 +530,20 @@ export class AuthService {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: bridgeBody,
-        signal: AbortSignal.timeout(30_000),
+        signal: AbortSignal.timeout(60_000),
       });
       const bridgeResult = await bridgeRes.json() as { success: boolean; error?: string; session_key?: string };
-      console.log(`[Breeze Bridge] Init result: ${JSON.stringify(bridgeResult)}`);
+      // Never log the result itself: it carries the session key.
+      console.log(`[Breeze Bridge] Init ${bridgeResult.success ? 'succeeded' : `failed: ${bridgeResult.error ?? 'no reason given'}`}`);
       bridgeConsumedToken = bridgeResult.success === true;
+      if (!bridgeConsumedToken) bridgeDetail = bridgeResult.error ?? 'the ICICI data service did not accept the session';
       if (bridgeConsumedToken && bridgeResult.session_key) {
         realSessionToken = bridgeResult.session_key;
         console.log(`[Breeze] Using session_key from bridge (length: ${realSessionToken.length})`);
       }
     } catch (err) {
       console.log(`[Breeze Bridge] Init failed: ${err instanceof Error ? err.message : err}`);
+      bridgeDetail = `the ICICI data service did not answer (${err instanceof Error ? err.message : err})`;
     }
 
     // Fall back to exchanging the token via ICICI CustomerDetails API
@@ -586,7 +590,8 @@ export class AuthService {
       },
     });
 
-    return { success: true };
+    // "Saved" and "prices are flowing" are different things: say which it is.
+    return { success: true, dataReady: bridgeConsumedToken, detail: bridgeConsumedToken ? undefined : bridgeDetail };
   }
 
   async getBreezeCredentialStatus(userId: string): Promise<{

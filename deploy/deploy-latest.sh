@@ -23,6 +23,7 @@ if [ -n "$(git status --porcelain --untracked-files=no -- . ':!server/dist' ':!f
   echo "STOP: code was edited directly on the VM:"; git status --short --untracked-files=no; exit 1
 fi
 PREV=$(git log --oneline -1)
+PREV_SHA=$(git rev-parse HEAD)
 # Keep the builds that are serving the site right now. Older commits tracked a
 # stale copy of these folders in Git, and switching commits put that old
 # website back on the live site until the new build finished.
@@ -138,8 +139,14 @@ while read -r pid cmd; do
       *)
         case "$cmd" in *capital-guard-engine*) svc=rust-engine ;; *uvicorn*) svc=ml-service ;; *) svc=breeze-bridge ;; esac
         case " $SYSTEMD_RUNS " in *" $svc "*) ;; *)
-          echo "  $svc is run by systemd ($unit): restarting it to load the new code"
-          sudo systemctl restart "$unit" || echo "  (could not restart $unit)"
+          # Restarting the ICICI bridge drops the day's login, so it is left
+          # running unless its own code changed in this deploy.
+          if [ "$svc" = breeze-bridge ] && git diff --quiet "$PREV_SHA" HEAD -- server/breeze-bridge; then
+            echo "  $svc is run by systemd ($unit): its code did not change, left running (ICICI login kept)"
+          else
+            echo "  $svc is run by systemd ($unit): restarting it to load the new code"
+            sudo systemctl restart "$unit" || echo "  (could not restart $unit)"
+          fi
           SYSTEMD_RUNS="$SYSTEMD_RUNS $svc" ;;
         esac ;;
     esac
