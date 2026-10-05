@@ -2309,7 +2309,10 @@ export class BotEngine {
       for (const sig of pendingSignals) {
         const result = await this.executeTrade(userId, sig.symbol, sig.signalType as 'BUY' | 'SELL', sig.rationale ?? '', botId, {
           confidence: sig.compositeScore,
-          signalSource: 'PENDING_SIGNAL',
+          // A queued signal keeps the name of what produced it. The Rust scan
+          // writes "Rust…" / "Market Scan…" rationales; everything it queued used
+          // to be executed under the AI Agent's name, so the engine looked idle.
+          signalSource: /^(Rust|Market Scan)/i.test(sig.rationale ?? '') ? 'RUST_ENGINE' : 'PENDING_SIGNAL',
         });
 
         await this.prisma.aITradeSignal.update({
