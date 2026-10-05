@@ -30,7 +30,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 breeze_instance = None
-_api_executor = ThreadPoolExecutor(max_workers=4)
+_api_executor = ThreadPoolExecutor(max_workers=8)
 session_expiry = None
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_FILE = os.path.join(SCRIPT_DIR, ".breeze_session.json")
@@ -235,6 +235,10 @@ def _resolve_cash_code(symbol):
     return _lookup_isec_code(sym) or sym
 
 
+_quote_codes = {}    # quote key -> the ICICI code that returned a price
+_quote_misses = {}   # quote key -> when ICICI last had no price for it
+
+
 def _cache_get(key):
     with _response_cache_lock:
         entry = _response_cache.get(key)
@@ -246,19 +250,70 @@ def _cache_get(key):
 def _cache_set(key, data):
     with _response_cache_lock:
         _response_cache[key] = {"data": data, "at": datetime.now()}
-        if len(_response_cache) > 50:
+        if len(_response_cache) > 600:
             oldest = min(_response_cache, key=lambda k: _response_cache[k]["at"])
             del _response_cache[oldest]
 
 BREEZE_API_TIMEOUT = 15  # seconds — max wait for a single Breeze SDK call
 
 
-def _call_with_timeout(fn, *args, timeout=BREEZE_API_TIMEOUT, **kwargs):
-    """Run a blocking Breeze SDK call with a timeout. Returns None on timeout."""
+# ICICI allows about 100 calls a minute for the whole account. Past that it
+# answers slowly or with an empty body, and every feature fails together: option
+# chains, candles and quotes. So calls are counted here and kept under the limit.
+# Price quotes are the bulk of the traffic and the least urgent (the caller has
+# other sources and a saved price), so they get a share and are refused first.
+CALLS_PER_MINUTE = int(os.environ.get("BREEZE_CALLS_PER_MINUTE", "90"))
+QUOTE_CALLS_PER_MINUTE = int(os.environ.get("BREEZE_QUOTE_CALLS_PER_MINUTE", "50"))
+_call_times = []
+_call_lock = threading.Lock()
+_call_stats = {"day": None, "today": 0, "refused": 0, "timeouts": 0, "last_note": 0.0}
+
+
+def _calls_last_minute(now=None):
+    now = now or time.time()
+    while _call_times and now - _call_times[0] > 60:
+        _call_times.pop(0)
+    return len(_call_times)
+
+
+def _take_call_slot(low):
+    """Reserve one ICICI call. Quotes (low) are refused at their share; other
+    calls wait briefly for room, since an option chain is worth waiting for."""
+    deadline = time.time() + (0 if low else 12)
+    while True:
+        now = time.time()
+        with _call_lock:
+            used = _calls_last_minute(now)
+            if used < (QUOTE_CALLS_PER_MINUTE if low else CALLS_PER_MINUTE):
+                _call_times.append(now)
+                day = datetime.now().strftime("%Y-%m-%d")
+                if _call_stats["day"] != day:
+                    _call_stats.update(day=day, today=0, refused=0, timeouts=0)
+                _call_stats["today"] += 1
+                return True
+            if now >= deadline:
+                _call_stats["refused"] += 1
+                if now - _call_stats["last_note"] > 30:
+                    _call_stats["last_note"] = now
+                    print(f"[Breeze Bridge] Holding back ICICI calls: {used} in the last minute "
+                          f"({_call_stats['refused']} held back today)", flush=True)
+                return False
+        time.sleep(0.25)
+
+
+def _call_with_timeout(fn, *args, timeout=BREEZE_API_TIMEOUT, low=False, **kwargs):
+    """Run a blocking Breeze SDK call with a timeout. Returns None on timeout,
+    or when the call was held back to stay under ICICI's limit."""
+    if not _take_call_slot(low):
+        return None
     future = _api_executor.submit(fn, *args, **kwargs)
     try:
         return future.result(timeout=timeout)
     except FuturesTimeoutError:
+        # A call still waiting in the queue must not run later: nobody is
+        # waiting for it any more, and it would only use up the limit.
+        future.cancel()
+        _call_stats["timeouts"] += 1
         print(f"[Breeze Bridge] API call timed out after {timeout}s")
         return None
     except Exception as e:
@@ -929,7 +984,7 @@ def _fetch_spot_from_breeze(symbol):
     # Try multiple codes: original symbol, cash code, NFO code
     codes_to_try = []
     seen = set()
-    for c in [sym, _resolve_cash_code(sym), _resolve_stock_code(sym)]:
+    for c in [_resolve_cash_code(sym), _resolve_stock_code(sym), sym]:
         if c not in seen:
             seen.add(c)
             codes_to_try.append(c)
@@ -1667,6 +1722,13 @@ class BreezeHandler(BaseHTTPRequestHandler):
                     "status": "ok",
                     "session_active": breeze_instance is not None,
                     "session_expiry": session_expiry.isoformat() if session_expiry else None,
+                    "icici_calls": {
+                        "last_minute": _calls_last_minute(),
+                        "limit_per_minute": CALLS_PER_MINUTE,
+                        "today": _call_stats["today"],
+                        "held_back_today": _call_stats["refused"],
+                        "timeouts_today": _call_stats["timeouts"],
+                    },
                 })
 
             elif path == "/indices":
@@ -1775,17 +1837,37 @@ class BreezeHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": "Breeze session not active"}, 503)
                     return
 
-                # Try multiple code resolutions: original symbol, cash code, NFO code.
+                # A price asked for again within a few seconds is answered from
+                # memory, and a symbol ICICI could not price is not asked again
+                # for a minute. Every page and every bot asks for the same
+                # prices, and each used to cost up to three ICICI calls.
+                quote_key = f"quote:{symbol}:{exchange}:{product_type}:{expiry}"
+                remembered = _cache_get(quote_key)
+                if remembered:
+                    self.send_json(remembered)
+                    return
+                missed_at = _quote_misses.get(quote_key)
+                if missed_at and time.time() - missed_at < 60:
+                    self.send_json({
+                        "symbol": symbol, "ltp": 0, "change": 0, "changePercent": 0, "volume": 0,
+                        "error": f"No valid LTP for {symbol}", "timestamp": datetime.now().isoformat(),
+                    })
+                    return
+
+                # ICICI's own code first (the NSE ticker is the wrong name for most
+                # stocks), and once a code has worked for a symbol only that one.
                 # MCX commodity codes are used verbatim — the equity/NFO resolvers
                 # would mangle them.
                 if exchange.upper() == "MCX":
                     codes_to_try = [symbol]
+                elif quote_key in _quote_codes:
+                    codes_to_try = [_quote_codes[quote_key]]
                 else:
                     codes_to_try = []
                     cash_code = _resolve_cash_code(symbol)
                     nfo_code = _resolve_stock_code(symbol)
                     seen = set()
-                    for c in [symbol, cash_code, nfo_code]:
+                    for c in [cash_code, nfo_code, symbol]:
                         if c not in seen:
                             seen.add(c)
                             codes_to_try.append(c)
@@ -1798,6 +1880,7 @@ class BreezeHandler(BaseHTTPRequestHandler):
                             "exchange_code": exchange,
                             "product_type": product_type,
                             "timeout": 4,
+                            "low": True,
                         }
                         if expiry:
                             quote_kwargs["expiry_date"] = f"{expiry}T06:00:00.000Z"
@@ -1812,19 +1895,26 @@ class BreezeHandler(BaseHTTPRequestHandler):
                             q = quotes[0]
                             ltp = float(q.get("ltp", 0))
                             if ltp > 0:
-                                self.send_json({
+                                answer = {
                                     "symbol": symbol,
                                     "ltp": ltp,
                                     "change": float(q.get("ltp_change", q.get("change", 0))),
                                     "changePercent": float(q.get("ltp_percent_change", q.get("percent_change", 0))),
                                     "volume": int(q.get("total_quantity_traded", q.get("volume", 0))),
                                     "timestamp": datetime.now().isoformat(),
-                                })
+                                }
+                                _quote_codes[quote_key] = code
+                                _quote_misses.pop(quote_key, None)
+                                _cache_set(quote_key, answer)
+                                self.send_json(answer)
                                 return
                     except Exception as e:
                         last_err = e
 
                 # All attempts returned no valid LTP
+                _quote_misses[quote_key] = time.time()
+                if len(_quote_misses) > 2000:
+                    _quote_misses.clear()
                 self.send_json({
                     "symbol": symbol, "ltp": 0, "change": 0,
                     "changePercent": 0, "volume": 0,
