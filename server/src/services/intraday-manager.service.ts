@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { isUserPlaced } from '../lib/order-source.js';
 import { MarketDataService } from './market-data.service.js';
 import { TradeService } from './trade.service.js';
 import { RiskService } from './risk.service.js';
@@ -434,12 +435,20 @@ export class IntradayManager {
       include: { portfolio: { select: { userId: true } } },
     });
 
-    if (openPositions.length === 0) return [];
+    // Options and futures the user opened are carried, as at a broker; the
+    // expiry-day sweep (squareOffExpiringDerivatives) still closes them on
+    // their last day. Without this a strategy built for tomorrow's expiry was
+    // closed at 15:15 today.
+    const toClose = openPositions.filter((p: any) => {
+      const derivative = p.instrumentType === 'OPTIONS' || p.instrumentType === 'FUTURES' || /\d(CE|PE)$|FUT$/.test(p.symbol);
+      return !(derivative && isUserPlaced(p.strategyTag));
+    });
+    if (toClose.length === 0) return [];
 
-    log.info({ count: openPositions.length, userId: userId ?? 'ALL' }, 'Squaring off non-delivery positions');
+    log.info({ count: toClose.length, carried: openPositions.length - toClose.length, userId: userId ?? 'ALL' }, 'Squaring off non-delivery positions');
     const results: SquareOffResult[] = [];
 
-    for (const pos of openPositions) {
+    for (const pos of toClose) {
       try {
         const result = await this.squareOffPosition(pos.id, 'Auto square-off at EOD');
         if (result) results.push(result);

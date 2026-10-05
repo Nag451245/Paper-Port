@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { isUserPlaced } from '../lib/order-source.js';
 import { MarketDataService } from './market-data.service.js';
 import { TradeService } from './trade.service.js';
 import { ExitCoordinator } from './exit-coordinator.service.js';
@@ -301,7 +302,8 @@ export class StopLossMonitor {
         existing.config.qty = pos.qty;
         existing.config.entryPrice = entryPrice;
       } else {
-        this.addPosition(this.buildConfig(pos));
+        const config = this.buildConfig(pos);
+        if (config) this.addPosition(config);
       }
     }
   }
@@ -310,10 +312,32 @@ export class StopLossMonitor {
     id: string; symbol: string; portfolioId: string; side: string;
     qty: number; avgEntryPrice: unknown; stopLoss: unknown; target: unknown;
     portfolio: { userId: string };
-  }): StopLossConfig {
+    strategyTag?: string | null;
+  }): StopLossConfig | null {
     const entryPrice = Number(pos.avgEntryPrice);
     const dbStopLoss = pos.stopLoss ? Number(pos.stopLoss) : 0;
     const dbTarget = pos.target ? Number(pos.target) : 0;
+
+    // A position the user opened is the user's to manage. The default 3% stop,
+    // 6% target and 2% trailing stop below are the bots' rules: applied to the
+    // legs of a user's option strategy they closed each leg within minutes,
+    // because an option premium moves that much on ordinary noise. Only a stop
+    // or target the user set on the position is acted on, and it is not trailed.
+    if (isUserPlaced(pos.strategyTag)) {
+      if (dbStopLoss <= 0 && dbTarget <= 0) return null;
+      const never = pos.side === 'LONG' ? 0 : Number.MAX_SAFE_INTEGER;   // a level price cannot reach
+      return {
+        symbol: pos.symbol,
+        positionId: pos.id,
+        portfolioId: pos.portfolioId,
+        userId: pos.portfolio.userId,
+        side: pos.side as 'LONG' | 'SHORT',
+        qty: pos.qty,
+        entryPrice,
+        stopLossPrice: dbStopLoss > 0 ? dbStopLoss : never,
+        takeProfitPrice: dbTarget > 0 ? dbTarget : undefined,
+      };
+    }
 
     const DEFAULT_STOP_PCT = 0.03;
     const DEFAULT_TP_MULTIPLIER = 2;
@@ -355,7 +379,8 @@ export class StopLossMonitor {
     });
 
     for (const pos of positions) {
-      this.addPosition(this.buildConfig(pos));
+      const config = this.buildConfig(pos);
+      if (config) this.addPosition(config);
     }
 
     log.info({ count: positions.length }, 'Loaded open positions');
