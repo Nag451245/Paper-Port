@@ -336,6 +336,11 @@ HISTORY_CALLS_PER_DAY = int(os.environ.get("BREEZE_HISTORY_CALLS_PER_DAY", "1200
 # its own, which could use up the whole day on its own.
 CHAIN_CALLS_PER_DAY = int(os.environ.get("BREEZE_CHAIN_CALLS_PER_DAY", "1500"))
 DAY_RESERVE = int(os.environ.get("BREEZE_DAY_RESERVE", "800"))      # kept back from quotes and candles
+# The day starts at midnight, nine hours before the market does. On 7 October
+# the whole day's allowance was spent between midnight and 05:30 on background
+# work, so nothing was left at the open. Before 09:00 IST on a trading day each
+# kind of call may use only this much; the rest waits for the session.
+PRE_OPEN_CALLS = {"quote": 60, "chain": 100, "history": 300, "other": 200}
 CALLS_FILE = os.path.join(SCRIPT_DIR, ".breeze_calls.json")
 DAY_LIMIT_MESSAGE = ("ICICI's daily allowance of API calls for this account is used up. "
                      "ICICI will serve data again after it resets overnight.")
@@ -390,6 +395,11 @@ def _day():
         _day_by_account[_account_key()] = counts
     counts.setdefault("chain", 0)
     return counts
+
+
+def _before_open():
+    now = _ist_now()
+    return now.weekday() < 5 and now.hour * 60 + now.minute < 540
 
 
 def _limit_reached():
@@ -466,6 +476,10 @@ def _take_call_slot(low, kind=None):
                 day_ok = counts["history"] < HISTORY_CALLS_PER_DAY and counts["total"] < CALLS_PER_DAY - DAY_RESERVE
             if day_ok and kind == "chain":
                 day_ok = counts["chain"] < CHAIN_CALLS_PER_DAY
+            if day_ok and _before_open():
+                spent = counts[kind] if kind in ("quote", "chain", "history") else (
+                    counts["total"] - counts["quote"] - counts["chain"] - counts["history"])
+                day_ok = spent < PRE_OPEN_CALLS[kind if kind in PRE_OPEN_CALLS else "other"]
             if not day_ok:
                 counts["refused"] += 1
                 if now - _note_at[0] > 60:
