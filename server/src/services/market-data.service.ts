@@ -600,6 +600,7 @@ export class MarketDataService {
         if (this.cache) await this.cache.set(cacheKey, fnoQuote, getQuoteCacheTTL());
         return fnoQuote;
       }
+      this.quoteMisses.set(missKey, Date.now());
       return fnoQuote ?? this.emptyQuote(symbol, exchange);
     }
 
@@ -1437,7 +1438,7 @@ export class MarketDataService {
       const chain = await getUpstox().optionChain(upstoxToken, symbol, expiry);
       if (chain && chain.strikes.length > 0) {
         console.log(`[OptionChain] ${symbol} expiry=${chain.expiry} → Upstox (${chain.strikes.length} strikes)`);
-        if (this.cache) await this.cache.set(cacheKey, chain, 10);
+        if (this.cache) await this.cache.set(cacheKey, chain, 20);
         return chain;
       }
     }
@@ -1450,7 +1451,7 @@ export class MarketDataService {
         const bridgeResult = await this.fetchFromBreezeBridge(symbol, expiry);
         if (bridgeResult && bridgeResult.strikes && bridgeResult.strikes.length > 0) {
           console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Breeze Python Bridge (${bridgeResult.strikes.length} strikes)`);
-          if (this.cache) await this.cache.set(cacheKey, bridgeResult, 10);
+          if (this.cache) await this.cache.set(cacheKey, bridgeResult, 20);
           return bridgeResult;
         }
         console.log(`[OptionChain] ${symbol} expiry=${expiry ?? 'nearest'} → Bridge returned 0 strikes, trying fallbacks`);
@@ -2667,24 +2668,16 @@ export class MarketDataService {
     parsed: { underlying: string; expiry: string; strike: number; type: 'CE' | 'PE' } | null,
   ): Promise<MarketQuote | null> {
     if (!parsed) return null;
+    // An expired contract no longer trades: there is no price to fetch. (Open
+    // positions in expired options used to be asked for on every poll.)
+    if (parsed.expiry < istDateStr()) return null;
 
     try {
-      const bridgeActive = await this.ensureBreezeBridgeSession();
-      if (!bridgeActive) {
-        console.log(`[FnOQuote] Bridge not active for ${symbol}`);
-        return null;
-      }
-
-      const bridgeUrl = `${BREEZE_BRIDGE_URL}/option-chain/${encodeURIComponent(parsed.underlying)}?expiry=${encodeURIComponent(parsed.expiry)}`;
-      const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), 15_000);
-      const res = await fetch(bridgeUrl, { signal: ac.signal });
-      clearTimeout(timer);
-
-      if (!res.ok) return null;
-
-      const data = await res.json() as any;
-      if (!data.strikes || !Array.isArray(data.strikes)) return null;
+      // Through the shared, cached chain: every open option of the same
+      // underlying and expiry is priced from one download, not one each, and
+      // from the account's own broker.
+      const data = await this.getOptionsChain(parsed.underlying, parsed.expiry) as any;
+      if (!data?.strikes || !Array.isArray(data.strikes) || data.strikes.length === 0) return null;
 
       // Bridge returns strikes with callLTP/putLTP, callOI/putOI, etc.
       for (const s of data.strikes) {

@@ -561,6 +561,36 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     } catch (err) { console.error('[DailyPnl Cron] Error:', (err as Error).message); }
   });
 
+  // Options that expired while still open are settled at what they are worth
+  // at expiry (see services/expiry-settlement.service.ts). After the close on
+  // market days (15:42 and 16:25 IST), before the next open (09:05 IST), and
+  // shortly after a restart, so nothing expired stays open and unpriced.
+  const settleExpiredOptions = async (when: string) => {
+    try {
+      const { MarketDataService } = await import('./services/market-data.service.js');
+      const { TradeService } = await import('./services/trade.service.js');
+      const { ExpirySettlementService } = await import('./services/expiry-settlement.service.js');
+      const { istDateStr } = await import('./lib/ist.js');
+      const market = new MarketDataService();
+      const trades = new TradeService(getPrisma());
+      const dailyClose = async (underlying: string, day: string) => {
+        const from = istDateStr(new Date(new Date(`${day}T00:00:00+05:30`).getTime() - 5 * 86_400_000));
+        const bars = await market.getHistory(underlying, '1day', from, day);
+        const bar = bars.find((b) => istDateStr(new Date(b.timestamp)) === day);
+        return bar && Number(bar.close) > 0 ? Number(bar.close) : null;
+      };
+      const result = await new ExpirySettlementService(getPrisma(), (id, userId, price) => trades.closePosition(id, userId, price), dailyClose).settleExpired();
+      if (result.settled.length || result.waiting.length) {
+        console.log(`[ExpirySettlement ${when}] settled ${result.settled.length}, waiting ${result.waiting.length}` +
+          (result.waiting.length ? ` (${result.waiting.slice(0, 5).map((w) => `${w.symbol}: ${w.why}`).join('; ')})` : ''));
+      }
+    } catch (err) { console.error('[ExpirySettlement] Error:', (err as Error).message); }
+  };
+  orchestrator.scheduleMarketDay('12 10 * * 1-5', () => settleExpiredOptions('15:42'));
+  orchestrator.scheduleMarketDay('55 10 * * 1-5', () => settleExpiredOptions('16:25'));
+  orchestrator.scheduleMarketDay('35 3 * * 1-5', () => settleExpiredOptions('09:05'));
+  setTimeout(() => { void settleExpiredOptions('start-up'); }, 120_000).unref();
+
   // Nightly learning — only on market days (skips holidays & weekends) — 16:00 IST = 10:30 UTC
   orchestrator.scheduleMarketDay('30 10 * * 1-5', async () => {
     const result = await learningEngine.runNightlyLearning();

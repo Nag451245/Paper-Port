@@ -330,7 +330,11 @@ QUOTE_CALLS_PER_MINUTE = int(os.environ.get("BREEZE_QUOTE_CALLS_PER_MINUTE", "50
 #   - the rest is kept for option chains and anything a person is waiting for.
 CALLS_PER_DAY = int(os.environ.get("BREEZE_CALLS_PER_DAY", "4500"))
 QUOTE_CALLS_PER_DAY = int(os.environ.get("BREEZE_QUOTE_CALLS_PER_DAY", "1500"))
-HISTORY_CALLS_PER_DAY = int(os.environ.get("BREEZE_HISTORY_CALLS_PER_DAY", "1500"))
+HISTORY_CALLS_PER_DAY = int(os.environ.get("BREEZE_HISTORY_CALLS_PER_DAY", "1200"))
+# Option chains: each refresh is two calls (calls and puts). Pricing one open
+# option used to download its whole chain every few seconds with no share of
+# its own, which could use up the whole day on its own.
+CHAIN_CALLS_PER_DAY = int(os.environ.get("BREEZE_CHAIN_CALLS_PER_DAY", "1500"))
 DAY_RESERVE = int(os.environ.get("BREEZE_DAY_RESERVE", "800"))      # kept back from quotes and candles
 CALLS_FILE = os.path.join(SCRIPT_DIR, ".breeze_calls.json")
 DAY_LIMIT_MESSAGE = ("ICICI's daily allowance of API calls for this account is used up. "
@@ -369,7 +373,7 @@ def _save_day_counts(force=False):
     _day_saved_at[0] = now
     try:
         day = _ist_now().strftime("%Y-%m-%d")
-        accounts = {k: {x: v[x] for x in ("total", "quote", "history", "refused", "timeouts", "exhausted")}
+        accounts = {k: {x: v[x] for x in ("total", "quote", "history", "chain", "refused", "timeouts", "exhausted")}
                     for k, v in _day_by_account.items() if v.get("day") == day}
         with open(CALLS_FILE, "w") as fh:
             json.dump({"day": day, "accounts": accounts}, fh)
@@ -382,8 +386,9 @@ def _day():
     today = _ist_now().strftime("%Y-%m-%d")
     counts = _day_by_account.get(_account_key())
     if not counts or counts.get("day") != today:
-        counts = {"day": today, "total": 0, "quote": 0, "history": 0, "refused": 0, "timeouts": 0, "exhausted": False}
+        counts = {"day": today, "total": 0, "quote": 0, "history": 0, "chain": 0, "refused": 0, "timeouts": 0, "exhausted": False}
         _day_by_account[_account_key()] = counts
+    counts.setdefault("chain", 0)
     return counts
 
 
@@ -407,6 +412,26 @@ def _quote_minute_cap():
     return max(1, min(QUOTE_CALLS_PER_MINUTE, -(-left // max(1, 930 - minutes))))
 
 
+def _chain_minute_cap():
+    """Option-chain calls allowed this minute: what is left of their share,
+    spread over the rest of the session. Never less than one refresh (2 calls)."""
+    left = CHAIN_CALLS_PER_DAY - _day()["chain"]
+    if left <= 0:
+        return 0
+    now = _ist_now()
+    minutes = now.hour * 60 + now.minute
+    if now.weekday() >= 5 or minutes < 555 or minutes >= 930:
+        return 2
+    return max(2, -(-left // max(1, 930 - minutes)))
+
+
+def _chain_room(calls=2):
+    """Is there room for a whole chain refresh (calls and puts)? Half a chain is worse than a kept one."""
+    counts = _day()
+    this_minute = len(_quotes_last_minute(time.time(), "chain"))
+    return counts["chain"] + calls <= CHAIN_CALLS_PER_DAY and this_minute + calls <= max(calls, _chain_minute_cap())
+
+
 def _calls_last_minute(now=None):
     now = now or time.time()
     times = _call_times()
@@ -415,8 +440,8 @@ def _calls_last_minute(now=None):
     return len(times)
 
 
-def _quotes_last_minute(now):
-    times = _call_times_by_account.setdefault(_account_key() + "|quote", [])
+def _quotes_last_minute(now, kind="quote"):
+    times = _call_times_by_account.setdefault(_account_key() + "|" + kind, [])
     while times and now - times[0] > 60:
         times.pop(0)
     return times
@@ -427,7 +452,7 @@ def _take_call_slot(low, kind=None):
     Quotes are refused at their share; other calls wait briefly for room in the
     minute, since an option chain is worth waiting for."""
     kind = kind or ("quote" if low else "other")
-    deadline = time.time() + (0 if kind == "quote" else 12)
+    deadline = time.time() + (0 if kind == "quote" else 3 if kind == "chain" else 12)
     while True:
         now = time.time()
         with _call_lock:
@@ -439,17 +464,21 @@ def _take_call_slot(low, kind=None):
                 day_ok = counts["quote"] < QUOTE_CALLS_PER_DAY and counts["total"] < CALLS_PER_DAY - DAY_RESERVE
             if day_ok and kind == "history":
                 day_ok = counts["history"] < HISTORY_CALLS_PER_DAY and counts["total"] < CALLS_PER_DAY - DAY_RESERVE
+            if day_ok and kind == "chain":
+                day_ok = counts["chain"] < CHAIN_CALLS_PER_DAY
             if not day_ok:
                 counts["refused"] += 1
                 if now - _note_at[0] > 60:
                     _note_at[0] = now
                     print(f"[Breeze Bridge] Day budget: holding back a {kind} call "
                           f"(today {counts['total']}/{CALLS_PER_DAY}, quotes {counts['quote']}/{QUOTE_CALLS_PER_DAY}, "
-                          f"candles {counts['history']}/{HISTORY_CALLS_PER_DAY}, ICICI limit hit: {counts['exhausted']})", flush=True)
+                          f"candles {counts['history']}/{HISTORY_CALLS_PER_DAY}, chains {counts['chain']}/{CHAIN_CALLS_PER_DAY}, ICICI limit hit: {counts['exhausted']})", flush=True)
                 return False
             used = _calls_last_minute(now)
             quotes = _quotes_last_minute(now)
-            minute_ok = used < CALLS_PER_MINUTE and (kind != "quote" or len(quotes) < _quote_minute_cap())
+            chains = _quotes_last_minute(now, "chain")
+            minute_ok = (used < CALLS_PER_MINUTE and (kind != "quote" or len(quotes) < _quote_minute_cap())
+                         and (kind != "chain" or len(chains) < _chain_minute_cap()))
             if minute_ok:
                 _call_times().append(now)
                 counts["total"] += 1
@@ -458,6 +487,9 @@ def _take_call_slot(low, kind=None):
                     counts["quote"] += 1
                 elif kind == "history":
                     counts["history"] += 1
+                elif kind == "chain":
+                    chains.append(now)
+                    counts["chain"] += 1
                 _save_day_counts()
                 return True
             if now >= deadline:
@@ -888,7 +920,52 @@ def _safe_int(val, default=0):
         return default
 
 
+CHAIN_FRESH_SECONDS = 20
+CHAIN_USABLE_SECONDS = 15 * 60
+_chains_kept = {}           # account|symbol|expiry|right -> (chain, fetched at)
+
+
 def get_option_chain(symbol, expiry=None, right_filter=None):
+    """The option chain, asked of ICICI at most every 20 seconds per chain.
+
+    Everything that needs an option's price reads the chain, so one kept copy
+    serves them all. When ICICI cannot be asked (the minute's or the day's
+    share is spent, or ICICI refuses), the last copy is returned marked stale
+    for up to 15 minutes rather than nothing.
+    """
+    if not breeze_instance:
+        return {"error": "Breeze session not initialized", "strikes": []}
+    key = f"{_account_key()}|{str(symbol).upper()}|{expiry}|{right_filter}"
+    kept = _chains_kept.get(key)
+    now = time.time()
+    if kept and now - kept[1] < CHAIN_FRESH_SECONDS:
+        return kept[0]
+    # A contract that has expired no longer trades: there is nothing to ask for.
+    if expiry and str(expiry)[:10] < _ist_now().strftime("%Y-%m-%d"):
+        return {"error": "That contract has expired.", "strikes": [], "expired": True}
+
+    def last_copy(reason):
+        if kept and now - kept[1] < CHAIN_USABLE_SECONDS:
+            return dict(kept[0], stale=True, staleReason=reason,
+                        asOf=datetime.utcfromtimestamp(kept[1]).isoformat() + "Z")
+        return None
+
+    if _limit_reached():
+        return last_copy("ICICI's daily allowance is used up") or {"error": DAY_LIMIT_MESSAGE, "strikes": [], "limitReached": True}
+    if not _chain_room(1 if right_filter else 2):
+        return last_copy("the option-chain share of ICICI calls is spent for now") or {
+            "error": "Option chains are being refreshed as often as ICICI's daily allowance permits. Try again in a minute.",
+            "strikes": [], "busy": True}
+    data = _fetch_option_chain(symbol, expiry, right_filter)
+    if data and data.get("strikes"):
+        if len(_chains_kept) > 300:
+            _chains_kept.clear()
+        _chains_kept[key] = (data, now)
+        return data
+    return last_copy("ICICI did not answer this refresh") or data
+
+
+def _fetch_option_chain(symbol, expiry=None, right_filter=None):
     if not breeze_instance:
         return {"error": "Breeze session not initialized", "strikes": []}
     if _limit_reached():
@@ -925,7 +1002,7 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
             }
 
             print(f"[Breeze Bridge] {symbol}({breeze_code}) {r}: calling API with params={params}")
-            result = _call_with_timeout(breeze_instance.get_option_chain_quotes, **params)
+            result = _call_with_timeout(breeze_instance.get_option_chain_quotes, kind="chain", **params)
 
             _has_data = (
                 result and result.get("Status") == 200
@@ -941,7 +1018,7 @@ def get_option_chain(symbol, expiry=None, right_filter=None):
                     alt_exp = (datetime.strptime(effective_expiry, "%Y-%m-%d") + timedelta(days=offset_days)).strftime("%Y-%m-%d")
                     params["expiry_date"] = f"{alt_exp}T06:00:00.000Z"
                     print(f"[Breeze Bridge] {symbol} {r}: retry with alt expiry={alt_exp}")
-                    result = _call_with_timeout(breeze_instance.get_option_chain_quotes, **params)
+                    result = _call_with_timeout(breeze_instance.get_option_chain_quotes, kind="chain", **params)
                     _has_data = (
                         result and result.get("Status") == 200
                         and isinstance(result.get("Success"), list)
@@ -1334,7 +1411,7 @@ def get_expiries(symbol):
 
         # Use expiry_date + empty strike to get ALL contracts for nearest expiry
         next_exp = _next_expiry_date(sym)
-        result = _call_with_timeout(breeze_instance.get_option_chain_quotes,
+        result = _call_with_timeout(breeze_instance.get_option_chain_quotes, kind="chain",
             stock_code=breeze_code, exchange_code="NFO",
             product_type="options", right="call",
             expiry_date=f"{next_exp}T06:00:00.000Z", strike_price="",
@@ -1344,7 +1421,7 @@ def get_expiries(symbol):
             # Try adjacent Tuesdays in case computed date is a holiday
             for offset_days in [7, -7, 14]:
                 alt_exp = (datetime.strptime(next_exp, "%Y-%m-%d") + timedelta(days=offset_days)).strftime("%Y-%m-%d")
-                result = _call_with_timeout(breeze_instance.get_option_chain_quotes,
+                result = _call_with_timeout(breeze_instance.get_option_chain_quotes, kind="chain",
                     stock_code=breeze_code, exchange_code="NFO",
                     product_type="options", right="call",
                     expiry_date=f"{alt_exp}T06:00:00.000Z", strike_price="",
@@ -1833,11 +1910,9 @@ def get_live_indices():
             except Exception as e:
                 print(f"[Breeze Bridge] Index historical {cfg['symbol']}: {e}")
 
-        if value <= 0:
-            spot = _fetch_spot_from_yahoo(cfg["symbol"])
-            if spot and spot > 0:
-                value = spot
-
+        # No other source is tried here: a price without its previous close
+        # showed as "+0.00%" under ICICI's name. The API has its own fallback,
+        # which carries the day's change, for any index left out.
         if value > 0:
             change = round(value - prev_close, 2) if prev_close > 0 else 0.0
             change_pct = round((change / prev_close) * 100, 2) if prev_close > 0 else 0.0
@@ -1919,6 +1994,7 @@ class BreezeHandler(BaseHTTPRequestHandler):
                         "limit_per_day": CALLS_PER_DAY,
                         "quotes_today": _day()["quote"],
                         "candles_today": _day()["history"],
+                        "chain_calls_today": _day()["chain"],
                         "held_back_today": _day()["refused"],
                         "timeouts_today": _day()["timeouts"],
                         "daily_limit_reached": _limit_reached(),
